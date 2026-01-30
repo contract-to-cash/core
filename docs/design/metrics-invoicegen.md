@@ -4,29 +4,35 @@
 
 ### 1.1 追加するAdapter
 
-```mermaid
-graph TB
-    subgraph PluginAdapters[Plugin Adapters]
-        MA[Metrics & Analytics Adapter]
-        IG[Invoice Generation Adapter]
-        EA[Existing Adapters]
-        
-        MA --> PR
-        IG --> PR
-        EA --> PR
-        
-        PR[Plugin Registry]
-        
-        PR --> CS
-        
-        subgraph CS[Core System]
-            Contract
-            Invoice
-            Payment
-        end
-        
-        CS --> ES[(Event Store)]
-    end
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Plugin Adapters                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌────────────────┐  │
+│  │   Metrics &     │  │    Invoice      │  │   Existing     │  │
+│  │   Analytics     │  │   Generation    │  │   Adapters     │  │
+│  │    Adapter      │  │    Adapter      │  │                │  │
+│  └────────┬────────┘  └────────┬────────┘  └───────┬────────┘  │
+│           │                    │                   │            │
+│           └────────────────────┼───────────────────┘            │
+│                                ▼                                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │                    Plugin Registry                        │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                │                                │
+│                                ▼                                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │                      Core System                          │  │
+│  │           (Contract / Invoice / Payment)                  │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                │                                │
+│                                ▼                                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │                      Event Store                          │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### 1.2 Adapter一覧
@@ -1616,24 +1622,26 @@ searchResult, _ := invoiceGenService.Search(ctx, &SearchQuery{
 
 ## 8. まとめ
 
-```mermaid
-graph LR
-    subgraph MetricsAnalytics[集計・分析]
-        MC[metrics.Collector<br/>メトリクス収集]
-        MS[metrics.Store<br/>メトリクス永続化]
-        ME[metrics.Exporter<br/>外部エクスポート]
-        MQ[metrics.QueryService<br/>レポート・ダッシュボード]
-    end
-    
-    subgraph InvoiceGen[インボイス発行]
-        IR[invoicegen.Renderer<br/>PDF/HTML生成]
-        ID[invoicegen.Delivery<br/>メール/郵送/FAX送付]
-        IS[invoicegen.Storage<br/>電子帳簿保存法対応]
-    end
-    
-    subgraph Existing[既存]
-        PG[payment.Gateway<br/>決済処理]
-        CR[contract.Repository<br/>契約永続化]
-        ES[eventstore.Store<br/>イベント永続化]
-    end
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Adapter一覧                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  【集計・分析】                                                  │
+│  ├─ metrics.Collector      契約・請求・決済のメトリクス収集      │
+│  ├─ metrics.Store          メトリクスの永続化                   │
+│  ├─ metrics.Exporter       外部分析ツールへのエクスポート        │
+│  └─ metrics.QueryService   レポート・ダッシュボード用クエリ      │
+│                                                                 │
+│  【インボイス発行】                                              │
+│  ├─ invoicegen.Renderer    PDF/HTML生成                        │
+│  ├─ invoicegen.Delivery    メール/郵送/FAX送付                  │
+│  └─ invoicegen.Storage     電子帳簿保存法対応の保管             │
+│                                                                 │
+│  【既存】                                                        │
+│  ├─ payment.Gateway        決済処理                             │
+│  ├─ contract.Repository    契約永続化                           │
+│  └─ eventstore.Store       イベント永続化                       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
