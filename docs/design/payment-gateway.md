@@ -4,31 +4,29 @@
 
 決済サービス（Stripe, PayPay, GMO, Square等）に依存しない抽象化レイヤーを提供する。
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        サービスA                                 │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│   ┌─────────────────────────────────────────────────────────┐   │
-│   │                 Application Layer                        │   │
-│   │                                                         │   │
-│   │    PaymentUseCase ──▶ PaymentService (OSS)              │   │
-│   │                              │                          │   │
-│   │                              ▼                          │   │
-│   │                     PaymentGateway (interface)          │   │
-│   └─────────────────────────────────────────────────────────┘   │
-│                              ▲                                   │
-│                              │ implements                        │
-│   ┌─────────────────────────────────────────────────────────┐   │
-│   │                Infrastructure Layer                      │   │
-│   │                                                         │   │
-│   │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌───────────┐  │   │
-│   │  │ Stripe  │  │  PayPay │  │   GMO   │  │  Square   │  │   │
-│   │  │ Gateway │  │ Gateway │  │ Gateway │  │  Gateway  │  │   │
-│   │  └─────────┘  └─────────┘  └─────────┘  └───────────┘  │   │
-│   └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph ServiceA[サービスA]
+        subgraph AL[Application Layer]
+            PUC[PaymentUseCase]
+            PS[PaymentService - OSS]
+            PG[PaymentGateway - interface]
+            PUC --> PS
+            PS --> PG
+        end
+        
+        subgraph IL[Infrastructure Layer]
+            SG[Stripe Gateway]
+            PPG[PayPay Gateway]
+            GMOG[GMO Gateway]
+            SQG[Square Gateway]
+        end
+        
+        PG -.->|implements| SG
+        PG -.->|implements| PPG
+        PG -.->|implements| GMOG
+        PG -.->|implements| SQG
+    end
 ```
 
 ---
@@ -50,32 +48,27 @@
 
 ### 2.2 決済フロー
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    決済ライフサイクル                             │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│   ┌──────────┐    ┌──────────┐    ┌──────────┐                 │
-│   │ Authorize│───▶│ Capture  │───▶│ Complete │                 │
-│   │ (オーソリ)│    │(売上確定) │    │  (完了)  │                 │
-│   └──────────┘    └──────────┘    └──────────┘                 │
-│        │               │               │                        │
-│        │               │               ▼                        │
-│        │               │         ┌──────────┐                   │
-│        │               │         │  Refund  │                   │
-│        │               │         │  (返金)  │                   │
-│        │               │         └──────────┘                   │
-│        │               │                                        │
-│        ▼               ▼                                        │
-│   ┌──────────┐    ┌──────────┐                                 │
-│   │   Void   │    │  Cancel  │                                 │
-│   │(オーソリ │    │ (キャンセル)│                                │
-│   │  取消)   │    └──────────┘                                 │
-│   └──────────┘                                                  │
-│                                                                 │
-│   ※ 即時決済の場合: Authorize + Capture を同時に行う            │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+stateDiagram-v2
+    [*] --> Authorize: オーソリ
+    
+    Authorize --> Capture: 売上確定
+    Authorize --> Void: オーソリ取消
+    
+    Capture --> Complete: 完了
+    Capture --> Cancel: キャンセル
+    
+    Complete --> Refund: 返金
+    Complete --> [*]
+    
+    Refund --> [*]
+    Void --> [*]
+    Cancel --> [*]
+    
+    note right of Authorize
+        即時決済の場合:
+        Authorize + Capture を同時に行う
+    end note
 ```
 
 ---
@@ -1434,31 +1427,25 @@ func main() {
 
 ## 10. まとめ
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         OSS が提供                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  • payment.Gateway インターフェース                              │
-│  • payment.CustomerGateway インターフェース                      │
-│  • payment.WebhookHandler インターフェース                       │
-│  • payment.GatewayRouter（複数ゲートウェイ対応）                 │
-│  • リクエスト/レスポンス型                                       │
-│  • エラーコード定義                                              │
-│  • PaymentService（アプリケーション層）                          │
-│  • テスト用モック実装                                            │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-                              ▲
-                              │ implements
-┌─────────────────────────────────────────────────────────────────┐
-│                       サービスA が実装                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  • StripeGateway（Stripe SDKを使った実装）                      │
-│  • PayPayGateway（PayPay APIを使った実装）                      │
-│  • GMOGateway（GMO APIを使った実装）                            │
-│  • etc...                                                       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph OSS[OSS が提供]
+        GW[payment.Gateway インターフェース]
+        CGW[payment.CustomerGateway インターフェース]
+        WH[payment.WebhookHandler インターフェース]
+        GR[payment.GatewayRouter<br/>複数ゲートウェイ対応]
+        RT[リクエスト/レスポンス型]
+        EC[エラーコード定義]
+        PS[PaymentService<br/>アプリケーション層]
+        TM[テスト用モック実装]
+    end
+    
+    subgraph ServiceImpl[サービスA が実装]
+        SG[StripeGateway<br/>Stripe SDK]
+        PPG[PayPayGateway<br/>PayPay API]
+        GMOG[GMOGateway<br/>GMO API]
+        ETC[etc...]
+    end
+    
+    OSS -.->|implements| ServiceImpl
 ```

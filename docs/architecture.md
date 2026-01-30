@@ -14,64 +14,59 @@ SaaSやサービス事業において、契約・決済ロジックは本質的�
 
 ### 1.2 システム構成
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Application                          │
-├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │   Coupon    │  │   Tax       │  │   Custom Plugin     │  │
-│  │   Plugin    │  │   Plugin    │  │   (User Defined)    │  │
-│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
-│         │                │                    │              │
-│         └────────────────┼────────────────────┘              │
-│                          ▼                                   │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │              Plugin Adapter Interface                 │  │
-│  └───────────────────────────────────────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                   Contract Core                        │  │
-│  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────────┐  │  │
-│  │  │ Subscription│ │  One-Time   │ │  Usage-Based    │  │  │
-│  │  │   Engine    │ │   Engine    │ │    Engine       │  │  │
-│  │  └─────────────┘ └─────────────┘ └─────────────────┘  │  │
-│  └───────────────────────────────────────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │                   Event Store                          │  │
-│  │            (Append-Only Event Log)                     │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Application
+        subgraph Plugins
+            CP[Coupon Plugin]
+            TP[Tax Plugin]
+            CUP[Custom Plugin<br/>User Defined]
+        end
+        
+        CP --> PAI
+        TP --> PAI
+        CUP --> PAI
+        PAI[Plugin Adapter Interface]
+        
+        subgraph ContractCore[Contract Core]
+            SE[Subscription Engine]
+            OE[One-Time Engine]
+            UE[Usage-Based Engine]
+        end
+        
+        PAI --> ContractCore
+        
+        ES[(Event Store<br/>Append-Only Event Log)]
+        ContractCore --> ES
+    end
 ```
 
 ## 2. 設計原則
 
 ### 2.1 依存逆転の原則（DIP）
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Presentation Layer                         │
-│                   (HTTP Handler, gRPC, CLI)                     │
-└─────────────────────────────────┬───────────────────────────────┘
-                                  │ depends on
-                                  ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Application Layer                          │
-│                (UseCase, Command/Query Handler)                 │
-└─────────────────────────────────┬───────────────────────────────┘
-                                  │ depends on
-                                  ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        Domain Layer                             │
-│    (Entity, Value Object, Domain Service, Repository Interface) │
-│                      ※外部依存なし                               │
-└─────────────────────────────────────────────────────────────────┘
-                                  ▲
-                                  │ implements
-┌─────────────────────────────────┴───────────────────────────────┐
-│                    Infrastructure Layer                         │
-│          (PostgreSQL, MySQL, DynamoDB, EventStore...)          │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph PL[Presentation Layer]
+        PL_DESC[HTTP Handler, gRPC, CLI]
+    end
+    
+    subgraph AL[Application Layer]
+        AL_DESC[UseCase, Command/Query Handler]
+    end
+    
+    subgraph DL[Domain Layer]
+        DL_DESC[Entity, Value Object,<br/>Domain Service, Repository Interface]
+        DL_NOTE[※外部依存なし]
+    end
+    
+    subgraph IL[Infrastructure Layer]
+        IL_DESC[PostgreSQL, MySQL,<br/>DynamoDB, EventStore...]
+    end
+    
+    PL -->|depends on| AL
+    AL -->|depends on| DL
+    IL -.->|implements| DL
 ```
 
 ### 2.2 CQRS（コマンド・クエリ分離）
