@@ -749,7 +749,7 @@ func (c *JapaneseTaxCalculator) GetTaxRate(ctx context.Context, address shared.A
 
 ## 8. アプリケーション層での統合
 
-### 8.1 請求サービスでのプラグイン利用
+### 10.1 請求サービスでのプラグイン利用
 
 ```go
 // application/service/billing_service.go
@@ -930,7 +930,7 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 
 ## 10. API互換性とバージョニング戦略
 
-### 8.1 Semantic Versioning
+### 10.1 Semantic Versioning
 
 本ライブラリはSemantic Versioning 2.0.0に従う。
 
@@ -940,7 +940,7 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 | **Minor (v1.x.0)** | 新規フックの追加、既存フックへのメソッド追加（デフォルト実装あり） | MetricsHookに新メソッド追加 |
 | **Patch (v1.x.y)** | バグ修正、ドキュメント修正 | Registry のスレッドセーフ修正 |
 
-### 8.2 破壊的変更の定義
+### 10.2 破壊的変更の定義
 
 以下をプラグインAPIの破壊的変更と定義する：
 
@@ -950,7 +950,7 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 4. **CalculationContext/Context型のフィールド削除・型変更**
 5. **Registry APIの変更**（Register/Get系メソッド）
 
-### 8.3 初版のフック設計について
+### 10.3 初版のフック設計について
 
 本ライブラリは初版（v1.0.0）から分割フック設計を採用している。
 
@@ -968,7 +968,7 @@ InvoiceGenerationHook — 請求書生成
 ISP違反と計算順序の脆さの懸念から、設計段階で分割を決定した。
 そのため、v1.x→v2.0.0の移行ガイドや非推奨プロセスは不要。
 
-### 8.4 カスタムプラグイン開発者向けガイドライン
+### 10.4 カスタムプラグイン開発者向けガイドライン
 
 ```go
 // 割引プラグインを作る場合:

@@ -1377,7 +1377,7 @@ func (s *PaymentService) ProcessPayment(
         amount = *input.Amount  // 一部支払い
     }
 
-    // 3. プラグインフック: BeforePayment
+    // 3. プラグインフック: BeforeCharge
     payCtx := &plugin.PaymentContext{
         InvoiceID:     invoiceID,
         Amount:        amount,
@@ -1385,7 +1385,7 @@ func (s *PaymentService) ProcessPayment(
         Metadata:      input.Metadata,
     }
     for _, hook := range s.pluginRegistry.GetPaymentHooks() {
-        if err := hook.BeforePayment(ctx, payCtx); err != nil {
+        if err := hook.BeforeCharge(ctx, payCtx); err != nil {
             return nil, err
         }
     }
@@ -1443,14 +1443,14 @@ func (s *PaymentService) ProcessPayment(
     }
     s.eventStore.Append(ctx, p.ID().String(), []eventstore.Event{event}, 0)
 
-    // 8. プラグインフック: AfterPayment
+    // 8. プラグインフック: AfterCharge
     result := &plugin.PaymentResult{
         PaymentID:             p.ID(),
         ExternalTransactionID: chargeResp.TransactionID,
         Status:                string(chargeResp.Status),
     }
     for _, hook := range s.pluginRegistry.GetPaymentHooks() {
-        hook.AfterPayment(ctx, payCtx, result)
+        hook.AfterCharge(ctx, payCtx, result)
     }
 
     return p, nil

@@ -1193,7 +1193,9 @@ package plugin
 
 // フックタイプ追加
 const (
-    HookTypeInvoiceCalculation = "InvoiceCalculationHook"
+    HookTypeDiscount           = "DiscountHook"
+    HookTypeTax                = "TaxHook"
+    HookTypeInvoiceLifecycle   = "InvoiceLifecycleHook"
     HookTypeContractLifecycle  = "ContractLifecycleHook"
     HookTypePayment            = "PaymentHook"
     HookTypeMetrics            = "MetricsHook"           // ★追加
