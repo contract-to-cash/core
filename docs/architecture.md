@@ -162,8 +162,9 @@ type ContractStatus string
 
 const (
     ContractStatusDraft     ContractStatus = "draft"
-    ContractStatusTrialing  ContractStatus = "trialing"  // トライアル
+    ContractStatusTrialing  ContractStatus = "trialing"   // トライアル
     ContractStatusActive    ContractStatus = "active"
+    ContractStatusPastDue   ContractStatus = "past_due"   // 支払い遅延（Dunning中）
     ContractStatusSuspended ContractStatus = "suspended"
     ContractStatusCancelled ContractStatus = "cancelled"
     ContractStatusExpired   ContractStatus = "expired"

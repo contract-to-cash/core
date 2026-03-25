@@ -1399,9 +1399,9 @@ func (s *PaymentService) ProcessPayment(
 
     chargeResp, err := s.gateway.Charge(ctx, chargeReq)
     if err != nil {
-        // 失敗時のプラグインフック
-        for _, hook := range s.pluginRegistry.GetPaymentHooks() {
-            hook.OnPaymentFailed(ctx, payCtx, err)
+        // 失敗時のプラグインフック（ISP分離後のIF）
+        for _, hook := range s.pluginRegistry.GetOnPaymentFailedHooks() {
+            hook.OnPaymentFailed(pluginCtx, nil, err) // Payment未生成のためnil
         }
         return nil, err
     }

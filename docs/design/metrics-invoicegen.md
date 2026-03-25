@@ -1193,51 +1193,18 @@ func (s *Service) Search(ctx context.Context, query *SearchQuery) (*SearchResult
 
 ## 4. プラグインレジストリへの統合
 
-```go
-// plugin/registry.go（追記）
-package plugin
+メトリクス・請求書生成フックの Registry 管理は `plugin-system.md` の Registry 定義に
+統合されている。ISP分離により、以下の個別フックIFでRegistryに自動分類される:
 
-// フックタイプ追加
-const (
-    HookTypeDiscount           = "DiscountHook"
-    HookTypeTax                = "TaxHook"
-    HookTypeInvoiceLifecycle   = "InvoiceLifecycleHook"
-    HookTypeContractLifecycle  = "ContractLifecycleHook"
-    HookTypePayment            = "PaymentHook"
-    HookTypeMetrics            = "MetricsHook"           // ★追加
-    HookTypeInvoiceGeneration  = "InvoiceGenerationHook" // ★追加
-)
+**メトリクスフック:**
+- `plugin.OnContractChangeHook` → `registry.GetOnContractChangeHooks()`
+- `plugin.OnInvoiceIssuedHook` → `registry.GetOnInvoiceIssuedHooks()`
+- `plugin.OnPaymentProcessedHook` → `registry.GetOnPaymentProcessedHooks()`
 
-// GetMetricsHooks メトリクスフック取得
-func (r *Registry) GetMetricsHooks() []metrics.Hook {
-    r.mu.RLock()
-    defer r.mu.RUnlock()
+**請求書生成フック:**
+- `plugin.InvoiceGenerationHook` → `registry.GetInvoiceGenerationHooks()`
 
-    hooks := r.hooks[HookTypeMetrics]
-    result := make([]metrics.Hook, 0, len(hooks))
-    for _, h := range hooks {
-        if rp := r.plugins[h.ID()]; rp != nil && rp.enabled {
-            result = append(result, h.(metrics.Hook))
-        }
-    }
-    return result
-}
-
-// GetInvoiceGenerationHooks インボイス生成フック取得
-func (r *Registry) GetInvoiceGenerationHooks() []invoicegen.GenerationHook {
-    r.mu.RLock()
-    defer r.mu.RUnlock()
-
-    hooks := r.hooks[HookTypeInvoiceGeneration]
-    result := make([]invoicegen.GenerationHook, 0, len(hooks))
-    for _, h := range hooks {
-        if rp := r.plugins[h.ID()]; rp != nil && rp.enabled {
-            result = append(result, h.(invoicegen.GenerationHook))
-        }
-    }
-    return result
-}
-```
+詳細は `docs/design/plugin-system.md` のセクション4（プラグインレジストリ）を参照。
 
 ---
 
