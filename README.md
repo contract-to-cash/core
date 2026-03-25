@@ -85,7 +85,9 @@ docs/
 
 | フック | 用途 |
 |--------|------|
-| `InvoiceCalculationHook` | 請求書計算への介入 |
+| `DiscountHook` | 割引計算（クーポン、ボリューム割引等） |
+| `TaxHook` | 税計算（割引後の金額に対して実行） |
+| `InvoiceLifecycleHook` | 請求書計算の前後処理 |
 | `ContractLifecycleHook` | 契約ライフサイクルへの介入 |
 | `PaymentHook` | 支払い処理への介入 |
 | `MetricsHook` | メトリクス収集 |

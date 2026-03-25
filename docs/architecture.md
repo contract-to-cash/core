@@ -176,7 +176,9 @@ const (
 
 | フック | 用途 |
 |--------|------|
-| `InvoiceCalculationHook` | 請求書計算への介入（クーポン、税計算等） |
+| `DiscountHook` | 割引計算（クーポン、ボリューム割引等） |
+| `TaxHook` | 税計算（割引後の金額に対して実行） |
+| `InvoiceLifecycleHook` | 請求書計算の前後処理 |
 | `ContractLifecycleHook` | 契約ライフサイクルへの介入 |
 | `PaymentHook` | 支払い処理への介入 |
 | `MetricsHook` | メトリクス収集 |
@@ -184,15 +186,16 @@ const (
 
 ### 5.2 実行順序
 
-会計基準に則った順序で実行：
+コアが会計基準に則った計算順序を構造的に保証する：
 
 ```
-1. 基本料金計算
-2. 数量調整（従量課金）
-3. 割引適用（クーポン等）
-4. 小計算出
-5. 税計算（割引後に対して）
-6. 合計算出
+1. InvoiceLifecycleHook.BeforeCalculation()  ← 計算前処理
+2. 基本料金計算（コア）
+3. DiscountHook.CalculateDiscount()          ← 割引計算
+4. 小計算出（コア: subtotal - totalDiscount）
+5. TaxHook.CalculateTax()                    ← 税計算（割引後に対して）
+6. 合計算出（コア: afterDiscount + totalTax）
+7. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
 ```
 
 ## 6. 関連ドキュメント

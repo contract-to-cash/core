@@ -24,6 +24,9 @@
 
 ## 改善1: ドメイン層とインフラ層の境界修正
 
+> **注**: `docs/design/payment-gateway.md` は本改善の適用前の状態（`domain/payment/` にGateway等を配置）。
+> 本改善の実装時にパッケージパスを `application/port/` に更新する。
+
 ### 問題
 
 `domain/payment/` パッケージに以下のインフラ詳細が混在している:

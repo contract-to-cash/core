@@ -1154,11 +1154,11 @@ func NewGatewayError(code ErrorCode, message string) *GatewayError {
     return &GatewayError{
         Code:      code,
         Message:   message,
-        Retryable: isRetryable(code),
+        Retryable: isRetryableCode(code),
     }
 }
 
-func isRetryable(code ErrorCode) bool {
+func isRetryableCode(code ErrorCode) bool {
     switch code {
     case ErrorCodeGatewayError, ErrorCodeGatewayTimeout, ErrorCodeRateLimitExceeded:
         return true

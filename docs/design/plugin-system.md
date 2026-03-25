@@ -598,7 +598,7 @@ package coupon
 import (
     "time"
     
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 type CouponID string
@@ -683,8 +683,8 @@ package tax
 import (
     "context"
     
-    "github.com/yourorg/contract-billing-core/domain/shared"
-    "github.com/yourorg/contract-billing-core/plugin"
+    "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/plugin"
 )
 
 // TaxPlugin 税計算プラグイン
@@ -700,6 +700,9 @@ func NewTaxPlugin(calculator TaxCalculator) *TaxPlugin {
     }
 }
 
+// インターフェース準拠の確認（TaxHookのみ実装）
+var _ plugin.TaxHook = (*TaxPlugin)(nil)
+
 func (p *TaxPlugin) Name() string    { return "tax" }
 func (p *TaxPlugin) Version() string { return "1.0.0" }
 func (p *TaxPlugin) Priority() int   { return p.priority }
@@ -712,33 +715,18 @@ func (p *TaxPlugin) Shutdown(ctx context.Context) error {
     return nil
 }
 
-func (p *TaxPlugin) BeforeCalculation(ctx *plugin.Context) error {
-    return nil
-}
-
-func (p *TaxPlugin) CalculateDiscount(ctx *plugin.Context, subtotal shared.Money) (shared.Money, error) {
-    // 税プラグインは割引を行わない
-    return shared.NewMoney(big.NewRat(0, 1), subtotal.Currency()), nil
-}
-
-func (p *TaxPlugin) CalculateTax(ctx *plugin.Context, subtotal shared.Money) (shared.Money, error) {
+// CalculateTax TaxHookの実装
+// DiscountHookやInvoiceLifecycleHookの空実装は不要
+func (p *TaxPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.Money, error) {
     contract := ctx.Contract()
-    if contract == nil {
-        return shared.NewMoney(big.NewRat(0, 1), subtotal.Currency()), nil
-    }
-    
+    afterDiscount := ctx.SubtotalAfterDiscount()
+
     // 請求先情報から税率を決定
     taxRate := p.calculator.GetTaxRate(ctx.Context(), contract.BillingAddress())
-    
-    tax := subtotal.Multiply(taxRate)
-    
-    ctx.SetMetadata("tax_rate", taxRate.FloatString(4))
-    
-    return tax, nil
-}
 
-func (p *TaxPlugin) AfterCalculation(ctx *plugin.Context, invoice *invoice.Invoice) error {
-    return nil
+    tax := afterDiscount.Multiply(taxRate)
+
+    return tax, nil
 }
 
 // TaxCalculator 税率計算インターフェース
@@ -770,10 +758,10 @@ package service
 import (
     "context"
     
-    "github.com/yourorg/contract-billing-core/domain/contract"
-    "github.com/yourorg/contract-billing-core/domain/invoice"
-    "github.com/yourorg/contract-billing-core/domain/shared"
-    "github.com/yourorg/contract-billing-core/plugin"
+    "github.com/contract-to-cash/core/domain/contract"
+    "github.com/contract-to-cash/core/domain/invoice"
+    "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/plugin"
 )
 
 type BillingService struct {
@@ -940,7 +928,7 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 }
 ```
 
-## 8. API互換性とバージョニング戦略
+## 10. API互換性とバージョニング戦略
 
 ### 8.1 Semantic Versioning
 
@@ -948,7 +936,7 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 
 | バージョン変更 | 条件 | 例 |
 |---------------|------|-----|
-| **Major (v2.0.0)** | プラグインインターフェースの破壊的変更 | フックインターフェースの分離・統合 |
+| **Major (v2.0.0)** | プラグインインターフェースの破壊的変更 | CalculationContextのフィールド型変更 |
 | **Minor (v1.x.0)** | 新規フックの追加、既存フックへのメソッド追加（デフォルト実装あり） | MetricsHookに新メソッド追加 |
 | **Patch (v1.x.y)** | バグ修正、ドキュメント修正 | Registry のスレッドセーフ修正 |
 

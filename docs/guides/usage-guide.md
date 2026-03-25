@@ -405,23 +405,21 @@ func main() {
     eventBus := NewEventBus()
     logger := NewLogger()
     
-    registry := plugin.NewRegistry(eventBus, logger)
+    registry := plugin.NewRegistry()
 
-    // クーポンプラグイン（OSS提供）
-    couponDefRepo := postgres.NewCouponDefinitionRepository(db)
-    couponInstRepo := postgres.NewCouponInstanceRepository(db)
-    couponUsageRepo := postgres.NewCouponUsageRepository(db)
-    
-    cp := couponPlugin.NewPlugin(couponDefRepo, couponInstRepo, couponUsageRepo)
+    // クーポンプラグイン（OSS提供、DiscountHook を実装）
+    couponRepo := postgres.NewCouponRepository(db)
+    cp := couponPlugin.NewCouponPlugin(couponRepo)
     registry.Register(cp)
-    registry.Enable(ctx, "coupon", map[string]interface{}{
-        "max_coupons_per_invoice": 1,
-    })
 
-    // 請求通知プラグイン（サービスA独自）
+    // 請求通知プラグイン（サービスA独自、InvoiceLifecycleHook を実装）
     notificationPlugin := serviceAPlugin.NewNotificationPlugin(sendgridClient)
     registry.Register(notificationPlugin)
-    registry.Enable(ctx, "notification", nil)
+
+    // 全プラグイン初期化
+    registry.InitializeAll(ctx, map[string]plugin.Config{
+        "coupon": {"maxCouponsPerInvoice": 1},
+    })
 
     // ============================================================
     // 4. OSSサービス初期化
@@ -478,40 +476,35 @@ func NewNotificationPlugin(emailClient EmailClient) *Plugin {
     return &Plugin{emailClient: emailClient}
 }
 
-// Plugin interface 実装
-func (p *Plugin) ID() string             { return PluginID }
-func (p *Plugin) Version() string        { return "1.0.0" }
-func (p *Plugin) Dependencies() []string { return nil }
+// Plugin 基本インターフェース実装
+func (p *Plugin) Name() string    { return PluginID }
+func (p *Plugin) Version() string { return "1.0.0" }
+func (p *Plugin) Priority() int   { return plugin.PriorityNormal }
 
-func (p *Plugin) OnInstall(ctx context.Context, pc *plugin.Context) error  { return nil }
-func (p *Plugin) OnUninstall(ctx context.Context, pc *plugin.Context) error { return nil }
-func (p *Plugin) OnEnable(ctx context.Context, pc *plugin.Context) error {
-    p.logger = pc.Logger
+func (p *Plugin) Initialize(ctx context.Context, config plugin.Config) error {
     return nil
 }
-func (p *Plugin) OnDisable(ctx context.Context, pc *plugin.Context) error { return nil }
+func (p *Plugin) Shutdown(ctx context.Context) error { return nil }
 
-// InvoiceCalculationHook 実装
-func (p *Plugin) BeforeCalculation(ctx context.Context, calcCtx *plugin.InvoiceCalculationContext) error {
+// InvoiceLifecycleHook 実装
+// 通知プラグインは割引・税計算に関心がないため、
+// DiscountHookやTaxHookは実装しない（空実装不要）
+var _ plugin.InvoiceLifecycleHook = (*Plugin)(nil)
+
+func (p *Plugin) BeforeCalculation(ctx *plugin.CalculationContext) error {
     return nil
 }
 
-func (p *Plugin) CalculateAdjustments(ctx context.Context, calcCtx *plugin.InvoiceCalculationContext) ([]invoice.Adjustment, error) {
-    // 調整は行わない
-    return nil, nil
-}
-
-func (p *Plugin) AfterCalculation(ctx context.Context, calcCtx *plugin.InvoiceCalculationContext, inv *invoice.Invoice) error {
+func (p *Plugin) AfterCalculation(ctx *plugin.CalculationContext, inv *invoice.Invoice) error {
     // 請求書生成後にメール通知
-    err := p.emailClient.SendInvoiceNotification(ctx, SendInvoiceNotificationInput{
-        AccountID: calcCtx.Account.ID.String(),
+    err := p.emailClient.SendInvoiceNotification(ctx.Context(), SendInvoiceNotificationInput{
+        AccountID: ctx.Contract().AccountID().String(),
         InvoiceID: inv.ID().String(),
         Total:     inv.Total().Amount(),
         DueDate:   inv.DueDate(),
     })
     if err != nil {
-        p.logger.Error("failed to send invoice notification", "error", err)
-        // 通知失敗は請求処理を止めない
+        // 通知失敗は請求処理を止めない（ログのみ）
     }
     return nil
 }
