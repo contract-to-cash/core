@@ -327,8 +327,9 @@ type InvoiceID string
 type InvoiceStatus string
 
 const (
-    InvoiceStatusDraft      InvoiceStatus = "draft"
-    InvoiceStatusIssued     InvoiceStatus = "issued"
+    InvoiceStatusDraft      InvoiceStatus = "draft"      // 生成直後（GracePeriod中）
+    InvoiceStatusFinalized  InvoiceStatus = "finalized"  // 確定済み（変更不可）
+    InvoiceStatusIssued     InvoiceStatus = "issued"      // 送付済み
     InvoiceStatusPaid       InvoiceStatus = "paid"
     InvoiceStatusPartialPaid InvoiceStatus = "partial_paid"  // 一部入金
     InvoiceStatusOverdue    InvoiceStatus = "overdue"
@@ -541,9 +542,17 @@ type Plan struct {
     id           PlanID
     name         string
     description  string
-    pricingModel PricingModel
+    pricingModel PricingModel     // 固定料金部分（FlatPrice等）
+    usageMetrics []UsageMetric    // 従量課金メトリクス（ハイブリッド対応）
     features     []Feature
     metadata     map[string]string
+}
+
+// UsageMetric 従量課金メトリクス定義
+type UsageMetric struct {
+    Name             string       // メトリクス名（例: "api_calls", "storage_gb"）
+    PricingModel     PricingModel // 料金モデル（TieredPrice, UsagePrice等）
+    IncludedQuantity int64        // 含有枠（基本料金に含まれる無料枠。0 = 枠なし）
 }
 
 type PricingModel interface {
@@ -562,7 +571,23 @@ func (p FlatPrice) CalculatePrice(usage int64) shared.Money {
 // TieredPrice 段階料金
 type TieredPrice struct {
     Tiers []PriceTier
+    Mode  TieredPricingMode
 }
+
+type TieredPricingMode string
+
+const (
+    // TieredPricingGraduated 段階別課金（デフォルト・推奨）
+    // 各段階に該当する使用量にその段階の単価を適用する
+    // 例: 0-100回@¥10 + 101-500回@¥8 → 250回 = (100×¥10)+(150×¥8) = ¥2,200
+    TieredPricingGraduated TieredPricingMode = "graduated"
+
+    // TieredPricingVolume 全量課金
+    // 到達した段階の単価を全使用量に適用する
+    // 例: 0-100回@¥10, 101-500回@¥8 → 250回 = 250×¥8 = ¥2,000
+    // 注意: クリフエッジ問題（100回=¥1,000 > 101回=¥808）が発生しうる
+    TieredPricingVolume TieredPricingMode = "volume"
+)
 
 type PriceTier struct {
     UpTo      int64        // この数量まで（0 = 無制限）
@@ -571,7 +596,19 @@ type PriceTier struct {
 }
 
 func (p TieredPrice) CalculatePrice(usage int64) shared.Money {
-    // 段階料金計算ロジック
+    if p.Mode == TieredPricingVolume {
+        return p.calculateVolume(usage)
+    }
+    return p.calculateGraduated(usage)
+}
+
+func (p TieredPrice) calculateGraduated(usage int64) shared.Money {
+    // 段階ごとに該当する使用量 × 単価を合算
+    // ...
+}
+
+func (p TieredPrice) calculateVolume(usage int64) shared.Money {
+    // 到達段階の単価 × 全使用量
     // ...
 }
 

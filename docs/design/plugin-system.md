@@ -764,25 +764,62 @@ import (
     "github.com/contract-to-cash/core/plugin"
 )
 
+// BillingConfig 請求処理設定
+type BillingConfig struct {
+    // GracePeriod 請求書確定（finalize）までの猶予期間
+    // この間に遅延UsageRecordの吸収やInvoiceLifecycleHookでの調整が可能
+    // デフォルト: 1時間
+    GracePeriod time.Duration
+
+    // DaysUntilDue 請求書送付から支払い期限までの日数
+    // CollectionMethod が "send_invoice" の場合に使用
+    // デフォルト: 30日
+    DaysUntilDue int
+
+    // CollectionMethod 回収方法
+    //   "charge_automatically": 確定後に自動課金
+    //   "send_invoice": 請求書を送付し支払いを待つ
+    // デフォルト: "charge_automatically"
+    CollectionMethod string
+}
+
 type BillingService struct {
     contractRepo contract.Repository
     invoiceRepo  invoice.Repository
+    usageRepo    usage.Repository
     registry     *plugin.Registry
+    config       BillingConfig
 }
 
 func NewBillingService(
     contractRepo contract.Repository,
     invoiceRepo invoice.Repository,
+    usageRepo usage.Repository,
     registry *plugin.Registry,
+    config BillingConfig,
 ) *BillingService {
     return &BillingService{
         contractRepo: contractRepo,
         invoiceRepo:  invoiceRepo,
+        usageRepo:    usageRepo,
         registry:     registry,
+        config:       config,
     }
 }
 
-func (s *BillingService) GenerateInvoice(ctx context.Context, contractID string) (*invoice.Invoice, error) {
+// GenerateInvoice 請求書を生成する（draft状態）
+//
+// 契約タイプに応じた計算フロー:
+//   subscription  → 固定料金のみ
+//   usage_based   → 従量料金のみ（UsageRecord集計 + PricingModel適用）
+//   hybrid        → 固定料金 + 従量料金
+//
+// 生成された請求書はdraft状態。GracePeriod経過後に FinalizeInvoice() で確定する。
+func (s *BillingService) GenerateInvoice(
+    ctx context.Context,
+    contractID string,
+    billingPeriod shared.DateRange,
+) (*invoice.Invoice, error) {
     // 契約取得
     c, err := s.contractRepo.FindByID(ctx, shared.ContractID(contractID))
     if err != nil {
@@ -798,13 +835,14 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID string)
         }
     }
 
-    // 2. 基本料金計算
-    subtotal := s.calculateBasePrice(c)
+    // 2. 料金計算（契約タイプに応じて分岐）
+    subtotal, err := s.calculateSubtotal(ctx, c, billingPeriod)
+    if err != nil {
+        return nil, fmt.Errorf("subtotal calculation failed: %w", err)
+    }
     calcCtx.SetSubtotal(subtotal)
 
     // 3. 割引計算（DiscountHook のみ）
-    //    コアがこのステップで DiscountHook だけを呼ぶため、
-    //    TaxHook が割引より先に実行されることは構造的にありえない
     var totalDiscount shared.Money
     for _, hook := range s.registry.GetDiscountHooks() {
         discount, err := hook.CalculateDiscount(calcCtx)
@@ -814,13 +852,17 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID string)
         totalDiscount, _ = totalDiscount.Add(discount)
     }
 
+    // 割引上限ガード: 割引合計がsubtotalを超えないようにする
+    // ゼロ金額請求書は正常ケース（全額割引等）として扱う
+    if totalDiscount.GreaterThan(subtotal) {
+        totalDiscount = subtotal
+    }
+
     // 4. 小計算出（割引後）
     afterDiscount, _ := subtotal.Subtract(totalDiscount)
     calcCtx.SetSubtotalAfterDiscount(afterDiscount)
 
     // 5. 税計算（TaxHook のみ、割引後の金額に対して）
-    //    コアが割引後の金額で TaxHook を呼ぶため、
-    //    会計基準の順序が構造的に保証される
     var totalTax shared.Money
     for _, hook := range s.registry.GetTaxHooks() {
         tax, err := hook.CalculateTax(calcCtx)
@@ -830,7 +872,7 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID string)
         totalTax, _ = totalTax.Add(tax)
     }
 
-    // 6. 請求書作成
+    // 6. 請求書作成（draft状態）
     inv := invoice.NewInvoice(
         invoice.NewInvoiceID(),
         c.AccountID(),
@@ -838,6 +880,9 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID string)
         subtotal,
         totalDiscount,
         totalTax,
+        invoice.WithStatus(invoice.InvoiceStatusDraft),
+        invoice.WithBillingPeriod(billingPeriod),
+        invoice.WithDueDate(s.calculateDueDate(billingPeriod)),
     )
     calcCtx.SetInvoice(inv)
 
@@ -848,7 +893,7 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID string)
         }
     }
 
-    // 保存
+    // 保存（draft状態で保存。GracePeriod後にFinalizeInvoiceで確定）
     if err := s.invoiceRepo.Save(ctx, inv); err != nil {
         return nil, err
     }
@@ -856,8 +901,98 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID string)
     return inv, nil
 }
 
-func (s *BillingService) calculateBasePrice(contract *contract.Contract) shared.Money {
-    return contract.Price()
+// calculateSubtotal 契約タイプに応じた基本料金を算出する
+func (s *BillingService) calculateSubtotal(
+    ctx context.Context,
+    c *contract.Contract,
+    period shared.DateRange,
+) (shared.Money, error) {
+    switch c.ContractType() {
+
+    case contract.ContractTypeSubscription:
+        // サブスクリプション: 固定料金
+        return c.Price(), nil
+
+    case contract.ContractTypeUsageBased:
+        // 従量課金: UsageRecord集計 → PricingModel適用
+        return s.calculateUsageCharge(ctx, c, period)
+
+    case contract.ContractTypeOneTime:
+        // 買い切り: 固定料金（1回のみ）
+        return c.Price(), nil
+
+    default:
+        return shared.Money{}, fmt.Errorf("unknown contract type: %s", c.ContractType())
+    }
+}
+
+// calculateUsageCharge 従量料金を算出する
+//
+// フロー:
+//   1. 請求期間のUsageRecordを集計（UsageSummary取得）
+//   2. 含有枠（Included Allowance）があれば差し引き
+//   3. PricingModel（Graduated/Volume）で料金算出
+//
+// メータリング（生イベントの収集・集計）はOSSスコープ外。
+// 利用者がアプリケーション側で集計し、UsageRecordとして記録する。
+func (s *BillingService) calculateUsageCharge(
+    ctx context.Context,
+    c *contract.Contract,
+    period shared.DateRange,
+) (shared.Money, error) {
+    plan := c.Plan()
+    var totalCharge shared.Money
+
+    for _, metric := range plan.UsageMetrics() {
+        // 1. 請求期間の使用量を集計
+        summary, err := s.usageRepo.GetSummary(ctx, c.ID(), metric.Name, period)
+        if err != nil {
+            return shared.Money{}, fmt.Errorf("usage summary failed for %s: %w", metric.Name, err)
+        }
+
+        // 2. 含有枠（Included Allowance）の差し引き
+        billableUsage := summary.TotalUsage
+        if metric.IncludedQuantity > 0 {
+            billableUsage -= metric.IncludedQuantity
+            if billableUsage < 0 {
+                billableUsage = 0
+            }
+        }
+
+        // 3. PricingModelで料金算出
+        charge := metric.PricingModel.CalculatePrice(billableUsage)
+        totalCharge, _ = totalCharge.Add(charge)
+    }
+
+    // 基本料金（ハイブリッド課金の固定部分）がある場合は加算
+    if basePrice := c.BasePrice(); !basePrice.IsZero() {
+        totalCharge, _ = totalCharge.Add(basePrice)
+    }
+
+    return totalCharge, nil
+}
+
+// FinalizeInvoice 請求書を確定する
+// GracePeriod経過後に呼び出す。確定後は変更不可。
+func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID string) error {
+    inv, err := s.invoiceRepo.FindByID(ctx, shared.InvoiceID(invoiceID))
+    if err != nil {
+        return err
+    }
+    if inv.Status() != invoice.InvoiceStatusDraft {
+        return fmt.Errorf("invoice %s is not in draft status", invoiceID)
+    }
+
+    inv.Finalize()
+    return s.invoiceRepo.Save(ctx, inv)
+}
+
+func (s *BillingService) calculateDueDate(period shared.DateRange) time.Time {
+    daysUntilDue := s.config.DaysUntilDue
+    if daysUntilDue == 0 {
+        daysUntilDue = 30
+    }
+    return period.End().AddDate(0, 0, daysUntilDue)
 }
 ```
 
