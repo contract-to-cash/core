@@ -190,12 +190,18 @@ const (
 
 ```
 1. InvoiceLifecycleHook.BeforeCalculation()  ← 計算前処理
-2. 基本料金計算（コア）
+2. 料金計算（コア、契約タイプに応じて分岐）
+   - subscription: 固定料金
+   - usage_based:  UsageRecord集計 → 含有枠差引 → PricingModel適用
+   - one_time:     固定料金（1回のみ）
+   - ハイブリッド:  基本料金 + 従量料金
 3. DiscountHook.CalculateDiscount()          ← 割引計算
+   → 割引上限ガード（割引合計 > subtotalの場合にcap）
 4. 小計算出（コア: subtotal - totalDiscount）
 5. TaxHook.CalculateTax()                    ← 税計算（割引後に対して）
 6. 合計算出（コア: afterDiscount + totalTax）
-7. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
+7. 請求書をdraft状態で生成 → GracePeriod後にfinalize
+8. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
 ```
 
 ## 6. 関連ドキュメント

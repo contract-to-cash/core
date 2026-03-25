@@ -424,11 +424,18 @@ func main() {
     // ============================================================
     // 4. OSSサービス初期化
     // ============================================================
+    usageRepo := postgres.NewUsageRepository(db)
+
     billingSvc := billingService.NewBillingService(
         contractRepo,
         invoiceRepo,
-        eventStore,
+        usageRepo,
         registry,
+        billingService.BillingConfig{
+            GracePeriod:      1 * time.Hour,   // 請求書確定までの猶予期間
+            DaysUntilDue:     30,               // 支払い期限（日数）
+            CollectionMethod: "charge_automatically",
+        },
     )
 
     // ============================================================

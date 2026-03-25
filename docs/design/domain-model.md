@@ -180,7 +180,9 @@ type Contract struct {
     currentPeriod   shared.DateRange
     trialConfig     *TrialConfiguration  // トライアル設定（オプショナル）
     suspensionConfig *SuspensionConfiguration
-    price           shared.Money
+    price           shared.Money         // サブスクリプション/買い切りの固定料金
+    basePrice       shared.Money         // ハイブリッド課金の固定部分（従量課金のみの場合はゼロ）
+    plan            *pricing.Plan        // 料金プラン（UsageMetric含む）
     metadata        map[string]string
     createdAt       time.Time
     updatedAt       time.Time
