@@ -24,8 +24,14 @@
 
 ## 改善1: ドメイン層とインフラ層の境界修正
 
-> **注**: `docs/design/payment-gateway.md` は本改善の適用前の状態（`domain/payment/` にGateway等を配置）。
-> 本改善の実装時にパッケージパスを `application/port/` に更新する。
+> **注**: 本改善は設計段階で先行適用済み。
+> - `docs/design/payment-gateway.md`: Gateway IF → `application/port/gateway.go` (PaymentGateway)、
+>   WebhookHandler → `application/port/webhook.go`、CustomerGateway → `application/port/customer_gateway.go`、
+>   GatewayRouter IF → `application/port/gateway_router.go`、
+>   DefaultGatewayRouter → `infrastructure/gateway/router.go` に移動
+> - RawResponse を全レスポンス型から削除
+> - domain/payment/ にはエンティティ・イベント・リポジトリIFのみ残す方針を明記
+> 以下は改善の根拠を記録として残す。
 
 ### 問題
 
@@ -321,6 +327,14 @@ func (r *Registry) GetInvoiceLifecycleHooks() []InvoiceLifecycleHook { ... }
 ---
 
 ## 改善3: イベントソーシングの集約設計改善
+
+> **注**: 本改善は設計段階で先行適用済み。
+> - `docs/design/event-sourcing.md`: 型付きイベント（DomainEvent IF, EventType定数, EventRegistry）、
+>   型スイッチによるApply、Clock IF注入（shared/clock.go）を適用済み
+> - `docs/design/payment-gateway.md`: WebhookProcessor, PaymentService に clock IF を注入、
+>   time.Now() を clock.Now() に置換済み
+> - `docs/design/plugin-system.md`: CouponPlugin に clock IF を注入、テスト例を FixedClock に更新済み
+> 以下は改善の根拠を記録として残す。
 
 ### 問題
 

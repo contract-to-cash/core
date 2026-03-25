@@ -7,27 +7,45 @@
 ```mermaid
 graph TB
     subgraph ServiceA[サービスA]
+        subgraph DL[Domain Layer]
+            PE[Payment Entity]
+            PR[Payment Repository IF]
+        end
+
         subgraph AL[Application Layer]
             PUC[PaymentUseCase]
             PS[PaymentService - OSS]
-            PG[PaymentGateway - interface]
+            PG[port.PaymentGateway - interface]
             PUC --> PS
             PS --> PG
+            PS --> PR
         end
-        
+
         subgraph IL[Infrastructure Layer]
             SG[Stripe Gateway]
             PPG[PayPay Gateway]
             GMOG[GMO Gateway]
             SQG[Square Gateway]
         end
-        
+
         PG -.->|implements| SG
         PG -.->|implements| PPG
         PG -.->|implements| GMOG
         PG -.->|implements| SQG
     end
 ```
+
+### パッケージ配置方針
+
+| パッケージ | 配置するもの | 根拠 |
+|-----------|-------------|------|
+| `domain/payment/` | Payment エンティティ、ドメインイベント、Repository IF | 純粋なドメイン概念のみ |
+| `application/port/` | PaymentGateway IF, CustomerGateway IF, WebhookHandler IF, GatewayRouter IF, リクエスト/レスポンス型 | 外部決済サービスとの統合境界（ポート） |
+| `infrastructure/gateway/` | DefaultGatewayRouter, 各ゲートウェイ実装 | 具象実装（アダプタ） |
+
+> `docs/architecture.md` の「Domain層は外部依存なし」原則に準拠するため、
+> HTTP ヘッダー・リダイレクト URL・生レスポンスバイト列等のインフラ詳細を
+> `domain/payment/` から `application/port/` に移動した。
 
 ---
 
@@ -78,8 +96,8 @@ stateDiagram-v2
 ### 3.1 PaymentGateway（メインインターフェース）
 
 ```go
-// domain/payment/gateway.go
-package payment
+// application/port/gateway.go
+package port
 
 import (
     "context"
@@ -88,9 +106,10 @@ import (
     "github.com/contract-to-cash/core/domain/shared"
 )
 
-// Gateway 決済ゲートウェイインターフェース
+// PaymentGateway 決済ゲートウェイインターフェース
 // 各決済サービス（Stripe, PayPay等）はこのインターフェースを実装する
-type Gateway interface {
+// 旧 domain/payment/gateway.go から application/port/ に移動
+type PaymentGateway interface {
     // ============================================================
     // 基本情報
     // ============================================================
@@ -135,16 +154,16 @@ type Gateway interface {
     // ============================================================
 
     // RegisterPaymentMethod 支払い方法登録（カード情報等）
-    RegisterPaymentMethod(ctx context.Context, req *RegisterPaymentMethodRequest) (*PaymentMethod, error)
+    RegisterPaymentMethod(ctx context.Context, req *RegisterPaymentMethodRequest) (*PaymentMethodDetail, error)
 
     // DeletePaymentMethod 支払い方法削除
     DeletePaymentMethod(ctx context.Context, paymentMethodID string) error
 
     // GetPaymentMethod 支払い方法取得
-    GetPaymentMethod(ctx context.Context, paymentMethodID string) (*PaymentMethod, error)
+    GetPaymentMethod(ctx context.Context, paymentMethodID string) (*PaymentMethodDetail, error)
 
     // ListPaymentMethods 支払い方法一覧
-    ListPaymentMethods(ctx context.Context, customerID string) ([]*PaymentMethod, error)
+    ListPaymentMethods(ctx context.Context, customerID string) ([]*PaymentMethodDetail, error)
 }
 
 // ============================================================
@@ -168,8 +187,8 @@ const (
 ### 3.2 リクエスト/レスポンス型
 
 ```go
-// domain/payment/gateway_types.go
-package payment
+// application/port/gateway_types.go
+package port
 
 import (
     "time"
@@ -209,7 +228,8 @@ type ChargeResponse struct {
     PaymentMethodID string
     CreatedAt       time.Time
     Metadata        map[string]string
-    RawResponse     []byte           // 生レスポンス（デバッグ用）
+    // RawResponse []byte は削除（インフラ詳細のため）
+    // デバッグ用の生レスポンスはインフラ層の実装側でログに記録する
 }
 
 // ============================================================
@@ -236,7 +256,6 @@ type AuthorizeResponse struct {
     ExpiresAt       *time.Time
     CreatedAt       time.Time
     Metadata        map[string]string
-    RawResponse     []byte
 }
 
 // ============================================================
@@ -258,7 +277,6 @@ type CaptureResponse struct {
     Fee             *shared.Money
     Net             *shared.Money
     CapturedAt      time.Time
-    RawResponse     []byte
 }
 
 // ============================================================
@@ -274,7 +292,6 @@ type VoidResponse struct {
     AuthorizationID string
     Status          TransactionStatus
     VoidedAt        time.Time
-    RawResponse     []byte
 }
 
 // ============================================================
@@ -305,7 +322,6 @@ type RefundResponse struct {
     Amount          shared.Money
     Reason          RefundReason
     RefundedAt      time.Time
-    RawResponse     []byte
 }
 
 type RefundStatus string
@@ -330,7 +346,6 @@ type CancelResponse struct {
     TransactionID string
     Status        TransactionStatus
     CanceledAt    time.Time
-    RawResponse   []byte
 }
 
 // ============================================================
@@ -389,10 +404,10 @@ const (
 )
 
 // ============================================================
-// PaymentMethod（支払い方法）
+// PaymentMethodDetail（支払い方法詳細 — ポート層）
 // ============================================================
 
-type PaymentMethod struct {
+type PaymentMethodDetail struct {
     ID          string
     CustomerID  string
     Type        PaymentMethodType
@@ -471,6 +486,9 @@ type QRCodeDetails struct {
 // 3Dセキュア
 // ============================================================
 
+// ThreeDSecureRequest は application/port/ に配置
+// ReturnURL（リダイレクトURL）はインフラ寄りの概念だが、
+// ゲートウェイIF のリクエストパラメータとしてポート層に含める
 type ThreeDSecureRequest struct {
     Required    bool
     ReturnURL   string  // 認証後のリダイレクトURL
@@ -526,8 +544,8 @@ type Address struct {
 ### 3.3 顧客管理インターフェース
 
 ```go
-// domain/payment/customer.go
-package payment
+// application/port/customer_gateway.go
+package port
 
 import (
     "context"
@@ -536,6 +554,7 @@ import (
 
 // CustomerGateway 顧客管理インターフェース
 // 決済ゲートウェイ側の顧客情報を管理
+// 旧 domain/payment/customer.go から application/port/ に移動
 type CustomerGateway interface {
     // 顧客作成
     CreateCustomer(ctx context.Context, req *CreateCustomerRequest) (*Customer, error)
@@ -591,16 +610,19 @@ type Customer struct {
 ### 3.4 Webhookインターフェース
 
 ```go
-// domain/payment/webhook.go
-package payment
+// application/port/webhook.go
+package port
 
 import (
     "context"
     "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // WebhookHandler Webhookハンドラインターフェース
 // ゲートウェイごとに実装する。署名検証・タイムスタンプ検証・パースを担当。
+// 旧 domain/payment/webhook.go から application/port/ に移動
 type WebhookHandler interface {
     // ParseAndVerify Webhookリクエストの検証とパースを一括で行う
     // 以下を順に実行する:
@@ -654,6 +676,7 @@ type WebhookProcessor struct {
     handler      WebhookHandler
     deduplicator WebhookDeduplicator
     dlq          WebhookDeadLetterQueue // nil許容（DLQなしでも動作）
+    clock        shared.Clock           // テスト時にタイムスタンプ検証の「現在時刻」を制御
     config       WebhookProcessorConfig
 }
 
@@ -792,7 +815,7 @@ func (p *WebhookProcessor) ProcessWebhook(
     if tolerance == 0 {
         tolerance = DefaultTimestampTolerance
     }
-    now := time.Now()
+    now := p.clock.Now()
     diff := now.Sub(event.CreatedAt)
     if diff > tolerance {
         return &WebhookError{
@@ -866,7 +889,7 @@ func (p *WebhookProcessor) ProcessWebhook(
             Payload:    event.RawData,
             LastError:  lastErr.Error(),
             RetryCount: maxRetries,
-            CreatedAt:  time.Now(),
+            CreatedAt:  p.clock.Now(),
         }); dlqErr != nil {
             // DLQ送信失敗は致命的ではないが、必ずログに記録する
             // 実装時: log.Error("failed to send to DLQ", "event_id", event.ID, "error", dlqErr)
@@ -1182,26 +1205,30 @@ var (
 
 複数の決済ゲートウェイを使い分けるためのルーター。
 
+### 5.1 GatewayRouter インターフェース（ポート層）
+
 ```go
-// domain/payment/router.go
-package payment
+// application/port/gateway_router.go
+package port
 
 import (
     "context"
-    "errors"
+
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // GatewayRouter 決済ゲートウェイルーター
 // 条件に応じて適切なゲートウェイを選択
+// 旧 domain/payment/router.go から application/port/ に移動
 type GatewayRouter interface {
     // 条件に基づいてゲートウェイを選択
-    Route(ctx context.Context, criteria *RoutingCriteria) (Gateway, error)
-    
+    Route(ctx context.Context, criteria *RoutingCriteria) (PaymentGateway, error)
+
     // ゲートウェイ登録
-    Register(gateway Gateway, rules []RoutingRule)
-    
+    Register(gateway PaymentGateway, rules []RoutingRule)
+
     // フォールバック設定
-    SetFallback(gateway Gateway)
+    SetFallback(gateway PaymentGateway)
 }
 
 type RoutingCriteria struct {
@@ -1217,20 +1244,35 @@ type RoutingRule struct {
     MinAmount          *shared.Money
     MaxAmount          *shared.Money
     Countries          []string
-    
+
     // 優先度（高いほど優先）
     Priority           int
 }
+```
+
+### 5.2 DefaultGatewayRouter 具象実装（インフラ層）
+
+```go
+// infrastructure/gateway/router.go
+package gateway
+
+import (
+    "context"
+    "errors"
+
+    "github.com/contract-to-cash/core/application/port"
+)
 
 // DefaultGatewayRouter デフォルト実装
+// 旧 domain/payment/router.go の実装部分を infrastructure/ に移動
 type DefaultGatewayRouter struct {
     gateways map[string]gatewayWithRules
-    fallback Gateway
+    fallback port.PaymentGateway
 }
 
 type gatewayWithRules struct {
-    gateway Gateway
-    rules   []RoutingRule
+    gateway port.PaymentGateway
+    rules   []port.RoutingRule
 }
 
 func NewGatewayRouter() *DefaultGatewayRouter {
@@ -1239,19 +1281,19 @@ func NewGatewayRouter() *DefaultGatewayRouter {
     }
 }
 
-func (r *DefaultGatewayRouter) Register(gateway Gateway, rules []RoutingRule) {
-    r.gateways[gateway.ID()] = gatewayWithRules{
-        gateway: gateway,
+func (r *DefaultGatewayRouter) Register(gw port.PaymentGateway, rules []port.RoutingRule) {
+    r.gateways[gw.ID()] = gatewayWithRules{
+        gateway: gw,
         rules:   rules,
     }
 }
 
-func (r *DefaultGatewayRouter) SetFallback(gateway Gateway) {
-    r.fallback = gateway
+func (r *DefaultGatewayRouter) SetFallback(gw port.PaymentGateway) {
+    r.fallback = gw
 }
 
-func (r *DefaultGatewayRouter) Route(ctx context.Context, criteria *RoutingCriteria) (Gateway, error) {
-    var bestMatch Gateway
+func (r *DefaultGatewayRouter) Route(ctx context.Context, criteria *port.RoutingCriteria) (port.PaymentGateway, error) {
+    var bestMatch port.PaymentGateway
     var bestPriority int = -1
 
     for _, gw := range r.gateways {
@@ -1274,7 +1316,7 @@ func (r *DefaultGatewayRouter) Route(ctx context.Context, criteria *RoutingCrite
     return nil, errors.New("no gateway available for criteria")
 }
 
-func (r *DefaultGatewayRouter) matches(rule RoutingRule, criteria *RoutingCriteria) bool {
+func (r *DefaultGatewayRouter) matches(rule port.RoutingRule, criteria *port.RoutingCriteria) bool {
     // PaymentMethodType チェック
     if len(rule.PaymentMethodTypes) > 0 {
         found := false
@@ -1327,6 +1369,7 @@ import (
     "context"
     "time"
 
+    "github.com/contract-to-cash/core/application/port"
     "github.com/contract-to-cash/core/domain/invoice"
     "github.com/contract-to-cash/core/domain/payment"
     "github.com/contract-to-cash/core/domain/shared"
@@ -1336,11 +1379,12 @@ import (
 
 // PaymentService 決済サービス
 type PaymentService struct {
-    gateway        payment.Gateway        // または GatewayRouter
+    gateway        port.PaymentGateway    // 旧 payment.Gateway → port.PaymentGateway
     paymentRepo    payment.Repository
     invoiceRepo    invoice.Repository
     eventStore     eventstore.Store
     pluginRegistry *plugin.Registry
+    clock          shared.Clock
 }
 
 func NewPaymentService(
@@ -1432,12 +1476,12 @@ func (s *PaymentService) ProcessPayment(
     event := eventstore.Event{
         ID:            shared.NewID(),
         StreamID:      p.ID().String(),
-        Type:          "PaymentCompleted",
+        Type:          string(payment.EventTypePaymentCompleted),
         Version:       1,
         SchemaVersion: 1,
         Data:          eventData,
         Metadata:      eventstore.EventMetadata{},
-        OccurredAt:    time.Now(),
+        OccurredAt:    s.clock.Now(),
     }
     s.eventStore.Append(ctx, p.ID().String(), []eventstore.Event{event}, 0)
 
@@ -1706,14 +1750,14 @@ func main() {
     stripeGateway := stripe.NewGateway(os.Getenv("STRIPE_API_KEY"))
     
     // または複数ゲートウェイをルーティング
-    router := payment.NewGatewayRouter()
-    router.Register(stripeGateway, []payment.RoutingRule{
-        {PaymentMethodTypes: []payment.PaymentMethodType{payment.PaymentMethodCreditCard}, Priority: 10},
+    router := gateway.NewGatewayRouter()
+    router.Register(stripeGateway, []port.RoutingRule{
+        {PaymentMethodTypes: []port.PaymentMethodType{port.PaymentMethodCreditCard}, Priority: 10},
     })
-    
+
     paypayGateway := paypay.NewGateway(...)
-    router.Register(paypayGateway, []payment.RoutingRule{
-        {PaymentMethodTypes: []payment.PaymentMethodType{payment.PaymentMethodQRCode}, Priority: 10},
+    router.Register(paypayGateway, []port.RoutingRule{
+        {PaymentMethodTypes: []port.PaymentMethodType{port.PaymentMethodQRCode}, Priority: 10},
     })
     
     router.SetFallback(stripeGateway)
@@ -1738,22 +1782,33 @@ func main() {
 ```mermaid
 graph TB
     subgraph OSS[OSS が提供]
-        GW[payment.Gateway インターフェース]
-        CGW[payment.CustomerGateway インターフェース]
-        WH[payment.WebhookHandler インターフェース]
-        GR[payment.GatewayRouter<br/>複数ゲートウェイ対応]
-        RT[リクエスト/レスポンス型]
+        subgraph PortLayer[application/port/]
+            GW[port.PaymentGateway IF]
+            CGW[port.CustomerGateway IF]
+            WH[port.WebhookHandler IF]
+            GR[port.GatewayRouter IF]
+            RT[リクエスト/レスポンス型]
+        end
+        subgraph DomainLayer[domain/payment/]
+            ENT[Payment エンティティ]
+            EVT[ドメインイベント]
+            REPO[Repository IF]
+        end
+        subgraph InfraLayer[infrastructure/gateway/]
+            DR[DefaultGatewayRouter 実装]
+        end
         EC[エラーコード定義]
         PS[PaymentService<br/>アプリケーション層]
         TM[テスト用モック実装]
     end
-    
+
     subgraph ServiceImpl[サービスA が実装]
         SG[StripeGateway<br/>Stripe SDK]
         PPG[PayPayGateway<br/>PayPay API]
         GMOG[GMOGateway<br/>GMO API]
         ETC[etc...]
     end
-    
-    OSS -.->|implements| ServiceImpl
+
+    PortLayer -.->|implements| ServiceImpl
+    PortLayer -.->|implements| InfraLayer
 ```

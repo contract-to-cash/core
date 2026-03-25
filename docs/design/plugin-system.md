@@ -587,6 +587,7 @@ type CouponPlugin struct {
     repo     CouponRepository
     config   CouponConfig
     priority int
+    clock    shared.Clock
 }
 
 // インターフェース準拠の確認（コンパイル時チェック）
@@ -597,10 +598,11 @@ type CouponConfig struct {
     AllowStacking        bool // 複数クーポン併用可否
 }
 
-func NewCouponPlugin(repo CouponRepository) *CouponPlugin {
+func NewCouponPlugin(repo CouponRepository, clock shared.Clock) *CouponPlugin {
     return &CouponPlugin{
         repo:     repo,
         priority: plugin.PriorityNormal,
+        clock:    clock,
     }
 }
 
@@ -628,7 +630,7 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
     contract := ctx.Contract()
     subtotal := ctx.Subtotal()
 
-    coupons, err := p.repo.FindApplicable(ctx.Context(), contract.ID(), time.Now())
+    coupons, err := p.repo.FindApplicable(ctx.Context(), contract.ID(), p.clock.Now())
     if err != nil {
         return shared.Money{}, err
     }
@@ -1093,6 +1095,9 @@ import (
 )
 
 func TestCouponPlugin_CalculateDiscount(t *testing.T) {
+    fixedNow := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+    clock := shared.FixedClock{FixedTime: fixedNow}
+
     mockRepo := &MockCouponRepository{
         coupons: []*Coupon{
             {
@@ -1100,13 +1105,13 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
                 code:       "SAVE10",
                 couponType: CouponTypePercentage,
                 value:      big.NewRat(10, 100), // 10%
-                validFrom:  time.Now().Add(-24 * time.Hour),
-                validUntil: time.Now().Add(24 * time.Hour),
+                validFrom:  fixedNow.Add(-24 * time.Hour),
+                validUntil: fixedNow.Add(24 * time.Hour),
             },
         },
     }
 
-    p := NewCouponPlugin(mockRepo)
+    p := NewCouponPlugin(mockRepo, clock)
     p.Initialize(context.Background(), plugin.Config{})
 
     // CalculationContext を使用（型安全）
