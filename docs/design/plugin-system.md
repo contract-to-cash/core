@@ -749,7 +749,7 @@ func (c *JapaneseTaxCalculator) GetTaxRate(ctx context.Context, address shared.A
 
 ## 8. アプリケーション層での統合
 
-### 10.1 請求サービスでのプラグイン利用
+### 8.1 請求サービスでのプラグイン利用
 
 ```go
 // application/service/billing_service.go
