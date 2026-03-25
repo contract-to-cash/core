@@ -83,15 +83,15 @@ docs/
 
 ### 拡張ポイント
 
-| フック | 用途 |
-|--------|------|
-| `DiscountHook` | 割引計算（クーポン、ボリューム割引等） |
-| `TaxHook` | 税計算（割引後の金額に対して実行） |
-| `InvoiceLifecycleHook` | 請求書計算の前後処理 |
-| `ContractLifecycleHook` | 契約ライフサイクルへの介入 |
-| `PaymentHook` | 支払い処理への介入 |
-| `MetricsHook` | メトリクス収集 |
-| `InvoiceGenerationHook` | 請求書生成・送付 |
+| カテゴリ | フック例 | 用途 |
+|---------|---------|------|
+| **請求計算** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引・税計算、計算前後処理 |
+| **契約ライフサイクル** | `OnContractCreateHook`, `OnContractCancelHook` 等 | 契約の各イベントに個別対応 |
+| **支払い** | `BeforeChargeHook`, `AfterChargeHook` 等 | 課金前後、失敗時、返金時 |
+| **メトリクス** | `OnContractChangeHook`, `OnInvoiceIssuedHook` 等 | KPI収集 |
+| **請求書生成** | `InvoiceGenerationHook` | PDF生成、送付 |
+
+全フックがISP（インターフェース分離の原則）に準拠。必要なフックだけ実装すればよい。
 
 ## ライセンス
 

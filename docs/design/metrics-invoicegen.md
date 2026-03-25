@@ -383,19 +383,15 @@ import (
 // MetricsHook（コアシステムに組み込むフック）
 // ============================================================
 
-// Hook メトリクス収集フック
-type Hook interface {
-    plugin.Plugin
-
-    // OnContractEvent 契約イベント発生時
-    OnContractEvent(ctx context.Context, event ContractEventData) error
-
-    // OnInvoiceEvent 請求書イベント発生時
-    OnInvoiceEvent(ctx context.Context, event InvoiceEventData) error
-
-    // OnPaymentEvent 決済イベント発生時
-    OnPaymentEvent(ctx context.Context, event PaymentEventData) error
-}
+// メトリクス収集フック
+// 注: フック定義の正式な定義は plugin-system.md を参照。
+// ISP準拠により以下の3つの個別フックIFに分離されている:
+//   - plugin.OnContractChangeHook  — 契約変更メトリクス
+//   - plugin.OnInvoiceIssuedHook   — 請求書発行メトリクス
+//   - plugin.OnPaymentProcessedHook — 支払い処理メトリクス
+//
+// 以下は本ドキュメント内での使用例のための簡略表記。
+// 実装時は plugin-system.md の定義に従うこと。
 
 // ContractEventData 契約イベントデータ
 type ContractEventData struct {
@@ -981,6 +977,16 @@ import (
 // ============================================================
 
 // GenerationHook 請求書生成フック
+// 請求書生成フック
+// 注: フック定義の正式な定義は plugin-system.md を参照。
+// plugin-system.md の InvoiceGenerationHook は以下の3メソッドを定義:
+//   - BuildDocument   — ドキュメント構築時
+//   - AfterRender     — レンダリング後
+//   - AfterDelivery   — 送付後
+//
+// 以下の拡張メソッド（BeforeRender, BeforeDelivery, BuildInvoiceDocument）は
+// 本ドキュメントでの詳細設計として記載。実装時にplugin-system.mdの
+// InvoiceGenerationHookを拡張するか、個別フックIFに分離する。
 type GenerationHook interface {
     plugin.Plugin
 

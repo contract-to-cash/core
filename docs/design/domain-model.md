@@ -53,15 +53,35 @@ func (m Money) Multiply(factor *big.Rat) Money {
 }
 
 func (m Money) IsNegative() bool {
-    return m.amount.Sign() < 0
+    return m.amount != nil && m.amount.Sign() < 0
+}
+
+func (m Money) IsZero() bool {
+    return m.amount == nil || m.amount.Sign() == 0
+}
+
+func (m Money) GreaterThan(other Money) bool {
+    if m.amount == nil || other.amount == nil {
+        return false
+    }
+    return m.amount.Cmp(other.amount) > 0
 }
 
 func (m Money) Amount() *big.Rat {
+    if m.amount == nil {
+        return new(big.Rat)
+    }
     return m.amount
 }
 
 func (m Money) Currency() Currency {
     return m.currency
+}
+
+// Zero 指定通貨のゼロ金額を生成する
+// var totalDiscount shared.Money の代わりに使用し、nilポインタを回避する
+func Zero(currency Currency) Money {
+    return NewMoney(new(big.Rat), currency)
 }
 ```
 
@@ -157,10 +177,20 @@ const (
     ContractStatusDraft     ContractStatus = "draft"
     ContractStatusTrialing  ContractStatus = "trialing"
     ContractStatusActive    ContractStatus = "active"
+    ContractStatusPastDue   ContractStatus = "past_due"    // 支払い遅延（Dunning中）
     ContractStatusSuspended ContractStatus = "suspended"
     ContractStatusCancelled ContractStatus = "cancelled"
     ContractStatusExpired   ContractStatus = "expired"
 )
+
+// ContractStatus 状態遷移ルール:
+//   draft     → active | trialing | cancelled（作成直後のキャンセル）
+//   trialing  → active（トライアル終了・自動移行）| cancelled（トライアル中の解約）
+//   active    → past_due | suspended | cancelled | expired
+//   past_due  → active（支払い成功）| suspended（リトライ上限到達）| cancelled
+//   suspended → active（再開）| cancelled（一時停止中の解約）
+//   cancelled → 終端状態（遷移なし）
+//   expired   → 終端状態（遷移なし）
 
 type ContractType string
 
@@ -415,11 +445,20 @@ type PaymentID string
 type PaymentStatus string
 
 const (
-    PaymentStatusPending   PaymentStatus = "pending"
-    PaymentStatusCompleted PaymentStatus = "completed"
-    PaymentStatusFailed    PaymentStatus = "failed"
-    PaymentStatusRefunded  PaymentStatus = "refunded"
+    PaymentStatusPending          PaymentStatus = "pending"           // 処理中
+    PaymentStatusCompleted        PaymentStatus = "completed"         // 支払い完了
+    PaymentStatusFailed           PaymentStatus = "failed"            // 支払い失敗
+    PaymentStatusPartiallyRefunded PaymentStatus = "partially_refunded" // 一部返金済み
+    PaymentStatusRefunded         PaymentStatus = "refunded"          // 全額返金済み
+    PaymentStatusChargedBack      PaymentStatus = "charged_back"      // チャージバック
 )
+
+// PaymentStatus 状態遷移ルール:
+//   pending    → completed | failed
+//   completed  → partially_refunded | refunded | charged_back
+//   partially_refunded → refunded（残額返金時）
+//   failed     → pending（リトライ時）
+//   charged_back, refunded → 終端状態（遷移なし）
 
 type PaymentMethod string
 

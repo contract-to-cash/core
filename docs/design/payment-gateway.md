@@ -1289,11 +1289,11 @@ func (r *DefaultGatewayRouter) matches(rule RoutingRule, criteria *RoutingCriter
         }
     }
 
-    // 金額チェック
-    if rule.MinAmount != nil && criteria.Amount.Amount() < rule.MinAmount.Amount() {
+    // 金額チェック（big.Rat の比較は Cmp を使用）
+    if rule.MinAmount != nil && criteria.Amount.Amount().Cmp(rule.MinAmount.Amount()) < 0 {
         return false
     }
-    if rule.MaxAmount != nil && criteria.Amount.Amount() > rule.MaxAmount.Amount() {
+    if rule.MaxAmount != nil && criteria.Amount.Amount().Cmp(rule.MaxAmount.Amount()) > 0 {
         return false
     }
 
@@ -1377,15 +1377,10 @@ func (s *PaymentService) ProcessPayment(
         amount = *input.Amount  // 一部支払い
     }
 
-    // 3. プラグインフック: BeforeCharge
-    payCtx := &plugin.PaymentContext{
-        InvoiceID:     invoiceID,
-        Amount:        amount,
-        PaymentMethod: input.PaymentMethodID,
-        Metadata:      input.Metadata,
-    }
-    for _, hook := range s.pluginRegistry.GetPaymentHooks() {
-        if err := hook.BeforeCharge(ctx, payCtx); err != nil {
+    // 3. プラグインフック: BeforeCharge（ISP分離後のIF）
+    pluginCtx := plugin.NewContext(ctx)
+    for _, hook := range s.pluginRegistry.GetBeforeChargeHooks() {
+        if err := hook.BeforeCharge(pluginCtx, amount); err != nil {
             return nil, err
         }
     }
@@ -1432,25 +1427,23 @@ func (s *PaymentService) ProcessPayment(
         return nil, err
     }
 
-    // 7. イベント発行
+    // 7. イベント発行（event-sourcing.md の Event 構造体に準拠）
+    eventData, _ := json.Marshal(p)
     event := eventstore.Event{
         ID:            shared.NewID(),
-        AggregateID:   p.ID().String(),
-        AggregateType: "Payment",
+        StreamID:      p.ID().String(),
         Type:          "PaymentCompleted",
-        Payload:       marshalPayload(p),
+        Version:       1,
+        SchemaVersion: 1,
+        Data:          eventData,
+        Metadata:      eventstore.EventMetadata{},
         OccurredAt:    time.Now(),
     }
     s.eventStore.Append(ctx, p.ID().String(), []eventstore.Event{event}, 0)
 
-    // 8. プラグインフック: AfterCharge
-    result := &plugin.PaymentResult{
-        PaymentID:             p.ID(),
-        ExternalTransactionID: chargeResp.TransactionID,
-        Status:                string(chargeResp.Status),
-    }
-    for _, hook := range s.pluginRegistry.GetPaymentHooks() {
-        hook.AfterCharge(ctx, payCtx, result)
+    // 8. プラグインフック: AfterCharge（ISP分離後のIF）
+    for _, hook := range s.pluginRegistry.GetAfterChargeHooks() {
+        hook.AfterCharge(pluginCtx, p)
     }
 
     return p, nil

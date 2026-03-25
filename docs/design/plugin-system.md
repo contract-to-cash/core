@@ -194,82 +194,116 @@ type InvoiceLifecycleHook interface {
 2. **計算順序の構造的保証** — コアが「DiscountHook → 小計算出 → TaxHook」の順で呼び出すため、Priority値による順序制御ミスが発生しない
 3. **型安全なコンテキスト** — `CalculationContext` でプラグイン間のデータ受け渡しを型安全に行う
 
-### 3.5 契約ライフサイクルフック
+### 3.5 契約ライフサイクルフック（ISP準拠・個別分離）
+
+DiscountHook/TaxHookと同じ設計方針で、契約ライフサイクルの各イベントを
+個別のフックIFとして定義する。必要なイベントだけ実装すればよい。
 
 ```go
-// plugin/hooks.go (続き)
+// plugin/hooks_contract.go
 
-// ContractLifecycleHook 契約ライフサイクルフック
-type ContractLifecycleHook interface {
+// OnContractCreateHook 契約作成時
+type OnContractCreateHook interface {
     Plugin
-    
-    // OnCreate 契約作成時
-    OnCreate(ctx *Context, contract *contract.Contract) error
-    
-    // OnActivate 契約有効化時
-    OnActivate(ctx *Context, contract *contract.Contract) error
-    
-    // OnSuspend 契約一時停止時
-    OnSuspend(ctx *Context, contract *contract.Contract) error
-    
-    // OnResume 契約再開時
-    OnResume(ctx *Context, contract *contract.Contract) error
-    
-    // OnCancel 契約解約時
-    OnCancel(ctx *Context, contract *contract.Contract) error
-    
-    // OnRenew 契約更新時
-    OnRenew(ctx *Context, contract *contract.Contract) error
-    
-    // OnTrialEnd トライアル終了時
-    OnTrialEnd(ctx *Context, contract *contract.Contract, converted bool) error
+    OnContractCreate(ctx *Context, contract *contract.Contract) error
 }
+
+// OnContractActivateHook 契約有効化時
+type OnContractActivateHook interface {
+    Plugin
+    OnContractActivate(ctx *Context, contract *contract.Contract) error
+}
+
+// OnContractSuspendHook 契約一時停止時
+type OnContractSuspendHook interface {
+    Plugin
+    OnContractSuspend(ctx *Context, contract *contract.Contract) error
+}
+
+// OnContractResumeHook 契約再開時
+type OnContractResumeHook interface {
+    Plugin
+    OnContractResume(ctx *Context, contract *contract.Contract) error
+}
+
+// OnContractCancelHook 契約解約時
+type OnContractCancelHook interface {
+    Plugin
+    OnContractCancel(ctx *Context, contract *contract.Contract) error
+}
+
+// OnContractRenewHook 契約更新時
+type OnContractRenewHook interface {
+    Plugin
+    OnContractRenew(ctx *Context, contract *contract.Contract) error
+}
+
+// OnContractTrialEndHook トライアル終了時
+type OnContractTrialEndHook interface {
+    Plugin
+    OnContractTrialEnd(ctx *Context, contract *contract.Contract, converted bool) error
+}
+
+// 複数イベントを監視したいプラグインは複数IFを実装する:
+//   var _ plugin.OnContractCreateHook = (*NotifyPlugin)(nil)
+//   var _ plugin.OnContractCancelHook = (*NotifyPlugin)(nil)
 ```
 
-### 3.6 支払いフック
+### 3.6 支払いフック（ISP準拠・個別分離）
 
 ```go
-// plugin/hooks.go (続き)
+// plugin/hooks_payment.go
 
-// PaymentHook 支払いフック
-type PaymentHook interface {
+// BeforeChargeHook 課金前処理
+type BeforeChargeHook interface {
     Plugin
-    
-    // BeforeCharge 課金前処理
     BeforeCharge(ctx *Context, amount shared.Money) error
-    
-    // AfterCharge 課金後処理
+}
+
+// AfterChargeHook 課金後処理
+type AfterChargeHook interface {
+    Plugin
     AfterCharge(ctx *Context, payment *payment.Payment) error
-    
-    // OnPaymentFailed 支払い失敗時
+}
+
+// OnPaymentFailedHook 支払い失敗時
+type OnPaymentFailedHook interface {
+    Plugin
     OnPaymentFailed(ctx *Context, payment *payment.Payment, err error) error
-    
-    // OnRefund 返金時
+}
+
+// OnRefundHook 返金時
+type OnRefundHook interface {
+    Plugin
     OnRefund(ctx *Context, payment *payment.Payment, amount shared.Money) error
 }
 ```
 
-### 3.7 メトリクスフック
+### 3.7 メトリクスフック（ISP準拠・個別分離）
 
 ```go
-// plugin/hooks.go (続き)
+// plugin/hooks_metrics.go
 
-// MetricsHook メトリクス収集フック
-type MetricsHook interface {
+// OnContractChangeHook 契約変更メトリクス
+type OnContractChangeHook interface {
     Plugin
-    
-    // OnContractChange 契約変更時
     OnContractChange(ctx *Context, event ContractChangeEvent) error
-    
-    // OnInvoiceIssued 請求書発行時
+}
+
+// OnInvoiceIssuedHook 請求書発行メトリクス
+type OnInvoiceIssuedHook interface {
+    Plugin
     OnInvoiceIssued(ctx *Context, invoice *invoice.Invoice) error
-    
-    // OnPaymentProcessed 支払い処理時
+}
+
+// OnPaymentProcessedHook 支払い処理メトリクス
+type OnPaymentProcessedHook interface {
+    Plugin
     OnPaymentProcessed(ctx *Context, payment *payment.Payment) error
 }
 
 type ContractChangeEvent struct {
-    ContractID  string
+    ContractID  shared.ContractID
     ChangeType  string // "created", "activated", "cancelled", etc.
     OldValue    interface{}
     NewValue    interface{}
@@ -332,13 +366,32 @@ type Registry struct {
     mu      sync.RWMutex
     plugins map[string]Plugin
 
-    // フック別のプラグインリスト（分離後）
+    // 請求計算フック
     discountHooks          []DiscountHook
     taxHooks               []TaxHook
     invoiceLifecycleHooks  []InvoiceLifecycleHook
-    contractLifecycleHooks []ContractLifecycleHook
-    paymentHooks           []PaymentHook
-    metricsHooks           []MetricsHook
+
+    // 契約ライフサイクルフック（ISP分離）
+    onContractCreateHooks   []OnContractCreateHook
+    onContractActivateHooks []OnContractActivateHook
+    onContractSuspendHooks  []OnContractSuspendHook
+    onContractResumeHooks   []OnContractResumeHook
+    onContractCancelHooks   []OnContractCancelHook
+    onContractRenewHooks    []OnContractRenewHook
+    onContractTrialEndHooks []OnContractTrialEndHook
+
+    // 支払いフック（ISP分離）
+    beforeChargeHooks    []BeforeChargeHook
+    afterChargeHooks     []AfterChargeHook
+    onPaymentFailedHooks []OnPaymentFailedHook
+    onRefundHooks        []OnRefundHook
+
+    // メトリクスフック（ISP分離）
+    onContractChangeHooks   []OnContractChangeHook
+    onInvoiceIssuedHooks    []OnInvoiceIssuedHook
+    onPaymentProcessedHooks []OnPaymentProcessedHook
+
+    // 請求書生成フック
     invoiceGenerationHooks []InvoiceGenerationHook
 }
 
@@ -360,34 +413,35 @@ func (r *Registry) Register(plugin Plugin) error {
     r.plugins[plugin.Name()] = plugin
     
     // フック別に分類（型アサーションで自動判定）
-    if h, ok := plugin.(DiscountHook); ok {
-        r.discountHooks = append(r.discountHooks, h)
-        r.sortByPriority(r.discountHooks)
-    }
-    if h, ok := plugin.(TaxHook); ok {
-        r.taxHooks = append(r.taxHooks, h)
-        r.sortByPriority(r.taxHooks)
-    }
-    if h, ok := plugin.(InvoiceLifecycleHook); ok {
-        r.invoiceLifecycleHooks = append(r.invoiceLifecycleHooks, h)
-        r.sortByPriority(r.invoiceLifecycleHooks)
-    }
-    if h, ok := plugin.(ContractLifecycleHook); ok {
-        r.contractLifecycleHooks = append(r.contractLifecycleHooks, h)
-        r.sortByPriority(r.contractLifecycleHooks)
-    }
-    if h, ok := plugin.(PaymentHook); ok {
-        r.paymentHooks = append(r.paymentHooks, h)
-        r.sortByPriority(r.paymentHooks)
-    }
-    if h, ok := plugin.(MetricsHook); ok {
-        r.metricsHooks = append(r.metricsHooks, h)
-        r.sortByPriority(r.metricsHooks)
-    }
-    if h, ok := plugin.(InvoiceGenerationHook); ok {
-        r.invoiceGenerationHooks = append(r.invoiceGenerationHooks, h)
-        r.sortByPriority(r.invoiceGenerationHooks)
-    }
+    // 1つのプラグインが複数のフックIFを実装可能
+
+    // 請求計算フック
+    if h, ok := plugin.(DiscountHook); ok { r.discountHooks = append(r.discountHooks, h) }
+    if h, ok := plugin.(TaxHook); ok { r.taxHooks = append(r.taxHooks, h) }
+    if h, ok := plugin.(InvoiceLifecycleHook); ok { r.invoiceLifecycleHooks = append(r.invoiceLifecycleHooks, h) }
+
+    // 契約ライフサイクルフック（ISP分離）
+    if h, ok := plugin.(OnContractCreateHook); ok { r.onContractCreateHooks = append(r.onContractCreateHooks, h) }
+    if h, ok := plugin.(OnContractActivateHook); ok { r.onContractActivateHooks = append(r.onContractActivateHooks, h) }
+    if h, ok := plugin.(OnContractSuspendHook); ok { r.onContractSuspendHooks = append(r.onContractSuspendHooks, h) }
+    if h, ok := plugin.(OnContractResumeHook); ok { r.onContractResumeHooks = append(r.onContractResumeHooks, h) }
+    if h, ok := plugin.(OnContractCancelHook); ok { r.onContractCancelHooks = append(r.onContractCancelHooks, h) }
+    if h, ok := plugin.(OnContractRenewHook); ok { r.onContractRenewHooks = append(r.onContractRenewHooks, h) }
+    if h, ok := plugin.(OnContractTrialEndHook); ok { r.onContractTrialEndHooks = append(r.onContractTrialEndHooks, h) }
+
+    // 支払いフック（ISP分離）
+    if h, ok := plugin.(BeforeChargeHook); ok { r.beforeChargeHooks = append(r.beforeChargeHooks, h) }
+    if h, ok := plugin.(AfterChargeHook); ok { r.afterChargeHooks = append(r.afterChargeHooks, h) }
+    if h, ok := plugin.(OnPaymentFailedHook); ok { r.onPaymentFailedHooks = append(r.onPaymentFailedHooks, h) }
+    if h, ok := plugin.(OnRefundHook); ok { r.onRefundHooks = append(r.onRefundHooks, h) }
+
+    // メトリクスフック（ISP分離）
+    if h, ok := plugin.(OnContractChangeHook); ok { r.onContractChangeHooks = append(r.onContractChangeHooks, h) }
+    if h, ok := plugin.(OnInvoiceIssuedHook); ok { r.onInvoiceIssuedHooks = append(r.onInvoiceIssuedHooks, h) }
+    if h, ok := plugin.(OnPaymentProcessedHook); ok { r.onPaymentProcessedHooks = append(r.onPaymentProcessedHooks, h) }
+
+    // 請求書生成フック
+    if h, ok := plugin.(InvoiceGenerationHook); ok { r.invoiceGenerationHooks = append(r.invoiceGenerationHooks, h) }
     
     return nil
 }
@@ -448,7 +502,25 @@ func (r *Registry) GetInvoiceLifecycleHooks() []InvoiceLifecycleHook {
     return r.invoiceLifecycleHooks
 }
 
-// ContractLifecycleHook, PaymentHook, MetricsHook, InvoiceGenerationHook も同様
+// 契約ライフサイクル（各イベント個別）
+func (r *Registry) GetOnContractCreateHooks() []OnContractCreateHook { ... }
+func (r *Registry) GetOnContractActivateHooks() []OnContractActivateHook { ... }
+func (r *Registry) GetOnContractCancelHooks() []OnContractCancelHook { ... }
+// ... 他の契約ライフサイクルフックも同様
+
+// 支払い（各イベント個別）
+func (r *Registry) GetBeforeChargeHooks() []BeforeChargeHook { ... }
+func (r *Registry) GetAfterChargeHooks() []AfterChargeHook { ... }
+func (r *Registry) GetOnPaymentFailedHooks() []OnPaymentFailedHook { ... }
+func (r *Registry) GetOnRefundHooks() []OnRefundHook { ... }
+
+// メトリクス（各イベント個別）
+func (r *Registry) GetOnContractChangeHooks() []OnContractChangeHook { ... }
+func (r *Registry) GetOnInvoiceIssuedHooks() []OnInvoiceIssuedHook { ... }
+func (r *Registry) GetOnPaymentProcessedHooks() []OnPaymentProcessedHook { ... }
+
+// 請求書生成
+func (r *Registry) GetInvoiceGenerationHooks() []InvoiceGenerationHook { ... }
 ```
 
 ## 5. プラグイン実行順序
