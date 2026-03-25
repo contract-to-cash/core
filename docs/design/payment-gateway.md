@@ -631,98 +631,307 @@ type WebhookEvent struct {
 //
 // WebhookHandlerはゲートウェイ固有のパース・検証を担当する。
 // 以下の横断的関心事はアプリケーション層の WebhookProcessor が担当する:
+//   - タイムスタンプ双方向検証（リプレイ攻撃防止）
 //   - イベント重複検出（冪等性保証）
-//   - タイムスタンプ許容範囲の設定
-//   - 処理失敗時のリトライ・DeadLetterQueue
+//   - リトライ可能/不可能エラーの分類
+//   - Dead Letter Queue（リトライ超過時の追跡）
+//
+// 設計根拠:
+//   - Standard Webhooks仕様に準拠した双方向タイムスタンプ検証
+//   - Stripeは最長3日間リトライするため、重複検出TTLは72時間が必要
+//   - 決済GWは「2xxか否か」でリトライ判定するため、HTTPステータスの使い分けが重要
+
+// デフォルト値
+const (
+    DefaultTimestampTolerance = 5 * time.Minute   // Standard Webhooks仕様準拠
+    DefaultDeduplicationTTL   = 72 * time.Hour     // Stripeの最大リトライ期間(3日)に合わせる
+    DefaultMaxRetries         = 3
+    DefaultRetryBackoff       = 1 * time.Second
+)
 
 // WebhookProcessor Webhook処理サービス
-// WebhookHandlerでパースされたイベントを安全に処理する
 type WebhookProcessor struct {
     handler      WebhookHandler
     deduplicator WebhookDeduplicator
+    dlq          WebhookDeadLetterQueue // nil許容（DLQなしでも動作）
     config       WebhookProcessorConfig
 }
 
 // WebhookProcessorConfig Webhook処理設定
 type WebhookProcessorConfig struct {
-    // TimestampTolerance タイムスタンプの許容範囲
-    // この範囲外のイベントはリプレイ攻撃として拒否する
-    // デフォルト: 5分
+    // TimestampTolerance タイムスタンプの許容範囲（双方向）
+    // 過去・未来ともにこの範囲外のイベントを拒否する
+    // デフォルト: 5分（Standard Webhooks仕様準拠）
     TimestampTolerance time.Duration
 
-    // MaxRetries 処理失敗時の最大リトライ回数
+    // DeduplicationTTL 重複検出レコードの保持期間
+    // Stripeは最長3日間リトライするため、72時間以上を推奨
+    // デフォルト: 72時間
+    DeduplicationTTL time.Duration
+
+    // MaxRetries リトライ可能エラー発生時の最大リトライ回数
     // デフォルト: 3
     MaxRetries int
 
-    // RetryBackoff リトライ間隔の基準値（指数バックオフ）
-    // デフォルト: 1秒（1s, 2s, 4s, ...）
+    // RetryBackoff リトライ間隔の基準値（指数バックオフ + ジッター）
+    // 実際の間隔: backoff * 2^(attempt-1) + random(0, backoff/10)
+    // デフォルト: 1秒
     RetryBackoff time.Duration
 }
 
+// ============================================================
+// 重複検出インターフェース
+// ============================================================
+
 // WebhookDeduplicator イベント重複検出インターフェース
-// 利用者がストレージ実装を提供する（Redis, RDB等）
+// 利用者がストレージ実装を提供する（Redis SETNX + TTL、RDB UPSERT等）
 type WebhookDeduplicator interface {
     // IsDuplicate イベントIDが処理済みかチェックし、未処理なら記録する
-    // 原子的に「チェック＆マーク」を行うこと（SETNX等）
-    IsDuplicate(ctx context.Context, eventID string) (bool, error)
+    // ttl: レコード保持期間。期限切れ後は自動削除される
+    // 原子的に「チェック＆マーク」を行うこと（Redis: SETNX+EXPIRE、RDB: INSERT ON CONFLICT）
+    IsDuplicate(ctx context.Context, eventID string, ttl time.Duration) (bool, error)
 }
 
+// 推奨ストレージ実装:
+//
+// Redis（高速・推奨）:
+//   SET webhook:{eventID} 1 NX EX {ttl_seconds}
+//   → OK: 初回（処理実行）、nil: 重複（スキップ）
+//
+// RDB（永続・監査対応）:
+//   INSERT INTO processed_webhooks (event_id, processed_at, expires_at)
+//   VALUES ($1, NOW(), NOW() + $2)
+//   ON CONFLICT (event_id) DO NOTHING
+//   → affected=1: 初回、affected=0: 重複
+//
+// ハイブリッド（推奨）:
+//   Redis で高速フィルタ（第一防衛線）
+//   + RDB で永続記録（監査ログ兼第二防衛線）
+
+// ============================================================
+// Dead Letter Queue インターフェース
+// ============================================================
+
+// WebhookDeadLetterQueue リトライ超過イベントの記録先
+// リトライ上限を超えたイベントを保存し、手動/バッチでの再処理を可能にする
+type WebhookDeadLetterQueue interface {
+    // Send 処理失敗したイベントをDLQに記録する
+    Send(ctx context.Context, entry *WebhookDLQEntry) error
+}
+
+// WebhookDLQEntry DLQエントリ
+type WebhookDLQEntry struct {
+    EventID    string
+    EventType  WebhookEventType
+    Payload    []byte           // 元のWebhookペイロード
+    LastError  string           // 最後のエラーメッセージ
+    RetryCount int              // 実行したリトライ回数
+    CreatedAt  time.Time        // DLQ投入時刻
+}
+
+// ============================================================
+// エラー分類
+// ============================================================
+
+// WebhookRetryableError リトライ可能なエラーをラップする
+// ネットワークエラー、DB一時障害等に使用する
+type WebhookRetryableError struct {
+    Err error
+}
+
+func (e *WebhookRetryableError) Error() string { return e.Err.Error() }
+func (e *WebhookRetryableError) Unwrap() error { return e.Err }
+
+// isRetryable エラーがリトライ可能か判定する
+// WebhookRetryableError でラップされている場合のみリトライする
+// それ以外（ビジネスロジックエラー等）は即座にDLQへ送る
+func isRetryable(err error) bool {
+    var retryable *WebhookRetryableError
+    return errors.As(err, &retryable)
+}
+
+// エラー分類ガイド:
+//
+// リトライ可能（WebhookRetryableErrorでラップ）:
+//   - DB接続エラー、タイムアウト
+//   - 外部API一時障害（5xx）
+//   - Rate Limit（429）
+//
+// リトライ不可（素のerrorで返す）:
+//   - 存在しない顧客ID参照
+//   - 不整合なステート遷移
+//   - バリデーションエラー
+
+// ============================================================
+// Webhook処理メインロジック
+// ============================================================
+
 // ProcessWebhook Webhookイベントを安全に処理する
-// 1. ParseAndVerify（署名検証 + タイムスタンプ検証 + パース）
-// 2. タイムスタンプ許容範囲チェック
-// 3. 重複検出（冪等性）
-// 4. イベントハンドラ呼び出し
+//
+// 処理フロー:
+//   1. ParseAndVerify（署名検証 + パース）
+//   2. タイムスタンプ双方向検証（過去・未来の両方をチェック）
+//   3. 重複検出（冪等性保証、TTL付き）
+//   4. イベントハンドラ呼び出し（リトライ可能エラーのみリトライ）
+//   5. リトライ超過時はDLQに送信
 func (p *WebhookProcessor) ProcessWebhook(
     ctx context.Context,
     req *WebhookRequest,
     handler func(ctx context.Context, event *WebhookEvent) error,
 ) error {
-    // 1. パースと署名検証
+    // 1. パースと署名検証（ゲートウェイ固有）
     event, err := p.handler.ParseAndVerify(ctx, req)
     if err != nil {
-        return fmt.Errorf("webhook verification failed: %w", err)
+        return &WebhookError{Code: WebhookErrVerification, Err: err}
     }
 
-    // 2. タイムスタンプ検証（リプレイ攻撃防止）
+    // 2. タイムスタンプ双方向検証（Standard Webhooks仕様準拠）
+    //    過去方向: リプレイ攻撃防止
+    //    未来方向: クロックスキュー攻撃防止
     tolerance := p.config.TimestampTolerance
     if tolerance == 0 {
-        tolerance = 5 * time.Minute
+        tolerance = DefaultTimestampTolerance
     }
-    if time.Since(event.CreatedAt) > tolerance {
-        return fmt.Errorf("webhook event too old: %s (tolerance: %s)", event.ID, tolerance)
+    now := time.Now()
+    diff := now.Sub(event.CreatedAt)
+    if diff > tolerance {
+        return &WebhookError{
+            Code: WebhookErrTimestampTooOld,
+            Err:  fmt.Errorf("event %s is %v old (tolerance: %v)", event.ID, diff, tolerance),
+        }
+    }
+    if diff < -tolerance {
+        return &WebhookError{
+            Code: WebhookErrTimestampTooNew,
+            Err:  fmt.Errorf("event %s is %v in the future (tolerance: %v)", event.ID, -diff, tolerance),
+        }
     }
 
     // 3. 重複検出（冪等性保証）
-    isDup, err := p.deduplicator.IsDuplicate(ctx, event.ID)
+    ttl := p.config.DeduplicationTTL
+    if ttl == 0 {
+        ttl = DefaultDeduplicationTTL
+    }
+    isDup, err := p.deduplicator.IsDuplicate(ctx, event.ID, ttl)
     if err != nil {
-        return fmt.Errorf("deduplication check failed: %w", err)
+        return &WebhookError{Code: WebhookErrDeduplication, Err: err}
     }
     if isDup {
-        return nil // 重複イベントは正常応答（200）で無視
+        return nil // 重複イベントは正常応答（HTTP 200）で無視
     }
 
     // 4. イベント処理（リトライ付き）
     maxRetries := p.config.MaxRetries
     if maxRetries == 0 {
-        maxRetries = 3
+        maxRetries = DefaultMaxRetries
     }
     backoff := p.config.RetryBackoff
     if backoff == 0 {
-        backoff = 1 * time.Second
+        backoff = DefaultRetryBackoff
     }
 
     var lastErr error
     for attempt := 0; attempt <= maxRetries; attempt++ {
-        if attempt > 0 {
-            time.Sleep(backoff * time.Duration(1<<uint(attempt-1)))
+        // コンテキストキャンセルチェック
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        default:
         }
+
+        if attempt > 0 {
+            // 指数バックオフ + ジッター（同時大量失敗時のスパイク防止）
+            delay := backoff * time.Duration(1<<uint(attempt-1))
+            jitter := time.Duration(rand.Intn(int(delay / 10))) // 10%ジッター
+            time.Sleep(delay + jitter)
+        }
+
         if err := handler(ctx, event); err != nil {
             lastErr = err
+            // リトライ不可能なエラーは即座に中断
+            if !isRetryable(err) {
+                break
+            }
             continue
         }
-        return nil
+        return nil // 処理成功
     }
-    return fmt.Errorf("webhook processing failed after %d retries: %w", maxRetries, lastErr)
+
+    // 5. リトライ超過 or 非リトライエラー → DLQに送信
+    if p.dlq != nil {
+        _ = p.dlq.Send(ctx, &WebhookDLQEntry{
+            EventID:    event.ID,
+            EventType:  event.Type,
+            Payload:    event.RawData,
+            LastError:  lastErr.Error(),
+            RetryCount: maxRetries,
+            CreatedAt:  time.Now(),
+        })
+    }
+    return &WebhookError{
+        Code: WebhookErrProcessingFailed,
+        Err:  fmt.Errorf("after %d attempts: %w", maxRetries+1, lastErr),
+    }
+}
+
+// ============================================================
+// Webhookエラー型とHTTPステータスマッピング
+// ============================================================
+
+// WebhookErrorCode Webhookエラーコード
+type WebhookErrorCode string
+
+const (
+    WebhookErrVerification    WebhookErrorCode = "verification_failed"
+    WebhookErrTimestampTooOld WebhookErrorCode = "timestamp_too_old"
+    WebhookErrTimestampTooNew WebhookErrorCode = "timestamp_too_new"
+    WebhookErrDeduplication   WebhookErrorCode = "deduplication_failed"
+    WebhookErrProcessingFailed WebhookErrorCode = "processing_failed"
+)
+
+// WebhookError Webhook処理エラー
+type WebhookError struct {
+    Code WebhookErrorCode
+    Err  error
+}
+
+func (e *WebhookError) Error() string { return fmt.Sprintf("[%s] %s", e.Code, e.Err) }
+func (e *WebhookError) Unwrap() error { return e.Err }
+
+// MapWebhookErrorToHTTP WebhookエラーをHTTPステータスコードに変換する
+//
+// 決済GWは「2xxか否か」でリトライ判定するため注意:
+//   - リトライさせたい障害 → 503を返す（GW側がリトライする）
+//   - リトライさせたくないエラー → 200を返す（内部でDLQ/アラート対応）
+//
+// | エラー種別             | HTTPステータス | GW側の挙動        |
+// |----------------------|--------------|-----------------|
+// | 署名検証失敗            | 401          | リトライする       |
+// | タイムスタンプ範囲外      | 400          | リトライする(※)   |
+// | 重複イベント            | 200          | リトライしない     |
+// | 処理成功              | 200          | リトライしない     |
+// | リトライ可能な内部エラー   | 503          | リトライする       |
+// | 非リトライエラー（DLQ行き）| 200          | リトライしない     |
+//
+// ※タイムスタンプ範囲外はリトライしても同じ結果になるが、
+//   400を返すことでGW側のダッシュボードに明確なエラーを表示させる
+func MapWebhookErrorToHTTP(err error) int {
+    var webhookErr *WebhookError
+    if !errors.As(err, &webhookErr) {
+        return 500 // 想定外エラー
+    }
+    switch webhookErr.Code {
+    case WebhookErrVerification:
+        return 401
+    case WebhookErrTimestampTooOld, WebhookErrTimestampTooNew:
+        return 400
+    case WebhookErrDeduplication:
+        return 503 // ストレージ障害 → GW側にリトライさせる
+    case WebhookErrProcessingFailed:
+        return 200 // DLQに送信済み → GW側のリトライは不要
+    default:
+        return 500
+    }
 }
 
 type WebhookEventType string
