@@ -620,7 +620,7 @@ type WebhookRequest struct {
 type WebhookEvent struct {
     ID        string           // イベント一意ID（重複検出に使用）
     Type      WebhookEventType
-    CreatedAt time.Time        // イベント発生時刻（タイムスタンプ検証対象）
+    CreatedAt time.Time        // イベント発生時刻（UTC必須、タイムスタンプ検証対象）
     Data      WebhookEventData
     RawData   []byte
 }
@@ -814,7 +814,7 @@ func (p *WebhookProcessor) ProcessWebhook(
     }
     isDup, err := p.deduplicator.IsDuplicate(ctx, event.ID, ttl)
     if err != nil {
-        return &WebhookError{Code: WebhookErrDeduplication, Err: err}
+        return &WebhookError{Code: WebhookErrDeduplicationStorage, Err: err}
     }
     if isDup {
         return nil // 重複イベントは正常応答（HTTP 200）で無視
@@ -858,15 +858,19 @@ func (p *WebhookProcessor) ProcessWebhook(
     }
 
     // 5. リトライ超過 or 非リトライエラー → DLQに送信
+    //    DLQ送信失敗はログ出力するが、呼び出し元にはProcessingFailedを返す
     if p.dlq != nil {
-        _ = p.dlq.Send(ctx, &WebhookDLQEntry{
+        if dlqErr := p.dlq.Send(ctx, &WebhookDLQEntry{
             EventID:    event.ID,
             EventType:  event.Type,
             Payload:    event.RawData,
             LastError:  lastErr.Error(),
             RetryCount: maxRetries,
             CreatedAt:  time.Now(),
-        })
+        }); dlqErr != nil {
+            // DLQ送信失敗は致命的ではないが、必ずログに記録する
+            // 実装時: log.Error("failed to send to DLQ", "event_id", event.ID, "error", dlqErr)
+        }
     }
     return &WebhookError{
         Code: WebhookErrProcessingFailed,
@@ -885,7 +889,7 @@ const (
     WebhookErrVerification    WebhookErrorCode = "verification_failed"
     WebhookErrTimestampTooOld WebhookErrorCode = "timestamp_too_old"
     WebhookErrTimestampTooNew WebhookErrorCode = "timestamp_too_new"
-    WebhookErrDeduplication   WebhookErrorCode = "deduplication_failed"
+    WebhookErrDeduplicationStorage   WebhookErrorCode = "deduplication_failed"
     WebhookErrProcessingFailed WebhookErrorCode = "processing_failed"
 )
 
@@ -904,14 +908,15 @@ func (e *WebhookError) Unwrap() error { return e.Err }
 //   - リトライさせたい障害 → 503を返す（GW側がリトライする）
 //   - リトライさせたくないエラー → 200を返す（内部でDLQ/アラート対応）
 //
-// | エラー種別             | HTTPステータス | GW側の挙動        |
-// |----------------------|--------------|-----------------|
-// | 署名検証失敗            | 401          | リトライする       |
-// | タイムスタンプ範囲外      | 400          | リトライする(※)   |
-// | 重複イベント            | 200          | リトライしない     |
-// | 処理成功              | 200          | リトライしない     |
-// | リトライ可能な内部エラー   | 503          | リトライする       |
-// | 非リトライエラー（DLQ行き）| 200          | リトライしない     |
+// | 状況                        | HTTPステータス | GW側の挙動    | 備考                    |
+// |----------------------------|-------------|------------|------------------------|
+// | 処理成功                     | 200         | リトライしない | —                      |
+// | 重複イベント（正常系）          | 200         | リトライしない | ProcessWebhookがnil返却  |
+// | 非リトライエラー（DLQ行き）     | 200         | リトライしない | DLQで追跡               |
+// | 署名検証失敗                  | 401         | リトライする  | 不正リクエスト             |
+// | タイムスタンプ範囲外            | 400         | リトライする  | リプレイ攻撃 or クロックスキュー |
+// | 重複検出ストレージ障害          | 503         | リトライする  | Redis/DB一時障害         |
+// | リトライ可能な内部エラー         | 503         | リトライする  | ※ProcessWebhook内で処理済 |
 //
 // ※タイムスタンプ範囲外はリトライしても同じ結果になるが、
 //   400を返すことでGW側のダッシュボードに明確なエラーを表示させる
@@ -925,7 +930,7 @@ func MapWebhookErrorToHTTP(err error) int {
         return 401
     case WebhookErrTimestampTooOld, WebhookErrTimestampTooNew:
         return 400
-    case WebhookErrDeduplication:
+    case WebhookErrDeduplicationStorage:
         return 503 // ストレージ障害 → GW側にリトライさせる
     case WebhookErrProcessingFailed:
         return 200 // DLQに送信済み → GW側のリトライは不要
