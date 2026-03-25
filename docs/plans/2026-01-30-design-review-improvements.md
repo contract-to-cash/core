@@ -28,7 +28,8 @@
 
 `domain/payment/` パッケージに以下のインフラ詳細が混在している:
 
-- `Gateway` インターフェース: `CardSource`（生カード番号）、`ThreeDSecureRequest`（リダイレクトURL）、`RawResponse`（生レスポンスバイト列）
+- `Gateway` インターフェース: `ThreeDSecureRequest`（リダイレクトURL）、`RawResponse`（生レスポンスバイト列）
+  - 注: `CardSource`（生カード番号）は非通過型設計への移行により削除済み
 - `GatewayRouter`: ルーティングロジックと具象実装 (`DefaultGatewayRouter`)
 - `WebhookHandler`: HTTP固有の概念（ヘッダー、ボディ、署名検証）
 - `CustomerGateway`: 外部決済サービスの顧客管理
@@ -90,7 +91,7 @@ type PaymentGateway interface {
 }
 
 // application/port/gateway_types.go
-// ChargeRequest, ChargeResponse, CardSource, ThreeDSecureRequest 等
+// ChargeRequest, ChargeResponse, ThreeDSecureRequest 等
 // 全リクエスト/レスポンス型を移動
 
 // application/port/webhook.go

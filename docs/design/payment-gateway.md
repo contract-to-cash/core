@@ -187,9 +187,9 @@ type ChargeRequest struct {
     CustomerID  string           // ゲートウェイ側の顧客ID
     Description string
 
-    // 支払い方法（どちらか必須）
+    // 支払い方法（いずれか必須）
     PaymentMethodID *string      // 登録済みの支払い方法ID
-    PaymentSource   *PaymentSource // 直接指定（カード番号等）
+    Token           *string      // ワンタイムトークン（決済GWのJS SDKで取得）
 
     // オプション
     IdempotencyKey  string       // 冪等性キー
@@ -220,10 +220,10 @@ type AuthorizeRequest struct {
     Amount          shared.Money
     CustomerID      string
     PaymentMethodID *string
-    PaymentSource   *PaymentSource
+    Token           *string      // ワンタイムトークン
     IdempotencyKey  string
     Metadata        map[string]string
-    
+
     // オーソリ有効期限（指定しない場合はゲートウェイのデフォルト）
     ExpiresIn       *time.Duration
 }
@@ -443,26 +443,29 @@ type QRCodeDetails struct {
 }
 
 // ============================================================
-// PaymentSource（直接指定用）
+// セキュリティ方針: カード情報の非通過型設計
 // ============================================================
-
-type PaymentSource struct {
-    Type PaymentMethodType
-    
-    // カード決済の場合
-    Card *CardSource
-    
-    // トークン（ゲートウェイのJS SDKで取得したトークン）
-    Token *string
-}
-
-type CardSource struct {
-    Number   string
-    ExpMonth int
-    ExpYear  int
-    CVC      string
-    Name     string  // カード名義
-}
+//
+// 本ライブラリはPCI DSS SAQ A相当の「非通過型」設計を採用する。
+// カード番号・CVC等のセンシティブ情報はサーバーサイドのコードに
+// 一切登場しない。
+//
+// 決済フロー:
+//   1. クライアント側で決済GWのJS SDK（Stripe Elements, payjp.js v2,
+//      GMO MpToken.js, Square Web Payments SDK等）を使用
+//   2. カード情報は決済GWサーバーに直接送信されトークン化
+//   3. サーバーにはトークン（またはPaymentMethodID）のみが送信される
+//
+// CardSource型（カード番号・CVCの直接受信）は意図的に提供しない。
+// これにより:
+//   - PCI DSSスコープを最小化（SAQ A: 約30要件）
+//   - 改正割賦販売法（2018年施行）の非保持化要件に準拠
+//   - OSSライブラリ利用者のセキュリティリスクを排除
+//
+// 参考:
+//   - PCI DSS 4.0 要件3.2.2: 認証後のCVC保持は禁止
+//   - 改正割賦販売法: PCI DSS非準拠の加盟店は非通過型が義務
+//   - Square: カード番号直接送信APIを提供しない設計を採用
 
 // ============================================================
 // 3Dセキュア
@@ -496,25 +499,19 @@ type RegisterPaymentMethodRequest struct {
     CustomerID    string
     Type          PaymentMethodType
     SetAsDefault  bool
-    
-    // カードの場合
-    Card          *CardSource
-    Token         *string
-    
-    // 銀行口座の場合
-    BankAccount   *BankAccountSource
+
+    // トークン（必須）
+    // 決済GWのJS SDKでカード情報/銀行口座情報をトークン化したもの
+    Token         string
 
     // 請求先住所（3Dセキュア等で使用）
     BillingAddress *Address
 }
 
-type BankAccountSource struct {
-    BankCode      string
-    BranchCode    string
-    AccountType   string
-    AccountNumber string
-    AccountHolder string
-}
+// BankAccountSource は削除。
+// 銀行口座情報もトークン化して RegisterPaymentMethodRequest.Token で渡す。
+// ゲートウェイ実装が口座振替対応の場合、各GWのJS SDKまたは
+// ホスト型フォームで口座情報をトークン化する。
 
 type Address struct {
     PostalCode string
@@ -603,25 +600,129 @@ import (
 )
 
 // WebhookHandler Webhookハンドラインターフェース
+// ゲートウェイごとに実装する。署名検証・タイムスタンプ検証・パースを担当。
 type WebhookHandler interface {
-    // Webhookイベントをパース・検証
-    ParseEvent(ctx context.Context, req *WebhookRequest) (*WebhookEvent, error)
-    
-    // 署名検証
-    VerifySignature(payload []byte, signature string) error
+    // ParseAndVerify Webhookリクエストの検証とパースを一括で行う
+    // 以下を順に実行する:
+    //   1. 署名検証（HMAC-SHA256等、ゲートウェイ固有）
+    //   2. タイムスタンプ検証（許容範囲外のイベントを拒否）
+    //   3. ペイロードのパース
+    ParseAndVerify(ctx context.Context, req *WebhookRequest) (*WebhookEvent, error)
 }
 
+// WebhookRequest HTTP Webhookリクエスト
 type WebhookRequest struct {
     Headers map[string]string
     Body    []byte
 }
 
+// WebhookEvent パース済みWebhookイベント
 type WebhookEvent struct {
-    ID        string
+    ID        string           // イベント一意ID（重複検出に使用）
     Type      WebhookEventType
-    CreatedAt time.Time
+    CreatedAt time.Time        // イベント発生時刻（タイムスタンプ検証対象）
     Data      WebhookEventData
     RawData   []byte
+}
+
+// ============================================================
+// Webhook処理サービス（アプリケーション層）
+// ============================================================
+//
+// WebhookHandlerはゲートウェイ固有のパース・検証を担当する。
+// 以下の横断的関心事はアプリケーション層の WebhookProcessor が担当する:
+//   - イベント重複検出（冪等性保証）
+//   - タイムスタンプ許容範囲の設定
+//   - 処理失敗時のリトライ・DeadLetterQueue
+
+// WebhookProcessor Webhook処理サービス
+// WebhookHandlerでパースされたイベントを安全に処理する
+type WebhookProcessor struct {
+    handler      WebhookHandler
+    deduplicator WebhookDeduplicator
+    config       WebhookProcessorConfig
+}
+
+// WebhookProcessorConfig Webhook処理設定
+type WebhookProcessorConfig struct {
+    // TimestampTolerance タイムスタンプの許容範囲
+    // この範囲外のイベントはリプレイ攻撃として拒否する
+    // デフォルト: 5分
+    TimestampTolerance time.Duration
+
+    // MaxRetries 処理失敗時の最大リトライ回数
+    // デフォルト: 3
+    MaxRetries int
+
+    // RetryBackoff リトライ間隔の基準値（指数バックオフ）
+    // デフォルト: 1秒（1s, 2s, 4s, ...）
+    RetryBackoff time.Duration
+}
+
+// WebhookDeduplicator イベント重複検出インターフェース
+// 利用者がストレージ実装を提供する（Redis, RDB等）
+type WebhookDeduplicator interface {
+    // IsDuplicate イベントIDが処理済みかチェックし、未処理なら記録する
+    // 原子的に「チェック＆マーク」を行うこと（SETNX等）
+    IsDuplicate(ctx context.Context, eventID string) (bool, error)
+}
+
+// ProcessWebhook Webhookイベントを安全に処理する
+// 1. ParseAndVerify（署名検証 + タイムスタンプ検証 + パース）
+// 2. タイムスタンプ許容範囲チェック
+// 3. 重複検出（冪等性）
+// 4. イベントハンドラ呼び出し
+func (p *WebhookProcessor) ProcessWebhook(
+    ctx context.Context,
+    req *WebhookRequest,
+    handler func(ctx context.Context, event *WebhookEvent) error,
+) error {
+    // 1. パースと署名検証
+    event, err := p.handler.ParseAndVerify(ctx, req)
+    if err != nil {
+        return fmt.Errorf("webhook verification failed: %w", err)
+    }
+
+    // 2. タイムスタンプ検証（リプレイ攻撃防止）
+    tolerance := p.config.TimestampTolerance
+    if tolerance == 0 {
+        tolerance = 5 * time.Minute
+    }
+    if time.Since(event.CreatedAt) > tolerance {
+        return fmt.Errorf("webhook event too old: %s (tolerance: %s)", event.ID, tolerance)
+    }
+
+    // 3. 重複検出（冪等性保証）
+    isDup, err := p.deduplicator.IsDuplicate(ctx, event.ID)
+    if err != nil {
+        return fmt.Errorf("deduplication check failed: %w", err)
+    }
+    if isDup {
+        return nil // 重複イベントは正常応答（200）で無視
+    }
+
+    // 4. イベント処理（リトライ付き）
+    maxRetries := p.config.MaxRetries
+    if maxRetries == 0 {
+        maxRetries = 3
+    }
+    backoff := p.config.RetryBackoff
+    if backoff == 0 {
+        backoff = 1 * time.Second
+    }
+
+    var lastErr error
+    for attempt := 0; attempt <= maxRetries; attempt++ {
+        if attempt > 0 {
+            time.Sleep(backoff * time.Duration(1<<uint(attempt-1)))
+        }
+        if err := handler(ctx, event); err != nil {
+            lastErr = err
+            continue
+        }
+        return nil
+    }
+    return fmt.Errorf("webhook processing failed after %d retries: %w", maxRetries, lastErr)
 }
 
 type WebhookEventType string

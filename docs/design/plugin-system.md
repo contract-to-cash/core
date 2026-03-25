@@ -853,3 +853,99 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
     }
 }
 ```
+
+## 8. API互換性とバージョニング戦略
+
+### 8.1 Semantic Versioning
+
+本ライブラリはSemantic Versioning 2.0.0に従う。
+
+| バージョン変更 | 条件 | 例 |
+|---------------|------|-----|
+| **Major (v2.0.0)** | プラグインインターフェースの破壊的変更 | フック分離（InvoiceCalculationHook → DiscountHook + TaxHook） |
+| **Minor (v1.x.0)** | 新規フックの追加、既存フックへのメソッド追加（デフォルト実装あり） | MetricsHookに新メソッド追加 |
+| **Patch (v1.x.y)** | バグ修正、ドキュメント修正 | Registry のスレッドセーフ修正 |
+
+### 8.2 破壊的変更の定義
+
+以下をプラグインAPIの破壊的変更と定義する：
+
+1. **インターフェースのメソッド追加**（デフォルト実装なし）
+2. **インターフェースのメソッドシグネチャ変更**（引数型・戻り値型の変更）
+3. **インターフェースの削除・統合・分離**
+4. **Context型のフィールド削除・型変更**
+5. **Registry APIの変更**（Enable/Disable/Get系メソッド）
+
+### 8.3 計画されている破壊的変更（v2.0.0）
+
+改善計画（改善2: プラグインフック分離）により、以下の破壊的変更を v2.0.0 で実施する：
+
+```
+v1.x（現行）                        v2.0.0（改善後）
+─────────────────────────           ─────────────────────────
+InvoiceCalculationHook              DiscountHook
+  ├─ BeforeCalculation()            TaxHook
+  ├─ CalculateDiscount()            InvoiceLifecycleHook
+  ├─ CalculateTax()                   ├─ BeforeCalculation()
+  └─ AfterCalculation()               └─ AfterCalculation()
+```
+
+### 8.4 v1.x LTS方針
+
+| 項目 | 方針 |
+|------|------|
+| サポート期間 | v2.0.0 リリース後 12ヶ月間 |
+| セキュリティ修正 | サポート期間中は適用 |
+| バグ修正 | Criticalのみ適用 |
+| 新機能 | 追加しない |
+
+### 8.5 移行ガイド
+
+v1.x から v2.0.0 への移行パターン：
+
+```go
+// ============================================================
+// v1.x: InvoiceCalculationHook を実装するプラグイン
+// ============================================================
+
+type MyPlugin struct{}
+
+func (p *MyPlugin) CalculateDiscount(ctx *Context, subtotal Money) (Money, error) {
+    // 割引ロジック
+}
+
+func (p *MyPlugin) CalculateTax(ctx *Context, subtotal Money) (Money, error) {
+    // このプラグインは税計算に関心がないが、実装が必要だった
+    return shared.NewMoney(big.NewRat(0, 1), subtotal.Currency()), nil
+}
+
+// ============================================================
+// v2.0.0: DiscountHook のみ実装すればよい
+// ============================================================
+
+type MyPlugin struct{}
+
+func (p *MyPlugin) CalculateDiscount(ctx *CalculationContext) (Money, error) {
+    // 割引ロジック（CalculateTax の空実装は不要）
+}
+```
+
+**移行手順:**
+
+1. `go get github.com/contract-to-cash/core/v2` でv2モジュールをインポート
+2. プラグインが実装しているフックを特定（割引のみ？税のみ？両方？）
+3. 各フックに対応する新インターフェースを実装
+4. `Registry.Enable()` の呼び出しはそのまま使える（Registry が自動的にフック種別を判定）
+5. `CalculationContext`（旧 `Context`）の型安全なAPIに移行
+
+### 8.6 非推奨通知のプロセス
+
+```
+v1.x.0  InvoiceCalculationHook に @deprecated 注釈を追加
+        コンパイル時に deprecation warning を出力
+        ↓
+v1.x+1  移行ガイドへのリンクをGoDocに記載
+        ↓
+v2.0.0  InvoiceCalculationHook を削除
+        DiscountHook / TaxHook / InvoiceLifecycleHook に分離
+```
