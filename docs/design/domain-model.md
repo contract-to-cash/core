@@ -115,6 +115,30 @@ func (r DateRange) Duration() time.Duration {
 }
 ```
 
+### 1.3 共有ID型
+
+全ドメインで使用するID型を `domain/shared/identifier.go` に集約する。
+これにより各ドメインパッケージは `shared` のみに依存し、互いを参照しない（循環依存の解消）。
+
+```go
+// domain/shared/identifier.go
+package shared
+
+// 全ドメインで使用するID型
+type AccountID string
+type ContractID string
+type InvoiceID string
+type PaymentID string
+type UsageRecordID string
+type PlanID string
+
+// ID生成ヘルパー
+func NewAccountID() AccountID     { return AccountID(generateULID()) }
+func NewContractID() ContractID   { return ContractID(generateULID()) }
+func NewInvoiceID() InvoiceID     { return InvoiceID(generateULID()) }
+func NewPaymentID() PaymentID     { return PaymentID(generateULID()) }
+```
+
 ## 2. Account（アカウント）
 
 ```go
@@ -123,14 +147,14 @@ package account
 
 import (
     "time"
-    
-    "github.com/yourorg/contract-billing-core/domain/shared"
+
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
-type AccountID string
+// AccountID は shared/identifier.go で定義
 
 type Account struct {
-    id          AccountID
+    id          shared.AccountID
     name        string
     email       string
     billingInfo BillingInfo
@@ -164,12 +188,11 @@ package contract
 
 import (
     "time"
-    
-    "github.com/yourorg/contract-billing-core/domain/account"
-    "github.com/yourorg/contract-billing-core/domain/shared"
+
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
-type ContractID string
+// ContractID は shared/identifier.go で定義
 
 type ContractStatus string
 
@@ -201,8 +224,8 @@ const (
 )
 
 type Contract struct {
-    id              ContractID
-    accountID       account.AccountID
+    id              shared.ContractID
+    accountID       shared.AccountID
     planID          string
     status          ContractStatus
     contractType    ContractType
@@ -326,7 +349,7 @@ type Repository interface {
     // 基本CRUD
     Save(ctx context.Context, contract *Contract) error
     FindByID(ctx context.Context, id ContractID) (*Contract, error)
-    FindByAccountID(ctx context.Context, accountID account.AccountID) ([]*Contract, error)
+    FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*Contract, error)
     
     // クエリ
     FindActiveByPlanID(ctx context.Context, planID string) ([]*Contract, error)
@@ -349,12 +372,11 @@ package invoice
 import (
     "time"
     
-    "github.com/yourorg/contract-billing-core/domain/account"
-    "github.com/yourorg/contract-billing-core/domain/contract"
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
-type InvoiceID string
+// InvoiceID は shared/identifier.go で定義
+// account, contract パッケージへの直接依存なし（shared.AccountID, shared.ContractID を使用）
 
 type InvoiceStatus string
 
@@ -372,8 +394,8 @@ const (
 type Invoice struct {
     id                InvoiceID
     invoiceNumber     string                    // 請求書番号
-    accountID         account.AccountID
-    contractID        contract.ContractID
+    accountID         shared.AccountID
+    contractID        shared.ContractID
     lineItems         []LineItem
     subtotal          shared.Money
     taxAmount         shared.Money
@@ -415,8 +437,8 @@ import (
 type Repository interface {
     Save(ctx context.Context, invoice *Invoice) error
     FindByID(ctx context.Context, id InvoiceID) (*Invoice, error)
-    FindByContractID(ctx context.Context, contractID contract.ContractID) ([]*Invoice, error)
-    FindByAccountID(ctx context.Context, accountID account.AccountID) ([]*Invoice, error)
+    FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*Invoice, error)
+    FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*Invoice, error)
     FindOverdue(ctx context.Context) ([]*Invoice, error)
     FindByStatus(ctx context.Context, status InvoiceStatus) ([]*Invoice, error)
     
@@ -436,11 +458,10 @@ package payment
 import (
     "time"
     
-    "github.com/yourorg/contract-billing-core/domain/invoice"
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
-type PaymentID string
+// PaymentID は shared/identifier.go で定義
 
 type PaymentStatus string
 
@@ -472,7 +493,7 @@ const (
 
 type Payment struct {
     id                PaymentID
-    invoiceID         invoice.InvoiceID
+    invoiceID         shared.InvoiceID
     amount            shared.Money
     method            PaymentMethod
     status            PaymentStatus
@@ -525,14 +546,14 @@ package usage
 import (
     "time"
     
-    "github.com/yourorg/contract-billing-core/domain/contract"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
-type UsageRecordID string
+// UsageRecordID は shared/identifier.go で定義
 
 type UsageRecord struct {
-    id          UsageRecordID
-    contractID  contract.ContractID
+    id          shared.UsageRecordID
+    contractID  shared.ContractID
     metricName  string       // 例: "api_calls", "storage_gb", "active_users"
     quantity    int64
     timestamp   time.Time
@@ -542,7 +563,7 @@ type UsageRecord struct {
 
 // UsageSummary 集計結果
 type UsageSummary struct {
-    ContractID  contract.ContractID
+    ContractID  shared.ContractID
     MetricName  string
     Period      shared.DateRange
     TotalUsage  int64
@@ -562,8 +583,8 @@ import (
 
 type Repository interface {
     Record(ctx context.Context, record *UsageRecord) error
-    GetSummary(ctx context.Context, contractID contract.ContractID, metric string, period shared.DateRange) (*UsageSummary, error)
-    GetRecords(ctx context.Context, contractID contract.ContractID, metric string, from, to time.Time) ([]*UsageRecord, error)
+    GetSummary(ctx context.Context, contractID shared.ContractID, metric string, period shared.DateRange) (*UsageSummary, error)
+    GetRecords(ctx context.Context, contractID shared.ContractID, metric string, from, to time.Time) ([]*UsageRecord, error)
 }
 ```
 
@@ -574,10 +595,10 @@ type Repository interface {
 package pricing
 
 import (
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
-type PlanID string
+// PlanID は shared/identifier.go で定義
 
 type Plan struct {
     id           PlanID
@@ -682,53 +703,28 @@ package billing
 
 import (
     "context"
-    
-    "github.com/yourorg/contract-billing-core/domain/contract"
-    "github.com/yourorg/contract-billing-core/domain/invoice"
-    "github.com/yourorg/contract-billing-core/domain/usage"
+
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
-// Calculator 請求計算サービス
+// Calculator 請求計算ドメインサービス
+// contract と invoice を橋渡しする（両方のドメインを参照してよい唯一のドメインサービス）
 type Calculator interface {
-    CalculateInvoice(ctx context.Context, contract *contract.Contract) (*invoice.Invoice, error)
-    CalculateProration(ctx context.Context, contract *contract.Contract, newPrice shared.Money) (*ProrationResult, error)
+    // GenerateInvoice 契約から請求書を生成
+    GenerateInvoice(ctx context.Context, contractID shared.ContractID) error
+
+    // CalculateProration 日割り計算
+    CalculateProration(ctx context.Context, contractID shared.ContractID, newPrice shared.Money) (*ProrationResult, error)
 }
 
 type ProrationResult struct {
-    CreditAmount shared.Money  // 返金（クレジット）額
-    ChargeAmount shared.Money  // 追加請求額
+    CreditAmount  shared.Money // 返金（クレジット）額
+    ChargeAmount  shared.Money // 追加請求額
     EffectiveDate time.Time
 }
 ```
 
-### 8.2 契約エンジン
-
-```go
-// domain/contract/engine.go
-package contract
-
-import "context"
-
-// Engine 契約タイプごとの処理エンジン
-type Engine interface {
-    // 請求書生成
-    GenerateInvoice(ctx context.Context, contract *Contract) (*invoice.Invoice, error)
-    
-    // 更新処理
-    Renew(ctx context.Context, contract *Contract) error
-    
-    // キャンセル処理
-    Cancel(ctx context.Context, contract *Contract) error
-}
-
-// SubscriptionEngine サブスクリプション用エンジン
-type SubscriptionEngine struct {
-    // ...
-}
-
-// UsageBasedEngine 従量課金用エンジン
-type UsageBasedEngine struct {
-    usageRepo usage.Repository
-    // ...
-}
+> **注**: 旧 `domain/contract/engine.go`（`Engine`, `SubscriptionEngine`, `UsageBasedEngine`）は
+> 削除済み。契約タイプ別の処理ロジックは `application/service/billing_service.go` の
+> `calculateSubtotal()` に移動している（`plugin-system.md` セクション8参照）。
 ```

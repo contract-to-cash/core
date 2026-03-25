@@ -218,7 +218,7 @@ import (
     "errors"
     "time"
     
-    "github.com/yourorg/contract-billing-core/eventstore"
+    "github.com/contract-to-cash/core/eventstore"
 )
 
 // ContractAggregate 契約集約
@@ -433,8 +433,8 @@ import (
     "context"
     "time"
     
-    "github.com/yourorg/contract-billing-core/domain/contract"
-    "github.com/yourorg/contract-billing-core/eventstore"
+    "github.com/contract-to-cash/core/domain/contract"
+    "github.com/contract-to-cash/core/eventstore"
 )
 
 // TemporalQueryService 時点指定クエリサービス
@@ -554,7 +554,7 @@ import (
     "context"
     "time"
     
-    "github.com/yourorg/contract-billing-core/eventstore"
+    "github.com/contract-to-cash/core/eventstore"
 )
 
 // ProjectionService Projection更新サービス
@@ -625,7 +625,7 @@ import (
     "context"
     "encoding/json"
     
-    "github.com/yourorg/contract-billing-core/eventstore"
+    "github.com/contract-to-cash/core/eventstore"
 )
 
 // ContractProjector 契約のProjection更新

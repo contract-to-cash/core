@@ -52,7 +52,7 @@ package metrics
 import (
     "time"
 
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // ============================================================
@@ -376,7 +376,7 @@ package metrics
 import (
     "context"
 
-    "github.com/yourorg/contract-billing-core/plugin"
+    "github.com/contract-to-cash/core/plugin"
 )
 
 // ============================================================
@@ -600,7 +600,7 @@ package invoicegen
 import (
     "time"
 
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // ============================================================
@@ -968,8 +968,8 @@ package invoicegen
 import (
     "context"
 
-    "github.com/yourorg/contract-billing-core/domain/invoice"
-    "github.com/yourorg/contract-billing-core/plugin"
+    "github.com/contract-to-cash/core/domain/invoice"
+    "github.com/contract-to-cash/core/plugin"
 )
 
 // ============================================================
@@ -1027,8 +1027,8 @@ import (
     "encoding/hex"
     "time"
 
-    "github.com/yourorg/contract-billing-core/domain/invoice"
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/invoice"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // Service インボイス発行サービス
@@ -1211,7 +1211,7 @@ func (s *Service) Search(ctx context.Context, query *SearchQuery) (*SearchResult
 ## 5. ディレクトリ構成（最終版）
 
 ```
-github.com/yourorg/contract-billing-core/
+github.com/contract-to-cash/core/
 ├── domain/
 │   ├── contract/
 │   ├── invoice/
@@ -1275,8 +1275,8 @@ import (
     "context"
     "time"
 
-    "github.com/yourorg/contract-billing-core/eventstore"
-    pluginmetrics "github.com/yourorg/contract-billing-core/plugin/metrics"
+    "github.com/contract-to-cash/core/eventstore"
+    pluginmetrics "github.com/contract-to-cash/core/plugin/metrics"
 )
 
 type Collector struct {
@@ -1399,7 +1399,7 @@ import (
     "io"
 
     "github.com/chromedp/chromedp"  // または wkhtmltopdf等
-    plugingen "github.com/yourorg/contract-billing-core/plugin/invoicegen"
+    plugingen "github.com/contract-to-cash/core/plugin/invoicegen"
 )
 
 type PDFRenderer struct {

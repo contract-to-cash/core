@@ -13,7 +13,7 @@ graph TB
             ND[Notification Domain]
         end
         
-        subgraph OSS[contract-billing-core - OSS]
+        subgraph OSS[contract-to-cash/core - OSS]
             ContractD[Contract Domain]
             InvoiceD[Invoice Domain]
             PaymentD[Payment Domain]
@@ -48,8 +48,8 @@ graph TB
 
 ```bash
 # サービスAのプロジェクトで
-go get github.com/yourorg/contract-billing-core
-go get github.com/yourorg/contract-billing-core/plugins/coupon  # 必要なら
+go get github.com/contract-to-cash/core
+go get github.com/contract-to-cash/core/plugins/coupon  # 必要なら
 ```
 
 ### Step 2: ディレクトリ構成
@@ -112,8 +112,8 @@ module github.com/yourcompany/service-a
 go 1.22
 
 require (
-    github.com/yourorg/contract-billing-core v1.0.0
-    github.com/yourorg/contract-billing-core/plugins/coupon v1.0.0
+    github.com/contract-to-cash/core v1.0.0
+    github.com/contract-to-cash/core/plugins/coupon v1.0.0
     // ... その他の依存
 )
 ```
@@ -135,10 +135,10 @@ import (
     "database/sql"
 
     // OSSのドメインをインポート
-    "github.com/yourorg/contract-billing-core/domain/contract"
-    "github.com/yourorg/contract-billing-core/domain/invoice"
-    "github.com/yourorg/contract-billing-core/domain/shared"
-    "github.com/yourorg/contract-billing-core/eventstore"
+    "github.com/contract-to-cash/core/domain/contract"
+    "github.com/contract-to-cash/core/domain/invoice"
+    "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/eventstore"
 )
 
 // ============================================================
@@ -219,8 +219,8 @@ import (
     "time"
 
     // OSSのドメイン
-    "github.com/yourorg/contract-billing-core/domain/contract"
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/contract"
+    "github.com/contract-to-cash/core/domain/shared"
 
     // サービスA固有ドメイン
     "github.com/yourcompany/service-a/internal/domain/user"
@@ -318,8 +318,8 @@ import (
     "context"
 
     // OSSのアプリケーションサービス
-    "github.com/yourorg/contract-billing-core/application/service"
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/application/service"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // BillingUseCase 請求ユースケース
@@ -367,9 +367,9 @@ import (
     _ "github.com/lib/pq"
 
     // OSSパッケージ
-    billingService "github.com/yourorg/contract-billing-core/application/service"
-    "github.com/yourorg/contract-billing-core/plugin"
-    couponPlugin "github.com/yourorg/contract-billing-core/plugins/coupon"
+    billingService "github.com/contract-to-cash/core/application/service"
+    "github.com/contract-to-cash/core/plugin"
+    couponPlugin "github.com/contract-to-cash/core/plugins/coupon"
 
     // サービスA
     "github.com/yourcompany/service-a/internal/application/usecase"
@@ -467,8 +467,8 @@ package notification
 import (
     "context"
 
-    "github.com/yourorg/contract-billing-core/domain/invoice"
-    "github.com/yourorg/contract-billing-core/plugin"
+    "github.com/contract-to-cash/core/domain/invoice"
+    "github.com/contract-to-cash/core/plugin"
 )
 
 const PluginID = "service-a-notification"

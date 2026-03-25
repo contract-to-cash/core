@@ -85,7 +85,7 @@ import (
     "context"
     "time"
 
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // Gateway 決済ゲートウェイインターフェース
@@ -174,7 +174,7 @@ package payment
 import (
     "time"
 
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // ============================================================
@@ -1327,11 +1327,11 @@ import (
     "context"
     "time"
 
-    "github.com/yourorg/contract-billing-core/domain/invoice"
-    "github.com/yourorg/contract-billing-core/domain/payment"
-    "github.com/yourorg/contract-billing-core/domain/shared"
-    "github.com/yourorg/contract-billing-core/eventstore"
-    "github.com/yourorg/contract-billing-core/plugin"
+    "github.com/contract-to-cash/core/domain/invoice"
+    "github.com/contract-to-cash/core/domain/payment"
+    "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/eventstore"
+    "github.com/contract-to-cash/core/plugin"
 )
 
 // PaymentService 決済サービス
@@ -1506,7 +1506,7 @@ type RefundInput struct {
 ## 7. ディレクトリ構成（決済追加後）
 
 ```
-github.com/yourorg/contract-billing-core/
+github.com/contract-to-cash/core/
 ├── domain/
 │   ├── contract/
 │   ├── invoice/
@@ -1564,8 +1564,8 @@ import (
     "github.com/stripe/stripe-go/v76/paymentintent"
     "github.com/stripe/stripe-go/v76/refund"
 
-    "github.com/yourorg/contract-billing-core/domain/payment"
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/payment"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // Gateway Stripe決済ゲートウェイ実装

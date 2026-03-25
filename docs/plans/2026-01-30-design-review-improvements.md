@@ -555,6 +555,12 @@ func (a *BaseAggregate) RaiseEvent(domainEvent DomainEvent, metadata EventMetada
 
 ## 改善4: パッケージ構成と循環依存の解消
 
+> **注**: 本改善は設計段階で先行適用済み。
+> - `domain-model.md`: 全ID型を `shared/identifier.go` に集約済み、循環依存解消済み
+> - `contract/engine.go`（Engine IF）: 削除済み、`application/service/billing_service.go` に移行
+> - importパス: 全ドキュメントで `github.com/contract-to-cash/core` に統一済み
+> 以下は改善の根拠を記録として残す。
+
 ### 問題
 
 #### 循環依存の発生箇所

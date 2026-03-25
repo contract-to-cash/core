@@ -88,7 +88,7 @@ graph TB
 ## 3. パッケージ構成
 
 ```
-github.com/yourorg/contract-billing-core/
+github.com/contract-to-cash/core/
 ├── domain/                      # ドメイン層（依存なし）
 │   ├── contract/
 │   │   ├── entity.go
