@@ -121,6 +121,10 @@ type PaymentGateway interface {
 
 ## 改善2: プラグインシステムのフック分離
 
+> **注**: 本改善は設計段階で先行適用済み。`docs/design/plugin-system.md` は
+> 初版から DiscountHook / TaxHook / InvoiceLifecycleHook の分離設計を採用しており、
+> InvoiceCalculationHook は存在しない。以下は改善の根拠を記録として残す。
+
 ### 問題
 
 #### 2A: 全メソッド実装の強制

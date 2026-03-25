@@ -51,7 +51,7 @@ type Plugin interface {
 type Config map[string]interface{}
 ```
 
-### 2.2 フック用コンテキスト
+### 2.2 計算コンテキスト（型安全）
 
 ```go
 // plugin/context.go
@@ -59,88 +59,142 @@ package plugin
 
 import (
     "context"
-    
-    "github.com/yourorg/contract-billing-core/domain/contract"
-    "github.com/yourorg/contract-billing-core/domain/invoice"
+
+    "github.com/contract-to-cash/core/domain/contract"
+    "github.com/contract-to-cash/core/domain/invoice"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
-// Context プラグイン実行コンテキスト
-type Context struct {
-    ctx       context.Context
-    contract  *contract.Contract
-    invoice   *invoice.Invoice
-    metadata  map[string]interface{}
+// CalculationContext 請求計算コンテキスト
+// コアが各計算ステップで値を設定し、プラグインが参照する
+// metadata は使用せず、型付きフィールドでデータを共有する
+type CalculationContext struct {
+    ctx                   context.Context
+    contract              *contract.Contract
+    invoice               *invoice.Invoice
+    subtotal              shared.Money           // 基本料金
+    subtotalAfterDiscount shared.Money           // 割引後小計（TaxHookが参照）
+    appliedDiscounts      []AppliedDiscount      // 適用された割引の記録
 }
 
-func NewContext(ctx context.Context) *Context {
-    return &Context{
+// AppliedDiscount 適用された割引の記録
+type AppliedDiscount struct {
+    PluginName string       // 割引を適用したプラグイン名
+    Code       string       // クーポンコード等
+    Amount     shared.Money // 割引額
+}
+
+func NewCalculationContext(ctx context.Context, c *contract.Contract) *CalculationContext {
+    return &CalculationContext{
         ctx:      ctx,
-        metadata: make(map[string]interface{}),
+        contract: c,
     }
 }
 
-func (c *Context) Context() context.Context {
-    return c.ctx
+func (c *CalculationContext) Context() context.Context        { return c.ctx }
+func (c *CalculationContext) Contract() *contract.Contract    { return c.contract }
+func (c *CalculationContext) Subtotal() shared.Money          { return c.subtotal }
+func (c *CalculationContext) SubtotalAfterDiscount() shared.Money { return c.subtotalAfterDiscount }
+func (c *CalculationContext) AppliedDiscounts() []AppliedDiscount { return c.appliedDiscounts }
+
+// SetSubtotal コアが基本料金算出後に設定する
+func (c *CalculationContext) SetSubtotal(s shared.Money) { c.subtotal = s }
+
+// SetSubtotalAfterDiscount コアが割引適用後に設定する
+func (c *CalculationContext) SetSubtotalAfterDiscount(s shared.Money) { c.subtotalAfterDiscount = s }
+
+// RecordDiscount プラグインが割引を記録する
+func (c *CalculationContext) RecordDiscount(d AppliedDiscount) {
+    c.appliedDiscounts = append(c.appliedDiscounts, d)
 }
 
-func (c *Context) Contract() *contract.Contract {
-    return c.contract
+// SetInvoice コアが請求書作成後に設定する（AfterCalculation用）
+func (c *CalculationContext) SetInvoice(inv *invoice.Invoice) { c.invoice = inv }
+func (c *CalculationContext) Invoice() *invoice.Invoice       { return c.invoice }
+```
+
+### 2.3 汎用コンテキスト（非計算フック用）
+
+```go
+// Context 契約ライフサイクル、支払い、メトリクス等の汎用コンテキスト
+type Context struct {
+    ctx      context.Context
+    metadata map[string]interface{}
 }
 
-func (c *Context) SetContract(contract *contract.Contract) {
-    c.contract = contract
+func NewContext(ctx context.Context) *Context {
+    return &Context{ctx: ctx, metadata: make(map[string]interface{})}
 }
 
-func (c *Context) Invoice() *invoice.Invoice {
-    return c.invoice
-}
-
-func (c *Context) SetInvoice(invoice *invoice.Invoice) {
-    c.invoice = invoice
-}
-
-func (c *Context) SetMetadata(key string, value interface{}) {
-    c.metadata[key] = value
-}
-
-func (c *Context) GetMetadata(key string) (interface{}, bool) {
-    v, ok := c.metadata[key]
-    return v, ok
-}
+func (c *Context) Context() context.Context                    { return c.ctx }
+func (c *Context) SetMetadata(key string, value interface{})   { c.metadata[key] = value }
+func (c *Context) GetMetadata(key string) (interface{}, bool)  { v, ok := c.metadata[key]; return v, ok }
 ```
 
 ## 3. フック定義
 
-### 3.1 請求書計算フック
+### 3.1 割引フック
 
 ```go
 // plugin/hooks.go
 package plugin
 
 import (
-    "github.com/yourorg/contract-billing-core/domain/invoice"
-    "github.com/yourorg/contract-billing-core/domain/shared"
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
-// InvoiceCalculationHook 請求書計算フック
-type InvoiceCalculationHook interface {
+// DiscountHook 割引計算フック
+// クーポン、ボリューム割引、キャンペーン割引等に使用
+type DiscountHook interface {
     Plugin
-    
-    // BeforeCalculation 計算前処理
-    BeforeCalculation(ctx *Context) error
-    
-    // CalculateDiscount 割引計算（クーポン等）
-    CalculateDiscount(ctx *Context, subtotal shared.Money) (shared.Money, error)
-    
-    // CalculateTax 税計算
-    CalculateTax(ctx *Context, subtotal shared.Money) (shared.Money, error)
-    
-    // AfterCalculation 計算後処理
-    AfterCalculation(ctx *Context, invoice *invoice.Invoice) error
+
+    // CalculateDiscount 割引額を計算して返す
+    // ctx.Subtotal() で基本料金を参照可能
+    CalculateDiscount(ctx *CalculationContext) (shared.Money, error)
 }
 ```
 
-### 3.2 契約ライフサイクルフック
+### 3.2 税計算フック
+
+```go
+// TaxHook 税計算フック
+// 国・地域ごとの税計算に使用
+type TaxHook interface {
+    Plugin
+
+    // CalculateTax 税額を計算して返す
+    // ctx.SubtotalAfterDiscount() で割引後の小計を参照可能
+    // コアが割引後の金額でこのフックを呼ぶため、
+    // 会計基準の順序（割引→税）が構造的に保証される
+    CalculateTax(ctx *CalculationContext) (shared.Money, error)
+}
+```
+
+### 3.3 請求書ライフサイクルフック
+
+```go
+// InvoiceLifecycleHook 請求書計算の前後処理フック
+// 計算前のバリデーションや計算後の通知等に使用
+type InvoiceLifecycleHook interface {
+    Plugin
+
+    // BeforeCalculation 計算前処理
+    BeforeCalculation(ctx *CalculationContext) error
+
+    // AfterCalculation 計算後処理
+    AfterCalculation(ctx *CalculationContext, invoice *invoice.Invoice) error
+}
+```
+
+### 3.4 フック分離の設計根拠
+
+`InvoiceCalculationHook` を3つのフックに分離した理由:
+
+1. **ISP（インターフェース分離の原則）** — 割引のみのプラグインに空のCalculateTax実装を強制しない
+2. **計算順序の構造的保証** — コアが「DiscountHook → 小計算出 → TaxHook」の順で呼び出すため、Priority値による順序制御ミスが発生しない
+3. **型安全なコンテキスト** — `CalculationContext` でプラグイン間のデータ受け渡しを型安全に行う
+
+### 3.5 契約ライフサイクルフック
 
 ```go
 // plugin/hooks.go (続き)
@@ -172,7 +226,7 @@ type ContractLifecycleHook interface {
 }
 ```
 
-### 3.3 支払いフック
+### 3.6 支払いフック
 
 ```go
 // plugin/hooks.go (続き)
@@ -195,7 +249,7 @@ type PaymentHook interface {
 }
 ```
 
-### 3.4 メトリクスフック
+### 3.7 メトリクスフック
 
 ```go
 // plugin/hooks.go (続き)
@@ -223,7 +277,7 @@ type ContractChangeEvent struct {
 }
 ```
 
-### 3.5 請求書生成フック
+### 3.8 請求書生成フック
 
 ```go
 // plugin/hooks.go (続き)
@@ -277,13 +331,15 @@ import (
 type Registry struct {
     mu      sync.RWMutex
     plugins map[string]Plugin
-    
-    // フック別のプラグインリスト
-    invoiceCalculationHooks  []InvoiceCalculationHook
-    contractLifecycleHooks   []ContractLifecycleHook
-    paymentHooks             []PaymentHook
-    metricsHooks             []MetricsHook
-    invoiceGenerationHooks   []InvoiceGenerationHook
+
+    // フック別のプラグインリスト（分離後）
+    discountHooks          []DiscountHook
+    taxHooks               []TaxHook
+    invoiceLifecycleHooks  []InvoiceLifecycleHook
+    contractLifecycleHooks []ContractLifecycleHook
+    paymentHooks           []PaymentHook
+    metricsHooks           []MetricsHook
+    invoiceGenerationHooks []InvoiceGenerationHook
 }
 
 func NewRegistry() *Registry {
@@ -303,10 +359,18 @@ func (r *Registry) Register(plugin Plugin) error {
     
     r.plugins[plugin.Name()] = plugin
     
-    // フック別に分類
-    if h, ok := plugin.(InvoiceCalculationHook); ok {
-        r.invoiceCalculationHooks = append(r.invoiceCalculationHooks, h)
-        r.sortByPriority(r.invoiceCalculationHooks)
+    // フック別に分類（型アサーションで自動判定）
+    if h, ok := plugin.(DiscountHook); ok {
+        r.discountHooks = append(r.discountHooks, h)
+        r.sortByPriority(r.discountHooks)
+    }
+    if h, ok := plugin.(TaxHook); ok {
+        r.taxHooks = append(r.taxHooks, h)
+        r.sortByPriority(r.taxHooks)
+    }
+    if h, ok := plugin.(InvoiceLifecycleHook); ok {
+        r.invoiceLifecycleHooks = append(r.invoiceLifecycleHooks, h)
+        r.sortByPriority(r.invoiceLifecycleHooks)
     }
     if h, ok := plugin.(ContractLifecycleHook); ok {
         r.contractLifecycleHooks = append(r.contractLifecycleHooks, h)
@@ -366,35 +430,50 @@ func (r *Registry) ShutdownAll(ctx context.Context) error {
     return nil
 }
 
-// GetInvoiceCalculationHooks 請求書計算フックを取得
-func (r *Registry) GetInvoiceCalculationHooks() []InvoiceCalculationHook {
+func (r *Registry) GetDiscountHooks() []DiscountHook {
     r.mu.RLock()
     defer r.mu.RUnlock()
-    return r.invoiceCalculationHooks
+    return r.discountHooks
 }
 
-// 他のフックも同様にゲッター提供
+func (r *Registry) GetTaxHooks() []TaxHook {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    return r.taxHooks
+}
+
+func (r *Registry) GetInvoiceLifecycleHooks() []InvoiceLifecycleHook {
+    r.mu.RLock()
+    defer r.mu.RUnlock()
+    return r.invoiceLifecycleHooks
+}
+
+// ContractLifecycleHook, PaymentHook, MetricsHook, InvoiceGenerationHook も同様
 ```
 
 ## 5. プラグイン実行順序
 
-### 5.1 会計基準に則った順序
+### 5.1 コアが保証する計算順序
 
-請求書計算において、プラグインは以下の順序で実行される：
+請求書計算の順序はコアが構造的に保証する。
+Priority値に依存しないため、プラグイン登録順のミスで会計基準違反が発生しない。
 
 ```
-1. 基本料金計算
-2. 数量調整（従量課金）
-3. 割引適用（クーポン等）  ← DiscountPluginが実行
-4. 小計算出
-5. 税計算（割引後に対して）  ← TaxPluginが実行
-6. 合計算出
+1. InvoiceLifecycleHook.BeforeCalculation()  ← 計算前処理
+2. 基本料金計算（コア）
+3. DiscountHook.CalculateDiscount()          ← 割引計算（全DiscountHook）
+4. 小計算出（コア: subtotal - totalDiscount）
+5. TaxHook.CalculateTax()                    ← 税計算（割引後に対して）
+6. 合計算出（コア: afterDiscount + totalTax）
+7. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
 ```
 
-### 5.2 優先度による制御
+### 5.2 Priority の役割（同一フック内の順序制御）
+
+Priorityは**同一フック種別内**での実行順序のみに影響する。
+例: 複数のDiscountHookがある場合、Priority順に実行される。
 
 ```go
-// 優先度定数
 const (
     PriorityHighest = 0
     PriorityHigh    = 100
@@ -403,13 +482,16 @@ const (
     PriorityLowest  = 1000
 )
 
-// 割引プラグインは税計算より先に実行
+// 例: ボリューム割引（先に適用）→ クーポン割引（後に適用）
+type VolumeDiscountPlugin struct{}
+func (p *VolumeDiscountPlugin) Priority() int { return PriorityHigh }
+
 type CouponPlugin struct{}
 func (p *CouponPlugin) Priority() int { return PriorityNormal }
-
-type TaxPlugin struct{}
-func (p *TaxPlugin) Priority() int { return PriorityLow }
 ```
+
+フック種別間の順序（DiscountHook → TaxHook）はコアが制御するため、
+TaxPluginのPriorityをどう設定してもDiscountHookより先に実行されることはない。
 
 ## 6. クーポンプラグイン実装例
 
@@ -422,17 +504,21 @@ package coupon
 import (
     "context"
     "time"
-    
-    "github.com/yourorg/contract-billing-core/domain/shared"
-    "github.com/yourorg/contract-billing-core/plugin"
+
+    "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/plugin"
 )
 
 // CouponPlugin クーポンプラグイン
+// DiscountHook のみを実装する（TaxHookやInvoiceLifecycleHookの空実装は不要）
 type CouponPlugin struct {
     repo     CouponRepository
     config   CouponConfig
     priority int
 }
+
+// インターフェース準拠の確認（コンパイル時チェック）
+var _ plugin.DiscountHook = (*CouponPlugin)(nil)
 
 type CouponConfig struct {
     MaxCouponsPerInvoice int
@@ -464,26 +550,21 @@ func (p *CouponPlugin) Shutdown(ctx context.Context) error {
     return nil
 }
 
-func (p *CouponPlugin) BeforeCalculation(ctx *plugin.Context) error {
-    return nil
-}
-
-func (p *CouponPlugin) CalculateDiscount(ctx *plugin.Context, subtotal shared.Money) (shared.Money, error) {
+// CalculateDiscount DiscountHookの実装
+// CalculateTax, BeforeCalculation, AfterCalculation の空実装は不要
+func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) {
     contract := ctx.Contract()
-    if contract == nil {
-        return shared.NewMoney(big.NewRat(0, 1), subtotal.Currency()), nil
-    }
-    
-    // 契約に適用されているクーポンを取得
+    subtotal := ctx.Subtotal()
+
     coupons, err := p.repo.FindApplicable(ctx.Context(), contract.ID(), time.Now())
     if err != nil {
         return shared.Money{}, err
     }
-    
+
     if len(coupons) == 0 {
         return shared.NewMoney(big.NewRat(0, 1), subtotal.Currency()), nil
     }
-    
+
     var totalDiscount shared.Money
     for i, coupon := range coupons {
         if !p.config.AllowStacking && i > 0 {
@@ -492,24 +573,19 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.Context, subtotal shared.Mo
         if p.config.MaxCouponsPerInvoice > 0 && i >= p.config.MaxCouponsPerInvoice {
             break
         }
-        
+
         discount := coupon.CalculateDiscount(subtotal)
         totalDiscount, _ = totalDiscount.Add(discount)
-        
-        // 使用記録
-        ctx.SetMetadata(fmt.Sprintf("applied_coupon_%d", i), coupon.Code())
+
+        // 型安全な割引記録（metadata[string]interface{} ではない）
+        ctx.RecordDiscount(plugin.AppliedDiscount{
+            PluginName: p.Name(),
+            Code:       coupon.Code(),
+            Amount:     discount,
+        })
     }
-    
+
     return totalDiscount, nil
-}
-
-func (p *CouponPlugin) CalculateTax(ctx *plugin.Context, subtotal shared.Money) (shared.Money, error) {
-    // クーポンプラグインは税計算を行わない
-    return shared.NewMoney(big.NewRat(0, 1), subtotal.Currency()), nil
-}
-
-func (p *CouponPlugin) AfterCalculation(ctx *plugin.Context, invoice *invoice.Invoice) error {
-    return nil
 }
 ```
 
@@ -720,72 +796,75 @@ func NewBillingService(
 
 func (s *BillingService) GenerateInvoice(ctx context.Context, contractID string) (*invoice.Invoice, error) {
     // 契約取得
-    contract, err := s.contractRepo.FindByID(ctx, contract.ContractID(contractID))
+    c, err := s.contractRepo.FindByID(ctx, shared.ContractID(contractID))
     if err != nil {
         return nil, err
     }
-    
-    // プラグインコンテキスト作成
-    pluginCtx := plugin.NewContext(ctx)
-    pluginCtx.SetContract(contract)
-    
-    // BeforeCalculation フック実行
-    for _, hook := range s.registry.GetInvoiceCalculationHooks() {
-        if err := hook.BeforeCalculation(pluginCtx); err != nil {
+
+    calcCtx := plugin.NewCalculationContext(ctx, c)
+
+    // 1. BeforeCalculation（InvoiceLifecycleHook）
+    for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
+        if err := hook.BeforeCalculation(calcCtx); err != nil {
             return nil, fmt.Errorf("before calculation hook failed: %w", err)
         }
     }
-    
-    // 基本料金計算
-    subtotal := s.calculateBasePrice(contract)
-    
-    // 割引計算（プラグイン順）
+
+    // 2. 基本料金計算
+    subtotal := s.calculateBasePrice(c)
+    calcCtx.SetSubtotal(subtotal)
+
+    // 3. 割引計算（DiscountHook のみ）
+    //    コアがこのステップで DiscountHook だけを呼ぶため、
+    //    TaxHook が割引より先に実行されることは構造的にありえない
     var totalDiscount shared.Money
-    for _, hook := range s.registry.GetInvoiceCalculationHooks() {
-        discount, err := hook.CalculateDiscount(pluginCtx, subtotal)
+    for _, hook := range s.registry.GetDiscountHooks() {
+        discount, err := hook.CalculateDiscount(calcCtx)
         if err != nil {
             return nil, fmt.Errorf("discount calculation failed: %w", err)
         }
         totalDiscount, _ = totalDiscount.Add(discount)
     }
-    
-    // 小計（割引後）
+
+    // 4. 小計算出（割引後）
     afterDiscount, _ := subtotal.Subtract(totalDiscount)
-    
-    // 税計算（割引後に対して）
+    calcCtx.SetSubtotalAfterDiscount(afterDiscount)
+
+    // 5. 税計算（TaxHook のみ、割引後の金額に対して）
+    //    コアが割引後の金額で TaxHook を呼ぶため、
+    //    会計基準の順序が構造的に保証される
     var totalTax shared.Money
-    for _, hook := range s.registry.GetInvoiceCalculationHooks() {
-        tax, err := hook.CalculateTax(pluginCtx, afterDiscount)
+    for _, hook := range s.registry.GetTaxHooks() {
+        tax, err := hook.CalculateTax(calcCtx)
         if err != nil {
             return nil, fmt.Errorf("tax calculation failed: %w", err)
         }
         totalTax, _ = totalTax.Add(tax)
     }
-    
-    // 請求書作成
+
+    // 6. 請求書作成
     inv := invoice.NewInvoice(
         invoice.NewInvoiceID(),
-        contract.AccountID(),
-        contract.ID(),
+        c.AccountID(),
+        c.ID(),
         subtotal,
         totalDiscount,
         totalTax,
     )
-    
-    pluginCtx.SetInvoice(inv)
-    
-    // AfterCalculation フック実行
-    for _, hook := range s.registry.GetInvoiceCalculationHooks() {
-        if err := hook.AfterCalculation(pluginCtx, inv); err != nil {
+    calcCtx.SetInvoice(inv)
+
+    // 7. AfterCalculation（InvoiceLifecycleHook）
+    for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
+        if err := hook.AfterCalculation(calcCtx, inv); err != nil {
             return nil, fmt.Errorf("after calculation hook failed: %w", err)
         }
     }
-    
+
     // 保存
     if err := s.invoiceRepo.Save(ctx, inv); err != nil {
         return nil, err
     }
-    
+
     return inv, nil
 }
 
@@ -813,13 +892,12 @@ import (
     "context"
     "math/big"
     "testing"
-    
-    "github.com/yourorg/contract-billing-core/domain/shared"
-    "github.com/yourorg/contract-billing-core/plugin"
+
+    "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/plugin"
 )
 
 func TestCouponPlugin_CalculateDiscount(t *testing.T) {
-    // モックリポジトリ
     mockRepo := &MockCouponRepository{
         coupons: []*Coupon{
             {
@@ -832,24 +910,32 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
             },
         },
     }
-    
+
     p := NewCouponPlugin(mockRepo)
     p.Initialize(context.Background(), plugin.Config{})
-    
-    ctx := plugin.NewContext(context.Background())
-    ctx.SetContract(&contract.Contract{/* ... */})
-    
-    subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-    
-    discount, err := p.CalculateDiscount(ctx, subtotal)
-    
+
+    // CalculationContext を使用（型安全）
+    c := &contract.Contract{/* ... */}
+    ctx := plugin.NewCalculationContext(context.Background(), c)
+    ctx.SetSubtotal(shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY))
+
+    discount, err := p.CalculateDiscount(ctx)
     if err != nil {
         t.Fatalf("unexpected error: %v", err)
     }
-    
+
     expected := big.NewRat(1000, 1) // 10000 * 10% = 1000
     if discount.Amount().Cmp(expected) != 0 {
         t.Errorf("expected %v, got %v", expected, discount.Amount())
+    }
+
+    // 型安全な割引記録の検証
+    discounts := ctx.AppliedDiscounts()
+    if len(discounts) != 1 {
+        t.Fatalf("expected 1 applied discount, got %d", len(discounts))
+    }
+    if discounts[0].Code != "SAVE10" {
+        t.Errorf("expected coupon code SAVE10, got %s", discounts[0].Code)
     }
 }
 ```
@@ -862,7 +948,7 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 
 | バージョン変更 | 条件 | 例 |
 |---------------|------|-----|
-| **Major (v2.0.0)** | プラグインインターフェースの破壊的変更 | フック分離（InvoiceCalculationHook → DiscountHook + TaxHook） |
+| **Major (v2.0.0)** | プラグインインターフェースの破壊的変更 | フックインターフェースの分離・統合 |
 | **Minor (v1.x.0)** | 新規フックの追加、既存フックへのメソッド追加（デフォルト実装あり） | MetricsHookに新メソッド追加 |
 | **Patch (v1.x.y)** | バグ修正、ドキュメント修正 | Registry のスレッドセーフ修正 |
 
@@ -873,79 +959,55 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 1. **インターフェースのメソッド追加**（デフォルト実装なし）
 2. **インターフェースのメソッドシグネチャ変更**（引数型・戻り値型の変更）
 3. **インターフェースの削除・統合・分離**
-4. **Context型のフィールド削除・型変更**
-5. **Registry APIの変更**（Enable/Disable/Get系メソッド）
+4. **CalculationContext/Context型のフィールド削除・型変更**
+5. **Registry APIの変更**（Register/Get系メソッド）
 
-### 8.3 計画されている破壊的変更（v2.0.0）
+### 8.3 初版のフック設計について
 
-改善計画（改善2: プラグインフック分離）により、以下の破壊的変更を v2.0.0 で実施する：
+本ライブラリは初版（v1.0.0）から分割フック設計を採用している。
 
 ```
-v1.x（現行）                        v2.0.0（改善後）
-─────────────────────────           ─────────────────────────
-InvoiceCalculationHook              DiscountHook
-  ├─ BeforeCalculation()            TaxHook
-  ├─ CalculateDiscount()            InvoiceLifecycleHook
-  ├─ CalculateTax()                   ├─ BeforeCalculation()
-  └─ AfterCalculation()               └─ AfterCalculation()
+DiscountHook          — 割引計算のみ
+TaxHook               — 税計算のみ
+InvoiceLifecycleHook  — 計算前後処理
+ContractLifecycleHook — 契約ライフサイクル
+PaymentHook           — 支払い処理
+MetricsHook           — メトリクス収集
+InvoiceGenerationHook — 請求書生成
 ```
 
-### 8.4 v1.x LTS方針
+`InvoiceCalculationHook`（割引・税・ライフサイクルの統合インターフェース）は
+ISP違反と計算順序の脆さの懸念から、設計段階で分割を決定した。
+そのため、v1.x→v2.0.0の移行ガイドや非推奨プロセスは不要。
 
-| 項目 | 方針 |
-|------|------|
-| サポート期間 | v2.0.0 リリース後 12ヶ月間 |
-| セキュリティ修正 | サポート期間中は適用 |
-| バグ修正 | Criticalのみ適用 |
-| 新機能 | 追加しない |
-
-### 8.5 移行ガイド
-
-v1.x から v2.0.0 への移行パターン：
+### 8.4 カスタムプラグイン開発者向けガイドライン
 
 ```go
-// ============================================================
-// v1.x: InvoiceCalculationHook を実装するプラグイン
-// ============================================================
+// 割引プラグインを作る場合:
+// DiscountHook のみ実装すればよい（TaxHookの空実装は不要）
+var _ plugin.DiscountHook = (*MyDiscountPlugin)(nil)
 
-type MyPlugin struct{}
-
-func (p *MyPlugin) CalculateDiscount(ctx *Context, subtotal Money) (Money, error) {
+type MyDiscountPlugin struct{}
+func (p *MyDiscountPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) {
     // 割引ロジック
 }
 
-func (p *MyPlugin) CalculateTax(ctx *Context, subtotal Money) (Money, error) {
-    // このプラグインは税計算に関心がないが、実装が必要だった
-    return shared.NewMoney(big.NewRat(0, 1), subtotal.Currency()), nil
+// 税計算プラグインを作る場合:
+// TaxHook のみ実装すればよい
+var _ plugin.TaxHook = (*MyTaxPlugin)(nil)
+
+type MyTaxPlugin struct{}
+func (p *MyTaxPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.Money, error) {
+    // ctx.SubtotalAfterDiscount() で割引後の金額を参照可能
 }
 
-// ============================================================
-// v2.0.0: DiscountHook のみ実装すればよい
-// ============================================================
+// 割引と税の両方を1プラグインで実装する場合:
+// DiscountHook と TaxHook の両方を実装
+var _ plugin.DiscountHook = (*MyBillingPlugin)(nil)
+var _ plugin.TaxHook = (*MyBillingPlugin)(nil)
 
-type MyPlugin struct{}
-
-func (p *MyPlugin) CalculateDiscount(ctx *CalculationContext) (Money, error) {
-    // 割引ロジック（CalculateTax の空実装は不要）
-}
-```
-
-**移行手順:**
-
-1. `go get github.com/contract-to-cash/core/v2` でv2モジュールをインポート
-2. プラグインが実装しているフックを特定（割引のみ？税のみ？両方？）
-3. 各フックに対応する新インターフェースを実装
-4. `Registry.Enable()` の呼び出しはそのまま使える（Registry が自動的にフック種別を判定）
-5. `CalculationContext`（旧 `Context`）の型安全なAPIに移行
-
-### 8.6 非推奨通知のプロセス
-
-```
-v1.x.0  InvoiceCalculationHook に @deprecated 注釈を追加
-        コンパイル時に deprecation warning を出力
-        ↓
-v1.x+1  移行ガイドへのリンクをGoDocに記載
-        ↓
-v2.0.0  InvoiceCalculationHook を削除
-        DiscountHook / TaxHook / InvoiceLifecycleHook に分離
+type MyBillingPlugin struct{}
+func (p *MyBillingPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) { ... }
+func (p *MyBillingPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.Money, error) { ... }
+// Registry が型アサーションで両方のフックに自動登録する
 ```
