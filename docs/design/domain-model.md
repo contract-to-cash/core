@@ -105,20 +105,21 @@ package shared
 import "time"
 
 // DateRange は期間を表す値オブジェクト
+// 半開区間 [start, end) を採用。endは含まない。連続する期間の隣接判定に適している。
 type DateRange struct {
     start time.Time
     end   time.Time
 }
 
 func NewDateRange(start, end time.Time) (DateRange, error) {
-    if end.Before(start) {
-        return DateRange{}, errors.New("end must be after start")
+    if !start.Before(end) {
+        return DateRange{}, errors.New("start must be before end")
     }
     return DateRange{start: start.UTC(), end: end.UTC()}, nil
 }
 
 func (r DateRange) Contains(t time.Time) bool {
-    return !t.Before(r.start) && !t.After(r.end)
+    return !t.Before(r.start) && t.Before(r.end)
 }
 
 func (r DateRange) Duration() time.Duration {
