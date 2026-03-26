@@ -1048,6 +1048,7 @@ type Service struct {
     storage        Storage
     generationHook GenerationHook
     issuerInfo     IssuerInfo
+    clock          shared.Clock // 時刻生成（time.Now()の直接呼び出し禁止）
 }
 
 func NewService(
@@ -1057,6 +1058,7 @@ func NewService(
     storage Storage,
     generationHook GenerationHook,
     issuerInfo IssuerInfo,
+    clock shared.Clock,
 ) *Service {
     return &Service{
         invoiceRepo:    invoiceRepo,
@@ -1065,6 +1067,7 @@ func NewService(
         storage:        storage,
         generationHook: generationHook,
         issuerInfo:     issuerInfo,
+        clock:          clock,
     }
 }
 
@@ -1109,7 +1112,7 @@ func (s *Service) GenerateAndSend(
         InvoiceID:     invoiceID,
         Document:      doc,
         RenderedPDF:   rendered,
-        Timestamp:     time.Now(),
+        Timestamp:     s.clock.Now(), // Clock IF 経由（time.Now()の直接呼び出し禁止）
         HashAlgorithm: "SHA-256",
         Hash:          hex.EncodeToString(hash[:]),
     })
@@ -1525,6 +1528,7 @@ func main() {
         s3Storage,
         invoiceGenHook,
         issuerInfo,
+        clock, // shared.Clock（time.Now()の直接呼び出し禁止）
     )
 
     // プラグイン登録

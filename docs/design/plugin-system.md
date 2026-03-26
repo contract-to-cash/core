@@ -302,11 +302,27 @@ type OnPaymentProcessedHook interface {
     OnPaymentProcessed(ctx *Context, payment *payment.Payment) error
 }
 
+// ContractChangeType 契約変更種別（型安全）
+type ContractChangeType string
+
+const (
+    ContractChangeCreated    ContractChangeType = "created"
+    ContractChangeActivated  ContractChangeType = "activated"
+    ContractChangeSuspended  ContractChangeType = "suspended"
+    ContractChangeResumed    ContractChangeType = "resumed"
+    ContractChangeCancelled  ContractChangeType = "cancelled"
+    ContractChangeRenewed    ContractChangeType = "renewed"
+    ContractChangePlanChanged ContractChangeType = "plan_changed"
+)
+
 type ContractChangeEvent struct {
     ContractID  shared.ContractID
-    ChangeType  string // "created", "activated", "cancelled", etc.
-    OldValue    interface{}
-    NewValue    interface{}
+    ChangeType  ContractChangeType    // 型安全な変更種別
+    OldStatus   *ContractStatus       // ステータス変更の場合の旧値（nilは該当なし）
+    NewStatus   *ContractStatus       // ステータス変更の場合の新値
+    OldPlanID   *shared.PlanID        // プラン変更の場合の旧プランID
+    NewPlanID   *shared.PlanID        // プラン変更の場合の新プランID
+    MRRChange   *shared.Money         // MRR変動額（メトリクス用）
     Timestamp   time.Time
 }
 ```
@@ -532,14 +548,18 @@ Priority値に依存しないため、プラグイン登録順のミスで会計
 
 ```
 1. InvoiceLifecycleHook.BeforeCalculation()  ← 計算前処理
-2. 基本料金計算（コア）
+2. 料金計算（コア、契約タイプに応じて分岐）
 3. DiscountHook.CalculateDiscount()          ← 割引計算（全DiscountHook）
+   → 割引上限ガード（割引合計 > subtotalの場合にcap）
 4. 小計算出（コア: subtotal - totalDiscount）
 5. TaxHook.CalculateTax()                    ← 税計算（割引後に対して）
 6. 合計算出（コア: afterDiscount + totalTax）
-7. クレジット台帳からの充当（コア）          ← 残高があれば税込合計から差し引き
-8. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
+7. クレジット台帳からの充当（コア）          ← 残高があれば税込合計から差引
+8. 請求書をdraft状態で生成 → GracePeriod後にfinalize
+9. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
 ```
+
+> **注**: このフロー順序は `architecture.md` セクション5.2 と同一。
 
 ### 5.2 Priority の役割（同一フック内の順序制御）
 
@@ -640,7 +660,7 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
         return shared.NewMoney(big.NewRat(0, 1), subtotal.Currency()), nil
     }
 
-    var totalDiscount shared.Money
+    totalDiscount := shared.Zero(subtotal.Currency())
     for i, coupon := range coupons {
         if !p.config.AllowStacking && i > 0 {
             break
@@ -650,7 +670,11 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
         }
 
         discount := coupon.CalculateDiscount(subtotal)
-        totalDiscount, _ = totalDiscount.Add(discount)
+        var err error
+        totalDiscount, err = totalDiscount.Add(discount)
+        if err != nil {
+            return shared.Money{}, fmt.Errorf("coupon discount accumulation failed: %w", err)
+        }
 
         // 型安全な割引記録（metadata[string]interface{} ではない）
         ctx.RecordDiscount(plugin.AppliedDiscount{
@@ -936,13 +960,16 @@ func (s *BillingService) GenerateInvoice(
     calcCtx.SetSubtotal(subtotal)
 
     // 3. 割引計算（DiscountHook のみ）
-    var totalDiscount shared.Money
+    totalDiscount := shared.Zero(subtotal.Currency())
     for _, hook := range s.registry.GetDiscountHooks() {
         discount, err := hook.CalculateDiscount(calcCtx)
         if err != nil {
             return nil, fmt.Errorf("discount calculation failed: %w", err)
         }
-        totalDiscount, _ = totalDiscount.Add(discount)
+        totalDiscount, err = totalDiscount.Add(discount)
+        if err != nil {
+            return nil, fmt.Errorf("discount accumulation failed: %w", err)
+        }
     }
 
     // 割引上限ガード: 割引合計がsubtotalを超えないようにする
@@ -952,44 +979,65 @@ func (s *BillingService) GenerateInvoice(
     }
 
     // 4. 小計算出（割引後）
-    afterDiscount, _ := subtotal.Subtract(totalDiscount)
+    afterDiscount, err := subtotal.Subtract(totalDiscount)
+    if err != nil {
+        return nil, fmt.Errorf("discount subtraction failed: %w", err)
+    }
     calcCtx.SetSubtotalAfterDiscount(afterDiscount)
 
     // 5. 税計算（TaxHook のみ、割引後の金額に対して）
-    var totalTax shared.Money
+    totalTax := shared.Zero(subtotal.Currency())
     for _, hook := range s.registry.GetTaxHooks() {
         tax, err := hook.CalculateTax(calcCtx)
         if err != nil {
             return nil, fmt.Errorf("tax calculation failed: %w", err)
         }
-        totalTax, _ = totalTax.Add(tax)
+        totalTax, err = totalTax.Add(tax)
+        if err != nil {
+            return nil, fmt.Errorf("tax accumulation failed: %w", err)
+        }
     }
 
     // 合計算出（税込）
-    total, _ := afterDiscount.Add(totalTax)
+    total, err := afterDiscount.Add(totalTax)
+    if err != nil {
+        return nil, fmt.Errorf("total calculation failed: %w", err)
+    }
 
     // 6. クレジット台帳からの充当（domain-model.md セクション9.5参照）
     appliedCredit := shared.Zero(total.Currency())
     if s.creditRepo != nil {
-        credits, _ := s.creditRepo.FindAvailable(ctx, c.AccountID(), total.Currency())
+        credits, err := s.creditRepo.FindAvailable(ctx, c.AccountID(), total.Currency())
+        if err != nil {
+            return nil, fmt.Errorf("credit lookup failed: %w", err)
+        }
         for _, entry := range credits {
             if entry.IsExpired(s.clock.Now()) {
                 continue
             }
-            if entry.RemainingAmount().Currency() != total.Currency() {
-                continue // 通貨不一致はスキップ
+            remaining, err := total.Subtract(appliedCredit) // まだ充当が必要な額
+            if err != nil {
+                return nil, fmt.Errorf("credit remaining calculation failed: %w", err)
             }
-            remaining := total.Subtract(appliedCredit) // まだ充当が必要な額
             if remaining.IsZero() {
                 break
             }
-            apply := min(entry.RemainingAmount(), remaining)
-            appliedCredit = appliedCredit.Add(apply)
+            apply, err := entry.RemainingAmount().Min(remaining)
+            if err != nil {
+                return nil, fmt.Errorf("credit min calculation failed: %w", err)
+            }
+            appliedCredit, err = appliedCredit.Add(apply)
+            if err != nil {
+                return nil, fmt.Errorf("credit accumulation failed: %w", err)
+            }
             // CreditApplication 作成 + CreditEntry.remainingAmount 減算
-            // （単一トランザクション内でアトミックに実行）
+            // （同一DBトランザクション内でアトミックに実行 — domain-model.md 9.5参照）
         }
     }
-    amountDue := total.Subtract(appliedCredit)
+    amountDue, err := total.Subtract(appliedCredit)
+    if err != nil {
+        return nil, fmt.Errorf("amount due calculation failed: %w", err)
+    }
 
     // 7. 請求書作成（draft状態）
     inv := invoice.NewInvoice(
@@ -1062,7 +1110,7 @@ func (s *BillingService) calculateUsageCharge(
     period shared.DateRange,
 ) (shared.Money, error) {
     plan := c.Plan()
-    var totalCharge shared.Money
+    totalCharge := shared.Zero(c.Price().Currency())
 
     for _, metric := range plan.UsageMetrics() {
         // 1. 請求期間の使用量を集計
@@ -1082,12 +1130,19 @@ func (s *BillingService) calculateUsageCharge(
 
         // 3. PricingModelで料金算出
         charge := metric.PricingModel.CalculatePrice(billableUsage)
-        totalCharge, _ = totalCharge.Add(charge)
+        totalCharge, err = totalCharge.Add(charge)
+        if err != nil {
+            return shared.Money{}, fmt.Errorf("charge accumulation failed for %s: %w", metric.Name, err)
+        }
     }
 
     // 基本料金（ハイブリッド課金の固定部分）がある場合は加算
     if basePrice := c.BasePrice(); !basePrice.IsZero() {
-        totalCharge, _ = totalCharge.Add(basePrice)
+        var err error
+        totalCharge, err = totalCharge.Add(basePrice)
+        if err != nil {
+            return shared.Money{}, fmt.Errorf("base price addition failed: %w", err)
+        }
     }
 
     return totalCharge, nil

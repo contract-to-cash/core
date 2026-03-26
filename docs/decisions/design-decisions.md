@@ -56,8 +56,11 @@ type ProjectionOptions struct {
 - 表示時に変換すれば十分
 
 ```go
-// イベント発生時刻は常にUTC
-event.OccurredAt = time.Now().UTC()
+// ❌ 禁止: time.Now() の直接呼び出し（テスト不可）
+// event.OccurredAt = time.Now().UTC()
+
+// ✅ 推奨: Clock IF 経由でUTC時刻を取得（テスト容易）
+event.OccurredAt = clock.Now() // shared.Clock は常にUTCを返す
 ```
 
 ## 2. 契約ドメイン
@@ -190,6 +193,7 @@ type BatchOptions struct {
 | `PaymentRetry` | 失敗決済リトライ |
 | `TrialExpiration` | トライアル終了処理 |
 | `UsageAggregator` | 従量課金集計 |
+| `CreditExpiration` | 有効期限切れクレジットの失効処理 |
 
 **理由：**
 - スケジューラは環境依存（cron, Kubernetes CronJob, Cloud Scheduler等）
@@ -247,13 +251,18 @@ type EventMetadata struct {
 |------|------------------------------|
 
 ```
-1. 基本料金計算
-2. 数量調整（従量課金）
-3. 割引適用（クーポン等）
-4. 小計算出
-5. 税計算（割引後に対して）
-6. 合計算出
+1. 計算前処理（InvoiceLifecycleHook.BeforeCalculation）
+2. 料金計算（契約タイプに応じて分岐）
+3. 割引適用（DiscountHook、割引上限ガード付き）
+4. 小計算出（subtotal - totalDiscount）
+5. 税計算（TaxHook、割引後に対して）
+6. 合計算出（afterDiscount + totalTax）
+7. クレジット台帳からの充当（残高があれば差引）
+8. 請求書をdraft状態で生成
+9. 計算後処理（InvoiceLifecycleHook.AfterCalculation）
 ```
+
+> このフロー順序は `architecture.md` セクション5.2 および `plugin-system.md` セクション5.1 と同一。
 
 **理由：**
 - 会計上正しい計算順序を保証

@@ -263,29 +263,19 @@ func (uc *SubscribeUseCase) Execute(ctx context.Context, input SubscribeInput) (
         return nil, err
     }
 
-    // 2. プランから契約アイテム構築
-    items := []contract.ContractItem{
-        contract.NewContractItem(
-            shared.ProductID(input.PlanID),
-            1,
-            shared.NewMoney(980, shared.JPY),  // プランから取得した価格
-            contract.FlatPricing{Price: shared.NewMoney(980, shared.JPY)},
-        ),
-    }
-
-    // 3. 契約作成（OSSのドメインモデルを使用）
-    billingCycle := &contract.BillingCycle{
-        Interval:      contract.BillingIntervalMonth,
-        IntervalCount: 1,
-        AnchorDate:    input.StartDate,
-    }
+    // 2. 契約作成（OSSのドメインモデルを使用）
+    // NOTE: NewContract は OSS が提供するファサード関数。
+    //       引数の詳細は実装フェーズで確定する。
+    //       ここではサービスAでの利用パターンを概念的に示す。
+    price := shared.NewMoney(new(big.Rat).SetInt64(980), shared.CurrencyJPY)
 
     c, err := contract.NewContract(
-        shared.AccountID(u.ID),  // サービスAのUserIDをAccountIDにマッピング
+        shared.AccountID(u.ID),              // サービスAのUserIDをAccountIDにマッピング
         contract.ContractTypeSubscription,
-        items,
+        shared.PlanID(input.PlanID),
+        price,
+        contract.BillingCycleMonthly,
         input.StartDate,
-        billingCycle,
     )
     if err != nil {
         return nil, err

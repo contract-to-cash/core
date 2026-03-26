@@ -201,8 +201,9 @@ const (
 4. 小計算出（コア: subtotal - totalDiscount）
 5. TaxHook.CalculateTax()                    ← 税計算（割引後に対して）
 6. 合計算出（コア: afterDiscount + totalTax）
-7. 請求書をdraft状態で生成 → GracePeriod後にfinalize
-8. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
+7. クレジット台帳からの充当（コア）          ← 残高があれば税込合計から差引
+8. 請求書をdraft状態で生成 → GracePeriod後にfinalize
+9. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
 ```
 
 ## 6. 関連ドキュメント

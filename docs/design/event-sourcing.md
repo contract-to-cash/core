@@ -56,9 +56,12 @@ type Store interface {
     LoadUntilVersion(ctx context.Context, streamID string, version int) ([]Event, error)
     
     // 特定時点までのイベント取得
+    // 時点再構築用: OccurredAt（ビジネス時刻）ベースでフィルタする。
+    // RecordedAt（システム記録時刻）ではないことに注意。
     LoadUntil(ctx context.Context, streamID string, until time.Time) ([]Event, error)
-    
+
     // 期間指定でのイベント取得
+    // OccurredAt ベースで from <= OccurredAt <= to のイベントを返す。
     LoadRange(ctx context.Context, streamID string, from, to time.Time) ([]Event, error)
     
     // 全ストリームのイベント購読（Projection用）
@@ -150,12 +153,15 @@ type AggregateRoot interface {
     UncommittedEvents() []Event
     ClearUncommittedEvents()
     LoadFromHistory(events []Event) error
+    LoadFromSnapshot(snapshot Snapshot) error // スナップショットから状態を復元
 }
 
 // Evolver 状態進化インターフェース（純粋関数）
+// Apply は型付き DomainEvent を受け取り、集約の状態を更新する。
+// デシリアライズ（json.RawMessage → DomainEvent）は呼び出し元
+// （LoadFromHistory やリポジトリ層）の責務であり、Apply 内では行わない。
 type Evolver interface {
-    // Apply はイベントを適用して新しい状態を返す（純粋関数）
-    Apply(event Event) error
+    Apply(event DomainEvent) error
 }
 ```
 
@@ -165,11 +171,30 @@ type Evolver interface {
 // eventstore/aggregate_base.go
 package eventstore
 
+import (
+    "encoding/json"
+    "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
 // BaseAggregate 集約ルートの基本実装
+// フィールドは unexported（カプセル化）。外部パッケージからは
+// NewBaseAggregate() コンストラクタ経由で生成する。
 type BaseAggregate struct {
     id                string
     version           int
     uncommittedEvents []Event
+    clock             shared.Clock
+}
+
+// NewBaseAggregate 外部パッケージから BaseAggregate を生成するコンストラクタ
+// id: 集約ID, clock: 時刻生成（テスト時に FixedClock を注入可能）
+func NewBaseAggregate(id string, clock shared.Clock) BaseAggregate {
+    return BaseAggregate{
+        id:    id,
+        clock: clock,
+    }
 }
 
 func (a *BaseAggregate) ID() string {
@@ -189,8 +214,7 @@ func (a *BaseAggregate) ClearUncommittedEvents() {
 }
 
 // RaiseEvent 型付きドメインイベントを発行
-// 旧シグネチャ: RaiseEvent(eventType string, data interface{}, metadata EventMetadata)
-// 新シグネチャ: DomainEvent から EventType() を取得するため、文字列指定が不要
+// DomainEvent から EventType() を取得するため、文字列指定が不要
 func (a *BaseAggregate) RaiseEvent(domainEvent DomainEvent, metadata EventMetadata) error {
     jsonData, err := json.Marshal(domainEvent)
     if err != nil {
@@ -209,15 +233,26 @@ func (a *BaseAggregate) RaiseEvent(domainEvent DomainEvent, metadata EventMetada
         // ビジネス上の時刻（CreatedAt, ActivatedAt 等）は集約が Clock IF 経由で設定し、
         // Data フィールド（DomainEvent）内に含める。
         // RecordedAt は Event Store 側で設定されるため、ここでは OccurredAt のみ設定。
-        OccurredAt:    time.Now().UTC(),
+        // Clock IF 経由で取得（time.Now() の直接呼び出しは禁止）。
+        OccurredAt:    a.Clock().Now(),
     }
 
     a.uncommittedEvents = append(a.uncommittedEvents, event)
     return nil
 }
 
+// Clock Clock IF を返す（埋め込み先の集約がビジネス時刻取得に使用）
+func (a *BaseAggregate) Clock() shared.Clock {
+    return a.clock
+}
+
 func (a *BaseAggregate) IncrementVersion() {
     a.version++
+}
+
+// SetVersion スナップショット復元時にバージョンを直接設定する
+func (a *BaseAggregate) SetVersion(v int) {
+    a.version = v
 }
 ```
 
@@ -281,12 +316,13 @@ import (
 // ContractAggregate 契約集約
 type ContractAggregate struct {
     eventstore.BaseAggregate
-    clock shared.Clock // 時刻生成（テスト時に差し替え可能）
+    // clock は BaseAggregate に統合済み（RaiseEvent で使用）。
+    // 集約固有のビジネス時刻取得にも BaseAggregate 経由の Clock() を使用する。
 
     // 状態
-    accountID     string
+    accountID     shared.AccountID
     status        ContractStatus
-    planID        string
+    planID        shared.PlanID
     price         Money
     billingCycle  BillingCycle
     currentPeriod DateRange
@@ -295,10 +331,11 @@ type ContractAggregate struct {
 }
 
 // NewContractAggregate 新しい契約集約を作成
+// clock は BaseAggregate に渡され、RaiseEvent の OccurredAt 設定と
+// 集約内のビジネス時刻取得の両方に使用される
 func NewContractAggregate(id string, clock shared.Clock) *ContractAggregate {
     return &ContractAggregate{
-        BaseAggregate: eventstore.BaseAggregate{id: id},
-        clock:         clock,
+        BaseAggregate: eventstore.NewBaseAggregate(id, clock),
     }
 }
 
@@ -308,7 +345,7 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
         return shared.NewDomainError(shared.ErrCodeConflict, "contract already exists")
     }
 
-    now := a.clock.Now()
+    now := a.Clock().Now()
     event := &ContractCreatedEvent{
         ContractID:   a.ID(),
         AccountID:    cmd.AccountID,
@@ -329,7 +366,7 @@ func (a *ContractAggregate) Activate(metadata eventstore.EventMetadata) error {
 
     event := &ContractActivatedEvent{
         ContractID:  a.ID(),
-        ActivatedAt: a.clock.Now(),
+        ActivatedAt: a.Clock().Now(),
     }
 
     return a.RaiseEvent(event, metadata)
@@ -343,7 +380,7 @@ func (a *ContractAggregate) Suspend(config SuspensionConfiguration, metadata eve
 
     event := &ContractSuspendedEvent{
         ContractID:      a.ID(),
-        SuspendedAt:     a.clock.Now(),
+        SuspendedAt:     a.Clock().Now(),
         BillingBehavior: config.BillingBehavior,
         ResumeDate:      config.ResumeDate,
         Reason:          config.Reason,
@@ -353,10 +390,15 @@ func (a *ContractAggregate) Suspend(config SuspensionConfiguration, metadata eve
 }
 
 // LoadFromHistory イベント履歴から状態を復元
-// EventRegistry を使って型付きイベントにデシリアライズしてから Apply に渡す
+// デシリアライズ（Event.Data → DomainEvent）は LoadFromHistory の責務。
+// Apply には型付き DomainEvent のみを渡す（Apply は純粋関数）。
 func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error {
     for _, event := range events {
-        if err := a.Apply(event); err != nil {
+        domainEvent, err := contractEventRegistry.Deserialize(event.Type, event.Data)
+        if err != nil {
+            return err
+        }
+        if err := a.Apply(domainEvent); err != nil {
             return err
         }
         a.IncrementVersion()
@@ -364,17 +406,24 @@ func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error {
     return nil
 }
 
-// Apply 型付きイベントを適用して状態を更新
-// 文字列switchではなく型スイッチを使用し、コンパイル時の安全性を確保する
-func (a *ContractAggregate) Apply(event eventstore.Event) error {
-    // EventRegistry 経由でデシリアライズ済みの DomainEvent を受け取る想定
-    // ここでは Event.Data からの復元も併せて示す
-    domainEvent, err := contractEventRegistry.Deserialize(event.Type, event.Data)
-    if err != nil {
+// LoadFromSnapshot スナップショットから集約状態を復元
+func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error {
+    // スナップショットの JSON データから状態を復元
+    if err := json.Unmarshal(snapshot.State, a); err != nil {
         return err
     }
+    // BaseAggregate のバージョンをスナップショット時点に直接設定
+    a.SetVersion(snapshot.Version)
+    return nil
+}
 
-    switch e := domainEvent.(type) {
+// Apply 型付き DomainEvent を適用して状態を更新（純粋関数）
+// デシリアライズ済みの DomainEvent を受け取る。
+// 型スイッチにより、新しいイベント型の追加忘れは exhaustive lint ツール
+// (github.com/nishanths/exhaustive) で検出可能。
+// default clause は未知のイベント型に対する防御として保持する。
+func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
+    switch e := event.(type) {
     case *ContractCreatedEvent:
         a.accountID = e.AccountID
         a.planID = e.PlanID
@@ -392,12 +441,10 @@ func (a *ContractAggregate) Apply(event eventstore.Event) error {
         a.status = ContractStatusSuspended
         a.updatedAt = e.SuspendedAt
 
-    // 型スイッチにより、新しいイベント型の追加忘れは
-    // exhaustive lint ツールで検出可能
     default:
         return shared.NewDomainError(
             shared.ErrCodeUnknownEvent,
-            fmt.Sprintf("unknown event type: %T", domainEvent),
+            fmt.Sprintf("unknown event type: %T", event),
         )
     }
 
@@ -405,6 +452,10 @@ func (a *ContractAggregate) Apply(event eventstore.Event) error {
 }
 
 // contractEventRegistry 契約集約のイベントレジストリ
+// 重要: 新しいイベント型を追加する場合、以下の2箇所を必ず更新すること:
+//   1. このレジストリに Register() で型を登録
+//   2. ContractAggregate.Apply() の switch case に対応を追加
+// exhaustive lint ツールで Apply 側の漏れは検出可能だが、Register 漏れは検出できない。
 var contractEventRegistry = func() *eventstore.EventRegistry {
     r := eventstore.NewEventRegistry()
     r.Register(ContractCreatedEvent{})
@@ -454,19 +505,19 @@ const (
 
 // ContractCreatedEvent 契約作成イベント
 type ContractCreatedEvent struct {
-    ContractID   string       `json:"contract_id"`
-    AccountID    string       `json:"account_id"`
-    PlanID       string       `json:"plan_id"`
-    Price        Money        `json:"price"`
-    BillingCycle BillingCycle `json:"billing_cycle"`
-    CreatedAt    time.Time    `json:"created_at"`
+    ContractID   shared.ContractID `json:"contract_id"`
+    AccountID    shared.AccountID  `json:"account_id"`
+    PlanID       shared.PlanID     `json:"plan_id"`
+    Price        Money             `json:"price"`
+    BillingCycle BillingCycle      `json:"billing_cycle"`
+    CreatedAt    time.Time         `json:"created_at"`
 }
 
 func (e ContractCreatedEvent) EventType() eventstore.EventType { return EventTypeContractCreated }
 
 // ContractActivatedEvent 契約有効化イベント
 type ContractActivatedEvent struct {
-    ContractID  string    `json:"contract_id"`
+    ContractID  shared.ContractID `json:"contract_id"`
     ActivatedAt time.Time `json:"activated_at"`
 }
 
@@ -474,7 +525,7 @@ func (e ContractActivatedEvent) EventType() eventstore.EventType { return EventT
 
 // ContractSuspendedEvent 契約一時停止イベント
 type ContractSuspendedEvent struct {
-    ContractID      string                    `json:"contract_id"`
+    ContractID      shared.ContractID         `json:"contract_id"`
     SuspendedAt     time.Time                 `json:"suspended_at"`
     BillingBehavior SuspensionBillingBehavior `json:"billing_behavior"`
     ResumeDate      *time.Time                `json:"resume_date,omitempty"`
@@ -485,37 +536,37 @@ func (e ContractSuspendedEvent) EventType() eventstore.EventType { return EventT
 
 // ContractResumedEvent 契約再開イベント
 type ContractResumedEvent struct {
-    ContractID string    `json:"contract_id"`
-    ResumedAt  time.Time `json:"resumed_at"`
+    ContractID shared.ContractID `json:"contract_id"`
+    ResumedAt  time.Time         `json:"resumed_at"`
 }
 
 func (e ContractResumedEvent) EventType() eventstore.EventType { return EventTypeContractResumed }
 
 // ContractCancelledEvent 契約解約イベント
 type ContractCancelledEvent struct {
-    ContractID  string    `json:"contract_id"`
-    CancelledAt time.Time `json:"cancelled_at"`
-    Reason      string    `json:"reason"`
+    ContractID  shared.ContractID `json:"contract_id"`
+    CancelledAt time.Time         `json:"cancelled_at"`
+    Reason      string            `json:"reason"`
 }
 
 func (e ContractCancelledEvent) EventType() eventstore.EventType { return EventTypeContractCancelled }
 
 // PriceChangedEvent 価格変更イベント
 type PriceChangedEvent struct {
-    ContractID  string    `json:"contract_id"`
-    OldPrice    Money     `json:"old_price"`
-    NewPrice    Money     `json:"new_price"`
-    ChangedAt   time.Time `json:"changed_at"`
-    EffectiveAt time.Time `json:"effective_at"`
+    ContractID  shared.ContractID `json:"contract_id"`
+    OldPrice    Money             `json:"old_price"`
+    NewPrice    Money             `json:"new_price"`
+    ChangedAt   time.Time         `json:"changed_at"`
+    EffectiveAt time.Time         `json:"effective_at"`
 }
 
 func (e PriceChangedEvent) EventType() eventstore.EventType { return EventTypePriceChanged }
 
 // PlanChangedEvent プラン変更イベント
 type PlanChangedEvent struct {
-    ContractID   string            `json:"contract_id"`
-    OldPlanID    string            `json:"old_plan_id"`
-    NewPlanID    string            `json:"new_plan_id"`
+    ContractID   shared.ContractID `json:"contract_id"`
+    OldPlanID    shared.PlanID     `json:"old_plan_id"`
+    NewPlanID    shared.PlanID     `json:"new_plan_id"`
     Proration    *ProrationResult  `json:"proration,omitempty"`
     ChangedAt    time.Time         `json:"changed_at"`
 }
@@ -524,7 +575,7 @@ func (e PlanChangedEvent) EventType() eventstore.EventType { return EventTypePla
 
 // TrialStartedEvent トライアル開始イベント
 type TrialStartedEvent struct {
-    ContractID   string             `json:"contract_id"`
+    ContractID   shared.ContractID  `json:"contract_id"`
     TrialConfig  TrialConfiguration `json:"trial_config"`
     StartedAt    time.Time          `json:"started_at"`
 }
@@ -533,7 +584,7 @@ func (e TrialStartedEvent) EventType() eventstore.EventType { return EventTypeTr
 
 // TrialEndedEvent トライアル終了イベント
 type TrialEndedEvent struct {
-    ContractID string    `json:"contract_id"`
+    ContractID shared.ContractID `json:"contract_id"`
     EndedAt    time.Time `json:"ended_at"`
     Converted  bool      `json:"converted"` // 本契約に移行したか
 }

@@ -67,6 +67,17 @@ func (m Money) GreaterThan(other Money) bool {
     return m.amount.Cmp(other.amount) > 0
 }
 
+// Min 2つの金額のうち小さい方を返す（同一通貨のみ）
+func (m Money) Min(other Money) (Money, error) {
+    if m.currency != other.currency {
+        return Money{}, errors.New("currency mismatch")
+    }
+    if m.Amount().Cmp(other.Amount()) <= 0 {
+        return m, nil
+    }
+    return other, nil
+}
+
 func (m Money) Amount() *big.Rat {
     if m.amount == nil {
         return new(big.Rat)
@@ -230,7 +241,7 @@ const (
 type Contract struct {
     id              shared.ContractID
     accountID       shared.AccountID
-    planID          string
+    planID          shared.PlanID
     status          ContractStatus
     contractType    ContractType
     billingCycle    BillingCycle
@@ -352,16 +363,16 @@ import (
 type Repository interface {
     // 基本CRUD
     Save(ctx context.Context, contract *Contract) error
-    FindByID(ctx context.Context, id ContractID) (*Contract, error)
+    FindByID(ctx context.Context, id shared.ContractID) (*Contract, error)
     FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*Contract, error)
     
     // クエリ
-    FindActiveByPlanID(ctx context.Context, planID string) ([]*Contract, error)
+    FindActiveByPlanID(ctx context.Context, planID shared.PlanID) ([]*Contract, error)
     FindExpiring(ctx context.Context, before time.Time) ([]*Contract, error)
     FindTrialsEndingSoon(ctx context.Context, within time.Duration) ([]*Contract, error)
     
     // 時点指定（イベントソーシング）
-    FindByIDAsOf(ctx context.Context, id ContractID, asOf time.Time) (*Contract, error)
+    FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*Contract, error)
 }
 ```
 
@@ -421,12 +432,14 @@ type Invoice struct {
 type LineItem struct {
     id          string
     description string
-    quantity    int
+    quantity    int64            // UsageRecord.quantity と型統一
     unitPrice   shared.Money
     amount      shared.Money
     taxRate     *big.Rat
     metadata    map[string]string
 }
+// NOTE: metrics-invoicegen の InvoiceLineItem.Quantity は float64（小数量=0.5時間等の表現用）。
+// ドメインモデル → 請求書ドキュメントの変換時に int64→float64 キャストを行う。
 ```
 
 ### 4.2 リポジトリインターフェース
@@ -442,14 +455,14 @@ import (
 
 type Repository interface {
     Save(ctx context.Context, invoice *Invoice) error
-    FindByID(ctx context.Context, id InvoiceID) (*Invoice, error)
+    FindByID(ctx context.Context, id shared.InvoiceID) (*Invoice, error)
     FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*Invoice, error)
     FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*Invoice, error)
     FindOverdue(ctx context.Context) ([]*Invoice, error)
     FindByStatus(ctx context.Context, status InvoiceStatus) ([]*Invoice, error)
-    
+
     // 時点指定
-    FindByIDAsOf(ctx context.Context, id InvoiceID, asOf time.Time) (*Invoice, error)
+    FindByIDAsOf(ctx context.Context, id shared.InvoiceID, asOf time.Time) (*Invoice, error)
 }
 ```
 
@@ -484,7 +497,7 @@ const (
 //   pending    → completed | failed
 //   completed  → partially_refunded | refunded | charged_back
 //   partially_refunded → refunded（残額返金時）
-//   failed     → pending（リトライ時）
+//   failed     → pending（リトライ時。DunningConfig.MaxRetries に達した場合は failed のまま終端）
 //   charged_back, refunded → 終端状態（遷移なし）
 
 type PaymentMethod string
@@ -739,13 +752,17 @@ type ProrationResult struct {
 }
 
 // NewProrationResult CreditとChargeからAdjustmentAmountを自動算出
-func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) *ProrationResult {
-    return &ProrationResult{
-        CreditAmount:  credit,
-        ChargeAmount:  charge,
-        AdjustmentAmount: charge.Sub(credit), // 差額のみ精算
-        EffectiveDate: effectiveDate,
+func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*ProrationResult, error) {
+    adjustment, err := charge.Subtract(credit) // 差額のみ精算
+    if err != nil {
+        return nil, err // 通貨不一致の場合
     }
+    return &ProrationResult{
+        CreditAmount:     credit,
+        ChargeAmount:     charge,
+        AdjustmentAmount: adjustment,
+        EffectiveDate:    effectiveDate,
+    }, nil
 }
 // 決済時の動作:
 //   アップグレード（Adjustment > 0）→ AdjustmentAmount のみ1回請求
@@ -909,7 +926,10 @@ type Repository interface {
     // 指定通貨のみ、有効期限内、古い順（FIFO消費）
     FindAvailable(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*CreditEntry, error)
 
-    // アカウントのクレジット残高合計
+    // GetBalance アカウントのクレジット残高合計
+    // 有効期限内（expiresAt が nil または now より後）かつ
+    // remainingAmount > 0 のエントリのみを集計する。
+    // 有効期限切れエントリは残高に含めない。
     GetBalance(ctx context.Context, accountID shared.AccountID, currency shared.Currency) (shared.Money, error)
 
     // 適用記録
@@ -930,12 +950,11 @@ type Repository interface {
   ③ TaxHook（税計算）
   ④ 合計算出
   ⑤ ★ クレジット適用 ← 新規ステップ
-  │   - FindAvailable(accountID) で有効クレジットをFIFO取得
+  │   - FindAvailable(accountID, invoice.Currency()) で
+  │     同一通貨かつ有効期限内のクレジットをFIFO取得
   │   - 古いクレジットから順に消費（有効期限切れはスキップ）
   │   - Invoice.appliedCredit に適用額を記録
   │   - CreditApplication レコード作成
-  │   - CreditEntry.remainingAmount 減算と CreditApplication 作成は
-  │     単一トランザクション内でアトミックに実行する
   │   - 適用額は min(entry.remainingAmount, 残り充当必要額) で算出
   │     （remainingAmount がマイナスになることを防止）
   │   - CreditEntry.remainingAmount を減算
@@ -943,6 +962,40 @@ type Repository interface {
   │   - 実請求額 > 0: 決済実行
   │   - 実請求額 = 0: 決済不要（全額クレジットで充当）
 ```
+
+#### トランザクション戦略
+
+クレジット適用は **CreditEntry（Credit集約）** と **Invoice（Invoice集約）** を
+跨ぐ操作であり、イベントソーシングの「1トランザクション = 1集約」原則と緊張関係にある。
+
+本プロジェクトでは **簡易CQRS（同一DB）** を採用しているため、以下の方式を適用する:
+
+**方式: アプリケーションサービス層での同一DBトランザクション**
+
+```go
+// application/service/billing_service.go
+func (s *BillingService) applyCredits(ctx context.Context, tx *sql.Tx, invoice *invoice.Invoice) error {
+    // 同一DBトランザクション内で以下を実行:
+    // 1. CreditEntry.remainingAmount を減算（SELECT FOR UPDATE でロック）
+    // 2. CreditApplication レコードを作成
+    // 3. Invoice.appliedCredit / amountDue を更新
+    //
+    // 同一DBを使用するため、通常のDBトランザクション(BEGIN/COMMIT)で
+    // アトミック性を保証できる。イベントソーシングのイベント追加も
+    // 同一トランザクション内で行われる。
+    ...
+}
+```
+
+**将来のフルCQRS移行時の移行パス:**
+
+フルCQRS（別DB）に移行する場合は、以下の Saga / Process Manager パターンに置き換える:
+1. `InvoiceFinalizedEvent` を発行
+2. `CreditApplicationSaga` がイベントを受信し、クレジット適用コマンドを発行
+3. 成功時: `CreditAppliedEvent` → Invoice の amountDue を更新
+4. 失敗時: 補償トランザクション（クレジット適用取消）を実行
+
+現時点では簡易CQRS前提のため、DBトランザクション方式で十分である。
 
 ### 9.6 ダウングレード時のフロー（CreditPolicy別）
 
