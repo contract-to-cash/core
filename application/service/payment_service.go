@@ -71,14 +71,16 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 
 	// Validate payment amount against invoice BEFORE charging the gateway.
 	// ValidatePayment is side-effect-free, so the invoice state is not modified.
-	if err := inv.ValidatePayment(amount); err != nil {
+	err = inv.ValidatePayment(amount)
+	if err != nil {
 		return nil, fmt.Errorf("payment validation failed: %w", err)
 	}
 
 	// Execute BeforeCharge hooks
 	pluginCtx := plugin.NewContext(ctx)
 	for _, hook := range s.registry.GetBeforeChargeHooks() {
-		if err := hook.BeforeCharge(pluginCtx, amount); err != nil {
+		err = hook.BeforeCharge(pluginCtx, amount)
+		if err != nil {
 			return nil, fmt.Errorf("BeforeCharge hook error: %w", err)
 		}
 	}

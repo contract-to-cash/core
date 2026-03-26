@@ -23,11 +23,11 @@ type mockDiscountPluginA struct {
 	called   bool
 }
 
-func (p *mockDiscountPluginA) Name() string                                   { return p.name }
-func (p *mockDiscountPluginA) Version() string                                { return "1.0.0" }
+func (p *mockDiscountPluginA) Name() string                                        { return p.name }
+func (p *mockDiscountPluginA) Version() string                                     { return "1.0.0" }
 func (p *mockDiscountPluginA) Initialize(_ context.Context, _ plugin.Config) error { return nil }
-func (p *mockDiscountPluginA) Shutdown(_ context.Context) error               { return nil }
-func (p *mockDiscountPluginA) Priority() int                                  { return p.priority }
+func (p *mockDiscountPluginA) Shutdown(_ context.Context) error                    { return nil }
+func (p *mockDiscountPluginA) Priority() int                                       { return p.priority }
 
 func (p *mockDiscountPluginA) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) {
 	p.called = true
@@ -36,17 +36,17 @@ func (p *mockDiscountPluginA) CalculateDiscount(ctx *plugin.CalculationContext) 
 
 // mockMultiHookPlugin implements both DiscountHook and InvoiceLifecycleHook.
 type mockMultiHookPlugin struct {
-	discountRate        *big.Rat
-	beforeCalcCalled    bool
-	afterCalcCalled     bool
-	discountCalcCalled  bool
+	discountRate       *big.Rat
+	beforeCalcCalled   bool
+	afterCalcCalled    bool
+	discountCalcCalled bool
 }
 
-func (p *mockMultiHookPlugin) Name() string                                   { return "multi-hook" }
-func (p *mockMultiHookPlugin) Version() string                                { return "1.0.0" }
+func (p *mockMultiHookPlugin) Name() string                                        { return "multi-hook" }
+func (p *mockMultiHookPlugin) Version() string                                     { return "1.0.0" }
 func (p *mockMultiHookPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
-func (p *mockMultiHookPlugin) Shutdown(_ context.Context) error               { return nil }
-func (p *mockMultiHookPlugin) Priority() int                                  { return 50 }
+func (p *mockMultiHookPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *mockMultiHookPlugin) Priority() int                                       { return 50 }
 
 func (p *mockMultiHookPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) {
 	p.discountCalcCalled = true

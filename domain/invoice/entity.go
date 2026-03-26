@@ -46,9 +46,9 @@ func NewLineItem(id, description string, quantity int64, unitPrice, amount share
 	}
 }
 
-func (li LineItem) ID() string          { return li.id }
-func (li LineItem) Description() string { return li.description }
-func (li LineItem) Quantity() int64     { return li.quantity }
+func (li LineItem) ID() string              { return li.id }
+func (li LineItem) Description() string     { return li.description }
+func (li LineItem) Quantity() int64         { return li.quantity }
 func (li LineItem) UnitPrice() shared.Money { return li.unitPrice }
 func (li LineItem) Amount() shared.Money    { return li.amount }
 func (li LineItem) TaxRate() *big.Rat       { return li.taxRate }
@@ -253,9 +253,9 @@ func (inv *Invoice) RecordPayment(amount shared.Money, paidAt time.Time) error {
 // --- Getters ---
 
 func (inv *Invoice) ID() shared.InvoiceID          { return inv.id }
-func (inv *Invoice) InvoiceNumber() string          { return inv.invoiceNumber }
-func (inv *Invoice) AccountID() shared.AccountID    { return inv.accountID }
-func (inv *Invoice) ContractID() shared.ContractID  { return inv.contractID }
+func (inv *Invoice) InvoiceNumber() string         { return inv.invoiceNumber }
+func (inv *Invoice) AccountID() shared.AccountID   { return inv.accountID }
+func (inv *Invoice) ContractID() shared.ContractID { return inv.contractID }
 func (inv *Invoice) LineItems() []LineItem {
 	cp := make([]LineItem, len(inv.lineItems))
 	copy(cp, inv.lineItems)
@@ -288,4 +288,4 @@ func WithIssueDate(t time.Time) InvoiceOption {
 		inv.issueDate = t
 	}
 }
-func (inv *Invoice) AllowPartialPay() bool           { return inv.allowPartialPay }
+func (inv *Invoice) AllowPartialPay() bool { return inv.allowPartialPay }

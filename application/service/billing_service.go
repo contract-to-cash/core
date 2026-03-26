@@ -82,7 +82,7 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 
 	// Step 2: BeforeCalculation (InvoiceLifecycleHooks)
 	for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
-		if err := hook.BeforeCalculation(calcCtx); err != nil {
+		if err = hook.BeforeCalculation(calcCtx); err != nil {
 			return nil, fmt.Errorf("BeforeCalculation hook error: %w", err)
 		}
 	}
@@ -97,7 +97,8 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	// Step 4: Execute all DiscountHooks
 	totalDiscount := shared.Zero(currency)
 	for _, hook := range s.registry.GetDiscountHooks() {
-		discount, err := hook.CalculateDiscount(calcCtx)
+		var discount shared.Money
+		discount, err = hook.CalculateDiscount(calcCtx)
 		if err != nil {
 			return nil, fmt.Errorf("DiscountHook error: %w", err)
 		}
@@ -122,7 +123,8 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	// Step 7: Execute all TaxHooks
 	totalTax := shared.Zero(currency)
 	for _, hook := range s.registry.GetTaxHooks() {
-		tax, err := hook.CalculateTax(calcCtx)
+		var tax shared.Money
+		tax, err = hook.CalculateTax(calcCtx)
 		if err != nil {
 			return nil, fmt.Errorf("TaxHook error: %w", err)
 		}
@@ -223,7 +225,8 @@ func (s *BillingService) calculateUsageCharge(ctx context.Context, agg *contract
 	totalCharge := shared.Zero(currency)
 
 	for _, metric := range plan.UsageMetrics() {
-		summary, err := s.usageRepo.GetSummary(ctx, agg.ContractID(), metric.Name, billingPeriod)
+		var summary *usage.UsageSummary
+		summary, err = s.usageRepo.GetSummary(ctx, agg.ContractID(), metric.Name, billingPeriod)
 		if err != nil {
 			return shared.Money{}, fmt.Errorf("failed to get usage summary for metric %s: %w", metric.Name, err)
 		}

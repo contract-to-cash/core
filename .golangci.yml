@@ -3,13 +3,34 @@ run:
 
 linters:
   enable:
+    # Default-equivalent
     - errcheck
     - govet
     - staticcheck
     - unused
     - ineffassign
     - gosimple
+    # Additional
+    - gofmt
+    - goimports
+    - misspell
+    - nolintlint
+    - bodyclose
+    - exhaustive
+    - copyloopvar
 
 linters-settings:
   errcheck:
     check-type-assertions: true
+  exhaustive:
+    default-signifies-exhaustive: true
+  nolintlint:
+    require-explanation: true
+    require-specific: true
+  govet:
+    enable:
+      - shadow
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 5

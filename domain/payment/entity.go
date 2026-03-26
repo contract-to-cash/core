@@ -66,14 +66,15 @@ func NewPayment(
 
 // --- Getters ---
 
-func (p *Payment) ID() shared.PaymentID      { return p.id }
-func (p *Payment) InvoiceID() shared.InvoiceID { return p.invoiceID }
-func (p *Payment) Amount() shared.Money        { return p.amount }
-func (p *Payment) Method() PaymentMethod       { return p.method }
-func (p *Payment) Status() PaymentStatus       { return p.status }
+func (p *Payment) ID() shared.PaymentID         { return p.id }
+func (p *Payment) InvoiceID() shared.InvoiceID  { return p.invoiceID }
+func (p *Payment) Amount() shared.Money         { return p.amount }
+func (p *Payment) Method() PaymentMethod        { return p.method }
+func (p *Payment) Status() PaymentStatus        { return p.status }
 func (p *Payment) GatewayTransactionID() string { return p.gatewayTransactionID }
 func (p *Payment) FailureReason() *string       { return p.failureReason }
 func (p *Payment) ProcessedAt() time.Time       { return p.processedAt }
+
 // Complete marks the payment as completed. Only valid from pending.
 func (p *Payment) Complete() error {
 	if p.status != PaymentStatusPending {

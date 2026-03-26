@@ -83,11 +83,11 @@ func (e *PriceChangedEvent) EventType() eventstore.EventType { return EventTypeP
 
 // PlanChangedEvent is raised when a contract's plan changes.
 type PlanChangedEvent struct {
-	ContractID shared.ContractID  `json:"contract_id"`
-	OldPlanID  shared.PlanID      `json:"old_plan_id"`
-	NewPlanID  shared.PlanID      `json:"new_plan_id"`
+	ContractID shared.ContractID    `json:"contract_id"`
+	OldPlanID  shared.PlanID        `json:"old_plan_id"`
+	NewPlanID  shared.PlanID        `json:"new_plan_id"`
 	Proration  *PlanChangeProration `json:"proration,omitempty"`
-	ChangedAt  time.Time          `json:"changed_at"`
+	ChangedAt  time.Time            `json:"changed_at"`
 }
 
 func (e *PlanChangedEvent) EventType() eventstore.EventType { return EventTypePlanChanged }

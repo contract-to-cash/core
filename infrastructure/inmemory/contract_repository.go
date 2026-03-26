@@ -15,10 +15,10 @@ var _ contract.Repository = (*InMemoryContractRepository)(nil)
 
 // InMemoryContractRepository is an in-memory implementation of contract.Repository.
 type InMemoryContractRepository struct {
-	mu         sync.RWMutex
-	store      *InMemoryEventStore
-	contracts  map[shared.ContractID]*contract.ContractAggregate
-	clock      shared.Clock
+	mu        sync.RWMutex
+	store     *InMemoryEventStore
+	contracts map[shared.ContractID]*contract.ContractAggregate
+	clock     shared.Clock
 }
 
 // NewInMemoryContractRepository creates a new InMemoryContractRepository.
@@ -141,4 +141,3 @@ func (r *InMemoryContractRepository) FindByIDAsOf(ctx context.Context, id shared
 	}
 	return agg, nil
 }
-

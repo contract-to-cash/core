@@ -84,11 +84,11 @@ type mockCouponPlugin struct {
 	priority int
 }
 
-func (p *mockCouponPlugin) Name() string                                   { return "mock-coupon" }
-func (p *mockCouponPlugin) Version() string                                { return "1.0.0" }
+func (p *mockCouponPlugin) Name() string                                        { return "mock-coupon" }
+func (p *mockCouponPlugin) Version() string                                     { return "1.0.0" }
 func (p *mockCouponPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
-func (p *mockCouponPlugin) Shutdown(_ context.Context) error               { return nil }
-func (p *mockCouponPlugin) Priority() int                                  { return p.priority }
+func (p *mockCouponPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *mockCouponPlugin) Priority() int                                       { return p.priority }
 
 func (p *mockCouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) {
 	return ctx.Subtotal().Multiply(p.rate), nil
@@ -100,11 +100,11 @@ type mockTaxPlugin struct {
 	priority int
 }
 
-func (p *mockTaxPlugin) Name() string                                   { return "mock-tax" }
-func (p *mockTaxPlugin) Version() string                                { return "1.0.0" }
+func (p *mockTaxPlugin) Name() string                                        { return "mock-tax" }
+func (p *mockTaxPlugin) Version() string                                     { return "1.0.0" }
 func (p *mockTaxPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
-func (p *mockTaxPlugin) Shutdown(_ context.Context) error               { return nil }
-func (p *mockTaxPlugin) Priority() int                                  { return p.priority }
+func (p *mockTaxPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *mockTaxPlugin) Priority() int                                       { return p.priority }
 
 func (p *mockTaxPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.Money, error) {
 	return ctx.SubtotalAfterDiscount().Multiply(p.rate), nil
@@ -113,11 +113,11 @@ func (p *mockTaxPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.Mon
 // mockHugeDiscountPlugin returns a discount larger than the subtotal.
 type mockHugeDiscountPlugin struct{}
 
-func (p *mockHugeDiscountPlugin) Name() string                                   { return "mock-huge-discount" }
-func (p *mockHugeDiscountPlugin) Version() string                                { return "1.0.0" }
+func (p *mockHugeDiscountPlugin) Name() string                                        { return "mock-huge-discount" }
+func (p *mockHugeDiscountPlugin) Version() string                                     { return "1.0.0" }
 func (p *mockHugeDiscountPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
-func (p *mockHugeDiscountPlugin) Shutdown(_ context.Context) error               { return nil }
-func (p *mockHugeDiscountPlugin) Priority() int                                  { return 100 }
+func (p *mockHugeDiscountPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *mockHugeDiscountPlugin) Priority() int                                       { return 100 }
 
 func (p *mockHugeDiscountPlugin) CalculateDiscount(_ *plugin.CalculationContext) (shared.Money, error) {
 	return moneyJPY(2000), nil

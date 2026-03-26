@@ -25,7 +25,7 @@ type Coupon struct {
 	id           CouponID
 	code         string
 	couponType   CouponType
-	value        *big.Rat       // percentage: discount rate (e.g. 10/100), fixed: discount amount
+	value        *big.Rat        // percentage: discount rate (e.g. 10/100), fixed: discount amount
 	currency     shared.Currency // used only for fixed type
 	minAmount    *shared.Money   // minimum purchase amount (nil = no minimum)
 	maxDiscount  *shared.Money   // maximum discount amount (nil = no cap)

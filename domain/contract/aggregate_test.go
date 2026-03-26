@@ -126,9 +126,9 @@ func TestInvalidStateTransitions(t *testing.T) {
 	meta := newTestMetadata()
 
 	tests := []struct {
-		name    string
-		setup   func() *ContractAggregate
-		action  func(agg *ContractAggregate) error
+		name   string
+		setup  func() *ContractAggregate
+		action func(agg *ContractAggregate) error
 	}{
 		{
 			name: "create on already created",

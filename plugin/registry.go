@@ -29,14 +29,14 @@ type Registry struct {
 	onContractTrialEndHooks []OnContractTrialEndHook
 
 	// Payment hooks
-	beforeChargeHooks   []BeforeChargeHook
-	afterChargeHooks    []AfterChargeHook
+	beforeChargeHooks    []BeforeChargeHook
+	afterChargeHooks     []AfterChargeHook
 	onPaymentFailedHooks []OnPaymentFailedHook
-	onRefundHooks       []OnRefundHook
+	onRefundHooks        []OnRefundHook
 
 	// Metrics hooks
-	onContractChangeHooks  []OnContractChangeHook
-	onInvoiceIssuedHooks   []OnInvoiceIssuedHook
+	onContractChangeHooks   []OnContractChangeHook
+	onInvoiceIssuedHooks    []OnInvoiceIssuedHook
 	onPaymentProcessedHooks []OnPaymentProcessedHook
 
 	// Invoice generation hooks

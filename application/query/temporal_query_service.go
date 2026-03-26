@@ -48,7 +48,7 @@ func (s *TemporalQueryService) GetContractAsOf(ctx context.Context, contractID s
 	agg := contract.NewContractAggregate(contractID, s.clock)
 
 	if snapshot != nil {
-		if err := agg.LoadFromSnapshot(*snapshot); err != nil {
+		if err = agg.LoadFromSnapshot(*snapshot); err != nil {
 			return nil, fmt.Errorf("failed to load from snapshot: %w", err)
 		}
 	}

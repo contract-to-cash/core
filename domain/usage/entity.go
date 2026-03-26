@@ -39,7 +39,7 @@ func NewUsageRecord(
 
 // --- Getters ---
 
-func (r *UsageRecord) ID() shared.UsageRecordID    { return r.id }
+func (r *UsageRecord) ID() shared.UsageRecordID      { return r.id }
 func (r *UsageRecord) ContractID() shared.ContractID { return r.contractID }
 func (r *UsageRecord) MetricName() string            { return r.metricName }
 func (r *UsageRecord) Quantity() int64               { return r.quantity }
@@ -51,7 +51,7 @@ func (r *UsageRecord) Metadata() map[string]string {
 	}
 	return cp
 }
-func (r *UsageRecord) IdempotencyKey() string        { return r.idempotencyKey }
+func (r *UsageRecord) IdempotencyKey() string { return r.idempotencyKey }
 
 // UsageSummary represents aggregated usage for a metric over a period.
 type UsageSummary struct {

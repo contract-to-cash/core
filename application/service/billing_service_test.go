@@ -286,11 +286,11 @@ type overDiscountPlugin struct {
 	discount shared.Money
 }
 
-func (p *overDiscountPlugin) Name() string                                       { return "over_discount" }
-func (p *overDiscountPlugin) Version() string                                    { return "1.0.0" }
+func (p *overDiscountPlugin) Name() string                                        { return "over_discount" }
+func (p *overDiscountPlugin) Version() string                                     { return "1.0.0" }
 func (p *overDiscountPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
-func (p *overDiscountPlugin) Shutdown(_ context.Context) error                   { return nil }
-func (p *overDiscountPlugin) Priority() int                                      { return 100 }
+func (p *overDiscountPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *overDiscountPlugin) Priority() int                                       { return 100 }
 func (p *overDiscountPlugin) CalculateDiscount(_ *plugin.CalculationContext) (shared.Money, error) {
 	return p.discount, nil
 }

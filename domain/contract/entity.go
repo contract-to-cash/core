@@ -23,9 +23,9 @@ const (
 type ContractType string
 
 const (
-	ContractTypeOneTime    ContractType = "one_time"
+	ContractTypeOneTime      ContractType = "one_time"
 	ContractTypeSubscription ContractType = "subscription"
-	ContractTypeUsageBased ContractType = "usage_based"
+	ContractTypeUsageBased   ContractType = "usage_based"
 )
 
 // BillingCycle represents how often billing occurs.
@@ -40,21 +40,21 @@ const (
 
 // Contract represents a contract entity.
 type Contract struct {
-	id                  shared.ContractID
-	accountID           shared.AccountID
-	planID              shared.PlanID
-	status              ContractStatus
-	contractType        ContractType
-	billingCycle        BillingCycle
-	currentPeriod       shared.DateRange
-	trialConfig         *TrialConfiguration
-	suspensionConfig    *SuspensionConfiguration
-	price               shared.Money
-	basePrice           shared.Money
-	metadata            map[string]string
-	createdAt           time.Time
-	updatedAt           time.Time
-	version             int
+	id               shared.ContractID
+	accountID        shared.AccountID
+	planID           shared.PlanID
+	status           ContractStatus
+	contractType     ContractType
+	billingCycle     BillingCycle
+	currentPeriod    shared.DateRange
+	trialConfig      *TrialConfiguration
+	suspensionConfig *SuspensionConfiguration
+	price            shared.Money
+	basePrice        shared.Money
+	metadata         map[string]string
+	createdAt        time.Time
+	updatedAt        time.Time
+	version          int
 }
 
 // ID returns the contract ID.
