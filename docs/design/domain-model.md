@@ -131,6 +131,7 @@ type InvoiceID string
 type PaymentID string
 type UsageRecordID string
 type PlanID string
+type CreditEntryID string
 
 // ID生成ヘルパー
 func NewAccountID() AccountID     { return AccountID(generateULID()) }
@@ -165,8 +166,11 @@ type Account struct {
 type BillingInfo struct {
     Address      Address
     TaxID        string
-    PaymentTerms int // 支払い期限（日数）
+    PaymentTerms int              // 支払い期限（日数）
+    CreditConfig *credit.CreditConfig // クレジット設定（nil = グローバルデフォルトを使用）
 }
+// NOTE: credit パッケージ（セクション9）の import が必要
+// import "domain/credit"
 
 type Address struct {
     Line1      string
@@ -400,9 +404,11 @@ type Invoice struct {
     subtotal          shared.Money
     taxAmount         shared.Money
     discountAmount    shared.Money
-    total             shared.Money
+    total             shared.Money              // 割引・税込み合計
+    appliedCredit     shared.Money              // クレジット台帳から充当された金額
+    amountDue         shared.Money              // 実請求額（total - appliedCredit）
     paidAmount        shared.Money              // 入金済み金額
-    balance           shared.Money              // 残高
+    balance           shared.Money              // 未払い残高（amountDue - paidAmount）
     status            InvoiceStatus
     billingPeriod     shared.DateRange
     issueDate         time.Time
@@ -534,6 +540,10 @@ const (
     DunningActionCancelContract  DunningActionType = "cancel_contract"
 )
 ```
+
+> **注**: Payment Gateway インターフェース（PaymentGateway, CustomerGateway, WebhookHandler）は
+> `application/port/` パッケージに配置。`domain/payment/` にはエンティティ・イベント・
+> リポジトリIFのみ残す。詳細は `payment-gateway.md` を参照。
 
 ## 6. Usage（従量課金）
 
@@ -709,6 +719,7 @@ import (
 
 // Calculator 請求計算ドメインサービス
 // contract と invoice を橋渡しする（両方のドメインを参照してよい唯一のドメインサービス）
+// Clock IF を DI で受け取り、日割り計算等の時刻判定に使用する
 type Calculator interface {
     // GenerateInvoice 契約から請求書を生成
     GenerateInvoice(ctx context.Context, contractID shared.ContractID) error
@@ -718,13 +729,234 @@ type Calculator interface {
 }
 
 type ProrationResult struct {
-    CreditAmount  shared.Money // 返金（クレジット）額
-    ChargeAmount  shared.Money // 追加請求額
+    CreditAmount  shared.Money // 旧プラン残日数分（内訳記録用）
+    ChargeAmount  shared.Money // 新プラン残日数分（内訳記録用）
+    AdjustmentAmount shared.Money // 日割り調整額（ChargeAmount - CreditAmount）
+    // AdjustmentAmount > 0: 追加請求（アップグレード）
+    // AdjustmentAmount < 0: 次回請求からクレジット差引（ダウングレード）
+    // AdjustmentAmount = 0: 精算不要
     EffectiveDate time.Time
 }
+
+// NewProrationResult CreditとChargeからAdjustmentAmountを自動算出
+func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) *ProrationResult {
+    return &ProrationResult{
+        CreditAmount:  credit,
+        ChargeAmount:  charge,
+        AdjustmentAmount: charge.Sub(credit), // 差額のみ精算
+        EffectiveDate: effectiveDate,
+    }
+}
+// 決済時の動作:
+//   アップグレード（Adjustment > 0）→ AdjustmentAmount のみ1回請求
+//   ダウングレード（Adjustment < 0）→ CreditPolicy に従って処理（後述）
+//   同額プラン変更（Adjustment = 0）→ 決済なし
 ```
 
 > **注**: 旧 `domain/contract/engine.go`（`Engine`, `SubscriptionEngine`, `UsageBasedEngine`）は
 > 削除済み。契約タイプ別の処理ロジックは `application/service/billing_service.go` の
 > `calculateSubtotal()` に移動している（`plugin-system.md` セクション8参照）。
+
+## 9. クレジット台帳（Credit Ledger）
+
+プラン変更（ダウングレード）、手動調整、返金のクレジット変換等で発生する
+預かり金（クレジット残高）を管理する。
+
+### 9.1 クレジットポリシー
+
+利用者がクレジットの扱いを設定できる。
+
+```go
+// domain/credit/policy.go
+package credit
+
+// CreditPolicy クレジット発生時のポリシー
+type CreditPolicy string
+
+const (
+    // CreditPolicyLedger クレジット台帳に積み、次回以降の請求書で自動差引
+    CreditPolicyLedger CreditPolicy = "ledger"
+
+    // CreditPolicyRefund 即座に元の決済手段に返金
+    CreditPolicyRefund CreditPolicy = "refund"
+
+    // CreditPolicyNone クレジットを発生させない（差額は切り捨て）
+    CreditPolicyNone CreditPolicy = "none"
+)
+
+// CreditConfig クレジット設定
+// Account.BillingInfo に含める。未設定の場合はグローバルデフォルトを使用。
+type CreditConfig struct {
+    // DowngradePolicy ダウングレード時のクレジットポリシー
+    // デフォルト: CreditPolicyLedger
+    DowngradePolicy CreditPolicy
+
+    // CancellationPolicy 解約時の未使用期間分のクレジットポリシー
+    // デフォルト: CreditPolicyNone
+    CancellationPolicy CreditPolicy
+
+    // AllowManualRefund クレジット残高からの手動返金を許可するか
+    // true: オペレーターがクレジット残高を返金に変換できる
+    // false: クレジットは請求書差引のみ
+    AllowManualRefund bool
+
+    // ExpirationDays クレジットの有効期限（日数）
+    // 0 = 無期限
+    ExpirationDays int
+}
+```
+
+### 9.2 クレジットエントリ
+
+```go
+// domain/credit/entity.go
+package credit
+
+import (
+    "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
+// CreditEntryID は shared/identifier.go で定義
+
+// CreditEntry クレジット台帳の1エントリ
+type CreditEntry struct {
+    id              shared.CreditEntryID
+    accountID       shared.AccountID
+    originalAmount  shared.Money      // 発生時の金額
+    remainingAmount shared.Money      // 未使用残高
+    reason          CreditReason      // 発生理由
+    sourceType      string            // 発生元の種類（"proration", "manual", "refund_conversion"）
+    sourceID        string            // 発生元ID（ProrationResult ID, 管理者操作ID等）
+    description     string            // 説明（「Proプラン→Basicプランへの日割り調整」等）
+    expiresAt       *time.Time        // 有効期限（nil = 無期限）
+    createdAt       time.Time
+}
+
+type CreditReason string
+
+const (
+    CreditReasonProration        CreditReason = "proration"          // プラン変更の日割り差額
+    CreditReasonCancellation     CreditReason = "cancellation"       // 解約時の未使用期間
+    CreditReasonManualAdjustment CreditReason = "manual_adjustment"  // 手動調整（CS対応等）
+    CreditReasonRefundConversion CreditReason = "refund_conversion"  // 返金→クレジット変換
+    CreditReasonGoodwill         CreditReason = "goodwill"           // お詫び・補填
+)
+
+// IsExpired 有効期限切れか判定
+func (e *CreditEntry) IsExpired(now time.Time) bool {
+    return e.expiresAt != nil && now.After(*e.expiresAt)
+}
+
+// IsFullyConsumed 全額消費済みか判定
+func (e *CreditEntry) IsFullyConsumed() bool {
+    return e.remainingAmount.IsZero()
+}
+```
+
+### 9.3 クレジット適用記録
+
+```go
+// domain/credit/application.go
+package credit
+
+import (
+    "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
+// CreditApplication クレジットの消費記録
+// どのクレジットが、どの請求書で、いくら使われたかを追跡
+type CreditApplication struct {
+    id            string
+    creditEntryID shared.CreditEntryID     // 消費元のクレジット
+    invoiceID     shared.InvoiceID  // 適用先の請求書
+    amount        shared.Money      // 適用額
+    appliedAt     time.Time
+}
+
+// CreditRefund クレジット残高からの返金記録
+// CreditConfig.AllowManualRefund = true の場合のみ作成可能
+// AllowManualRefund = false の場合、返金は CreditEntry の作成元（決済トランザクション）経由で行う
+type CreditRefund struct {
+    id            string
+    creditEntryID shared.CreditEntryID
+    accountID     shared.AccountID
+    amount        shared.Money
+    refundedAt    time.Time
+}
+```
+
+### 9.4 リポジトリインターフェース
+
+```go
+// domain/credit/repository.go
+package credit
+
+import (
+    "context"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
+type Repository interface {
+    Save(ctx context.Context, entry *CreditEntry) error
+    FindByID(ctx context.Context, id shared.CreditEntryID) (*CreditEntry, error)
+
+    // FindAvailable 有効なクレジット残高を持つエントリを取得
+    // 指定通貨のみ、有効期限内、古い順（FIFO消費）
+    FindAvailable(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*CreditEntry, error)
+
+    // アカウントのクレジット残高合計
+    GetBalance(ctx context.Context, accountID shared.AccountID, currency shared.Currency) (shared.Money, error)
+
+    // 適用記録
+    SaveApplication(ctx context.Context, app *CreditApplication) error
+    FindApplicationsByInvoice(ctx context.Context, invoiceID shared.InvoiceID) ([]*CreditApplication, error)
+
+    // 返金記録
+    SaveRefund(ctx context.Context, refund *CreditRefund) error
+}
+```
+
+### 9.5 請求書生成時のクレジット適用フロー
+
+```
+請求計算（BillingService.GenerateInvoice）:
+  ① 基本料金計算
+  ② DiscountHook（クーポン等）
+  ③ TaxHook（税計算）
+  ④ 合計算出
+  ⑤ ★ クレジット適用 ← 新規ステップ
+  │   - FindAvailable(accountID) で有効クレジットをFIFO取得
+  │   - 古いクレジットから順に消費（有効期限切れはスキップ）
+  │   - Invoice.appliedCredit に適用額を記録
+  │   - CreditApplication レコード作成
+  │   - CreditEntry.remainingAmount 減算と CreditApplication 作成は
+  │     単一トランザクション内でアトミックに実行する
+  │   - 適用額は min(entry.remainingAmount, 残り充当必要額) で算出
+  │     （remainingAmount がマイナスになることを防止）
+  │   - CreditEntry.remainingAmount を減算
+  ⑥ 実請求額 = 合計 - クレジット適用額
+  │   - 実請求額 > 0: 決済実行
+  │   - 実請求額 = 0: 決済不要（全額クレジットで充当）
+```
+
+### 9.6 ダウングレード時のフロー（CreditPolicy別）
+
+```
+ProrationResult.AdjustmentAmount < 0（ダウングレード）
+  │
+  ├─ CreditPolicyLedger（デフォルト）
+  │   → CreditEntry 作成（reason: proration）
+  │   → 次回以降の請求書で自動差引
+  │
+  ├─ CreditPolicyRefund
+  │   → PaymentGateway.Refund() で即時返金
+  │   → 元の決済手段に返金
+  │
+  └─ CreditPolicyNone
+      → 何もしない（差額は切り捨て）
 ```

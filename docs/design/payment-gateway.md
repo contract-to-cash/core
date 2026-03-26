@@ -228,7 +228,6 @@ type ChargeResponse struct {
     PaymentMethodID string
     CreatedAt       time.Time
     Metadata        map[string]string
-    // RawResponse []byte は削除（インフラ詳細のため）
     // デバッグ用の生レスポンスはインフラ層の実装側でログに記録する
 }
 
@@ -1388,7 +1387,7 @@ type PaymentService struct {
 }
 
 func NewPaymentService(
-    gateway payment.Gateway,
+    gateway port.PaymentGateway,
     paymentRepo payment.Repository,
     invoiceRepo invoice.Repository,
     eventStore eventstore.Store,
@@ -1663,7 +1662,6 @@ func (g *Gateway) Charge(ctx context.Context, req *payment.ChargeRequest) (*paym
         Amount:          req.Amount,
         PaymentMethodID: pi.PaymentMethod.ID,
         CreatedAt:       time.Unix(pi.Created, 0),
-        RawResponse:     []byte(pi.LastResponse.RawJSON),
     }, nil
 }
 
@@ -1691,7 +1689,6 @@ func (g *Gateway) Refund(ctx context.Context, req *payment.RefundRequest) (*paym
         Status:        payment.RefundStatusSucceeded,
         Amount:        shared.NewMoney(r.Amount, shared.Currency(r.Currency)),
         RefundedAt:    time.Unix(r.Created, 0),
-        RawResponse:   []byte(r.LastResponse.RawJSON),
     }, nil
 }
 

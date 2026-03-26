@@ -537,7 +537,8 @@ Priority値に依存しないため、プラグイン登録順のミスで会計
 4. 小計算出（コア: subtotal - totalDiscount）
 5. TaxHook.CalculateTax()                    ← 税計算（割引後に対して）
 6. 合計算出（コア: afterDiscount + totalTax）
-7. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
+7. クレジット台帳からの充当（コア）          ← 残高があれば税込合計から差し引き
+8. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
 ```
 
 ### 5.2 Priority の役割（同一フック内の順序制御）
@@ -831,8 +832,11 @@ package service
 
 import (
     "context"
-    
+
+    "github.com/contract-to-cash/core/application/port"
+    "github.com/contract-to-cash/core/domain/billing"
     "github.com/contract-to-cash/core/domain/contract"
+    "github.com/contract-to-cash/core/domain/credit"
     "github.com/contract-to-cash/core/domain/invoice"
     "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/plugin"
@@ -861,23 +865,38 @@ type BillingService struct {
     contractRepo contract.Repository
     invoiceRepo  invoice.Repository
     usageRepo    usage.Repository
+    creditRepo   credit.Repository    // nil許容: クレジット機能未使用の場合
+    creditConfig credit.CreditConfig
     registry     *plugin.Registry
     config       BillingConfig
+    clock        shared.Clock
+    calculator   billing.Calculator
+    gateway      port.PaymentGateway
 }
 
 func NewBillingService(
     contractRepo contract.Repository,
     invoiceRepo invoice.Repository,
     usageRepo usage.Repository,
+    creditRepo credit.Repository, // nil許容: クレジット機能はオプショナル
+    creditConfig credit.CreditConfig,
     registry *plugin.Registry,
     config BillingConfig,
+    clock shared.Clock,
+    calculator billing.Calculator,
+    gateway port.PaymentGateway,
 ) *BillingService {
     return &BillingService{
         contractRepo: contractRepo,
         invoiceRepo:  invoiceRepo,
         usageRepo:    usageRepo,
+        creditRepo:   creditRepo,
+        creditConfig: creditConfig,
         registry:     registry,
         config:       config,
+        clock:        clock,
+        calculator:   calculator,
+        gateway:      gateway,
     }
 }
 
@@ -946,7 +965,33 @@ func (s *BillingService) GenerateInvoice(
         totalTax, _ = totalTax.Add(tax)
     }
 
-    // 6. 請求書作成（draft状態）
+    // 合計算出（税込）
+    total, _ := afterDiscount.Add(totalTax)
+
+    // 6. クレジット台帳からの充当（domain-model.md セクション9.5参照）
+    appliedCredit := shared.Zero(total.Currency())
+    if s.creditRepo != nil {
+        credits, _ := s.creditRepo.FindAvailable(ctx, c.AccountID(), total.Currency())
+        for _, entry := range credits {
+            if entry.IsExpired(s.clock.Now()) {
+                continue
+            }
+            if entry.RemainingAmount().Currency() != total.Currency() {
+                continue // 通貨不一致はスキップ
+            }
+            remaining := total.Subtract(appliedCredit) // まだ充当が必要な額
+            if remaining.IsZero() {
+                break
+            }
+            apply := min(entry.RemainingAmount(), remaining)
+            appliedCredit = appliedCredit.Add(apply)
+            // CreditApplication 作成 + CreditEntry.remainingAmount 減算
+            // （単一トランザクション内でアトミックに実行）
+        }
+    }
+    amountDue := total.Subtract(appliedCredit)
+
+    // 7. 請求書作成（draft状態）
     inv := invoice.NewInvoice(
         invoice.NewInvoiceID(),
         c.AccountID(),
@@ -957,10 +1002,12 @@ func (s *BillingService) GenerateInvoice(
         invoice.WithStatus(invoice.InvoiceStatusDraft),
         invoice.WithBillingPeriod(billingPeriod),
         invoice.WithDueDate(s.calculateDueDate(billingPeriod)),
+        invoice.WithAppliedCredit(appliedCredit),
+        invoice.WithAmountDue(amountDue),
     )
     calcCtx.SetInvoice(inv)
 
-    // 7. AfterCalculation（InvoiceLifecycleHook）
+    // 8. AfterCalculation（InvoiceLifecycleHook）
     for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
         if err := hook.AfterCalculation(calcCtx, inv); err != nil {
             return nil, fmt.Errorf("after calculation hook failed: %w", err)
@@ -1059,6 +1106,47 @@ func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID string) 
 
     inv.Finalize()
     return s.invoiceRepo.Save(ctx, inv)
+}
+
+// ProcessPlanChange プラン変更時のクレジット処理
+// ProrationResult.AdjustmentAmount < 0 の場合、CreditPolicy に従い分岐
+func (s *BillingService) ProcessPlanChange(ctx context.Context, contractID shared.ContractID, newPlanID string) error {
+    // 1. 日割り計算
+    proration, err := s.calculator.CalculateProration(ctx, contractID, newPlanID)
+    if err != nil {
+        return fmt.Errorf("proration calculation failed: %w", err)
+    }
+
+    c, err := s.contractRepo.FindByID(ctx, contractID)
+    if err != nil {
+        return err
+    }
+    accountID := c.AccountID()
+
+    // 2. AdjustmentAmount の符号で分岐
+    if proration.AdjustmentAmount.IsNegative() {
+        // ダウングレード: CreditPolicy に従う
+        switch s.creditConfig.DowngradePolicy {
+        case credit.CreditPolicyLedger:
+            // クレジット台帳に積む
+            entry := credit.NewCreditEntry(accountID, proration.AdjustmentAmount.Negate(), credit.CreditReasonProration)
+            if err := s.creditRepo.Save(ctx, entry); err != nil {
+                return fmt.Errorf("credit entry save failed: %w", err)
+            }
+        case credit.CreditPolicyRefund:
+            // 即時返金
+            if err := s.gateway.Refund(ctx, &port.RefundRequest{Amount: proration.AdjustmentAmount.Negate()}); err != nil {
+                return fmt.Errorf("refund failed: %w", err)
+            }
+        case credit.CreditPolicyNone:
+            // 何もしない
+        }
+    } else if !proration.AdjustmentAmount.IsZero() {
+        // アップグレード: 差額のみ請求
+        // 請求書を生成して決済
+    }
+
+    return nil
 }
 
 func (s *BillingService) calculateDueDate(period shared.DateRange) time.Time {

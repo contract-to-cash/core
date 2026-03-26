@@ -114,6 +114,11 @@ type RevenueMetrics struct {
     Refunds        shared.Money `json:"refunds"`          // 返金額
     NetRevenue     shared.Money `json:"net_revenue"`      // 純売上
 
+    // クレジット
+    CreditIssued    shared.Money `json:"credit_issued"`    // 発行されたクレジット総額
+    CreditConsumed  shared.Money `json:"credit_consumed"`  // 消費されたクレジット総額
+    CreditBalance   shared.Money `json:"credit_balance"`   // 未消費クレジット残高
+
     // 従量課金
     UsageRevenue   shared.Money `json:"usage_revenue"`    // 従量課金売上
 
@@ -180,6 +185,10 @@ type InvoiceMetrics struct {
     TotalPaid         shared.Money `json:"total_paid"`         // 回収額
     TotalOutstanding  shared.Money `json:"total_outstanding"`  // 未回収額
     TotalOverdue      shared.Money `json:"total_overdue"`      // 延滞額
+
+    // クレジット充当
+    TotalAppliedCredit shared.Money `json:"total_applied_credit"` // クレジット充当合計
+    InvoicesWithCredit int64        `json:"invoices_with_credit"` // クレジット充当された請求書数
 
     // 平均
     AverageInvoiceAmount shared.Money `json:"avg_invoice_amount"` // 平均請求額

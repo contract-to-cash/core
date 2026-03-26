@@ -205,7 +205,11 @@ func (a *BaseAggregate) RaiseEvent(domainEvent DomainEvent, metadata EventMetada
         SchemaVersion: 1,
         Data:          jsonData,
         Metadata:      metadata,
-        OccurredAt:    time.Now().UTC(), // 記録時刻（集約側のビジネス時刻は Clock IF 経由で設定）
+        // OccurredAt はイベントの記録時刻（システム時刻）。
+        // ビジネス上の時刻（CreatedAt, ActivatedAt 等）は集約が Clock IF 経由で設定し、
+        // Data フィールド（DomainEvent）内に含める。
+        // RecordedAt は Event Store 側で設定されるため、ここでは OccurredAt のみ設定。
+        OccurredAt:    time.Now().UTC(),
     }
 
     a.uncommittedEvents = append(a.uncommittedEvents, event)
