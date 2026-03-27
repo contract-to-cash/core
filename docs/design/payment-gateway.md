@@ -1378,27 +1378,35 @@ import (
 
 // PaymentService 決済サービス
 type PaymentService struct {
-    gateway        port.PaymentGateway    // 旧 payment.Gateway → port.PaymentGateway
-    paymentRepo    payment.Repository
-    invoiceRepo    invoice.Repository
-    eventStore     eventstore.Store
-    pluginRegistry *plugin.Registry
-    clock          shared.Clock
+    gateway         port.PaymentGateway
+    paymentRepo     payment.Repository
+    invoiceRepo     invoice.Repository
+    contractRepo    contract.Repository    // 支払い方法フォールバック解決用
+    customerGateway port.CustomerGateway   // 顧客デフォルト支払い方法の参照用
+    eventStore      eventstore.Store
+    pluginRegistry  *plugin.Registry
+    clock           shared.Clock
 }
 
 func NewPaymentService(
     gateway port.PaymentGateway,
     paymentRepo payment.Repository,
     invoiceRepo invoice.Repository,
+    contractRepo contract.Repository,
+    customerGateway port.CustomerGateway,
     eventStore eventstore.Store,
     pluginRegistry *plugin.Registry,
+    clock shared.Clock,
 ) *PaymentService {
     return &PaymentService{
-        gateway:        gateway,
-        paymentRepo:    paymentRepo,
-        invoiceRepo:    invoiceRepo,
-        eventStore:     eventStore,
-        pluginRegistry: pluginRegistry,
+        gateway:         gateway,
+        paymentRepo:     paymentRepo,
+        invoiceRepo:     invoiceRepo,
+        contractRepo:    contractRepo,
+        customerGateway: customerGateway,
+        eventStore:      eventStore,
+        pluginRegistry:  pluginRegistry,
+        clock:           clock,
     }
 }
 
@@ -1761,11 +1769,14 @@ func main() {
 
     // 決済サービス初期化
     paymentService := service.NewPaymentService(
-        router,  // or stripeGateway directly
+        router,          // or stripeGateway directly
         paymentRepo,
         invoiceRepo,
+        contractRepo,    // 支払い方法フォールバック解決用
+        customerGateway, // 顧客デフォルト支払い方法の参照用
         eventStore,
         pluginRegistry,
+        clock,
     )
 
     // ...

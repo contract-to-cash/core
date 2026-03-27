@@ -111,7 +111,7 @@ func main() {
 	// ── 7. Process payment via PaymentService ──
 	gateway := &mockPaymentGateway{}
 	paymentService := service.NewPaymentService(
-		gateway, paymentRepo, invoiceRepo, eventStore, registry, clock,
+		gateway, paymentRepo, invoiceRepo, contractRepo, nil, eventStore, registry, clock,
 	)
 
 	payment, err := paymentService.ProcessPayment(ctx, inv.ID(), service.ProcessPaymentInput{

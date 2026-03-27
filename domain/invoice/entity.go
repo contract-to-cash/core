@@ -80,6 +80,7 @@ type Invoice struct {
 	issueDate       time.Time
 	dueDate         time.Time
 	paidAt          *time.Time
+	paymentMethodID *string
 	metadata        map[string]string
 	allowPartialPay bool
 }
@@ -299,4 +300,14 @@ func (inv *Invoice) Void() error {
 	}
 	inv.status = InvoiceStatusVoided
 	return nil
+}
+
+// PaymentMethodID returns the invoice-level payment method ID override.
+func (inv *Invoice) PaymentMethodID() *string { return inv.paymentMethodID }
+
+// WithPaymentMethodID sets the payment method ID on the invoice.
+func WithPaymentMethodID(id *string) InvoiceOption {
+	return func(inv *Invoice) {
+		inv.paymentMethodID = id
+	}
 }

@@ -9,15 +9,16 @@ import (
 
 // Event type constants.
 const (
-	EventTypeContractCreated   eventstore.EventType = "contract.created"
-	EventTypeContractActivated eventstore.EventType = "contract.activated"
-	EventTypeContractSuspended eventstore.EventType = "contract.suspended"
-	EventTypeContractResumed   eventstore.EventType = "contract.resumed"
-	EventTypeContractCancelled eventstore.EventType = "contract.cancelled"
-	EventTypePriceChanged      eventstore.EventType = "contract.price_changed"
-	EventTypePlanChanged       eventstore.EventType = "contract.plan_changed"
-	EventTypeTrialStarted      eventstore.EventType = "contract.trial_started"
-	EventTypeTrialEnded        eventstore.EventType = "contract.trial_ended"
+	EventTypeContractCreated      eventstore.EventType = "contract.created"
+	EventTypeContractActivated    eventstore.EventType = "contract.activated"
+	EventTypeContractSuspended    eventstore.EventType = "contract.suspended"
+	EventTypeContractResumed      eventstore.EventType = "contract.resumed"
+	EventTypeContractCancelled    eventstore.EventType = "contract.cancelled"
+	EventTypePriceChanged         eventstore.EventType = "contract.price_changed"
+	EventTypePlanChanged          eventstore.EventType = "contract.plan_changed"
+	EventTypeTrialStarted         eventstore.EventType = "contract.trial_started"
+	EventTypeTrialEnded           eventstore.EventType = "contract.trial_ended"
+	EventTypePaymentMethodChanged eventstore.EventType = "contract.payment_method_changed"
 )
 
 // ContractCreatedEvent is raised when a new contract is created.
@@ -109,3 +110,15 @@ type TrialEndedEvent struct {
 }
 
 func (e *TrialEndedEvent) EventType() eventstore.EventType { return EventTypeTrialEnded }
+
+// PaymentMethodChangedEvent is raised when a contract's payment method changes.
+type PaymentMethodChangedEvent struct {
+	ContractID         shared.ContractID `json:"contract_id"`
+	OldPaymentMethodID *string           `json:"old_payment_method_id,omitempty"`
+	NewPaymentMethodID *string           `json:"new_payment_method_id,omitempty"`
+	ChangedAt          time.Time         `json:"changed_at"`
+}
+
+func (e *PaymentMethodChangedEvent) EventType() eventstore.EventType {
+	return EventTypePaymentMethodChanged
+}

@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/application/port"
+	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
+	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/plugin"
 )
 
@@ -22,14 +24,14 @@ type mockGateway struct {
 
 func (g *mockGateway) ID() string                                 { return "mock" }
 func (g *mockGateway) SupportedMethods() []port.PaymentMethodType { return nil }
-func (g *mockGateway) Charge(_ context.Context, _ *port.ChargeRequest) (*port.ChargeResponse, error) {
+func (g *mockGateway) Charge(_ context.Context, req *port.ChargeRequest) (*port.ChargeResponse, error) {
 	if g.failCharge {
 		return nil, fmt.Errorf("card declined")
 	}
 	return &port.ChargeResponse{
-		TransactionID: "txn-001",
+		TransactionID: "txn-" + req.IdempotencyKey,
 		Status:        port.TransactionStatusCaptured,
-		Amount:        shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Amount:        req.Amount,
 		CreatedAt:     time.Now(),
 	}, nil
 }
@@ -62,7 +64,7 @@ func (g *mockGateway) ListPaymentMethods(_ context.Context, _ string) ([]*port.P
 	return nil, nil
 }
 
-// --- Mock repos for payment tests ---
+// --- Mock repos ---
 
 type mockPaymentRepo struct {
 	saved *payment.Payment
@@ -121,6 +123,50 @@ func (m *mockInvoiceRepoForPayment) FindUnpaidByContract(_ context.Context, _ sh
 	return nil, nil
 }
 
+type mockCustomerGateway struct {
+	customer *port.Customer
+	err      error
+}
+
+func (m *mockCustomerGateway) CreateCustomer(_ context.Context, _ *port.CreateCustomerRequest) (*port.Customer, error) {
+	return nil, nil
+}
+func (m *mockCustomerGateway) UpdateCustomer(_ context.Context, _ *port.UpdateCustomerRequest) (*port.Customer, error) {
+	return nil, nil
+}
+func (m *mockCustomerGateway) GetCustomer(_ context.Context, _ string) (*port.Customer, error) {
+	return m.customer, m.err
+}
+func (m *mockCustomerGateway) DeleteCustomer(_ context.Context, _ string) error { return nil }
+
+type mockEventStore struct{}
+
+func (m *mockEventStore) Append(_ context.Context, _ string, _ []eventstore.Event, _ int) error {
+	return nil
+}
+func (m *mockEventStore) Load(_ context.Context, _ string) ([]eventstore.Event, error) {
+	return nil, nil
+}
+func (m *mockEventStore) LoadUntilVersion(_ context.Context, _ string, _ int) ([]eventstore.Event, error) {
+	return nil, nil
+}
+func (m *mockEventStore) LoadUntil(_ context.Context, _ string, _ time.Time) ([]eventstore.Event, error) {
+	return nil, nil
+}
+func (m *mockEventStore) LoadRange(_ context.Context, _ string, _, _ time.Time) ([]eventstore.Event, error) {
+	return nil, nil
+}
+func (m *mockEventStore) Subscribe(_ context.Context, _ int64) (<-chan eventstore.Event, error) {
+	return nil, nil
+}
+func (m *mockEventStore) SaveSnapshot(_ context.Context, _ eventstore.Snapshot) error { return nil }
+func (m *mockEventStore) LoadSnapshot(_ context.Context, _ string) (*eventstore.Snapshot, error) {
+	return nil, nil
+}
+func (m *mockEventStore) LoadSnapshotBefore(_ context.Context, _ string, _ time.Time) (*eventstore.Snapshot, error) {
+	return nil, nil
+}
+
 // --- Hook spy plugins ---
 
 type afterChargeSpyPlugin struct {
@@ -157,9 +203,13 @@ func (p *onPaymentFailedSpyPlugin) OnPaymentFailed(ctx *plugin.PaymentContext, e
 	return nil
 }
 
-// --- Tests ---
+// --- Helpers ---
 
-func newFinalizedInvoice() *invoice.Invoice {
+func newPaymentTestClock() shared.FixedClock {
+	return shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)}
+}
+
+func newSimpleFinalizedInvoice() *invoice.Invoice {
 	inv := invoice.NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
@@ -172,16 +222,40 @@ func newFinalizedInvoice() *invoice.Invoice {
 	return inv
 }
 
+func newFinalizedInvoice(accountID shared.AccountID, contractID shared.ContractID, amount shared.Money, pmID *string) *invoice.Invoice {
+	opts := []invoice.InvoiceOption{
+		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+	}
+	if pmID != nil {
+		opts = append(opts, invoice.WithPaymentMethodID(pmID))
+	}
+	return invoice.NewInvoice(
+		shared.NewInvoiceID(),
+		accountID,
+		contractID,
+		amount,
+		shared.Zero(amount.Currency()),
+		shared.Zero(amount.Currency()),
+		opts...,
+	)
+}
+
+func strPtr(s string) *string {
+	return &s
+}
+
+// --- PaymentContext hook tests (from main) ---
+
 func TestProcessPayment_AfterChargeHook_ReceivesPaymentContext(t *testing.T) {
-	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)}
-	inv := newFinalizedInvoice()
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
 	invRepo := &mockInvoiceRepoForPayment{inv: inv}
 	spy := &afterChargeSpyPlugin{}
 
 	registry := plugin.NewRegistry()
 	_ = registry.Register(spy)
 
-	svc := NewPaymentService(&mockGateway{}, &mockPaymentRepo{}, invRepo, nil, registry, clock)
+	svc := NewPaymentService(&mockGateway{}, &mockPaymentRepo{}, invRepo, nil, nil, &mockEventStore{}, registry, clock)
 
 	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
 		PaymentMethodID: "pm-001",
@@ -211,15 +285,15 @@ func TestProcessPayment_AfterChargeHook_ReceivesPaymentContext(t *testing.T) {
 }
 
 func TestProcessPayment_OnPaymentFailedHook_ReceivesPaymentContext(t *testing.T) {
-	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)}
-	inv := newFinalizedInvoice()
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
 	invRepo := &mockInvoiceRepoForPayment{inv: inv}
 	spy := &onPaymentFailedSpyPlugin{}
 
 	registry := plugin.NewRegistry()
 	_ = registry.Register(spy)
 
-	svc := NewPaymentService(&mockGateway{failCharge: true}, &mockPaymentRepo{}, invRepo, nil, registry, clock)
+	svc := NewPaymentService(&mockGateway{failCharge: true}, &mockPaymentRepo{}, invRepo, nil, nil, &mockEventStore{}, registry, clock)
 
 	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
 		PaymentMethodID: "pm-001",
@@ -245,5 +319,211 @@ func TestProcessPayment_OnPaymentFailedHook_ReceivesPaymentContext(t *testing.T)
 	}
 	if spy.receivedErr == nil {
 		t.Error("expected error to be passed to hook")
+	}
+}
+
+// --- ResolvePaymentMethod tests ---
+
+func TestResolvePaymentMethod_ExplicitInput(t *testing.T) {
+	clock := newPaymentTestClock()
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	inv := newFinalizedInvoice(agg.AccountID(), agg.ContractID(), jpy(1000), nil)
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		invRepo,
+		&mockContractRepo{agg: agg},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-explicit",
+		Amount:          jpy(1000),
+		IdempotencyKey:  "test-001",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pmt == nil {
+		t.Fatal("expected payment, got nil")
+	}
+}
+
+func TestResolvePaymentMethod_FallbackToInvoice(t *testing.T) {
+	clock := newPaymentTestClock()
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	pmID := "pm-invoice-level"
+	inv := newFinalizedInvoice(agg.AccountID(), agg.ContractID(), jpy(1000), &pmID)
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		&mockContractRepo{agg: agg},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	resolved, err := svc.ResolvePaymentMethod(context.Background(), inv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolved != "pm-invoice-level" {
+		t.Errorf("expected pm-invoice-level, got %s", resolved)
+	}
+}
+
+func TestResolvePaymentMethod_FallbackToContract(t *testing.T) {
+	clock := newPaymentTestClock()
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	_ = agg.ChangePaymentMethod(strPtr("pm-contract-level"), eventstore.EventMetadata{UserID: "test"})
+
+	inv := newFinalizedInvoice(agg.AccountID(), agg.ContractID(), jpy(1000), nil)
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		&mockContractRepo{agg: agg},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	resolved, err := svc.ResolvePaymentMethod(context.Background(), inv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolved != "pm-contract-level" {
+		t.Errorf("expected pm-contract-level, got %s", resolved)
+	}
+}
+
+func TestResolvePaymentMethod_FallbackToCustomer(t *testing.T) {
+	clock := newPaymentTestClock()
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	inv := newFinalizedInvoice(agg.AccountID(), agg.ContractID(), jpy(1000), nil)
+
+	customerPM := "pm-customer-default"
+	custGateway := &mockCustomerGateway{
+		customer: &port.Customer{
+			ID:                     string(agg.AccountID()),
+			DefaultPaymentMethodID: &customerPM,
+		},
+	}
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		&mockContractRepo{agg: agg},
+		custGateway,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	resolved, err := svc.ResolvePaymentMethod(context.Background(), inv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolved != "pm-customer-default" {
+		t.Errorf("expected pm-customer-default, got %s", resolved)
+	}
+}
+
+func TestResolvePaymentMethod_InvoiceOverridesContract(t *testing.T) {
+	clock := newPaymentTestClock()
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	_ = agg.ChangePaymentMethod(strPtr("pm-contract"), eventstore.EventMetadata{UserID: "test"})
+
+	invPM := "pm-invoice"
+	inv := newFinalizedInvoice(agg.AccountID(), agg.ContractID(), jpy(1000), &invPM)
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		&mockContractRepo{agg: agg},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	resolved, err := svc.ResolvePaymentMethod(context.Background(), inv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resolved != "pm-invoice" {
+		t.Errorf("expected pm-invoice (invoice-level override), got %s", resolved)
+	}
+}
+
+func TestResolvePaymentMethod_NoPaymentMethodFound(t *testing.T) {
+	clock := newPaymentTestClock()
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	inv := newFinalizedInvoice(agg.AccountID(), agg.ContractID(), jpy(1000), nil)
+
+	custGateway := &mockCustomerGateway{
+		customer: &port.Customer{
+			ID:                     string(agg.AccountID()),
+			DefaultPaymentMethodID: nil,
+		},
+	}
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		&mockContractRepo{agg: agg},
+		custGateway,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	_, err := svc.ResolvePaymentMethod(context.Background(), inv)
+	if err == nil {
+		t.Fatal("expected error when no payment method found")
+	}
+}
+
+func TestProcessPayment_AutoResolvesPaymentMethod(t *testing.T) {
+	clock := newPaymentTestClock()
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	_ = agg.ChangePaymentMethod(strPtr("pm-auto-resolved"), eventstore.EventMetadata{UserID: "test"})
+
+	inv := newFinalizedInvoice(agg.AccountID(), agg.ContractID(), jpy(1000), nil)
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		invRepo,
+		&mockContractRepo{agg: agg},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		Amount:         jpy(1000),
+		IdempotencyKey: "test-auto",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pmt == nil {
+		t.Fatal("expected payment, got nil")
 	}
 }

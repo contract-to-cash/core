@@ -123,7 +123,7 @@ func main() {
 		inv.TaxAmount().Amount().RatString())
 
 	gateway := &mockPaymentGateway{clock: clock}
-	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, es, registry, clock)
+	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, contractRepo, nil, es, registry, clock)
 	pmt, err := paymentService.ProcessPayment(ctx, inv.ID(), service.ProcessPaymentInput{
 		PaymentMethodID: "pm-visa-tanaka",
 		Amount:          inv.AmountDue(),

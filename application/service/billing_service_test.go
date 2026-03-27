@@ -292,6 +292,69 @@ func TestGenerateInvoice_WithCredits(t *testing.T) {
 	}
 }
 
+// --- Payment method inheritance tests ---
+
+func TestGenerateInvoice_InheritsContractPaymentMethod(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(5000)
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, price)
+
+	// Set payment method on contract
+	pmID := "pm-contract-inherited"
+	_ = agg.ChangePaymentMethod(&pmID, eventstore.EventMetadata{UserID: "test"})
+
+	invRepo := &mockInvoiceRepo{}
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		nil,
+		credit.CreditConfig{},
+		&mockPlanRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if inv.PaymentMethodID() == nil || *inv.PaymentMethodID() != "pm-contract-inherited" {
+		t.Errorf("expected invoice to inherit contract payment method pm-contract-inherited, got %v", inv.PaymentMethodID())
+	}
+}
+
+func TestGenerateInvoice_NoPaymentMethodWhenContractHasNone(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(5000)
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, price)
+	invRepo := &mockInvoiceRepo{}
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		nil,
+		credit.CreditConfig{},
+		&mockPlanRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if inv.PaymentMethodID() != nil {
+		t.Errorf("expected nil payment method on invoice, got %v", inv.PaymentMethodID())
+	}
+}
+
 // --- Status guard tests ---
 
 func newDraftContractAggregate(clock shared.Clock, price shared.Money) *contract.ContractAggregate {
