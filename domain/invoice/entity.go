@@ -45,7 +45,11 @@ func WithPriceID(id shared.PriceID) LineItemOption {
 }
 
 // NewLineItem creates a new LineItem.
+// Panics if quantity is negative, as this indicates a programming error.
 func NewLineItem(id, description string, quantity int64, unitPrice, amount shared.Money, taxRate *big.Rat, opts ...LineItemOption) LineItem {
+	if quantity < 0 {
+		panic(fmt.Sprintf("line item quantity must not be negative: %d", quantity))
+	}
 	li := LineItem{
 		id:          id,
 		description: description,

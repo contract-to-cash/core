@@ -45,6 +45,26 @@ func TestUsagePrice_MaxClamp(t *testing.T) {
 	}
 }
 
+func TestUsagePrice_NegativeUsage(t *testing.T) {
+	unitPrice := shared.NewMoney(new(big.Rat).SetInt64(10), shared.CurrencyJPY)
+	up := UsagePrice{UnitPrice: unitPrice}
+
+	result := up.CalculatePrice(-5)
+	if !result.IsZero() {
+		t.Errorf("expected zero for negative usage, got %s", result.Amount().RatString())
+	}
+}
+
+func TestUsagePrice_ZeroUsage(t *testing.T) {
+	unitPrice := shared.NewMoney(new(big.Rat).SetInt64(10), shared.CurrencyJPY)
+	up := UsagePrice{UnitPrice: unitPrice}
+
+	result := up.CalculatePrice(0)
+	if !result.IsZero() {
+		t.Errorf("expected zero for zero usage, got %s", result.Amount().RatString())
+	}
+}
+
 func TestUsagePrice_WithinBounds(t *testing.T) {
 	unitPrice := shared.NewMoney(new(big.Rat).SetInt64(10), shared.CurrencyJPY)
 	min := shared.NewMoney(new(big.Rat).SetInt64(50), shared.CurrencyJPY)

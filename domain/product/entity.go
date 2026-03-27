@@ -90,12 +90,26 @@ func (p *Product) Metadata() map[string]string {
 }
 
 // AddFeature adds a feature to the product.
+// If a feature with the same name already exists, it is replaced.
 func (p *Product) AddFeature(f Feature) {
+	for i, existing := range p.features {
+		if existing.Name == f.Name {
+			p.features[i] = f
+			return
+		}
+	}
 	p.features = append(p.features, f)
 }
 
 // AddUsageMetric adds a usage metric to the product.
+// If a metric with the same name already exists, it is replaced.
 func (p *Product) AddUsageMetric(m UsageMetric) {
+	for i, existing := range p.usageMetrics {
+		if existing.Name == m.Name {
+			p.usageMetrics[i] = m
+			return
+		}
+	}
 	p.usageMetrics = append(p.usageMetrics, m)
 }
 
