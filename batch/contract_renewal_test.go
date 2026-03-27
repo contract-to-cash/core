@@ -140,6 +140,64 @@ func TestContractRenewalProcessor_DryRun(t *testing.T) {
 	}
 }
 
+func TestContractRenewalProcessor_DryRun_CancelAtPeriodEnd(t *testing.T) {
+	agg := newActiveContract("c1")
+	agg.SetCancelAtPeriodEnd(true)
+	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
+
+	processor := NewContractRenewalProcessor(repo, nil, processorClock())
+
+	result, err := processor.Process(context.Background(), BatchOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("Failed: got %d, want 1", result.Failed)
+	}
+	if result.Succeeded != 0 {
+		t.Errorf("Succeeded: got %d, want 0", result.Succeeded)
+	}
+	// Contract should still be active (dry run — no side effects).
+	if agg.Status() != contract.ContractStatusActive {
+		t.Errorf("status: got %s, want active (dry run should not mutate)", agg.Status())
+	}
+}
+
+func TestContractRenewalProcessor_DryRun_AutoRenewFalse(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
+	agg := contract.NewContractAggregate(shared.ContractID("c1"), clock)
+	cmd := contract.CreateContractCommand{
+		AccountID:    shared.AccountID("a1"),
+		PlanID:       shared.PlanID("p1"),
+		ContractType: contract.ContractTypeSubscription,
+		BillingCycle: contract.BillingCycleMonthly,
+		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:    false,
+	}
+	meta := eventstore.EventMetadata{UserID: "test"}
+	if err := agg.Create(cmd, meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+
+	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
+	processor := NewContractRenewalProcessor(repo, nil, processorClock())
+
+	result, err := processor.Process(context.Background(), BatchOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("Failed: got %d, want 1", result.Failed)
+	}
+	if result.Succeeded != 0 {
+		t.Errorf("Succeeded: got %d, want 0", result.Succeeded)
+	}
+}
+
 func TestContractRenewalProcessor_NoContracts(t *testing.T) {
 	repo := &mockRenewalRepo{contracts: nil}
 

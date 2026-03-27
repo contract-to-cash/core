@@ -134,31 +134,50 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		return nil
 	}
 
+	oldStatus := agg.Status()
 	if err := agg.Renew(metadata); err != nil {
 		return err
 	}
 
-	// Fire OnContractRenewHooks
 	if p.registry != nil {
 		pluginCtx := plugin.NewContext(ctx)
-		for _, hook := range p.registry.GetOnContractRenewHooks() {
-			if err := hook.OnContractRenew(pluginCtx, agg); err != nil {
-				return fmt.Errorf("renew hook %q failed: %w", hook.Name(), err)
-			}
-		}
+		newStatus := agg.Status()
 
-		// Fire OnContractChangeHooks with ContractChangeRenewed
-		activeStatus := contract.ContractStatusActive
-		changeEvent := plugin.ContractChangeEvent{
-			ContractID: agg.ContractID(),
-			ChangeType: plugin.ContractChangeRenewed,
-			OldStatus:  &activeStatus,
-			NewStatus:  &activeStatus,
-			Timestamp:  p.clock.Now(),
-		}
-		for _, hook := range p.registry.GetOnContractChangeHooks() {
-			if err := hook.OnContractChange(pluginCtx, changeEvent); err != nil {
-				return fmt.Errorf("change hook %q failed: %w", hook.Name(), err)
+		if newStatus == contract.ContractStatusExpired {
+			// Contract expired (cancelAtPeriodEnd or autoRenew=false).
+			// Fire OnContractChangeHooks with appropriate change type.
+			changeEvent := plugin.ContractChangeEvent{
+				ContractID: agg.ContractID(),
+				ChangeType: plugin.ContractChangeCancelled,
+				OldStatus:  &oldStatus,
+				NewStatus:  &newStatus,
+				Timestamp:  p.clock.Now(),
+			}
+			for _, hook := range p.registry.GetOnContractChangeHooks() {
+				if err := hook.OnContractChange(pluginCtx, changeEvent); err != nil {
+					return fmt.Errorf("change hook %q failed: %w", hook.Name(), err)
+				}
+			}
+		} else {
+			// Contract renewed successfully — fire renew hooks.
+			for _, hook := range p.registry.GetOnContractRenewHooks() {
+				if err := hook.OnContractRenew(pluginCtx, agg); err != nil {
+					return fmt.Errorf("renew hook %q failed: %w", hook.Name(), err)
+				}
+			}
+
+			// Fire OnContractChangeHooks with ContractChangeRenewed.
+			changeEvent := plugin.ContractChangeEvent{
+				ContractID: agg.ContractID(),
+				ChangeType: plugin.ContractChangeRenewed,
+				OldStatus:  &oldStatus,
+				NewStatus:  &newStatus,
+				Timestamp:  p.clock.Now(),
+			}
+			for _, hook := range p.registry.GetOnContractChangeHooks() {
+				if err := hook.OnContractChange(pluginCtx, changeEvent); err != nil {
+					return fmt.Errorf("change hook %q failed: %w", hook.Name(), err)
+				}
 			}
 		}
 	}

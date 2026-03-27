@@ -863,6 +863,9 @@ func TestRenew_WithPendingPriceID(t *testing.T) {
 	if agg.PendingPriceID() != nil {
 		t.Error("expected pendingPriceID to be nil after renewal")
 	}
+	if agg.PriceID() != priceID {
+		t.Errorf("expected priceID %s after renewal, got %s", priceID, agg.PriceID())
+	}
 
 	// Verify the event has PriceChanged=true
 	events := agg.UncommittedEvents()
@@ -885,6 +888,9 @@ func TestRenew_WithPendingPriceID(t *testing.T) {
 	}
 	if !renewed.PriceChanged {
 		t.Error("expected PriceChanged=true in ContractRenewedEvent")
+	}
+	if renewed.NewPriceID != priceID {
+		t.Errorf("expected NewPriceID=%s, got %s", priceID, renewed.NewPriceID)
 	}
 }
 
