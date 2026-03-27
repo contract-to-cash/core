@@ -115,14 +115,6 @@ func (m *mockCreditRepo) FindApplicationsByInvoice(_ context.Context, _ shared.I
 }
 func (m *mockCreditRepo) SaveRefund(_ context.Context, _ *credit.CreditRefund) error { return nil }
 
-type mockPlanRepo struct {
-	plan *pricing.Plan
-}
-
-func (m *mockPlanRepo) FindByID(_ context.Context, _ shared.PlanID) (*pricing.Plan, error) {
-	return m.plan, nil
-}
-
 type mockPriceRepo struct{}
 
 func (m *mockPriceRepo) FindByID(_ context.Context, _ shared.PriceID) (*pricing.Price, error) {

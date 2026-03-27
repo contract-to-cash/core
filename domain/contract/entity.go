@@ -30,10 +30,10 @@ const (
 )
 
 // BillingCycle is an alias for pricing.BillingCycle.
-// Deprecated: Use pricing.BillingCycle directly in new code.
+// New code should use pricing.BillingCycle directly.
 type BillingCycle = pricing.BillingCycle
 
-// Deprecated: Use pricing.BillingCycleDaily etc. directly in new code.
+// Billing cycle constants re-exported from pricing for backward compatibility.
 const (
 	BillingCycleDaily   = pricing.BillingCycleDaily
 	BillingCycleWeekly  = pricing.BillingCycleWeekly
