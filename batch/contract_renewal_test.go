@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,11 +15,14 @@ import (
 
 // mockRenewalRepo is a simple in-memory mock that satisfies contract.Repository.
 type mockRenewalRepo struct {
+	mu        sync.Mutex
 	contracts []*contract.ContractAggregate
 	saved     []*contract.ContractAggregate
 }
 
 func (m *mockRenewalRepo) Save(_ context.Context, agg *contract.ContractAggregate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.saved = append(m.saved, agg)
 	return nil
 }
