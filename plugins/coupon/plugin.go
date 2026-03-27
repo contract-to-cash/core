@@ -75,12 +75,12 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 	currency := ctx.Subtotal().Currency()
 	zero := shared.Zero(currency)
 
-	ct := ctx.Contract()
+	contr := ctx.Contract()
 	var accountID shared.AccountID
 	var planID shared.PlanID
-	if ct != nil {
-		accountID = ct.AccountID()
-		planID = ct.PlanID()
+	if contr != nil {
+		accountID = contr.AccountID()
+		planID = contr.PlanID()
 	}
 
 	// 1. Find applicable coupons with full query context
@@ -106,7 +106,8 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		if !c.IsApplicableToPlan(planID) {
 			continue
 		}
-		if ct != nil && !c.IsApplicableToContractType(ct.GetContractType()) {
+		// Contract type check is skipped when contract is nil (e.g., standalone coupon validation).
+		if contr != nil && !c.IsApplicableToContractType(contr.GetContractType()) {
 			continue
 		}
 		if !c.IsAccountAllowed(accountID) {
@@ -194,12 +195,15 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		total = sum
 	}
 
-	// 9. Update subtotal after discount for downstream hooks
+	// 9. Update subtotal after discount for downstream hooks.
+	// Each coupon's discount is calculated against the original subtotal (parallel application),
+	// not the cumulative reduced amount.
 	if !total.IsZero() {
 		afterDiscount, err := ctx.Subtotal().Subtract(total)
-		if err == nil {
-			ctx.SetSubtotalAfterDiscount(afterDiscount)
+		if err != nil {
+			return zero, fmt.Errorf("coupon: update subtotal after discount: %w", err)
 		}
+		ctx.SetSubtotalAfterDiscount(afterDiscount)
 	}
 
 	return total, nil
