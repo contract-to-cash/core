@@ -52,6 +52,29 @@ func (r DateRange) MarshalJSON() ([]byte, error) {
 	return marshalJSON(dateRangeJSON{Start: r.start, End: r.end})
 }
 
+// Next returns the next DateRange of the same duration based on the billing cycle.
+// The new range starts where the current one ends.
+func (r DateRange) Next(cycle string) DateRange {
+	switch cycle {
+	case "monthly":
+		end := r.end.AddDate(0, 1, 0)
+		return DateRange{start: r.end, end: end}
+	case "yearly":
+		end := r.end.AddDate(1, 0, 0)
+		return DateRange{start: r.end, end: end}
+	case "weekly":
+		end := r.end.AddDate(0, 0, 7)
+		return DateRange{start: r.end, end: end}
+	case "daily":
+		end := r.end.AddDate(0, 0, 1)
+		return DateRange{start: r.end, end: end}
+	default:
+		// Default to monthly if unknown cycle
+		end := r.end.AddDate(0, 1, 0)
+		return DateRange{start: r.end, end: end}
+	}
+}
+
 // UnmarshalJSON implements json.Unmarshaler for DateRange.
 func (r *DateRange) UnmarshalJSON(data []byte) error {
 	type dateRangeJSON struct {
