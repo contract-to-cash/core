@@ -22,10 +22,10 @@ type mockCouponRepository struct {
 	saveRedemptionCall int
 
 	// Error injection for testing error paths
-	findApplicableErr    error
-	findUsageErr         error
-	recordUsageErr       error
-	saveRedemptionErr    error
+	findApplicableErr error
+	findUsageErr      error
+	recordUsageErr    error
+	saveRedemptionErr error
 }
 
 func newMockRepo(coupons ...*Coupon) *mockCouponRepository {

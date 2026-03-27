@@ -89,23 +89,23 @@ func (r *Redemption) RedeemedAt() time.Time { return r.redeemedAt }
 
 // Coupon represents a discount coupon that can be applied to an invoice.
 type Coupon struct {
-	id                   CouponID
-	code                 string
-	codeType             CodeType
-	couponType           CouponType
-	value                *big.Rat        // percentage: discount rate (e.g. 10/100), fixed: discount amount
-	currency             shared.Currency // used only for fixed type
-	minAmount            *shared.Money   // minimum purchase amount (nil = no minimum)
-	maxDiscount          *shared.Money   // maximum discount amount (nil = no cap)
-	validFrom            time.Time
-	validUntil           time.Time
-	usageLimit           *int
-	usedCount            int
+	id                      CouponID
+	code                    string
+	codeType                CodeType
+	couponType              CouponType
+	value                   *big.Rat        // percentage: discount rate (e.g. 10/100), fixed: discount amount
+	currency                shared.Currency // used only for fixed type
+	minAmount               *shared.Money   // minimum purchase amount (nil = no minimum)
+	maxDiscount             *shared.Money   // maximum discount amount (nil = no cap)
+	validFrom               time.Time
+	validUntil              time.Time
+	usageLimit              *int
+	usedCount               int
 	perAccountUsageLimit    *int                    // max uses per account (nil = unlimited)
-	applicableTo           []string                // applicable plan IDs (empty = all plans)
+	applicableTo            []string                // applicable plan IDs (empty = all plans)
 	applicableContractTypes []contract.ContractType // applicable contract types (empty = all types)
-	allowedAccountIDs      []shared.AccountID
-	blockedAccountIDs      []shared.AccountID
+	allowedAccountIDs       []shared.AccountID
+	blockedAccountIDs       []shared.AccountID
 }
 
 // NewCoupon creates a new Coupon.
