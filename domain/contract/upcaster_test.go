@@ -34,7 +34,7 @@ func TestPriceChangedEventUpcaster_Upcast_V1ToV2(t *testing.T) {
 		"old_price":    map[string]interface{}{"amount": "1000", "currency": "JPY"},
 		"new_price":    map[string]interface{}{"amount": "2000", "currency": "JPY"},
 		"changed_at":   now,
-		"effective_at":  now,
+		"effective_at": now,
 	}
 	data, err := json.Marshal(v1Data)
 	if err != nil {
@@ -202,10 +202,10 @@ func TestLoadFromHistory_UpcastsV1PriceChangedEvent(t *testing.T) {
 
 	// Build a v1 PriceChangedEvent (no PriceID, no Policy fields)
 	v1PriceChanged := map[string]interface{}{
-		"contract_id": "test-contract-001",
-		"old_price":   map[string]interface{}{"amount": "1000/1", "currency": "JPY"},
-		"new_price":   map[string]interface{}{"amount": "2000/1", "currency": "JPY"},
-		"changed_at":  now,
+		"contract_id":  "test-contract-001",
+		"old_price":    map[string]interface{}{"amount": "1000/1", "currency": "JPY"},
+		"new_price":    map[string]interface{}{"amount": "2000/1", "currency": "JPY"},
+		"changed_at":   now,
 		"effective_at": now,
 	}
 	v1Data, _ := json.Marshal(v1PriceChanged)
