@@ -26,6 +26,10 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 	r.Register(&ContractExpiredEvent{})
 	r.Register(&CancellationScheduledEvent{})
 	r.Register(&CancellationUnscheduledEvent{})
+	r.Register(&PriceChangeScheduledEvent{})
+	r.Register(&PriceChangeUnscheduledEvent{})
+	r.Register(&PriceOverrideSetEvent{})
+	r.Register(&PriceOverrideClearedEvent{})
 	return r
 }()
 
@@ -34,6 +38,7 @@ type CreateContractCommand struct {
 	IdempotencyKey string
 	AccountID      shared.AccountID
 	PlanID         shared.PlanID
+	PriceID        shared.PriceID
 	ContractType   ContractType
 	BillingCycle   BillingCycle
 	Price          shared.Money
@@ -61,6 +66,7 @@ type ContractAggregate struct {
 	autoRenew         bool
 	cancelAtPeriodEnd bool
 	pendingPriceID    *shared.PriceID
+	priceOverride     *shared.Money
 	metadata          map[string]string
 	createdAt         time.Time
 	updatedAt         time.Time
@@ -122,6 +128,12 @@ func (a *ContractAggregate) CancelAtPeriodEnd() bool { return a.cancelAtPeriodEn
 // PendingPriceID returns the pending price ID to apply at next renewal.
 func (a *ContractAggregate) PendingPriceID() *shared.PriceID { return a.pendingPriceID }
 
+// HasPendingChange returns whether there is a pending price change.
+func (a *ContractAggregate) HasPendingChange() bool { return a.pendingPriceID != nil }
+
+// PriceOverride returns the per-contract price override, if any.
+func (a *ContractAggregate) PriceOverride() *shared.Money { return a.priceOverride }
+
 // GetMetadata returns a copy of the contract metadata.
 func (a *ContractAggregate) GetMetadata() map[string]string {
 	if a.metadata == nil {
@@ -152,6 +164,7 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 		ContractID:   a.contractID,
 		AccountID:    cmd.AccountID,
 		PlanID:       cmd.PlanID,
+		PriceID:      cmd.PriceID,
 		Price:        cmd.Price,
 		BasePrice:    cmd.BasePrice,
 		BillingCycle: cmd.BillingCycle,
@@ -251,19 +264,33 @@ func (a *ContractAggregate) Cancel(reason string, metadata eventstore.EventMetad
 	return a.RaiseEvent(event, metadata)
 }
 
-// ChangePrice changes the contract price.
-func (a *ContractAggregate) ChangePrice(newPrice shared.Money, effectiveAt time.Time, metadata eventstore.EventMetadata) error {
+// ChangePrice changes the contract price using the specified policy.
+// IMMEDIATE changes take effect now; END_OF_TERM defers to next renewal.
+func (a *ContractAggregate) ChangePrice(newPriceID shared.PriceID, policy ChangePolicy, proration *PlanChangeProration, metadata eventstore.EventMetadata) error {
 	if a.status != ContractStatusActive {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot change price: current status is %s", a.status))
 	}
 
+	switch policy {
+	case ChangePolicyImmediate:
+		return a.changePriceImmediate(newPriceID, proration, metadata)
+	case ChangePolicyEndOfTerm:
+		return a.changePriceEndOfTerm(newPriceID, metadata)
+	default:
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("unknown change policy: %s", policy))
+	}
+}
+
+func (a *ContractAggregate) changePriceImmediate(newPriceID shared.PriceID, proration *PlanChangeProration, metadata eventstore.EventMetadata) error {
 	event := &PriceChangedEvent{
-		ContractID:  a.contractID,
-		OldPrice:    a.price,
-		NewPrice:    newPrice,
-		ChangedAt:   a.Clock().Now(),
-		EffectiveAt: effectiveAt,
+		ContractID: a.contractID,
+		OldPriceID: a.priceID,
+		NewPriceID: newPriceID,
+		Policy:     ChangePolicyImmediate,
+		Proration:  proration,
+		ChangedAt:  a.Clock().Now(),
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -272,19 +299,70 @@ func (a *ContractAggregate) ChangePrice(newPrice shared.Money, effectiveAt time.
 	return a.RaiseEvent(event, metadata)
 }
 
-// ChangePlan changes the contract plan.
-func (a *ContractAggregate) ChangePlan(newPlanID shared.PlanID, proration *PlanChangeProration, metadata eventstore.EventMetadata) error {
-	if a.status != ContractStatusActive {
-		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
-			fmt.Sprintf("cannot change plan: current status is %s", a.status))
+func (a *ContractAggregate) changePriceEndOfTerm(newPriceID shared.PriceID, metadata eventstore.EventMetadata) error {
+	event := &PriceChangeScheduledEvent{
+		ContractID:     a.contractID,
+		CurrentPriceID: a.priceID,
+		NewPriceID:     newPriceID,
+		Policy:         ChangePolicyEndOfTerm,
+		ScheduledAt:    a.Clock().Now(),
 	}
 
-	event := &PlanChangedEvent{
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// UnscheduleChange cancels a pending price change.
+func (a *ContractAggregate) UnscheduleChange(reason string, metadata eventstore.EventMetadata) error {
+	if a.pendingPriceID == nil {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"no pending change to cancel")
+	}
+
+	event := &PriceChangeUnscheduledEvent{
+		ContractID:       a.contractID,
+		CancelledPriceID: *a.pendingPriceID,
+		Reason:           reason,
+		UnscheduledAt:    a.Clock().Now(),
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// SetPriceOverride sets a per-contract price override.
+func (a *ContractAggregate) SetPriceOverride(override shared.Money, metadata eventstore.EventMetadata) error {
+	if a.status != ContractStatusActive {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot set price override: current status is %s", a.status))
+	}
+
+	event := &PriceOverrideSetEvent{
 		ContractID: a.contractID,
-		OldPlanID:  a.planID,
-		NewPlanID:  newPlanID,
-		Proration:  proration,
-		ChangedAt:  a.Clock().Now(),
+		Override:   override,
+		SetAt:      a.Clock().Now(),
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// ClearPriceOverride removes the per-contract price override.
+func (a *ContractAggregate) ClearPriceOverride(metadata eventstore.EventMetadata) error {
+	if a.priceOverride == nil {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"no price override to clear")
+	}
+
+	event := &PriceOverrideClearedEvent{
+		ContractID: a.contractID,
+		ClearedAt:  a.Clock().Now(),
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -433,11 +511,6 @@ func (a *ContractAggregate) UnscheduleCancellation(metadata eventstore.EventMeta
 	return a.RaiseEvent(event, metadata)
 }
 
-// SetPendingPriceID sets the pending price ID to apply at next renewal.
-func (a *ContractAggregate) SetPendingPriceID(priceID *shared.PriceID) {
-	a.pendingPriceID = priceID
-}
-
 // expire transitions the contract to expired status.
 func (a *ContractAggregate) expire(metadata eventstore.EventMetadata) error {
 	event := &ContractExpiredEvent{
@@ -466,6 +539,7 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.contractID = e.ContractID
 		a.accountID = e.AccountID
 		a.planID = e.PlanID
+		a.priceID = e.PriceID
 		a.price = e.Price
 		a.basePrice = e.BasePrice
 		a.billingCycle = e.BillingCycle
@@ -500,8 +574,25 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.updatedAt = e.CancelledAt
 
 	case *PriceChangedEvent:
-		a.price = e.NewPrice
+		a.priceID = e.NewPriceID
+		a.pendingPriceID = nil // IMMEDIATE clears pending
 		a.updatedAt = e.ChangedAt
+
+	case *PriceChangeScheduledEvent:
+		a.pendingPriceID = &e.NewPriceID // priceID unchanged
+		a.updatedAt = e.ScheduledAt
+
+	case *PriceChangeUnscheduledEvent:
+		a.pendingPriceID = nil
+		a.updatedAt = e.UnscheduledAt
+
+	case *PriceOverrideSetEvent:
+		a.priceOverride = &e.Override
+		a.updatedAt = e.SetAt
+
+	case *PriceOverrideClearedEvent:
+		a.priceOverride = nil
+		a.updatedAt = e.ClearedAt
 
 	case *PlanChangedEvent:
 		a.planID = e.NewPlanID
@@ -570,6 +661,7 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		AutoRenew:         a.autoRenew,
 		CancelAtPeriodEnd: a.cancelAtPeriodEnd,
 		PendingPriceID:    a.pendingPriceID,
+		PriceOverride:     a.priceOverride,
 		Metadata:          a.metadata,
 		CreatedAt:         a.createdAt,
 		UpdatedAt:         a.updatedAt,
@@ -610,6 +702,7 @@ type contractSnapshotState struct {
 	AutoRenew         bool                     `json:"auto_renew"`
 	CancelAtPeriodEnd bool                     `json:"cancel_at_period_end"`
 	PendingPriceID    *shared.PriceID          `json:"pending_price_id,omitempty"`
+	PriceOverride     *shared.Money            `json:"price_override,omitempty"`
 	Metadata          map[string]string        `json:"metadata,omitempty"`
 	CreatedAt         time.Time                `json:"created_at"`
 	UpdatedAt         time.Time                `json:"updated_at"`
@@ -638,6 +731,7 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.autoRenew = state.AutoRenew
 	a.cancelAtPeriodEnd = state.CancelAtPeriodEnd
 	a.pendingPriceID = state.PendingPriceID
+	a.priceOverride = state.PriceOverride
 	a.metadata = state.Metadata
 	a.createdAt = state.CreatedAt
 	a.updatedAt = state.UpdatedAt

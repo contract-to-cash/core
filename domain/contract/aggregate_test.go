@@ -199,18 +199,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 				return agg
 			},
 			action: func(agg *ContractAggregate) error {
-				return agg.ChangePrice(newTestMoney(), time.Now(), meta)
-			},
-		},
-		{
-			name: "change plan from draft",
-			setup: func() *ContractAggregate {
-				agg := newTestAggregate()
-				_ = agg.Create(newTestCommand(), meta)
-				return agg
-			},
-			action: func(agg *ContractAggregate) error {
-				return agg.ChangePlan(shared.PlanID("plan-002"), nil, meta)
+				return agg.ChangePrice(shared.PriceID("price-new"), ChangePolicyImmediate, nil, meta)
 			},
 		},
 	}
@@ -267,23 +256,22 @@ func TestApplyAllEvents(t *testing.T) {
 		t.Errorf("expected active, got %s", agg.Status())
 	}
 
-	// PriceChangedEvent
-	newPrice := shared.NewMoney(new(big.Rat).SetInt64(2000), shared.CurrencyJPY)
+	// PriceChangedEvent (new format with PriceID)
 	err = agg.Apply(&PriceChangedEvent{
-		ContractID:  shared.ContractID("test-contract-001"),
-		OldPrice:    newTestMoney(),
-		NewPrice:    newPrice,
-		ChangedAt:   now,
-		EffectiveAt: now,
+		ContractID: shared.ContractID("test-contract-001"),
+		OldPriceID: shared.PriceID(""),
+		NewPriceID: shared.PriceID("price-new-001"),
+		Policy:     ChangePolicyImmediate,
+		ChangedAt:  now,
 	})
 	if err != nil {
 		t.Fatalf("Apply PriceChangedEvent failed: %v", err)
 	}
-	if agg.Price().Amount().Cmp(new(big.Rat).SetInt64(2000)) != 0 {
-		t.Error("price was not updated")
+	if agg.PriceID() != shared.PriceID("price-new-001") {
+		t.Errorf("expected priceID price-new-001, got %s", agg.PriceID())
 	}
 
-	// PlanChangedEvent
+	// PlanChangedEvent (legacy — kept for backward compat)
 	err = agg.Apply(&PlanChangedEvent{
 		ContractID: shared.ContractID("test-contract-001"),
 		OldPlanID:  shared.PlanID("plan-001"),
@@ -524,32 +512,12 @@ func TestChangePrice(t *testing.T) {
 	agg := createActiveAggregate(t)
 	meta := newTestMetadata()
 
-	newPrice := shared.NewMoney(new(big.Rat).SetInt64(2000), shared.CurrencyJPY)
-	effectiveAt := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
-
-	if err := agg.ChangePrice(newPrice, effectiveAt, meta); err != nil {
+	newPriceID := shared.PriceID("price-new-001")
+	if err := agg.ChangePrice(newPriceID, ChangePolicyImmediate, nil, meta); err != nil {
 		t.Fatalf("ChangePrice failed: %v", err)
 	}
-	if agg.Price().Amount().Cmp(new(big.Rat).SetInt64(2000)) != 0 {
-		t.Error("price was not updated")
-	}
-}
-
-func TestChangePlan(t *testing.T) {
-	agg := createActiveAggregate(t)
-	meta := newTestMetadata()
-
-	proration := &PlanChangeProration{
-		CreditAmount:     newTestMoney(),
-		ChargeAmount:     newTestMoney(),
-		AdjustmentAmount: shared.NewMoney(new(big.Rat).SetInt64(0), shared.CurrencyJPY),
-		EffectiveDate:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-	}
-	if err := agg.ChangePlan(shared.PlanID("plan-002"), proration, meta); err != nil {
-		t.Fatalf("ChangePlan failed: %v", err)
-	}
-	if agg.PlanID() != shared.PlanID("plan-002") {
-		t.Errorf("expected plan-002, got %s", agg.PlanID())
+	if agg.PriceID() != newPriceID {
+		t.Errorf("expected priceID %s, got %s", newPriceID, agg.PriceID())
 	}
 }
 
@@ -854,7 +822,9 @@ func TestRenew_WithPendingPriceID(t *testing.T) {
 	meta := newTestMetadata()
 
 	priceID := shared.PriceID("price-new-001")
-	agg.SetPendingPriceID(&priceID)
+	if err := agg.ChangePrice(priceID, ChangePolicyEndOfTerm, nil, meta); err != nil {
+		t.Fatalf("ChangePrice END_OF_TERM failed: %v", err)
+	}
 
 	if err := agg.Renew(meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
@@ -869,9 +839,9 @@ func TestRenew_WithPendingPriceID(t *testing.T) {
 
 	// Verify the event has PriceChanged=true
 	events := agg.UncommittedEvents()
-	// Events: Create + Activate + Renew = 3
-	if len(events) < 3 {
-		t.Fatalf("expected at least 3 events, got %d", len(events))
+	// Events: Create + Activate + PriceChangeScheduled + Renew = 4
+	if len(events) < 4 {
+		t.Fatalf("expected at least 4 events, got %d", len(events))
 	}
 	lastEvent := events[len(events)-1]
 	if lastEvent.Type != EventTypeContractRenewed {

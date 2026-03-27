@@ -23,6 +23,10 @@ const (
 	EventTypeContractExpired         eventstore.EventType = "contract.expired"
 	EventTypeCancellationScheduled   eventstore.EventType = "contract.cancellation_scheduled"
 	EventTypeCancellationUnscheduled eventstore.EventType = "contract.cancellation_unscheduled"
+	EventTypePriceChangeScheduled    eventstore.EventType = "contract.price_change_scheduled"
+	EventTypePriceChangeUnscheduled  eventstore.EventType = "contract.price_change_unscheduled"
+	EventTypePriceOverrideSet        eventstore.EventType = "contract.price_override_set"
+	EventTypePriceOverrideCleared    eventstore.EventType = "contract.price_override_cleared"
 )
 
 // ContractCreatedEvent is raised when a new contract is created.
@@ -30,6 +34,7 @@ type ContractCreatedEvent struct {
 	ContractID   shared.ContractID `json:"contract_id"`
 	AccountID    shared.AccountID  `json:"account_id"`
 	PlanID       shared.PlanID     `json:"plan_id"`
+	PriceID      shared.PriceID    `json:"price_id,omitempty"`
 	Price        shared.Money      `json:"price"`
 	BillingCycle BillingCycle      `json:"billing_cycle"`
 	ContractType ContractType      `json:"contract_type"`
@@ -77,16 +82,67 @@ type ContractCancelledEvent struct {
 
 func (e *ContractCancelledEvent) EventType() eventstore.EventType { return EventTypeContractCancelled }
 
-// PriceChangedEvent is raised when a contract's price changes.
+// PriceChangedEvent is raised when a contract's price changes immediately.
 type PriceChangedEvent struct {
-	ContractID  shared.ContractID `json:"contract_id"`
-	OldPrice    shared.Money      `json:"old_price"`
-	NewPrice    shared.Money      `json:"new_price"`
-	ChangedAt   time.Time         `json:"changed_at"`
-	EffectiveAt time.Time         `json:"effective_at"`
+	ContractID shared.ContractID    `json:"contract_id"`
+	OldPriceID shared.PriceID       `json:"old_price_id"`
+	NewPriceID shared.PriceID       `json:"new_price_id"`
+	Policy     ChangePolicy         `json:"policy"`
+	Proration  *PlanChangeProration `json:"proration,omitempty"`
+	ChangedAt  time.Time            `json:"changed_at"`
+	// Legacy fields kept for backward compatibility with historical events.
+	OldPrice    shared.Money `json:"old_price"`
+	NewPrice    shared.Money `json:"new_price"`
+	EffectiveAt time.Time    `json:"effective_at"`
 }
 
 func (e *PriceChangedEvent) EventType() eventstore.EventType { return EventTypePriceChanged }
+
+// PriceChangeScheduledEvent is raised when a price change is deferred to next renewal.
+type PriceChangeScheduledEvent struct {
+	ContractID     shared.ContractID `json:"contract_id"`
+	CurrentPriceID shared.PriceID    `json:"current_price_id"`
+	NewPriceID     shared.PriceID    `json:"new_price_id"`
+	Policy         ChangePolicy      `json:"policy"`
+	ScheduledAt    time.Time         `json:"scheduled_at"`
+}
+
+func (e *PriceChangeScheduledEvent) EventType() eventstore.EventType {
+	return EventTypePriceChangeScheduled
+}
+
+// PriceChangeUnscheduledEvent is raised when a pending price change is cancelled.
+type PriceChangeUnscheduledEvent struct {
+	ContractID       shared.ContractID `json:"contract_id"`
+	CancelledPriceID shared.PriceID    `json:"cancelled_price_id"`
+	Reason           string            `json:"reason"`
+	UnscheduledAt    time.Time         `json:"unscheduled_at"`
+}
+
+func (e *PriceChangeUnscheduledEvent) EventType() eventstore.EventType {
+	return EventTypePriceChangeUnscheduled
+}
+
+// PriceOverrideSetEvent is raised when a per-contract price override is set.
+type PriceOverrideSetEvent struct {
+	ContractID shared.ContractID `json:"contract_id"`
+	Override   shared.Money      `json:"override"`
+	SetAt      time.Time         `json:"set_at"`
+}
+
+func (e *PriceOverrideSetEvent) EventType() eventstore.EventType {
+	return EventTypePriceOverrideSet
+}
+
+// PriceOverrideClearedEvent is raised when a per-contract price override is cleared.
+type PriceOverrideClearedEvent struct {
+	ContractID shared.ContractID `json:"contract_id"`
+	ClearedAt  time.Time         `json:"cleared_at"`
+}
+
+func (e *PriceOverrideClearedEvent) EventType() eventstore.EventType {
+	return EventTypePriceOverrideCleared
+}
 
 // PlanChangedEvent is raised when a contract's plan changes.
 type PlanChangedEvent struct {
