@@ -153,7 +153,7 @@ func main() {
 	gateway.failNext = true            // simulate payment failure
 
 	agg, _ = contractRepo.FindByID(ctx, contractID)
-	must("renew", agg.Renew(metadata))
+	must("renew", agg.Renew(agg.GetBillingCycle(), metadata))
 	must("save", contractRepo.Save(ctx, agg))
 
 	inv2, _ := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())

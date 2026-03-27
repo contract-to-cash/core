@@ -166,7 +166,7 @@ func main() {
 	// ── 8. Generate next invoice - credits applied FIFO ──
 	clock.Advance(15 * 24 * time.Hour) // July 1
 	agg, _ = contractRepo.FindByID(ctx, contractID)
-	must("renew", agg.Renew(metadata))
+	must("renew", agg.Renew(agg.GetBillingCycle(), metadata))
 	must("save", contractRepo.Save(ctx, agg))
 	inv2, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {

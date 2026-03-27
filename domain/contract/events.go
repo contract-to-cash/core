@@ -164,13 +164,15 @@ func (e *PaymentMethodChangedEvent) EventType() eventstore.EventType {
 
 // ContractRenewedEvent is raised when a contract is renewed for a new billing period.
 type ContractRenewedEvent struct {
-	ContractID   shared.ContractID `json:"contract_id"`
-	OldPeriod    shared.DateRange  `json:"old_period"`
-	NewPeriod    shared.DateRange  `json:"new_period"`
-	OldPriceID   shared.PriceID    `json:"old_price_id"`
-	NewPriceID   shared.PriceID    `json:"new_price_id"`
-	PriceChanged bool              `json:"price_changed"`
-	RenewedAt    time.Time         `json:"renewed_at"`
+	ContractID      shared.ContractID `json:"contract_id"`
+	OldPeriod       shared.DateRange  `json:"old_period"`
+	NewPeriod       shared.DateRange  `json:"new_period"`
+	OldPriceID      shared.PriceID    `json:"old_price_id"`
+	NewPriceID      shared.PriceID    `json:"new_price_id"`
+	PriceChanged    bool              `json:"price_changed"`
+	OldBillingCycle BillingCycle      `json:"old_billing_cycle,omitempty"`
+	NewBillingCycle BillingCycle      `json:"new_billing_cycle,omitempty"`
+	RenewedAt       time.Time         `json:"renewed_at"`
 }
 
 func (e *ContractRenewedEvent) EventType() eventstore.EventType { return EventTypeContractRenewed }

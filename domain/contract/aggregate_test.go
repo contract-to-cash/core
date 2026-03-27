@@ -798,7 +798,7 @@ func TestRenew_HappyPath(t *testing.T) {
 
 	oldPeriod := agg.CurrentPeriod()
 
-	if err := agg.Renew(meta); err != nil {
+	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -826,7 +826,7 @@ func TestRenew_WithPendingPriceID(t *testing.T) {
 		t.Fatalf("ChangePrice END_OF_TERM failed: %v", err)
 	}
 
-	if err := agg.Renew(meta); err != nil {
+	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -868,7 +868,7 @@ func TestRenew_AutoRenewFalse_Expires(t *testing.T) {
 	agg := createActiveAggregate(t) // autoRenew defaults to false
 	meta := newTestMetadata()
 
-	if err := agg.Renew(meta); err != nil {
+	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -885,7 +885,7 @@ func TestRenew_CancelAtPeriodEnd_Cancels(t *testing.T) {
 		t.Fatalf("ScheduleCancellation failed: %v", err)
 	}
 
-	if err := agg.Renew(meta); err != nil {
+	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -933,7 +933,7 @@ func TestRenew_NotActive_Fails(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			agg := tt.setup()
-			err := agg.Renew(meta)
+			err := agg.Renew(agg.GetBillingCycle(), meta)
 			if err == nil {
 				t.Fatal("expected error for renew from non-active state, got nil")
 			}
@@ -1152,7 +1152,7 @@ func TestUnscheduleCancellation_ThenRenew_Renews(t *testing.T) {
 	}
 
 	oldPeriod := agg.CurrentPeriod()
-	if err := agg.Renew(meta); err != nil {
+	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -1305,7 +1305,7 @@ func TestRenew_CancelAtPeriodEnd_ResetsCancelFlag(t *testing.T) {
 	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
 		t.Fatalf("ScheduleCancellation failed: %v", err)
 	}
-	if err := agg.Renew(meta); err != nil {
+	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
