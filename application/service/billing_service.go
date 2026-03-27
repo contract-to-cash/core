@@ -12,12 +12,14 @@ import (
 	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/pricing"
+	"github.com/contract-to-cash/core/domain/product"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/domain/usage"
 	"github.com/contract-to-cash/core/plugin"
 )
 
 // PlanRepository provides access to pricing plans.
+// Deprecated: Use pricing.PriceRepository and product.Repository instead.
 type PlanRepository interface {
 	FindByID(ctx context.Context, id shared.PlanID) (*pricing.Plan, error)
 }
@@ -36,7 +38,9 @@ type BillingService struct {
 	usageRepo    usage.Repository
 	creditRepo   credit.Repository
 	creditConfig credit.CreditConfig
-	planRepo     PlanRepository
+	planRepo     PlanRepository          // Deprecated: kept for backward compatibility
+	priceRepo    pricing.PriceRepository // New: replaces planRepo for price lookups
+	productRepo  product.Repository      // New: for product/usage metric lookups
 	registry     *plugin.Registry
 	config       BillingConfig
 	clock        shared.Clock
@@ -65,6 +69,18 @@ func NewBillingService(
 		config:       config,
 		clock:        clock,
 	}
+}
+
+// WithPriceRepository sets the PriceRepository on the BillingService.
+func (s *BillingService) WithPriceRepository(repo pricing.PriceRepository) *BillingService {
+	s.priceRepo = repo
+	return s
+}
+
+// WithProductRepository sets the Product Repository on the BillingService.
+func (s *BillingService) WithProductRepository(repo product.Repository) *BillingService {
+	s.productRepo = repo
+	return s
 }
 
 // billableStatuses defines which contract statuses allow invoice generation.
