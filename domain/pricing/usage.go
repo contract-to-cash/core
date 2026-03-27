@@ -14,7 +14,11 @@ type UsagePrice struct {
 }
 
 // CalculatePrice calculates usage * UnitPrice, clamped by Minimum and Maximum.
+// Negative usage is treated as zero.
 func (p UsagePrice) CalculatePrice(usage int64) shared.Money {
+	if usage <= 0 {
+		return shared.Zero(p.UnitPrice.Currency())
+	}
 	factor := new(big.Rat).SetInt64(usage)
 	result := p.UnitPrice.Multiply(factor)
 

@@ -15,7 +15,10 @@ func TestNewUsageRecord(t *testing.T) {
 	ts := time.Now().UTC()
 	idempotencyKey := "idem_abc123"
 
-	r := NewUsageRecord(id, contractID, metricName, quantity, ts, idempotencyKey)
+	r, err := NewUsageRecord(id, contractID, metricName, quantity, ts, idempotencyKey)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if r.ID() != id {
 		t.Errorf("expected id %s, got %s", id, r.ID())
@@ -37,6 +40,37 @@ func TestNewUsageRecord(t *testing.T) {
 	}
 	if r.Metadata() == nil {
 		t.Error("expected metadata to be initialized")
+	}
+}
+
+func TestNewUsageRecord_NegativeQuantity(t *testing.T) {
+	_, err := NewUsageRecord(
+		shared.NewUsageRecordID(),
+		shared.NewContractID(),
+		"api_calls",
+		-1,
+		time.Now().UTC(),
+		"idem_neg",
+	)
+	if err == nil {
+		t.Fatal("expected error for negative quantity, got nil")
+	}
+}
+
+func TestNewUsageRecord_ZeroQuantity(t *testing.T) {
+	r, err := NewUsageRecord(
+		shared.NewUsageRecordID(),
+		shared.NewContractID(),
+		"api_calls",
+		0,
+		time.Now().UTC(),
+		"idem_zero",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error for zero quantity: %v", err)
+	}
+	if r.Quantity() != 0 {
+		t.Errorf("expected quantity 0, got %d", r.Quantity())
 	}
 }
 

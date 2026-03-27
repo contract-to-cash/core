@@ -51,6 +51,34 @@ func TestProduct_AddUsageMetric(t *testing.T) {
 	}
 }
 
+func TestProduct_AddFeature_Dedup(t *testing.T) {
+	p := NewProduct("Test", "")
+	p.AddFeature(Feature{Name: "SSO", Included: false})
+	p.AddFeature(Feature{Name: "SSO", Included: true})
+
+	features := p.Features()
+	if len(features) != 1 {
+		t.Fatalf("expected 1 feature after dedup, got %d", len(features))
+	}
+	if !features[0].Included {
+		t.Error("expected SSO feature to be updated to Included=true")
+	}
+}
+
+func TestProduct_AddUsageMetric_Dedup(t *testing.T) {
+	p := NewProduct("Test", "")
+	p.AddUsageMetric(UsageMetric{Name: "api_calls", IncludedQuantity: 1000})
+	p.AddUsageMetric(UsageMetric{Name: "api_calls", IncludedQuantity: 5000})
+
+	metrics := p.UsageMetrics()
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 metric after dedup, got %d", len(metrics))
+	}
+	if metrics[0].IncludedQuantity != 5000 {
+		t.Errorf("expected updated IncludedQuantity 5000, got %d", metrics[0].IncludedQuantity)
+	}
+}
+
 func TestProduct_SetMetadata(t *testing.T) {
 	p := NewProduct("Test", "")
 	p.SetMetadata("tier", "enterprise")

@@ -11,6 +11,15 @@ func jpy(amount int64) shared.Money {
 	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyJPY)
 }
 
+func TestNewLineItem_NegativeQuantity(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for negative quantity, got nil")
+		}
+	}()
+	NewLineItem("li-1", "Test", -1, jpy(1000), jpy(1000), nil)
+}
+
 func TestLineItem_WithPriceID(t *testing.T) {
 	priceID := shared.PriceID("price-001")
 	li := NewLineItem("li-1", "Monthly subscription", 1, jpy(1000), jpy(1000), nil,

@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/contract-to-cash/core/domain/shared"
@@ -18,6 +19,7 @@ type UsageRecord struct {
 }
 
 // NewUsageRecord creates a new UsageRecord.
+// Returns an error if quantity is negative.
 func NewUsageRecord(
 	id shared.UsageRecordID,
 	contractID shared.ContractID,
@@ -25,7 +27,11 @@ func NewUsageRecord(
 	quantity int64,
 	timestamp time.Time,
 	idempotencyKey string,
-) *UsageRecord {
+) (*UsageRecord, error) {
+	if quantity < 0 {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("usage quantity must not be negative: %d", quantity))
+	}
 	return &UsageRecord{
 		id:             id,
 		contractID:     contractID,
@@ -34,7 +40,7 @@ func NewUsageRecord(
 		timestamp:      timestamp,
 		metadata:       make(map[string]string),
 		idempotencyKey: idempotencyKey,
-	}
+	}, nil
 }
 
 // --- Getters ---
