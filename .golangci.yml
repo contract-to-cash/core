@@ -10,9 +10,6 @@ linters:
     - staticcheck
     - unused
     - ineffassign
-    - gosimple
-    - gofmt
-    - goimports
     - misspell
     - nolintlint
     - bodyclose
@@ -30,6 +27,11 @@ linters:
       settings:
         shadow:
           strict: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
 
 issues:
   max-issues-per-linter: 50
