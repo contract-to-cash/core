@@ -111,8 +111,7 @@ Maps event types to Go structs for deserialization:
 ```go
 registry := eventstore.NewEventRegistry()
 
-registry.Register(event DomainEvent) error           // Register event type
-registry.Serialize(event DomainEvent) (json.RawMessage, error)
+registry.Register(event DomainEvent)                  // Register event type
 registry.Deserialize(eventType EventType, data json.RawMessage) (DomainEvent, error)
 ```
 
@@ -122,9 +121,8 @@ Handle event schema evolution:
 
 ```go
 type Upcaster interface {
-    SourceVersion() int
-    TargetVersion() int
-    Upcast(data json.RawMessage) (json.RawMessage, error)
+    CanUpcast(eventType EventType, fromVersion int) bool
+    Upcast(event Event) (Event, error)
 }
 ```
 
@@ -144,6 +142,10 @@ type Upcaster interface {
 | `contract.price_change_unscheduled` | `EventTypePriceChangeUnscheduled` |
 | `contract.trial_started` | `EventTypeTrialStarted` |
 | `contract.trial_ended` | `EventTypeTrialEnded` |
+| `contract.plan_changed` | `EventTypePlanChanged` |
+| `contract.payment_method_changed` | `EventTypePaymentMethodChanged` |
+| `contract.cancellation_scheduled` | `EventTypeCancellationScheduled` |
+| `contract.cancellation_unscheduled` | `EventTypeCancellationUnscheduled` |
 
 ## In-Memory Implementation
 

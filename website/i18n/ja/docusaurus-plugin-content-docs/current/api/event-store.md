@@ -97,8 +97,7 @@ agg.Clock() Clock
 ```go
 registry := eventstore.NewEventRegistry()
 
-registry.Register(event DomainEvent) error
-registry.Serialize(event DomainEvent) (json.RawMessage, error)
+registry.Register(event DomainEvent)
 registry.Deserialize(eventType EventType, data json.RawMessage) (DomainEvent, error)
 ```
 
@@ -118,6 +117,10 @@ registry.Deserialize(eventType EventType, data json.RawMessage) (DomainEvent, er
 | `contract.price_change_unscheduled` | `EventTypePriceChangeUnscheduled` |
 | `contract.trial_started` | `EventTypeTrialStarted` |
 | `contract.trial_ended` | `EventTypeTrialEnded` |
+| `contract.plan_changed` | `EventTypePlanChanged` |
+| `contract.payment_method_changed` | `EventTypePaymentMethodChanged` |
+| `contract.cancellation_scheduled` | `EventTypeCancellationScheduled` |
+| `contract.cancellation_unscheduled` | `EventTypeCancellationUnscheduled` |
 
 ## インメモリ実装
 

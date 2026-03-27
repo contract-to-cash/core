@@ -56,11 +56,11 @@ const (
 The simplest payment flow — charge immediately:
 
 ```go
+pmID := "pm-visa-1234"
 resp, err := gateway.Charge(ctx, &port.ChargeRequest{
     CustomerID:      "cust-001",
     Amount:          invoiceTotal,
-    Currency:        shared.CurrencyJPY,
-    PaymentMethodID: "pm-visa-1234",
+    PaymentMethodID: &pmID,
     IdempotencyKey:  "charge-inv-001",
     Metadata:        map[string]string{"invoice_id": "inv-001"},
 })
@@ -72,10 +72,11 @@ For payment-gated provisioning where you need to confirm the charge before provi
 
 ```go
 // 1. Authorize (reserve funds)
+pmID := "pm-visa-1234"
 authResp, _ := gateway.Authorize(ctx, &port.AuthorizeRequest{
     CustomerID:      "cust-001",
     Amount:          invoiceTotal,
-    PaymentMethodID: "pm-visa-1234",
+    PaymentMethodID: &pmID,
     IdempotencyKey:  "auth-inv-001",
 })
 
@@ -84,7 +85,7 @@ authResp, _ := gateway.Authorize(ctx, &port.AuthorizeRequest{
 // 3. Capture (finalize the charge)
 captureResp, _ := gateway.Capture(ctx, &port.CaptureRequest{
     AuthorizationID: authResp.AuthorizationID,
-    Amount:          invoiceTotal, // Can be less for partial capture
+    Amount:          &invoiceTotal, // Can be less for partial capture
 })
 ```
 

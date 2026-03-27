@@ -23,12 +23,10 @@ type Config map[string]interface{}
 | Constant | Value | Use Case |
 |----------|-------|----------|
 | `PriorityHighest` | 0 | Audit logging, validation |
-| `PriorityVeryHigh` | 100 | Pre-processing |
-| `PriorityHigh` | 200 | Core business logic |
-| `PriorityNormal` | 300 | Default plugins |
-| `PriorityLow` | 400 | Post-processing (tax) |
-| `PriorityVeryLow` | 500 | Cleanup |
-| `PriorityLowest` | 1000 | Last resort |
+| `PriorityHigh` | 100 | Pre-processing, core business logic |
+| `PriorityNormal` | 500 | Default plugins |
+| `PriorityLow` | 900 | Post-processing (tax) |
+| `PriorityLowest` | 1000 | Last resort, cleanup |
 
 ---
 

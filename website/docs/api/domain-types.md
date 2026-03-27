@@ -83,7 +83,12 @@ type ErrorCode string
 
 const (
     ErrCodeInvalidStateTransition ErrorCode = "invalid_state_transition"
-    ErrCodeBusinessRule           ErrorCode = "business_rule"
+    ErrCodeBusinessRule           ErrorCode = "business_rule_violation"
+    ErrCodeValidation             ErrorCode = "validation_error"
+    ErrCodeNotFound               ErrorCode = "not_found"
+    ErrCodeConflict               ErrorCode = "conflict"
+    ErrCodeDuplicateRequest       ErrorCode = "duplicate_request"
+    ErrCodeVersionConflict        ErrorCode = "version_conflict"
     ErrCodeCurrencyMismatch       ErrorCode = "currency_mismatch"
     ErrCodeInvalidDateRange       ErrorCode = "invalid_date_range"
     ErrCodeUnknownEvent           ErrorCode = "unknown_event"
@@ -115,30 +120,29 @@ agg := contract.NewContractAggregate(contractID, clock)
 | Method | From Status | To Status |
 |--------|------------|-----------|
 | `Create(cmd, metadata)` | (new) | draft |
-| `Activate(metadata)` | draft | active |
+| `Activate(metadata)` | draft, trialing | active |
 | `StartTrial(config, metadata)` | draft | trialing |
 | `EndTrial(converted, metadata)` | trialing | active/cancelled |
-| `Suspend(config, metadata)` | active | suspended |
+| `Suspend(config, metadata)` | active, past_due | suspended |
 | `Resume(metadata)` | suspended | active |
-| `Cancel(reason, metadata)` | active/suspended | cancelled |
+| `Cancel(reason, metadata)` | draft, trialing, active, suspended, past_due | cancelled |
 | `Renew(metadata)` | active | active (new period) |
 | `ChangePrice(priceID, policy, proration, metadata)` | active | active |
 | `UnscheduleChange(reason, metadata)` | active (has pending) | active |
-| `SetPriceOverride(override, metadata)` | active | active |
-| `ClearPriceOverride(metadata)` | active | active |
 
 #### CreateContractCommand
 
 ```go
 type CreateContractCommand struct {
-    AccountID    shared.AccountID
-    PlanID       shared.PlanID
-    PriceID      shared.PriceID
-    ContractType ContractType
-    BillingCycle BillingCycle
-    Price        shared.Money
-    BasePrice    shared.Money
-    AutoRenew    bool
+    AccountID      shared.AccountID
+    PlanID         shared.PlanID
+    PriceID        shared.PriceID
+    ContractType   ContractType
+    BillingCycle   BillingCycle
+    Price          shared.Money
+    BasePrice      shared.Money
+    AutoRenew      bool
+    IdempotencyKey string
 }
 ```
 
@@ -149,6 +153,8 @@ type SuspensionConfiguration struct {
     BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
     ResumeDate      *time.Time
     Reason          string
+    SuspendedAt     time.Time
+    ExtendContract  bool
 }
 ```
 
@@ -170,7 +176,6 @@ agg.Status() ContractStatus
 agg.PriceID() shared.PriceID
 agg.PendingPriceID() *shared.PriceID
 agg.HasPendingChange() bool
-agg.PriceOverride() *shared.Money
 agg.Price() shared.Money
 agg.CurrentPeriod() shared.DateRange
 agg.GetContractType() ContractType
@@ -216,7 +221,7 @@ import "github.com/contract-to-cash/core/domain/invoice"
 ### Construction
 
 ```go
-inv := invoice.NewInvoice(id, accountID, contractID,
+inv := invoice.NewInvoice(id, accountID, contractID, subtotal, discountAmount, taxAmount,
     invoice.WithLineItems(items),
     invoice.WithBillingPeriod(period),
     invoice.WithDueDate(dueDate),
@@ -232,7 +237,7 @@ inv := invoice.NewInvoice(id, accountID, contractID,
 
 ```go
 inv.Finalize() error           // draft → finalized
-inv.ValidatePayment() error    // finalized → (validates for payment)
+inv.ValidatePayment(amount shared.Money) error    // finalized → (validates payment amount)
 inv.ID() shared.InvoiceID
 inv.Subtotal() shared.Money
 inv.DiscountAmount() shared.Money
@@ -257,7 +262,7 @@ import "github.com/contract-to-cash/core/domain/payment"
 
 **Status constants**: `PaymentStatusPending`, `PaymentStatusCompleted`, `PaymentStatusFailed`, `PaymentStatusPartiallyRefunded`, `PaymentStatusRefunded`, `PaymentStatusChargedBack`
 
-**Method constants**: `PaymentMethodCreditCard`, `PaymentMethodBankTransfer`, `PaymentMethodDirectDebit`, `PaymentMethodConvenienceStore`, `PaymentMethodCarrier`
+**Method constants**: `PaymentMethodCreditCard`, `PaymentMethodBankTransfer`, `PaymentMethodDirectDebit`, `PaymentMethodConvenience`, `PaymentMethodCarrier`
 
 ### Methods
 
@@ -265,7 +270,7 @@ import "github.com/contract-to-cash/core/domain/payment"
 payment.Complete() error                         // pending → completed
 payment.Fail(reason string) error                // pending → failed
 payment.MarkRefunded() error                     // completed → refunded
-payment.MarkPartiallyRefunded(amount Money) error
+payment.MarkPartiallyRefunded() error
 
 payment.ID() shared.PaymentID
 payment.InvoiceID() shared.InvoiceID
@@ -316,10 +321,10 @@ type PricingModel interface {
 }
 
 // Flat pricing (nil PricingModel on Price)
-// Tiered pricing
-pricing.NewTieredPrice(tiers []Tier)
-// Volume pricing
-pricing.NewVolumePrice(tiers []Tier)
+// Tiered pricing (graduated — each tier priced independently)
+pricing.TieredPrice{Tiers: []pricing.PriceTier{...}, Mode: pricing.TieredPricingGraduated}
+// Volume pricing (all units at the tier they fall into)
+pricing.TieredPrice{Tiers: []pricing.PriceTier{...}, Mode: pricing.TieredPricingVolume}
 ```
 
 ---
@@ -347,7 +352,7 @@ import "github.com/contract-to-cash/core/domain/usage"
 ```
 
 ```go
-record := usage.NewUsageRecord(contractID, metricName, quantity, timestamp, idempotencyKey)
+record, err := usage.NewUsageRecord(id, contractID, metricName, quantity, timestamp, idempotencyKey)
 
 type UsageSummary struct {
     ContractID shared.ContractID

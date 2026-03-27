@@ -24,13 +24,11 @@ type Plugin interface {
 
 ```go
 const (
-    PriorityHighest  = 0
-    PriorityVeryHigh = 100
-    PriorityHigh     = 200
-    PriorityNormal   = 300
-    PriorityLow      = 400
-    PriorityVeryLow  = 500
-    PriorityLowest   = 1000
+    PriorityHighest = 0
+    PriorityHigh    = 100
+    PriorityNormal  = 500
+    PriorityLow     = 900
+    PriorityLowest  = 1000
 )
 ```
 

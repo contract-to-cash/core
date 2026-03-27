@@ -83,10 +83,15 @@ type ErrorCode string
 
 const (
     ErrCodeInvalidStateTransition ErrorCode = "invalid_state_transition"
-    ErrCodeBusinessRule           ErrorCode = "business_rule"
+    ErrCodeBusinessRule           ErrorCode = "business_rule_violation"
     ErrCodeCurrencyMismatch       ErrorCode = "currency_mismatch"
     ErrCodeInvalidDateRange       ErrorCode = "invalid_date_range"
     ErrCodeUnknownEvent           ErrorCode = "unknown_event"
+    ErrCodeValidation             ErrorCode = "validation_error"
+    ErrCodeNotFound               ErrorCode = "not_found"
+    ErrCodeConflict               ErrorCode = "conflict"
+    ErrCodeDuplicateRequest       ErrorCode = "duplicate_request"
+    ErrCodeVersionConflict        ErrorCode = "version_conflict"
 )
 
 shared.NewDomainError(code ErrorCode, message string) error
@@ -115,17 +120,15 @@ agg := contract.NewContractAggregate(contractID, clock)
 | メソッド | 遷移元 | 遷移先 |
 |---------|-------|-------|
 | `Create(cmd, metadata)` | (新規) | draft |
-| `Activate(metadata)` | draft | active |
+| `Activate(metadata)` | draft, trialing | active |
 | `StartTrial(config, metadata)` | draft | trialing |
 | `EndTrial(converted, metadata)` | trialing | active/cancelled |
-| `Suspend(config, metadata)` | active | suspended |
+| `Suspend(config, metadata)` | active, past_due | suspended |
 | `Resume(metadata)` | suspended | active |
-| `Cancel(reason, metadata)` | active/suspended | cancelled |
+| `Cancel(reason, metadata)` | draft, trialing, active, suspended, past_due | cancelled |
 | `Renew(metadata)` | active | active（新期間） |
 | `ChangePrice(priceID, policy, proration, metadata)` | active | active |
 | `UnscheduleChange(reason, metadata)` | active（保留あり） | active |
-| `SetPriceOverride(override, metadata)` | active | active |
-| `ClearPriceOverride(metadata)` | active | active |
 
 #### CreateContractCommand
 
@@ -138,7 +141,8 @@ type CreateContractCommand struct {
     BillingCycle BillingCycle
     Price        shared.Money
     BasePrice    shared.Money
-    AutoRenew    bool
+    AutoRenew      bool
+    IdempotencyKey string
 }
 ```
 
@@ -149,6 +153,8 @@ type SuspensionConfiguration struct {
     BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
     ResumeDate      *time.Time
     Reason          string
+    SuspendedAt     time.Time
+    ExtendContract  bool
 }
 ```
 
@@ -170,7 +176,6 @@ agg.Status() ContractStatus
 agg.PriceID() shared.PriceID
 agg.PendingPriceID() *shared.PriceID
 agg.HasPendingChange() bool
-agg.PriceOverride() *shared.Money
 agg.Price() shared.Money
 agg.CurrentPeriod() shared.DateRange
 agg.GetContractType() ContractType
@@ -216,7 +221,7 @@ import "github.com/contract-to-cash/core/domain/invoice"
 ### 生成
 
 ```go
-inv := invoice.NewInvoice(id, accountID, contractID,
+inv := invoice.NewInvoice(id, accountID, contractID, subtotal, discountAmount, taxAmount,
     invoice.WithLineItems(items),
     invoice.WithBillingPeriod(period),
     invoice.WithDueDate(dueDate),
@@ -232,7 +237,7 @@ inv := invoice.NewInvoice(id, accountID, contractID,
 
 ```go
 inv.Finalize() error           // draft → finalized
-inv.ValidatePayment() error    // finalized → （決済バリデーション）
+inv.ValidatePayment(amount shared.Money) error    // finalized → （決済バリデーション）
 inv.ID() shared.InvoiceID
 inv.Subtotal() shared.Money
 inv.DiscountAmount() shared.Money
@@ -263,7 +268,7 @@ import "github.com/contract-to-cash/core/domain/payment"
 payment.Complete() error                         // pending → completed
 payment.Fail(reason string) error                // pending → failed
 payment.MarkRefunded() error                     // completed → refunded
-payment.MarkPartiallyRefunded(amount Money) error
+payment.MarkPartiallyRefunded() error
 
 payment.ID() shared.PaymentID
 payment.InvoiceID() shared.InvoiceID
@@ -314,10 +319,8 @@ type PricingModel interface {
 }
 
 // 定額（PriceのPricingModelがnil）
-// 段階制
-pricing.NewTieredPrice(tiers []Tier)
-// ボリューム制
-pricing.NewVolumePrice(tiers []Tier)
+// 段階制 / ボリューム制
+TieredPrice{Tiers: []pricing.PriceTier{...}, Mode: ...}
 ```
 
 ---
@@ -345,7 +348,7 @@ import "github.com/contract-to-cash/core/domain/usage"
 ```
 
 ```go
-record := usage.NewUsageRecord(contractID, metricName, quantity, timestamp, idempotencyKey)
+record, err := usage.NewUsageRecord(id, contractID, metricName, quantity, timestamp, idempotencyKey)
 
 type UsageSummary struct {
     ContractID shared.ContractID

@@ -23,11 +23,9 @@ type Config map[string]interface{}
 | 定数 | 値 | ユースケース |
 |-----|-----|-----------|
 | `PriorityHighest` | 0 | 監査ログ、バリデーション |
-| `PriorityVeryHigh` | 100 | 前処理 |
-| `PriorityHigh` | 200 | コアビジネスロジック |
-| `PriorityNormal` | 300 | デフォルトプラグイン |
-| `PriorityLow` | 400 | 後処理（税） |
-| `PriorityVeryLow` | 500 | クリーンアップ |
+| `PriorityHigh` | 100 | コアビジネスロジック |
+| `PriorityNormal` | 500 | デフォルトプラグイン |
+| `PriorityLow` | 900 | 後処理（税） |
 | `PriorityLowest` | 1000 | 最終手段 |
 
 ---

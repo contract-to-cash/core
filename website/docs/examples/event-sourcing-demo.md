@@ -31,7 +31,7 @@ queryService := query.NewTemporalQueryService(eventStore, clock)
 
 // Time travel to any past point
 historical, _ := queryService.GetContractAsOf(ctx, contractID, may1)
-// Status: active, Price: ¥3,000 (before the price change)
+// Status: active, Price: ¥5,000 (after the price change on May 1)
 ```
 
 ### Snapshot Recovery

@@ -31,7 +31,7 @@ queryService := query.NewTemporalQueryService(eventStore, clock)
 
 // 過去の任意の時点に時間旅行
 historical, _ := queryService.GetContractAsOf(ctx, contractID, may1)
-// Status: active, Price: ¥3,000（価格変更前）
+// Status: active, Price: ¥5,000（5月1日の価格変更後）
 ```
 
 ### スナップショット復元

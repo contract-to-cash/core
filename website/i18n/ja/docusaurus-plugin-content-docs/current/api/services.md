@@ -60,7 +60,7 @@ paymentService := service.NewPaymentService(
     paymentRepo,   // payment.Repository
     invoiceRepo,   // invoice.Repository
     contractRepo,  // contract.Repository
-    routingConfig, // *RoutingConfig（オプション）
+    customerGateway, // port.CustomerGateway（オプション、フォールバック解決用）
     eventStore,    // eventstore.Store
     registry,      // *plugin.Registry
     clock,         // shared.Clock
@@ -75,6 +75,7 @@ type ProcessPaymentInput struct {
     Amount          shared.Money
     Currency        shared.Currency
     IdempotencyKey  string       // 重複防止のため必須
+    Metadata        map[string]string
 }
 
 func (s *PaymentService) ProcessPayment(

@@ -56,11 +56,11 @@ const (
 最もシンプルな決済フロー — 即時チャージ：
 
 ```go
+pmID := "pm-visa-1234"
 resp, err := gateway.Charge(ctx, &port.ChargeRequest{
     CustomerID:      "cust-001",
     Amount:          invoiceTotal,
-    Currency:        shared.CurrencyJPY,
-    PaymentMethodID: "pm-visa-1234",
+    PaymentMethodID: &pmID,
     IdempotencyKey:  "charge-inv-001",
 })
 ```
@@ -71,10 +71,11 @@ resp, err := gateway.Charge(ctx, &port.ChargeRequest{
 
 ```go
 // 1. オーソリ（資金を確保）
+pmID := "pm-visa-1234"
 authResp, _ := gateway.Authorize(ctx, &port.AuthorizeRequest{
     CustomerID:      "cust-001",
     Amount:          invoiceTotal,
-    PaymentMethodID: "pm-visa-1234",
+    PaymentMethodID: &pmID,
     IdempotencyKey:  "auth-inv-001",
 })
 
@@ -83,7 +84,7 @@ authResp, _ := gateway.Authorize(ctx, &port.AuthorizeRequest{
 // 3. キャプチャ（チャージを確定）
 captureResp, _ := gateway.Capture(ctx, &port.CaptureRequest{
     AuthorizationID: authResp.AuthorizationID,
-    Amount:          invoiceTotal, // 一部キャプチャも可能
+    Amount:          &invoiceTotal, // 一部キャプチャも可能
 })
 ```
 
