@@ -257,13 +257,17 @@ func TestHasPendingChange(t *testing.T) {
 	}
 
 	priceB := shared.PriceID("price-B")
-	_ = agg.ChangePrice(priceB, ChangePolicyEndOfTerm, nil, meta)
+	if err := agg.ChangePrice(priceB, ChangePolicyEndOfTerm, nil, meta); err != nil {
+		t.Fatalf("ChangePrice END_OF_TERM failed: %v", err)
+	}
 
 	if !agg.HasPendingChange() {
 		t.Error("expected pending change after END_OF_TERM")
 	}
 
-	_ = agg.UnscheduleChange("test", meta)
+	if err := agg.UnscheduleChange("test", meta); err != nil {
+		t.Fatalf("UnscheduleChange failed: %v", err)
+	}
 
 	if agg.HasPendingChange() {
 		t.Error("expected no pending change after unschedule")
@@ -465,7 +469,9 @@ func TestSnapshotRoundTrip_WithPendingPriceID(t *testing.T) {
 	meta := newTestMetadata()
 
 	priceB := shared.PriceID("price-B")
-	_ = agg.ChangePrice(priceB, ChangePolicyEndOfTerm, nil, meta)
+	if err := agg.ChangePrice(priceB, ChangePolicyEndOfTerm, nil, meta); err != nil {
+		t.Fatalf("ChangePrice END_OF_TERM failed: %v", err)
+	}
 
 	data, err := agg.MarshalSnapshot()
 	if err != nil {
@@ -606,8 +612,12 @@ func TestPriceChangeUnscheduledEvent_Serialization(t *testing.T) {
 	meta := newTestMetadata()
 
 	priceB := shared.PriceID("price-B")
-	_ = agg.ChangePrice(priceB, ChangePolicyEndOfTerm, nil, meta)
-	_ = agg.UnscheduleChange("changed mind", meta)
+	if err := agg.ChangePrice(priceB, ChangePolicyEndOfTerm, nil, meta); err != nil {
+		t.Fatalf("ChangePrice END_OF_TERM failed: %v", err)
+	}
+	if err := agg.UnscheduleChange("changed mind", meta); err != nil {
+		t.Fatalf("UnscheduleChange failed: %v", err)
+	}
 
 	events := agg.UncommittedEvents()
 	lastEvent := events[len(events)-1]

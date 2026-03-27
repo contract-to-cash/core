@@ -14,7 +14,10 @@ import (
 // event has been migrated.
 type PriceChangedEventUpcaster struct{}
 
-// CanUpcast returns true for PriceChangedEvent at schema version 1.
+// CanUpcast returns true for PriceChangedEvent at schema version <= 1.
+// RaiseEvent always sets SchemaVersion=1, so v0 events never exist in practice.
+// For v2 (new format) events that still have SchemaVersion=1, the Upcast method
+// is idempotent: it only adds fields that are absent and preserves existing values.
 func (u *PriceChangedEventUpcaster) CanUpcast(eventType eventstore.EventType, fromVersion int) bool {
 	return eventType == EventTypePriceChanged && fromVersion <= 1
 }
