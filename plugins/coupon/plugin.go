@@ -75,12 +75,12 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 	currency := ctx.Subtotal().Currency()
 	zero := shared.Zero(currency)
 
-	contract := ctx.Contract()
+	ct := ctx.Contract()
 	var accountID shared.AccountID
 	var planID shared.PlanID
-	if contract != nil {
-		accountID = contract.AccountID()
-		planID = contract.PlanID()
+	if ct != nil {
+		accountID = ct.AccountID()
+		planID = ct.PlanID()
 	}
 
 	// 1. Find applicable coupons with full query context
@@ -98,12 +98,15 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		return zero, nil
 	}
 
-	// 2. Filter coupons by plan applicability and account restrictions.
+	// 2. Filter coupons by plan, contract type, and account restrictions.
 	// This is applied defensively in the plugin even though the repository may also filter,
 	// because the repository filtering is optional (depends on implementation).
 	var filtered []*Coupon
 	for _, c := range coupons {
 		if !c.IsApplicableToPlan(planID) {
+			continue
+		}
+		if ct != nil && !c.IsApplicableToContractType(ct.GetContractType()) {
 			continue
 		}
 		if !c.IsAccountAllowed(accountID) {
@@ -117,7 +120,8 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		return zero, nil
 	}
 
-	// 3. If stacking is not allowed, use only the first coupon
+	// 3. If stacking is not allowed, use only the first coupon.
+	// Note: AllowStacking=false takes precedence over MaxCouponsPerInvoice.
 	if !p.config.AllowStacking {
 		coupons = coupons[:1]
 	}
@@ -155,12 +159,9 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 			discount = subtotal
 		}
 
-		// 6. Record usage
-		if err := p.repo.RecordUsage(ctx.Context(), c.id, ctx.ContractID()); err != nil {
-			return zero, fmt.Errorf("coupon: record usage: %w", err)
-		}
-
-		// 7. Record redemption
+		// 6. Record redemption first (audit trail), then usage counter.
+		// This ordering is intentional: if redemption save fails, usage count
+		// is not incremented, avoiding phantom usage without an audit record.
 		redemption := NewRedemption(
 			RedemptionID(shared.GenerateID()),
 			c.id,
@@ -174,7 +175,12 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 			return zero, fmt.Errorf("coupon: save redemption: %w", err)
 		}
 
-		// 8. Record discount
+		// 7. Record usage (increment global counter)
+		if err := p.repo.RecordUsage(ctx.Context(), c.id, ctx.ContractID()); err != nil {
+			return zero, fmt.Errorf("coupon: record usage: %w", err)
+		}
+
+		// 8. Record discount in calculation context
 		ctx.RecordDiscount(plugin.AppliedDiscount{
 			PluginName: p.Name(),
 			Code:       c.Code(),
@@ -188,6 +194,13 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		total = sum
 	}
 
-	// 9. Return total discount
+	// 9. Update subtotal after discount for downstream hooks
+	if !total.IsZero() {
+		afterDiscount, err := ctx.Subtotal().Subtract(total)
+		if err == nil {
+			ctx.SetSubtotalAfterDiscount(afterDiscount)
+		}
+	}
+
 	return total, nil
 }

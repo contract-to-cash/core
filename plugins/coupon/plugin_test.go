@@ -2,6 +2,7 @@ package coupon
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -19,6 +20,12 @@ type mockCouponRepository struct {
 	redemptions        []*Redemption
 	recordUsageCalled  int
 	saveRedemptionCall int
+
+	// Error injection for testing error paths
+	findApplicableErr    error
+	findUsageErr         error
+	recordUsageErr       error
+	saveRedemptionErr    error
 }
 
 func newMockRepo(coupons ...*Coupon) *mockCouponRepository {
@@ -38,6 +45,9 @@ func (m *mockCouponRepository) FindByCode(_ context.Context, code string) (*Coup
 }
 
 func (m *mockCouponRepository) FindApplicable(_ context.Context, _ CouponQuery) ([]*Coupon, error) {
+	if m.findApplicableErr != nil {
+		return nil, m.findApplicableErr
+	}
 	return m.coupons, nil
 }
 
@@ -46,16 +56,25 @@ func (m *mockCouponRepository) Save(_ context.Context, _ *Coupon) error {
 }
 
 func (m *mockCouponRepository) RecordUsage(_ context.Context, _ CouponID, _ shared.ContractID) error {
+	if m.recordUsageErr != nil {
+		return m.recordUsageErr
+	}
 	m.recordUsageCalled++
 	return nil
 }
 
 func (m *mockCouponRepository) FindUsageByAccount(_ context.Context, couponID CouponID, accountID shared.AccountID) (int, error) {
+	if m.findUsageErr != nil {
+		return 0, m.findUsageErr
+	}
 	key := string(couponID) + ":" + string(accountID)
 	return m.accountUsage[key], nil
 }
 
 func (m *mockCouponRepository) SaveRedemption(_ context.Context, r *Redemption) error {
+	if m.saveRedemptionErr != nil {
+		return m.saveRedemptionErr
+	}
 	m.saveRedemptionCall++
 	m.redemptions = append(m.redemptions, r)
 	return nil
@@ -420,8 +439,142 @@ func TestCouponPlugin_UniqueCodeType(t *testing.T) {
 	}
 }
 
+func TestCouponPlugin_ContractType_Match(t *testing.T) {
+	coupon := newTestCoupon("c1", "SUB10", CouponTypePercentage, big.NewRat(10, 100), nil)
+	coupon.WithApplicableContractTypes([]contract.ContractType{contract.ContractTypeSubscription})
+	repo := newMockRepo(coupon)
+	p := NewCouponPlugin(repo, testClock)
+
+	agg := createTestAggregate(t, "acc-1", "plan-1") // subscription type
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContextWithContract(subtotal, agg)
+
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := big.NewRat(1000, 1)
+	if discount.Amount().Cmp(expected) != 0 {
+		t.Errorf("expected discount 1000, got %s", discount.Amount().RatString())
+	}
+}
+
+func TestCouponPlugin_ContractType_NoMatch(t *testing.T) {
+	// Coupon only for subscription, but contract is one_time
+	coupon := newTestCoupon("c1", "SUB10", CouponTypePercentage, big.NewRat(10, 100), nil)
+	coupon.WithApplicableContractTypes([]contract.ContractType{contract.ContractTypeSubscription})
+	repo := newMockRepo(coupon)
+	p := NewCouponPlugin(repo, testClock)
+
+	agg := createTestAggregateWithType(t, "acc-1", "plan-1", contract.ContractTypeOneTime)
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContextWithContract(subtotal, agg)
+
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !discount.IsZero() {
+		t.Errorf("expected zero discount for non-matching contract type, got %s", discount.Amount().RatString())
+	}
+}
+
+func TestCouponPlugin_StackingWithMultipleCoupons(t *testing.T) {
+	coupon1 := newTestCoupon("c1", "FIRST10", CouponTypePercentage, big.NewRat(10, 100), nil)
+	coupon2 := newTestCoupon("c2", "SECOND5", CouponTypePercentage, big.NewRat(5, 100), nil)
+	coupon3 := newTestCoupon("c3", "THIRD20", CouponTypePercentage, big.NewRat(20, 100), nil)
+
+	repo := newMockRepo(coupon1, coupon2, coupon3)
+	p := NewCouponPlugin(repo, testClock)
+	_ = p.Initialize(context.Background(), plugin.Config{
+		"allowStacking":        true,
+		"maxCouponsPerInvoice": 2,
+	})
+
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContext(subtotal)
+
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Stacking=true, max=2: first two coupons applied (10% + 5% = 1500)
+	expected := big.NewRat(1500, 1)
+	if discount.Amount().Cmp(expected) != 0 {
+		t.Errorf("expected discount 1500 (two coupons stacked), got %s", discount.Amount().RatString())
+	}
+
+	discounts := ctx.AppliedDiscounts()
+	if len(discounts) != 2 {
+		t.Errorf("expected 2 recorded discounts, got %d", len(discounts))
+	}
+}
+
+func TestCouponPlugin_FindApplicableError(t *testing.T) {
+	repo := newMockRepo()
+	repo.findApplicableErr = fmt.Errorf("db connection failed")
+	p := NewCouponPlugin(repo, testClock)
+
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContext(subtotal)
+
+	_, err := p.CalculateDiscount(ctx)
+	if err == nil {
+		t.Fatal("expected error from FindApplicable, got nil")
+	}
+}
+
+func TestCouponPlugin_SaveRedemptionError_NoUsageRecorded(t *testing.T) {
+	coupon := newTestCoupon("c1", "SAVE10", CouponTypePercentage, big.NewRat(10, 100), nil)
+	repo := newMockRepo(coupon)
+	repo.saveRedemptionErr = fmt.Errorf("redemption save failed")
+	p := NewCouponPlugin(repo, testClock)
+
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContext(subtotal)
+
+	_, err := p.CalculateDiscount(ctx)
+	if err == nil {
+		t.Fatal("expected error from SaveRedemption, got nil")
+	}
+
+	// Usage should NOT have been recorded since redemption failed first
+	if repo.recordUsageCalled != 0 {
+		t.Errorf("expected 0 usage recordings when redemption fails, got %d", repo.recordUsageCalled)
+	}
+}
+
+func TestCouponPlugin_SubtotalAfterDiscountUpdated(t *testing.T) {
+	coupon := newTestCoupon("c1", "SAVE10", CouponTypePercentage, big.NewRat(10, 100), nil)
+	repo := newMockRepo(coupon)
+	p := NewCouponPlugin(repo, testClock)
+
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContext(subtotal)
+
+	_, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// SubtotalAfterDiscount should be 10000 - 1000 = 9000
+	expected := big.NewRat(9000, 1)
+	if ctx.SubtotalAfterDiscount().Amount().Cmp(expected) != 0 {
+		t.Errorf("expected subtotal after discount 9000, got %s", ctx.SubtotalAfterDiscount().Amount().RatString())
+	}
+}
+
 // createTestAggregate creates a ContractAggregate via the Create command for testing.
 func createTestAggregate(t *testing.T, accountID shared.AccountID, planID shared.PlanID) *contract.ContractAggregate {
+	t.Helper()
+	return createTestAggregateWithType(t, accountID, planID, contract.ContractTypeSubscription)
+}
+
+// createTestAggregateWithType creates a ContractAggregate with a specific contract type.
+func createTestAggregateWithType(t *testing.T, accountID shared.AccountID, planID shared.PlanID, ct contract.ContractType) *contract.ContractAggregate {
 	t.Helper()
 	contractID := shared.NewContractID()
 	agg := contract.NewContractAggregate(contractID, testClock)
@@ -429,7 +582,7 @@ func createTestAggregate(t *testing.T, accountID shared.AccountID, planID shared
 		IdempotencyKey: shared.GenerateID(),
 		AccountID:      accountID,
 		PlanID:         planID,
-		ContractType:   contract.ContractTypeSubscription,
+		ContractType:   ct,
 		BillingCycle:   contract.BillingCycleMonthly,
 		Price:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
 		BasePrice:      shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),

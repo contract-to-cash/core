@@ -4,6 +4,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
@@ -100,10 +101,11 @@ type Coupon struct {
 	validUntil           time.Time
 	usageLimit           *int
 	usedCount            int
-	perAccountUsageLimit *int            // max uses per account (nil = unlimited)
-	applicableTo         []string        // applicable plan IDs (empty = all plans)
-	allowedAccountIDs    []shared.AccountID
-	blockedAccountIDs    []shared.AccountID
+	perAccountUsageLimit    *int                    // max uses per account (nil = unlimited)
+	applicableTo           []string                // applicable plan IDs (empty = all plans)
+	applicableContractTypes []contract.ContractType // applicable contract types (empty = all types)
+	allowedAccountIDs      []shared.AccountID
+	blockedAccountIDs      []shared.AccountID
 }
 
 // NewCoupon creates a new Coupon.
@@ -161,6 +163,12 @@ func (c *Coupon) WithBlockedAccountIDs(ids []shared.AccountID) *Coupon {
 	return c
 }
 
+// WithApplicableContractTypes sets the applicable contract types and returns the coupon for chaining.
+func (c *Coupon) WithApplicableContractTypes(types []contract.ContractType) *Coupon {
+	c.applicableContractTypes = types
+	return c
+}
+
 // ID returns the coupon ID.
 func (c *Coupon) ID() CouponID { return c.id }
 
@@ -201,6 +209,20 @@ func (c *Coupon) IsApplicableToPlan(planID shared.PlanID) bool {
 	}
 	for _, id := range c.applicableTo {
 		if id == string(planID) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsApplicableToContractType returns true if the coupon is applicable to the given contract type.
+// If applicableContractTypes is empty, the coupon applies to all contract types.
+func (c *Coupon) IsApplicableToContractType(ct contract.ContractType) bool {
+	if len(c.applicableContractTypes) == 0 {
+		return true
+	}
+	for _, t := range c.applicableContractTypes {
+		if t == ct {
 			return true
 		}
 	}

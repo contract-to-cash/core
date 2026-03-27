@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
@@ -254,5 +255,52 @@ func TestCoupon_CodeType(t *testing.T) {
 	c.WithCodeType(CodeTypeUnique)
 	if c.CodeType() != CodeTypeUnique {
 		t.Errorf("expected code type to be unique, got %s", c.CodeType())
+	}
+}
+
+func TestCoupon_IsApplicableToContractType(t *testing.T) {
+	tests := []struct {
+		name          string
+		contractTypes []contract.ContractType
+		ct            contract.ContractType
+		want          bool
+	}{
+		{
+			name:          "empty types matches all",
+			contractTypes: nil,
+			ct:            contract.ContractTypeSubscription,
+			want:          true,
+		},
+		{
+			name:          "matching contract type",
+			contractTypes: []contract.ContractType{contract.ContractTypeSubscription, contract.ContractTypeUsageBased},
+			ct:            contract.ContractTypeSubscription,
+			want:          true,
+		},
+		{
+			name:          "non-matching contract type",
+			contractTypes: []contract.ContractType{contract.ContractTypeSubscription},
+			ct:            contract.ContractTypeOneTime,
+			want:          false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewCoupon(
+				"c1", "CODE", CouponTypePercentage,
+				big.NewRat(10, 100), shared.CurrencyJPY,
+				nil, nil,
+				time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+				nil, 0, nil,
+			)
+			if len(tt.contractTypes) > 0 {
+				c.WithApplicableContractTypes(tt.contractTypes)
+			}
+			if got := c.IsApplicableToContractType(tt.ct); got != tt.want {
+				t.Errorf("IsApplicableToContractType(%q) = %v, want %v", tt.ct, got, tt.want)
+			}
+		})
 	}
 }
