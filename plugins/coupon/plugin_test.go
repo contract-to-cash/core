@@ -344,6 +344,48 @@ func TestCouponPlugin_RedemptionRecorded(t *testing.T) {
 	if r.Code() != "SAVE10" {
 		t.Errorf("expected code SAVE10, got %s", r.Code())
 	}
+	if r.CodeType() != CodeTypeShared {
+		t.Errorf("expected code type shared, got %s", r.CodeType())
+	}
+}
+
+func TestCouponPlugin_MinAmountNotMet(t *testing.T) {
+	minAmt := shared.NewMoney(big.NewRat(5000, 1), shared.CurrencyJPY)
+	coupon := NewCoupon(
+		"c1", "MIN5000", CouponTypePercentage,
+		big.NewRat(10, 100), shared.CurrencyJPY,
+		&minAmt, nil,
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+		nil, 0, nil,
+	)
+	repo := newMockRepo(coupon)
+	p := NewCouponPlugin(repo, testClock)
+
+	// Subtotal 3000 < minAmount 5000 -> no discount
+	subtotal := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+	ctx := newTestContext(subtotal)
+
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !discount.IsZero() {
+		t.Errorf("expected zero discount when subtotal < minAmount, got %s", discount.Amount().RatString())
+	}
+
+	// Subtotal 10000 >= minAmount 5000 -> discount applied
+	subtotal2 := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx2 := newTestContext(subtotal2)
+
+	discount2, err := p.CalculateDiscount(ctx2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := big.NewRat(1000, 1) // 10% of 10000
+	if discount2.Amount().Cmp(expected) != 0 {
+		t.Errorf("expected discount 1000, got %s", discount2.Amount().RatString())
+	}
 }
 
 func TestCouponPlugin_UniqueCodeType(t *testing.T) {
@@ -372,6 +414,9 @@ func TestCouponPlugin_UniqueCodeType(t *testing.T) {
 	}
 	if repo.redemptions[0].Code() != "UNIQUE-ABC123" {
 		t.Errorf("expected unique code in redemption, got %s", repo.redemptions[0].Code())
+	}
+	if repo.redemptions[0].CodeType() != CodeTypeUnique {
+		t.Errorf("expected code type unique in redemption, got %s", repo.redemptions[0].CodeType())
 	}
 }
 

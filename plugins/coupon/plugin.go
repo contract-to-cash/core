@@ -98,7 +98,9 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		return zero, nil
 	}
 
-	// 2. Filter coupons by plan applicability and account restrictions
+	// 2. Filter coupons by plan applicability and account restrictions.
+	// This is applied defensively in the plugin even though the repository may also filter,
+	// because the repository filtering is optional (depends on implementation).
 	var filtered []*Coupon
 	for _, c := range coupons {
 		if !c.IsApplicableToPlan(planID) {
@@ -163,6 +165,7 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 			RedemptionID(shared.GenerateID()),
 			c.id,
 			c.Code(),
+			c.codeType,
 			accountID,
 			ctx.ContractID(),
 			now,

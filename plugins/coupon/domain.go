@@ -38,6 +38,7 @@ type Redemption struct {
 	id         RedemptionID
 	couponID   CouponID
 	code       string
+	codeType   CodeType
 	accountID  shared.AccountID
 	contractID shared.ContractID
 	redeemedAt time.Time
@@ -48,6 +49,7 @@ func NewRedemption(
 	id RedemptionID,
 	couponID CouponID,
 	code string,
+	codeType CodeType,
 	accountID shared.AccountID,
 	contractID shared.ContractID,
 	redeemedAt time.Time,
@@ -56,6 +58,7 @@ func NewRedemption(
 		id:         id,
 		couponID:   couponID,
 		code:       code,
+		codeType:   codeType,
 		accountID:  accountID,
 		contractID: contractID,
 		redeemedAt: redeemedAt,
@@ -70,6 +73,9 @@ func (r *Redemption) CouponID() CouponID { return r.couponID }
 
 // Code returns the redeemed code.
 func (r *Redemption) Code() string { return r.code }
+
+// CodeType returns whether the redeemed code was shared or unique.
+func (r *Redemption) CodeType() CodeType { return r.codeType }
 
 // AccountID returns the account that redeemed the coupon.
 func (r *Redemption) AccountID() shared.AccountID { return r.accountID }
@@ -186,6 +192,9 @@ func (c *Coupon) IsValid(at time.Time) bool {
 
 // IsApplicableToPlan returns true if the coupon is applicable to the given plan.
 // If applicableTo is empty, the coupon applies to all plans.
+//
+// TODO(#7): Once Product/Price separation is implemented, this should check against
+// ProductID instead of PlanID. See #4 comment: "applicableTo should filter by ProductID".
 func (c *Coupon) IsApplicableToPlan(planID shared.PlanID) bool {
 	if len(c.applicableTo) == 0 {
 		return true
