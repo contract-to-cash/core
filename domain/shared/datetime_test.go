@@ -132,6 +132,38 @@ func TestDateRangeNext_Yearly(t *testing.T) {
 	}
 }
 
+func TestDateRange_Equals(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	dr1, _ := NewDateRange(start, end)
+	dr2, _ := NewDateRange(start, end)
+
+	if !dr1.Equals(dr2) {
+		t.Error("expected equal date ranges to be equal")
+	}
+
+	dr3, _ := NewDateRange(start, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
+	if dr1.Equals(dr3) {
+		t.Error("expected different date ranges to not be equal")
+	}
+
+	// Zero value
+	var zero DateRange
+	if dr1.Equals(zero) {
+		t.Error("expected non-zero to not equal zero")
+	}
+}
+
+func TestDateRange_String(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	dr, _ := NewDateRange(start, end)
+	s := dr.String()
+	if s == "" {
+		t.Error("expected non-empty string representation")
+	}
+}
+
 func TestDateRangeNext_UnknownCycle(t *testing.T) {
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)

@@ -43,6 +43,21 @@ func (r DateRange) Duration() time.Duration {
 	return r.end.Sub(r.start)
 }
 
+// Equals returns true if both date ranges have the same start and end.
+func (r DateRange) Equals(other DateRange) bool {
+	return r.start.Equal(other.start) && r.end.Equal(other.end)
+}
+
+// IsZero returns true if the date range is the zero value (not initialized).
+func (r DateRange) IsZero() bool {
+	return r.start.IsZero() && r.end.IsZero()
+}
+
+// String returns a human-readable representation of the date range.
+func (r DateRange) String() string {
+	return fmt.Sprintf("[%s, %s)", r.start.Format(time.RFC3339), r.end.Format(time.RFC3339))
+}
+
 // MarshalJSON implements json.Marshaler for DateRange.
 func (r DateRange) MarshalJSON() ([]byte, error) {
 	type dateRangeJSON struct {

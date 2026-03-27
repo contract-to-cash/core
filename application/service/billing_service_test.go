@@ -118,10 +118,13 @@ func (m *mockCreditRepo) FindApplicationsByInvoice(_ context.Context, _ shared.I
 }
 func (m *mockCreditRepo) SaveRefund(_ context.Context, _ *credit.CreditRefund) error { return nil }
 
-type mockPriceRepo struct{}
+type mockPriceRepo struct {
+	price *pricing.Price
+	err   error
+}
 
 func (m *mockPriceRepo) FindByID(_ context.Context, _ shared.PriceID) (*pricing.Price, error) {
-	return nil, nil
+	return m.price, m.err
 }
 func (m *mockPriceRepo) FindByProductID(_ context.Context, _ shared.ProductID) ([]*pricing.Price, error) {
 	return nil, nil
@@ -131,10 +134,13 @@ func (m *mockPriceRepo) FindActiveByProductID(_ context.Context, _ shared.Produc
 }
 func (m *mockPriceRepo) Save(_ context.Context, _ *pricing.Price) error { return nil }
 
-type mockProductRepo struct{}
+type mockProductRepo struct {
+	product *product.Product
+	err     error
+}
 
 func (m *mockProductRepo) FindByID(_ context.Context, _ shared.ProductID) (*product.Product, error) {
-	return nil, nil
+	return m.product, m.err
 }
 func (m *mockProductRepo) Save(_ context.Context, _ *product.Product) error { return nil }
 
@@ -144,12 +150,21 @@ func newTestClock() shared.FixedClock {
 	return shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)}
 }
 
+func newTestPrice(productID shared.ProductID, amount shared.Money, pricingModel pricing.PricingModel) *pricing.Price {
+	return pricing.NewPrice(productID, amount, amount.Currency(), pricing.BillingCycleMonthly, pricingModel)
+}
+
 func newTestContractAggregate(clock shared.Clock, contractType contract.ContractType, price shared.Money) *contract.ContractAggregate {
+	return newTestContractAggregateWithPriceID(clock, contractType, price, "")
+}
+
+func newTestContractAggregateWithPriceID(clock shared.Clock, contractType contract.ContractType, price shared.Money, priceID shared.PriceID) *contract.ContractAggregate {
 	cid := shared.NewContractID()
 	agg := contract.NewContractAggregate(cid, clock)
 	_ = agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
 		PlanID:       shared.NewPlanID(),
+		PriceID:      priceID,
 		ContractType: contractType,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        price,
@@ -157,6 +172,11 @@ func newTestContractAggregate(clock shared.Clock, contractType contract.Contract
 	}, eventstore.EventMetadata{UserID: "test"})
 	_ = agg.Activate(eventstore.EventMetadata{UserID: "test"})
 	return agg
+}
+
+// currentPeriodOf returns the billing period that matches the aggregate's current period.
+func currentPeriodOf(agg *contract.ContractAggregate) shared.DateRange {
+	return agg.CurrentPeriod()
 }
 
 func newBillingPeriod() shared.DateRange {
@@ -171,12 +191,24 @@ func jpy(amount int64) shared.Money {
 	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyJPY)
 }
 
+// newActiveAggWithPrice creates an active aggregate with a matching Price entity and returns both.
+func newActiveAggWithPrice(clock shared.Clock, contractType contract.ContractType, amount shared.Money) (*contract.ContractAggregate, *pricing.Price) {
+	priceEntity := newTestPrice(shared.NewProductID(), amount, nil)
+	agg := newTestContractAggregateWithPriceID(clock, contractType, amount, priceEntity.ID())
+	return agg, priceEntity
+}
+
+// priceRepoFor returns a mock price repo that returns the given price.
+func priceRepoFor(p *pricing.Price) *mockPriceRepo {
+	return &mockPriceRepo{price: p}
+}
+
 // --- Tests ---
 
 func TestGenerateInvoice_SubscriptionBasic(t *testing.T) {
 	clock := newTestClock()
 	price := jpy(10000)
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, price)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
 	invRepo := &mockInvoiceRepo{}
 
 	svc := NewBillingService(
@@ -185,14 +217,14 @@ func TestGenerateInvoice_SubscriptionBasic(t *testing.T) {
 		&mockUsageRepo{},
 		nil, // no credit repo
 		credit.CreditConfig{},
-		&mockPriceRepo{},
+		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
-	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -213,7 +245,7 @@ func TestGenerateInvoice_SubscriptionBasic(t *testing.T) {
 func TestGenerateInvoice_DiscountCap(t *testing.T) {
 	clock := newTestClock()
 	price := jpy(5000)
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, price)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
 	invRepo := &mockInvoiceRepo{}
 
 	// Register a discount hook that returns more than the subtotal
@@ -226,14 +258,14 @@ func TestGenerateInvoice_DiscountCap(t *testing.T) {
 		&mockUsageRepo{},
 		nil,
 		credit.CreditConfig{},
-		&mockPriceRepo{},
+		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		registry,
 		BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
-	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -247,7 +279,7 @@ func TestGenerateInvoice_DiscountCap(t *testing.T) {
 func TestGenerateInvoice_CreditNilSafe(t *testing.T) {
 	clock := newTestClock()
 	price := jpy(3000)
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, price)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
 
 	svc := NewBillingService(
 		&mockContractRepo{agg: agg},
@@ -255,14 +287,14 @@ func TestGenerateInvoice_CreditNilSafe(t *testing.T) {
 		&mockUsageRepo{},
 		nil, // creditRepo is nil
 		credit.CreditConfig{},
-		&mockPriceRepo{},
+		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
-	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -276,7 +308,7 @@ func TestGenerateInvoice_CreditNilSafe(t *testing.T) {
 func TestGenerateInvoice_WithCredits(t *testing.T) {
 	clock := newTestClock()
 	price := jpy(10000)
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, price)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
 
 	creditEntry := credit.NewCreditEntry(agg.AccountID(), jpy(3000), credit.CreditReasonGoodwill, clock.Now())
 	creditRepo := &mockCreditRepo{credits: []*credit.CreditEntry{creditEntry}}
@@ -287,14 +319,14 @@ func TestGenerateInvoice_WithCredits(t *testing.T) {
 		&mockUsageRepo{},
 		creditRepo,
 		credit.CreditConfig{},
-		&mockPriceRepo{},
+		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
-	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -317,7 +349,7 @@ func TestGenerateInvoice_WithCredits(t *testing.T) {
 func TestGenerateInvoice_InheritsContractPaymentMethod(t *testing.T) {
 	clock := newTestClock()
 	price := jpy(5000)
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, price)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
 
 	// Set payment method on contract
 	pmID := "pm-contract-inherited"
@@ -331,14 +363,14 @@ func TestGenerateInvoice_InheritsContractPaymentMethod(t *testing.T) {
 		&mockUsageRepo{},
 		nil,
 		credit.CreditConfig{},
-		&mockPriceRepo{},
+		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
-	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -351,7 +383,7 @@ func TestGenerateInvoice_InheritsContractPaymentMethod(t *testing.T) {
 func TestGenerateInvoice_NoPaymentMethodWhenContractHasNone(t *testing.T) {
 	clock := newTestClock()
 	price := jpy(5000)
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, price)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
 	invRepo := &mockInvoiceRepo{}
 
 	svc := NewBillingService(
@@ -360,14 +392,14 @@ func TestGenerateInvoice_NoPaymentMethodWhenContractHasNone(t *testing.T) {
 		&mockUsageRepo{},
 		nil,
 		credit.CreditConfig{},
-		&mockPriceRepo{},
+		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
-	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -379,21 +411,23 @@ func TestGenerateInvoice_NoPaymentMethodWhenContractHasNone(t *testing.T) {
 
 // --- Status guard tests ---
 
-func newDraftContractAggregate(clock shared.Clock, price shared.Money) *contract.ContractAggregate {
+func newDraftContractAggregateWithPrice(clock shared.Clock, price shared.Money) (*contract.ContractAggregate, *pricing.Price) {
+	priceEntity := newTestPrice(shared.NewProductID(), price, nil)
 	cid := shared.NewContractID()
 	agg := contract.NewContractAggregate(cid, clock)
 	_ = agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
 		PlanID:       shared.NewPlanID(),
+		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        price,
 		BasePrice:    price,
 	}, eventstore.EventMetadata{UserID: "test"})
-	return agg
+	return agg, priceEntity
 }
 
-func newBillingSvc(agg *contract.ContractAggregate, invRepo *mockInvoiceRepo, clock shared.Clock) *BillingService {
+func newBillingSvcWithPrice(agg *contract.ContractAggregate, invRepo *mockInvoiceRepo, priceEntity *pricing.Price, clock shared.Clock) *BillingService {
 	if invRepo == nil {
 		invRepo = &mockInvoiceRepo{}
 	}
@@ -403,7 +437,7 @@ func newBillingSvc(agg *contract.ContractAggregate, invRepo *mockInvoiceRepo, cl
 		&mockUsageRepo{},
 		nil,
 		credit.CreditConfig{},
-		&mockPriceRepo{},
+		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
@@ -413,8 +447,8 @@ func newBillingSvc(agg *contract.ContractAggregate, invRepo *mockInvoiceRepo, cl
 
 func TestGenerateInvoice_StatusGuard_DraftAllowed(t *testing.T) {
 	clock := newTestClock()
-	agg := newDraftContractAggregate(clock, jpy(1000))
-	svc := newBillingSvc(agg, nil, clock)
+	agg, priceEntity := newDraftContractAggregateWithPrice(clock, jpy(1000))
+	svc := newBillingSvcWithPrice(agg, nil, priceEntity, clock)
 
 	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
 	if err != nil {
@@ -427,11 +461,11 @@ func TestGenerateInvoice_StatusGuard_DraftAllowed(t *testing.T) {
 
 func TestGenerateInvoice_StatusGuard_CancelledBlocked(t *testing.T) {
 	clock := newTestClock()
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
 	_ = agg.Cancel("test", eventstore.EventMetadata{UserID: "test"})
-	svc := newBillingSvc(agg, nil, clock)
+	svc := newBillingSvcWithPrice(agg, nil, priceEntity, clock)
 
-	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err == nil {
 		t.Fatal("cancelled contract should block invoice generation")
 	}
@@ -439,14 +473,14 @@ func TestGenerateInvoice_StatusGuard_CancelledBlocked(t *testing.T) {
 
 func TestGenerateInvoice_StatusGuard_SuspendedSkipBlocked(t *testing.T) {
 	clock := newTestClock()
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
 	_ = agg.Suspend(contract.SuspensionConfiguration{
 		BillingBehavior: contract.SuspensionBillingSkip,
 		Reason:          "payment pending",
 	}, eventstore.EventMetadata{UserID: "test"})
-	svc := newBillingSvc(agg, nil, clock)
+	svc := newBillingSvcWithPrice(agg, nil, priceEntity, clock)
 
-	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err == nil {
 		t.Fatal("suspended (skip) contract should block invoice generation")
 	}
@@ -454,14 +488,14 @@ func TestGenerateInvoice_StatusGuard_SuspendedSkipBlocked(t *testing.T) {
 
 func TestGenerateInvoice_StatusGuard_SuspendedDeferBlocked(t *testing.T) {
 	clock := newTestClock()
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
 	_ = agg.Suspend(contract.SuspensionConfiguration{
 		BillingBehavior: contract.SuspensionBillingDefer,
 		Reason:          "payment pending",
 	}, eventstore.EventMetadata{UserID: "test"})
-	svc := newBillingSvc(agg, nil, clock)
+	svc := newBillingSvcWithPrice(agg, nil, priceEntity, clock)
 
-	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err == nil {
 		t.Fatal("suspended (defer) contract should block invoice generation")
 	}
@@ -469,14 +503,14 @@ func TestGenerateInvoice_StatusGuard_SuspendedDeferBlocked(t *testing.T) {
 
 func TestGenerateInvoice_StatusGuard_SuspendedContinueAllowed(t *testing.T) {
 	clock := newTestClock()
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
 	_ = agg.Suspend(contract.SuspensionConfiguration{
 		BillingBehavior: contract.SuspensionBillingContinue,
 		Reason:          "admin hold",
 	}, eventstore.EventMetadata{UserID: "test"})
-	svc := newBillingSvc(agg, nil, clock)
+	svc := newBillingSvcWithPrice(agg, nil, priceEntity, clock)
 
-	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err != nil {
 		t.Fatalf("suspended (continue) should allow invoice generation: %v", err)
 	}
@@ -489,14 +523,14 @@ func TestGenerateInvoice_StatusGuard_SuspendedContinueAllowed(t *testing.T) {
 
 func TestGenerateInvoice_DuplicateDraftBlocked(t *testing.T) {
 	clock := newTestClock()
-	agg := newDraftContractAggregate(clock, jpy(1000))
+	agg, priceEntity := newDraftContractAggregateWithPrice(clock, jpy(1000))
 
 	existingDraft := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(1000), jpy(0), jpy(0),
 	)
 	invRepo := &mockInvoiceRepo{existingByStatus: []*invoice.Invoice{existingDraft}}
-	svc := newBillingSvc(agg, invRepo, clock)
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
 
 	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
 	if err == nil {
@@ -506,17 +540,18 @@ func TestGenerateInvoice_DuplicateDraftBlocked(t *testing.T) {
 
 func TestGenerateInvoice_DuplicatePeriodBlocked(t *testing.T) {
 	clock := newTestClock()
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
 
 	existingInv := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(1000), jpy(0), jpy(0),
-		invoice.WithBillingPeriod(newBillingPeriod()),
+		invoice.WithBillingPeriod(period),
 	)
 	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{existingInv}}
-	svc := newBillingSvc(agg, invRepo, clock)
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
 
-	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), period)
 	if err == nil {
 		t.Fatal("should block duplicate invoice for same billing period")
 	}
@@ -524,18 +559,19 @@ func TestGenerateInvoice_DuplicatePeriodBlocked(t *testing.T) {
 
 func TestGenerateInvoice_VoidedAllowsRegeneration(t *testing.T) {
 	clock := newTestClock()
-	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
 
 	voidedInv := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(1000), jpy(0), jpy(0),
 		invoice.WithStatus(invoice.InvoiceStatusVoided),
-		invoice.WithBillingPeriod(newBillingPeriod()),
+		invoice.WithBillingPeriod(period),
 	)
 	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv}}
-	svc := newBillingSvc(agg, invRepo, clock)
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
 
-	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), period)
 	if err != nil {
 		t.Fatalf("voided invoice should allow regeneration: %v", err)
 	}
@@ -546,29 +582,253 @@ func TestGenerateInvoice_VoidedAllowsRegeneration(t *testing.T) {
 
 func TestGenerateInvoice_OneTimeDuplicateBlocked(t *testing.T) {
 	clock := newTestClock()
-	cid := shared.NewContractID()
-	agg := contract.NewContractAggregate(cid, clock)
-	_ = agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PlanID:       shared.NewPlanID(),
-		ContractType: contract.ContractTypeOneTime,
-		BillingCycle: contract.BillingCycleMonthly,
-		Price:        jpy(5000),
-		BasePrice:    jpy(5000),
-	}, eventstore.EventMetadata{UserID: "test"})
-	_ = agg.Activate(eventstore.EventMetadata{UserID: "test"})
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeOneTime, jpy(5000))
 
 	existingInv := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(5000), jpy(0), jpy(0),
 	)
 	invRepo := &mockInvoiceRepo{existingByContract: []*invoice.Invoice{existingInv}}
-	svc := newBillingSvc(agg, invRepo, clock)
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
 
-	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), newBillingPeriod())
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
 	if err == nil {
 		t.Fatal("should block duplicate invoice for one-time contract")
 	}
+}
+
+// --- Price-aware billing tests ---
+
+func TestCalculateSubtotal_BillingPeriodMismatch(t *testing.T) {
+	clock := newTestClock()
+	priceEntity := newTestPrice(shared.NewProductID(), jpy(10000), nil)
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeSubscription, jpy(10000), priceEntity.ID())
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		nil,
+		credit.CreditConfig{},
+		&mockPriceRepo{price: priceEntity},
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	// Use a billing period that does NOT match the aggregate's current period
+	mismatchedPeriod := newBillingPeriod() // [2026-01-01, 2026-02-01) != currentPeriod [2026-01-15, 2026-02-15)
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), mismatchedPeriod)
+	if err == nil {
+		t.Fatal("expected error for billing period mismatch")
+	}
+}
+
+func TestCalculateSubtotal_SubscriptionUsesPriceEntity(t *testing.T) {
+	clock := newTestClock()
+	priceAmount := jpy(15000)
+	priceEntity := newTestPrice(shared.NewProductID(), priceAmount, nil)
+	// Contract has price=10000 but Price entity has 15000
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeSubscription, jpy(10000), priceEntity.ID())
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		nil,
+		credit.CreditConfig{},
+		&mockPriceRepo{price: priceEntity},
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should use Price entity amount (15000), not aggregate Price (10000)
+	if inv.Subtotal().Amount().Cmp(priceAmount.Amount()) != 0 {
+		t.Errorf("expected subtotal %v (from Price entity), got %v", priceAmount.Amount(), inv.Subtotal().Amount())
+	}
+}
+
+func TestCalculateSubtotal_OneTimeUsesPriceEntity(t *testing.T) {
+	clock := newTestClock()
+	priceAmount := jpy(50000)
+	priceEntity := newTestPrice(shared.NewProductID(), priceAmount, nil)
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeOneTime, jpy(10000), priceEntity.ID())
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		nil,
+		credit.CreditConfig{},
+		&mockPriceRepo{price: priceEntity},
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if inv.Subtotal().Amount().Cmp(priceAmount.Amount()) != 0 {
+		t.Errorf("expected subtotal %v (from Price entity), got %v", priceAmount.Amount(), inv.Subtotal().Amount())
+	}
+}
+
+func TestCalculateSubtotal_UsageBased_ViaProductAndPrice(t *testing.T) {
+	clock := newTestClock()
+
+	// Create product with usage metrics
+	prod := product.NewProduct("API Access", "API usage product")
+	prod.AddUsageMetric(product.UsageMetric{Name: "api_calls", IncludedQuantity: 50})
+
+	// Create price with usage pricing model (10 JPY per unit)
+	usagePricing := pricing.UsagePrice{UnitPrice: jpy(10)}
+	baseAmount := jpy(1000)
+	priceEntity := newTestPrice(prod.ID(), baseAmount, usagePricing)
+
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeUsageBased, jpy(1000), priceEntity.ID())
+
+	// Usage repo returns 150 total usage for api_calls
+	usageRepo := &mockUsageRepoWithMetrics{
+		summaries: map[string]*usage.UsageSummary{
+			"api_calls": {TotalUsage: 150},
+		},
+	}
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		usageRepo,
+		nil,
+		credit.CreditConfig{},
+		&mockPriceRepo{price: priceEntity},
+		&mockProductRepo{product: prod},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// billableUsage = 150 - 50 (included) = 100
+	// usageCharge = 100 * 10 = 1000
+	// total = baseAmount(1000) + usageCharge(1000) = 2000
+	expectedTotal := new(big.Rat).SetInt64(2000)
+	if inv.Subtotal().Amount().Cmp(expectedTotal) != 0 {
+		t.Errorf("expected subtotal 2000, got %v", inv.Subtotal().Amount())
+	}
+}
+
+func TestCalculateSubtotal_UsageBased_IncludedQuantityCoversAll(t *testing.T) {
+	clock := newTestClock()
+
+	prod := product.NewProduct("API Access", "API usage product")
+	prod.AddUsageMetric(product.UsageMetric{Name: "api_calls", IncludedQuantity: 200})
+
+	usagePricing := pricing.UsagePrice{UnitPrice: jpy(10)}
+	baseAmount := jpy(1000)
+	priceEntity := newTestPrice(prod.ID(), baseAmount, usagePricing)
+
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeUsageBased, jpy(1000), priceEntity.ID())
+
+	usageRepo := &mockUsageRepoWithMetrics{
+		summaries: map[string]*usage.UsageSummary{
+			"api_calls": {TotalUsage: 100}, // below included quantity
+		},
+	}
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		usageRepo,
+		nil,
+		credit.CreditConfig{},
+		&mockPriceRepo{price: priceEntity},
+		&mockProductRepo{product: prod},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// billableUsage = 100 - 200 = -100 → clamped to 0
+	// usageCharge = 0
+	// total = baseAmount(1000)
+	expectedTotal := new(big.Rat).SetInt64(1000)
+	if inv.Subtotal().Amount().Cmp(expectedTotal) != 0 {
+		t.Errorf("expected subtotal 1000 (base only), got %v", inv.Subtotal().Amount())
+	}
+}
+
+func TestGenerateInvoice_LineItemHasPriceID(t *testing.T) {
+	clock := newTestClock()
+	priceAmount := jpy(10000)
+	priceEntity := newTestPrice(shared.NewProductID(), priceAmount, nil)
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeSubscription, priceAmount, priceEntity.ID())
+	invRepo := &mockInvoiceRepo{}
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		nil,
+		credit.CreditConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	items := inv.LineItems()
+	if len(items) == 0 {
+		t.Fatal("expected at least one line item")
+	}
+
+	if items[0].PriceID() != priceEntity.ID() {
+		t.Errorf("expected line item priceID %s, got %s", priceEntity.ID(), items[0].PriceID())
+	}
+
+	if items[0].Amount().Amount().Cmp(priceAmount.Amount()) != 0 {
+		t.Errorf("expected line item amount %v, got %v", priceAmount.Amount(), items[0].Amount().Amount())
+	}
+}
+
+// mockUsageRepoWithMetrics returns specific summaries per metric name.
+type mockUsageRepoWithMetrics struct {
+	summaries map[string]*usage.UsageSummary
+}
+
+func (m *mockUsageRepoWithMetrics) Record(_ context.Context, _ *usage.UsageRecord) error { return nil }
+func (m *mockUsageRepoWithMetrics) GetSummary(_ context.Context, _ shared.ContractID, metric string, _ shared.DateRange) (*usage.UsageSummary, error) {
+	if s, ok := m.summaries[metric]; ok {
+		return s, nil
+	}
+	return &usage.UsageSummary{TotalUsage: 0}, nil
+}
+func (m *mockUsageRepoWithMetrics) GetRecords(_ context.Context, _ shared.ContractID, _ string, _, _ time.Time) ([]*usage.UsageRecord, error) {
+	return nil, nil
 }
 
 // --- Mock discount plugin ---

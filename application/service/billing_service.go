@@ -18,13 +18,6 @@ import (
 	"github.com/contract-to-cash/core/plugin"
 )
 
-// PlanRepository provides access to pricing plans.
-// Deprecated: Use pricing.PriceRepository and product.Repository instead.
-// Retained temporarily for usage-based charge calculation until Sub-issue #10.
-type PlanRepository interface {
-	FindByID(ctx context.Context, id shared.PlanID) (*pricing.Plan, error)
-}
-
 // BillingConfig holds billing service configuration.
 type BillingConfig struct {
 	GracePeriod      time.Duration
@@ -41,8 +34,7 @@ type BillingService struct {
 	creditConfig credit.CreditConfig
 	priceRepo    pricing.PriceRepository
 	productRepo  product.Repository
-	planRepo     PlanRepository // Deprecated: fallback for usage charge calculation until #10
-	registry     *plugin.Registry
+	registry *plugin.Registry
 	config       BillingConfig
 	clock        shared.Clock
 }
@@ -72,14 +64,6 @@ func NewBillingService(
 		config:       config,
 		clock:        clock,
 	}
-}
-
-// WithPlanRepository sets the deprecated PlanRepository for usage-based charge
-// calculation. This will be removed when billing calculation is migrated to
-// use Price/Product entities (#10).
-func (s *BillingService) WithPlanRepository(repo PlanRepository) *BillingService {
-	s.planRepo = repo
-	return s
 }
 
 // billableStatuses defines which contract statuses allow invoice generation.
@@ -137,7 +121,7 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	}
 
 	// Step 3: Calculate subtotal based on contract type
-	subtotal, err := s.calculateSubtotal(ctx, agg, billingPeriod)
+	subtotal, lineItems, err := s.calculateSubtotal(ctx, agg, billingPeriod)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate subtotal: %w", err)
 	}
@@ -219,6 +203,9 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 		invoice.WithAmountDue(amountDue),
 		invoice.WithIssueDate(now),
 	}
+	if len(lineItems) > 0 {
+		opts = append(opts, invoice.WithLineItems(lineItems))
+	}
 	if agg.PaymentMethodID() != nil {
 		opts = append(opts, invoice.WithPaymentMethodID(agg.PaymentMethodID()))
 	}
@@ -249,74 +236,100 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	return inv, nil
 }
 
-// calculateSubtotal calculates the subtotal based on contract type.
-func (s *BillingService) calculateSubtotal(ctx context.Context, agg *contract.ContractAggregate, billingPeriod shared.DateRange) (shared.Money, error) {
-	switch agg.GetContractType() {
-	case contract.ContractTypeSubscription:
-		return agg.Price(), nil
-
-	case contract.ContractTypeOneTime:
-		return agg.Price(), nil
-
-	case contract.ContractTypeUsageBased:
-		return s.calculateUsageCharge(ctx, agg, billingPeriod)
-
-	default:
-		return shared.Money{}, fmt.Errorf("unsupported contract type: %s", agg.GetContractType())
+// calculateSubtotal calculates the subtotal based on the Price entity.
+// It validates that the billing period matches the contract's current period,
+// loads the Price entity, and delegates to usage charge calculation if needed.
+// Returns the subtotal amount and line items with priceID for traceability.
+func (s *BillingService) calculateSubtotal(ctx context.Context, agg *contract.ContractAggregate, billingPeriod shared.DateRange) (shared.Money, []invoice.LineItem, error) {
+	// 1. Validate billing period matches contract's current period
+	//    Skip validation for draft contracts (currentPeriod is zero).
+	if !agg.CurrentPeriod().IsZero() && !billingPeriod.Equals(agg.CurrentPeriod()) {
+		return shared.Money{}, nil, fmt.Errorf(
+			"billing period mismatch: requested %s but contract current period is %s",
+			billingPeriod, agg.CurrentPeriod(),
+		)
 	}
+
+	// 2. Load the Price entity
+	price, err := s.priceRepo.FindByID(ctx, agg.PriceID())
+	if err != nil {
+		return shared.Money{}, nil, fmt.Errorf("failed to load price: %w", err)
+	}
+
+	// 3. Use Price entity amount
+	effectiveAmount := price.Amount()
+
+	// 4. Calculate based on pricing model
+	if price.PricingModel() == nil {
+		// Pure subscription or one-time — return the flat amount with a line item
+		li := invoice.NewLineItem(
+			shared.GenerateID(), "Subscription", 1,
+			effectiveAmount, effectiveAmount, nil,
+			invoice.WithPriceID(price.ID()),
+		)
+		return effectiveAmount, []invoice.LineItem{li}, nil
+	}
+
+	// 5. Usage-based: load product for usage metrics, calculate usage charges
+	return s.calculateUsageCharge(ctx, agg, price, billingPeriod, effectiveAmount)
 }
 
-// calculateUsageCharge calculates usage-based charges by iterating over
-// plan usage metrics, querying usage summaries, applying included quantities,
-// and computing prices via the pricing model.
-//
-// NOTE: This method still uses the deprecated PlanRepository to load usage metrics
-// with their PricingModel. It will be migrated to use Product/Price entities in #10.
-func (s *BillingService) calculateUsageCharge(ctx context.Context, agg *contract.ContractAggregate, billingPeriod shared.DateRange) (shared.Money, error) {
-	currency := agg.Price().Currency()
-
-	if s.planRepo == nil {
-		return shared.Money{}, fmt.Errorf("usage-based billing requires PlanRepository (set via WithPlanRepository); will be migrated to Price/Product in #10")
-	}
-
-	// Load the plan to get usage metrics
-	plan, err := s.planRepo.FindByID(ctx, agg.PlanID())
+// calculateUsageCharge calculates usage-based charges using the Product entity
+// for usage metric definitions and the Price entity's PricingModel for pricing.
+// Returns the total charge and line items with priceID for traceability.
+func (s *BillingService) calculateUsageCharge(
+	ctx context.Context,
+	agg *contract.ContractAggregate,
+	price *pricing.Price,
+	billingPeriod shared.DateRange,
+	baseAmount shared.Money,
+) (shared.Money, []invoice.LineItem, error) {
+	// Load the product to get usage metrics
+	prod, err := s.productRepo.FindByID(ctx, price.ProductID())
 	if err != nil {
-		return shared.Money{}, fmt.Errorf("failed to load plan: %w", err)
+		return shared.Money{}, nil, fmt.Errorf("failed to load product: %w", err)
 	}
 
-	totalCharge := shared.Zero(currency)
+	totalCharge := baseAmount // start with base price
+	var lineItems []invoice.LineItem
 
-	for _, metric := range plan.UsageMetrics() {
-		var summary *usage.UsageSummary
-		summary, err = s.usageRepo.GetSummary(ctx, agg.ContractID(), metric.Name, billingPeriod)
+	// Base price line item
+	lineItems = append(lineItems, invoice.NewLineItem(
+		shared.GenerateID(), "Base price", 1,
+		baseAmount, baseAmount, nil,
+		invoice.WithPriceID(price.ID()),
+	))
+
+	for _, metric := range prod.UsageMetrics() {
+		summary, err := s.usageRepo.GetSummary(ctx, agg.ContractID(), metric.Name, billingPeriod)
 		if err != nil {
-			return shared.Money{}, fmt.Errorf("failed to get usage summary for metric %s: %w", metric.Name, err)
+			return shared.Money{}, nil, fmt.Errorf("failed to get usage summary for %s: %w", metric.Name, err)
 		}
 
-		// Subtract included quantity
 		billableUsage := summary.TotalUsage - metric.IncludedQuantity
 		if billableUsage < 0 {
 			billableUsage = 0
 		}
 
-		// Calculate price via the metric's pricing model
-		metricPrice := metric.PricingModel.CalculatePrice(billableUsage)
-
+		// Use the Price's pricing model
+		metricPrice := price.PricingModel().CalculatePrice(billableUsage)
 		totalCharge, err = totalCharge.Add(metricPrice)
 		if err != nil {
-			return shared.Money{}, fmt.Errorf("failed to sum usage charge: %w", err)
+			return shared.Money{}, nil, fmt.Errorf("failed to sum usage charge: %w", err)
+		}
+
+		if billableUsage > 0 {
+			lineItems = append(lineItems, invoice.NewLineItem(
+				shared.GenerateID(),
+				fmt.Sprintf("Usage: %s", metric.Name),
+				billableUsage,
+				metricPrice, metricPrice, nil,
+				invoice.WithPriceID(price.ID()),
+			))
 		}
 	}
 
-	// Add the base price
-	basePrice := agg.Price()
-	totalCharge, err = totalCharge.Add(basePrice)
-	if err != nil {
-		return shared.Money{}, fmt.Errorf("failed to add base price: %w", err)
-	}
-
-	return totalCharge, nil
+	return totalCharge, lineItems, nil
 }
 
 // applyCredits applies available credits to the total using FIFO order.

@@ -30,12 +30,23 @@ type LineItem struct {
 	unitPrice   shared.Money
 	amount      shared.Money
 	taxRate     *big.Rat
+	priceID     shared.PriceID
 	metadata    map[string]string
 }
 
+// LineItemOption is a functional option for NewLineItem.
+type LineItemOption func(*LineItem)
+
+// WithPriceID sets the price ID on the line item for traceability.
+func WithPriceID(id shared.PriceID) LineItemOption {
+	return func(li *LineItem) {
+		li.priceID = id
+	}
+}
+
 // NewLineItem creates a new LineItem.
-func NewLineItem(id, description string, quantity int64, unitPrice, amount shared.Money, taxRate *big.Rat) LineItem {
-	return LineItem{
+func NewLineItem(id, description string, quantity int64, unitPrice, amount shared.Money, taxRate *big.Rat, opts ...LineItemOption) LineItem {
+	li := LineItem{
 		id:          id,
 		description: description,
 		quantity:    quantity,
@@ -44,6 +55,10 @@ func NewLineItem(id, description string, quantity int64, unitPrice, amount share
 		taxRate:     taxRate,
 		metadata:    make(map[string]string),
 	}
+	for _, opt := range opts {
+		opt(&li)
+	}
+	return li
 }
 
 func (li LineItem) ID() string              { return li.id }
@@ -52,6 +67,7 @@ func (li LineItem) Quantity() int64         { return li.quantity }
 func (li LineItem) UnitPrice() shared.Money { return li.unitPrice }
 func (li LineItem) Amount() shared.Money    { return li.amount }
 func (li LineItem) TaxRate() *big.Rat       { return li.taxRate }
+func (li LineItem) PriceID() shared.PriceID { return li.priceID }
 func (li LineItem) Metadata() map[string]string {
 	cp := make(map[string]string, len(li.metadata))
 	for k, v := range li.metadata {
