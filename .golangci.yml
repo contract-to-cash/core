@@ -20,6 +20,9 @@ linters:
       require-specific: true
   exclusions:
     generated: lax
+    rules:
+      - linter: govet
+        text: 'shadow: declaration of "err" shadows declaration at'
     presets:
       - comments
       - common-false-positives
