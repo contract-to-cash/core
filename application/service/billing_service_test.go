@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -829,6 +830,80 @@ func (m *mockUsageRepoWithMetrics) GetSummary(_ context.Context, _ shared.Contra
 }
 func (m *mockUsageRepoWithMetrics) GetRecords(_ context.Context, _ shared.ContractID, _ string, _, _ time.Time) ([]*usage.UsageRecord, error) {
 	return nil, nil
+}
+
+// --- Error path tests ---
+
+func TestCalculateSubtotal_EmptyPriceID(t *testing.T) {
+	clock := newTestClock()
+	// Contract with empty PriceID
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeSubscription, jpy(10000), "")
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		nil,
+		credit.CreditConfig{},
+		&mockPriceRepo{},
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err == nil {
+		t.Fatal("expected error for empty priceID")
+	}
+}
+
+func TestCalculateSubtotal_PriceRepoError(t *testing.T) {
+	clock := newTestClock()
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeSubscription, jpy(10000), shared.PriceID("price-999"))
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		nil,
+		credit.CreditConfig{},
+		&mockPriceRepo{err: fmt.Errorf("price not found")},
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err == nil {
+		t.Fatal("expected error when priceRepo fails")
+	}
+}
+
+func TestCalculateUsageCharge_ProductRepoError(t *testing.T) {
+	clock := newTestClock()
+	usagePricing := pricing.UsagePrice{UnitPrice: jpy(10)}
+	priceEntity := newTestPrice(shared.NewProductID(), jpy(1000), usagePricing)
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeUsageBased, jpy(1000), priceEntity.ID())
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		nil,
+		credit.CreditConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{err: fmt.Errorf("product not found")},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err == nil {
+		t.Fatal("expected error when productRepo fails")
+	}
 }
 
 // --- Mock discount plugin ---

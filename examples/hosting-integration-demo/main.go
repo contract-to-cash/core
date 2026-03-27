@@ -28,6 +28,7 @@ import (
 	"github.com/contract-to-cash/core/application/service"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/credit"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -50,6 +51,8 @@ func main() {
 	paymentRepo := inmemory.NewInMemoryPaymentRepository()
 	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
 
 	// ── 2. Register plugins ──
 	registry := plugin.NewRegistry()
@@ -75,14 +78,19 @@ func main() {
 	// ── 3. Customer signs up for a hosting plan ──
 	printSection("Phase 1: Customer Sign-up")
 
+	priceEntity := pricing.NewPrice(shared.NewProductID(), moneyJPY(5000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+	must("save price", priceRepo.Save(ctx, priceEntity))
+
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create", agg.Create(contract.CreateContractCommand{
 		AccountID:    accountID,
 		PlanID:       shared.PlanID("plan-vps-standard"),
+		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        moneyJPY(5000),
 		BasePrice:    moneyJPY(5000),
+		AutoRenew:    true,
 	}, metadata))
 
 	// Fire OnContractCreate hooks
@@ -101,16 +109,12 @@ func main() {
 	// ── 5. First invoice + payment -> server provisioned ──
 	printSection("Phase 2: First Payment & Server Provisioning")
 
-	billingPeriod, _ := shared.NewDateRange(
-		time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
-	)
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo, creditRepo,
-		credit.CreditConfig{}, nil, nil, registry,
+		credit.CreditConfig{}, priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30}, clock,
 	)
-	inv, err := billingService.GenerateInvoice(ctx, contractID, billingPeriod)
+	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {
 		fatal("generate invoice", err)
 	}
@@ -148,11 +152,11 @@ func main() {
 	clock.Advance(30 * 24 * time.Hour) // May 1
 	gateway.failNext = true            // simulate payment failure
 
-	billingPeriod2, _ := shared.NewDateRange(
-		time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
-	)
-	inv2, _ := billingService.GenerateInvoice(ctx, contractID, billingPeriod2)
+	agg, _ = contractRepo.FindByID(ctx, contractID)
+	must("renew", agg.Renew(metadata))
+	must("save", contractRepo.Save(ctx, agg))
+
+	inv2, _ := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	must("finalize", inv2.Finalize())
 	must("save invoice", invoiceRepo.Save(ctx, inv2))
 

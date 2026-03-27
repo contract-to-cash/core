@@ -13,6 +13,7 @@ import (
 	"github.com/contract-to-cash/core/application/service"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/credit"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -31,6 +32,8 @@ func main() {
 	paymentRepo := inmemory.NewInMemoryPaymentRepository()
 	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
 
 	// ── 2. Plugin registry (tax: 10%) ──
 	registry := plugin.NewRegistry()
@@ -56,10 +59,15 @@ func main() {
 	price := moneyJPY(3000)
 	metadata := eventstore.EventMetadata{UserID: "demo-user"}
 
+	// Create a Price entity for this subscription
+	priceEntity := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+	must("save price", priceRepo.Save(ctx, priceEntity))
+
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create contract", agg.Create(contract.CreateContractCommand{
 		AccountID:    accountID,
 		PlanID:       planID,
+		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        price,
@@ -74,23 +82,19 @@ func main() {
 	printStep("2. Contract activated", "Status=%s", agg.Status())
 
 	// ── 5. Generate an invoice via BillingService ──
-	billingPeriod, _ := shared.NewDateRange(
-		time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
-	)
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo, creditRepo,
 		credit.CreditConfig{
 			DowngradePolicy:    credit.CreditPolicyLedger,
 			CancellationPolicy: credit.CreditPolicyLedger,
 		},
-		nil, nil, // priceRepo/productRepo: not needed for subscription type
+		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
-	inv, err := billingService.GenerateInvoice(ctx, contractID, billingPeriod)
+	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {
 		fatal("generate invoice", err)
 	}

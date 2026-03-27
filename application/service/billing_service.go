@@ -250,7 +250,12 @@ func (s *BillingService) calculateSubtotal(ctx context.Context, agg *contract.Co
 		)
 	}
 
-	// 2. Load the Price entity
+	// 2. Validate PriceID is set
+	if agg.PriceID() == "" {
+		return shared.Money{}, nil, fmt.Errorf("contract %s has no priceID set", agg.ContractID())
+	}
+
+	// 3. Load the Price entity
 	price, err := s.priceRepo.FindByID(ctx, agg.PriceID())
 	if err != nil {
 		return shared.Money{}, nil, fmt.Errorf("failed to load price: %w", err)

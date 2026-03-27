@@ -17,6 +17,7 @@ import (
 	"github.com/contract-to-cash/core/application/service"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/credit"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -35,6 +36,8 @@ func main() {
 	paymentRepo := inmemory.NewInMemoryPaymentRepository()
 	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
 
 	// Tax plugin only
 	registry := plugin.NewRegistry()
@@ -57,14 +60,19 @@ func main() {
 	}
 
 	// ── 1. Create contract (Draft) ──
+	priceEntity := pricing.NewPrice(shared.NewProductID(), moneyJPY(3000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+	must("save price", priceRepo.Save(ctx, priceEntity))
+
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create", agg.Create(contract.CreateContractCommand{
 		AccountID:    accountID,
 		PlanID:       shared.PlanID("plan-pro"),
+		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        moneyJPY(3000),
 		BasePrice:    moneyJPY(3000),
+		AutoRenew:    true,
 	}, metadata))
 	must("save", contractRepo.Save(ctx, agg))
 	recordTransition("Draft")
@@ -86,26 +94,23 @@ func main() {
 	// ── 3. Trial ends, auto-convert to Active ──
 	clock.Advance(14 * 24 * time.Hour) // April 15
 	agg, _ = contractRepo.FindByID(ctx, contractID)
-	must("end trial", agg.EndTrial(true, metadata)) // converted=true
+	must("activate", agg.Activate(metadata)) // Trialing -> Active, sets currentPeriod
 	must("save", contractRepo.Save(ctx, agg))
 	recordTransition("Active")
 	printStep("3. Trial Ended -> Active",
-		"Auto-converted to paid subscription on %s", clock.Now().Format("2006-01-02"))
+		"Auto-converted to paid subscription on %s\n     Billing period: %s",
+		clock.Now().Format("2006-01-02"), agg.CurrentPeriod())
 
 	// ── 4. Generate first invoice and pay ──
 	clock.Advance(16 * 24 * time.Hour) // May 1
-	billingPeriod, _ := shared.NewDateRange(
-		time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
-	)
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo, creditRepo,
 		credit.CreditConfig{DowngradePolicy: credit.CreditPolicyLedger, CancellationPolicy: credit.CreditPolicyLedger},
-		nil, nil, registry,
+		priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
-	inv, err := billingService.GenerateInvoice(ctx, contractID, billingPeriod)
+	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {
 		fatal("generate invoice", err)
 	}
@@ -160,11 +165,10 @@ func main() {
 
 	// ── 8. Generate next invoice - credits applied FIFO ──
 	clock.Advance(15 * 24 * time.Hour) // July 1
-	billingPeriod2, _ := shared.NewDateRange(
-		time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
-	)
-	inv2, err := billingService.GenerateInvoice(ctx, contractID, billingPeriod2)
+	agg, _ = contractRepo.FindByID(ctx, contractID)
+	must("renew", agg.Renew(metadata))
+	must("save", contractRepo.Save(ctx, agg))
+	inv2, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {
 		fatal("generate invoice 2", err)
 	}
