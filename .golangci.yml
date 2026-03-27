@@ -5,14 +5,12 @@ run:
 
 linters:
   enable:
-    # Default-equivalent
     - errcheck
     - govet
     - staticcheck
     - unused
     - ineffassign
     - gosimple
-    # Additional
     - gofmt
     - goimports
     - misspell
@@ -21,7 +19,7 @@ linters:
     - exhaustive
     - copyloopvar
 
-linters-settings:
+settings:
   errcheck:
     check-type-assertions: true
   exhaustive:
