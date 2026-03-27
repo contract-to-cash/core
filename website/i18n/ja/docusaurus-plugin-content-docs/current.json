@@ -1,0 +1,22 @@
+{
+  "version.label": {
+    "message": "Next",
+    "description": "The label for version current"
+  },
+  "sidebar.docsSidebar.category.Core Concepts": {
+    "message": "Core Concepts",
+    "description": "The label for category 'Core Concepts' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.category.Guides": {
+    "message": "Guides",
+    "description": "The label for category 'Guides' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.category.Examples": {
+    "message": "Examples",
+    "description": "The label for category 'Examples' in sidebar 'docsSidebar'"
+  },
+  "sidebar.apiSidebar.category.API Reference": {
+    "message": "API Reference",
+    "description": "The label for category 'API Reference' in sidebar 'apiSidebar'"
+  }
+}

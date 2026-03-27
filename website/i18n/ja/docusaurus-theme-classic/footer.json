@@ -1,0 +1,46 @@
+{
+  "link.title.Docs": {
+    "message": "Docs",
+    "description": "The title of the footer links column with title=Docs in the footer"
+  },
+  "link.title.API Reference": {
+    "message": "API Reference",
+    "description": "The title of the footer links column with title=API Reference in the footer"
+  },
+  "link.title.More": {
+    "message": "More",
+    "description": "The title of the footer links column with title=More in the footer"
+  },
+  "link.item.label.Introduction": {
+    "message": "Introduction",
+    "description": "The label of footer link with label=Introduction linking to /docs/introduction"
+  },
+  "link.item.label.Quick Start": {
+    "message": "Quick Start",
+    "description": "The label of footer link with label=Quick Start linking to /docs/quick-start"
+  },
+  "link.item.label.Architecture": {
+    "message": "Architecture",
+    "description": "The label of footer link with label=Architecture linking to /docs/architecture"
+  },
+  "link.item.label.Domain Types": {
+    "message": "Domain Types",
+    "description": "The label of footer link with label=Domain Types linking to /docs/api/domain-types"
+  },
+  "link.item.label.Services": {
+    "message": "Services",
+    "description": "The label of footer link with label=Services linking to /docs/api/services"
+  },
+  "link.item.label.Plugin Hooks": {
+    "message": "Plugin Hooks",
+    "description": "The label of footer link with label=Plugin Hooks linking to /docs/api/plugin-hooks"
+  },
+  "link.item.label.GitHub": {
+    "message": "GitHub",
+    "description": "The label of footer link with label=GitHub linking to https://github.com/contract-to-cash/core"
+  },
+  "copyright": {
+    "message": "Copyright 2026 Contract Billing Core Contributors. Built with Docusaurus.",
+    "description": "The footer copyright"
+  }
+}
