@@ -55,7 +55,7 @@ func main() {
 	// ── T2: May 1 - Price change to ¥5,000 ──
 	clock.Advance(30 * 24 * time.Hour) // May 1
 	agg, _ = contractRepo.FindByID(ctx, contractID)
-	must("change price", agg.ChangePrice(moneyJPY(5000), clock.Now(), metadata))
+	must("change price", agg.ChangePrice("price-5000", contract.ChangePolicyImmediate, nil, metadata))
 	must("save", contractRepo.Save(ctx, agg))
 	t2 := clock.current
 	printStep("T2: %s", "Price changed to ¥5,000/month", t2.Format("2006-01-02"))

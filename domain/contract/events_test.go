@@ -26,6 +26,8 @@ func TestEventTypes(t *testing.T) {
 		{"ContractExpiredEvent", &ContractExpiredEvent{}, EventTypeContractExpired},
 		{"CancellationScheduledEvent", &CancellationScheduledEvent{}, EventTypeCancellationScheduled},
 		{"CancellationUnscheduledEvent", &CancellationUnscheduledEvent{}, EventTypeCancellationUnscheduled},
+		{"PriceChangeScheduledEvent", &PriceChangeScheduledEvent{}, EventTypePriceChangeScheduled},
+		{"PriceChangeUnscheduledEvent", &PriceChangeUnscheduledEvent{}, EventTypePriceChangeUnscheduled},
 	}
 
 	for _, tt := range tests {
@@ -53,6 +55,8 @@ func TestEventTypeConstants(t *testing.T) {
 		EventTypeContractExpired:         "contract.expired",
 		EventTypeCancellationScheduled:   "contract.cancellation_scheduled",
 		EventTypeCancellationUnscheduled: "contract.cancellation_unscheduled",
+		EventTypePriceChangeScheduled:    "contract.price_change_scheduled",
+		EventTypePriceChangeUnscheduled:  "contract.price_change_unscheduled",
 	}
 
 	for et, expected := range expectations {
