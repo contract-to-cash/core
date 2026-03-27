@@ -1,7 +1,7 @@
 # コードベース調査レポート: Contract-to-Cash Core
 
 **調査日**: 2026-03-27
-**対象パス**: /Users/keishi.hara/src/github.com/contract-to-cash/core
+**対象パス**: contract-to-cash/core
 **調査テーマ**: コード品質、設計パターン、テストカバレッジ、改善点
 
 ---

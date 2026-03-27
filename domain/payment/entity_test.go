@@ -80,6 +80,13 @@ func newTestPayment() *Payment {
 	)
 }
 
+func completePayment(t *testing.T, p *Payment) {
+	t.Helper()
+	if err := p.Complete(); err != nil {
+		t.Fatalf("setup: failed to complete payment: %v", err)
+	}
+}
+
 func TestPayment_Complete(t *testing.T) {
 	p := newTestPayment()
 
@@ -93,7 +100,7 @@ func TestPayment_Complete(t *testing.T) {
 
 func TestPayment_Complete_InvalidState(t *testing.T) {
 	p := newTestPayment()
-	_ = p.Complete()
+	completePayment(t, p)
 
 	if err := p.Complete(); err == nil {
 		t.Error("expected error completing already completed payment")
@@ -117,7 +124,7 @@ func TestPayment_Fail(t *testing.T) {
 
 func TestPayment_Fail_InvalidState(t *testing.T) {
 	p := newTestPayment()
-	_ = p.Complete()
+	completePayment(t, p)
 
 	if err := p.Fail("test"); err == nil {
 		t.Error("expected error failing completed payment")
@@ -126,7 +133,7 @@ func TestPayment_Fail_InvalidState(t *testing.T) {
 
 func TestPayment_MarkRefunded_FromCompleted(t *testing.T) {
 	p := newTestPayment()
-	_ = p.Complete()
+	completePayment(t, p)
 
 	if err := p.MarkRefunded(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -138,8 +145,10 @@ func TestPayment_MarkRefunded_FromCompleted(t *testing.T) {
 
 func TestPayment_MarkRefunded_FromPartiallyRefunded(t *testing.T) {
 	p := newTestPayment()
-	_ = p.Complete()
-	_ = p.MarkPartiallyRefunded()
+	completePayment(t, p)
+	if err := p.MarkPartiallyRefunded(); err != nil {
+		t.Fatalf("setup: failed to partially refund: %v", err)
+	}
 
 	if err := p.MarkRefunded(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -159,7 +168,7 @@ func TestPayment_MarkRefunded_InvalidState(t *testing.T) {
 
 func TestPayment_MarkPartiallyRefunded(t *testing.T) {
 	p := newTestPayment()
-	_ = p.Complete()
+	completePayment(t, p)
 
 	if err := p.MarkPartiallyRefunded(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -179,7 +188,7 @@ func TestPayment_MarkPartiallyRefunded_InvalidState(t *testing.T) {
 
 func TestPayment_MarkChargedBack(t *testing.T) {
 	p := newTestPayment()
-	_ = p.Complete()
+	completePayment(t, p)
 
 	if err := p.MarkChargedBack(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
