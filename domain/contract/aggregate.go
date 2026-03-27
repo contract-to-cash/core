@@ -669,10 +669,18 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 	return json.Marshal(state)
 }
 
+// contractUpcasterChain is the package-level upcaster chain for contract events.
+var contractUpcasterChain = NewContractUpcasterChain()
+
 // LoadFromHistory restores aggregate state by replaying persisted events.
 func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error {
 	for _, e := range events {
-		domainEvent, err := contractEventRegistry.Deserialize(e.Type, e.Data)
+		// Upcast legacy event schemas before deserialization.
+		upcasted, err := contractUpcasterChain.Upcast(e)
+		if err != nil {
+			return fmt.Errorf("failed to upcast event: %w", err)
+		}
+		domainEvent, err := contractEventRegistry.Deserialize(upcasted.Type, upcasted.Data)
 		if err != nil {
 			return fmt.Errorf("failed to deserialize event: %w", err)
 		}
