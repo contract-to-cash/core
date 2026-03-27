@@ -270,65 +270,6 @@ func TestHasPendingChange(t *testing.T) {
 	}
 }
 
-// --- PriceOverride tests ---
-
-func TestSetPriceOverride(t *testing.T) {
-	agg := createActiveAggregate(t)
-	meta := newTestMetadata()
-
-	override := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
-	err := agg.SetPriceOverride(override, meta)
-	if err != nil {
-		t.Fatalf("SetPriceOverride failed: %v", err)
-	}
-
-	if agg.PriceOverride() == nil {
-		t.Fatal("expected priceOverride to be set")
-	}
-	if agg.PriceOverride().Amount().Cmp(new(big.Rat).SetInt64(500)) != 0 {
-		t.Errorf("expected override amount 500, got %s", agg.PriceOverride().Amount().RatString())
-	}
-}
-
-func TestSetPriceOverride_NotActive_Fails(t *testing.T) {
-	agg := newTestAggregate()
-	meta := newTestMetadata()
-	_ = agg.Create(newTestCommand(), meta)
-
-	override := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
-	err := agg.SetPriceOverride(override, meta)
-	if err == nil {
-		t.Fatal("expected error for SetPriceOverride from draft state")
-	}
-}
-
-func TestClearPriceOverride(t *testing.T) {
-	agg := createActiveAggregate(t)
-	meta := newTestMetadata()
-
-	override := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
-	_ = agg.SetPriceOverride(override, meta)
-
-	err := agg.ClearPriceOverride(meta)
-	if err != nil {
-		t.Fatalf("ClearPriceOverride failed: %v", err)
-	}
-
-	if agg.PriceOverride() != nil {
-		t.Error("expected priceOverride to be nil after clear")
-	}
-}
-
-func TestClearPriceOverride_NoneSet_Fails(t *testing.T) {
-	agg := createActiveAggregate(t)
-	meta := newTestMetadata()
-
-	err := agg.ClearPriceOverride(meta)
-	if err == nil {
-		t.Fatal("expected error when no price override to clear")
-	}
-}
-
 // --- Apply handler tests for new events ---
 
 func TestApply_PriceChangedEvent_NewFormat(t *testing.T) {
@@ -435,72 +376,6 @@ func TestApply_PriceChangeUnscheduledEvent(t *testing.T) {
 	}
 }
 
-func TestApply_PriceOverrideSetEvent(t *testing.T) {
-	agg := newTestAggregate()
-	now := agg.Clock().Now()
-
-	_ = agg.Apply(&ContractCreatedEvent{
-		ContractID:   shared.ContractID("test-contract-001"),
-		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
-		Price:        newTestMoney(),
-		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
-		ContractType: ContractTypeSubscription,
-		CreatedAt:    now,
-	})
-
-	override := shared.NewMoney(new(big.Rat).SetInt64(800), shared.CurrencyJPY)
-	err := agg.Apply(&PriceOverrideSetEvent{
-		ContractID: shared.ContractID("test-contract-001"),
-		Override:   override,
-		SetAt:      now,
-	})
-	if err != nil {
-		t.Fatalf("Apply PriceOverrideSetEvent failed: %v", err)
-	}
-
-	if agg.PriceOverride() == nil {
-		t.Fatal("expected priceOverride to be set")
-	}
-}
-
-func TestApply_PriceOverrideClearedEvent(t *testing.T) {
-	agg := newTestAggregate()
-	now := agg.Clock().Now()
-
-	_ = agg.Apply(&ContractCreatedEvent{
-		ContractID:   shared.ContractID("test-contract-001"),
-		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
-		Price:        newTestMoney(),
-		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
-		ContractType: ContractTypeSubscription,
-		CreatedAt:    now,
-	})
-
-	// Set override first
-	override := shared.NewMoney(new(big.Rat).SetInt64(800), shared.CurrencyJPY)
-	_ = agg.Apply(&PriceOverrideSetEvent{
-		ContractID: shared.ContractID("test-contract-001"),
-		Override:   override,
-		SetAt:      now,
-	})
-
-	err := agg.Apply(&PriceOverrideClearedEvent{
-		ContractID: shared.ContractID("test-contract-001"),
-		ClearedAt:  now,
-	})
-	if err != nil {
-		t.Fatalf("Apply PriceOverrideClearedEvent failed: %v", err)
-	}
-
-	if agg.PriceOverride() != nil {
-		t.Error("expected priceOverride to be nil after clear")
-	}
-}
-
 // --- Event type tests ---
 
 func TestNewEventTypes(t *testing.T) {
@@ -511,8 +386,6 @@ func TestNewEventTypes(t *testing.T) {
 	}{
 		{"PriceChangeScheduledEvent", &PriceChangeScheduledEvent{}, EventTypePriceChangeScheduled},
 		{"PriceChangeUnscheduledEvent", &PriceChangeUnscheduledEvent{}, EventTypePriceChangeUnscheduled},
-		{"PriceOverrideSetEvent", &PriceOverrideSetEvent{}, EventTypePriceOverrideSet},
-		{"PriceOverrideClearedEvent", &PriceOverrideClearedEvent{}, EventTypePriceOverrideCleared},
 	}
 
 	for _, tt := range tests {
@@ -587,36 +460,6 @@ func TestApply_LegacyPlanChangedEvent(t *testing.T) {
 
 // --- Snapshot round-trip tests for new fields ---
 
-func TestSnapshotRoundTrip_WithPriceOverride(t *testing.T) {
-	agg := createActiveAggregate(t)
-	meta := newTestMetadata()
-
-	override := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
-	_ = agg.SetPriceOverride(override, meta)
-
-	data, err := agg.MarshalSnapshot()
-	if err != nil {
-		t.Fatalf("MarshalSnapshot failed: %v", err)
-	}
-
-	restored := NewContractAggregate(agg.ContractID(), newTestClock())
-	snapshot := eventstore.Snapshot{
-		StreamID: string(agg.ContractID()),
-		Version:  agg.Version(),
-		State:    data,
-	}
-	if err := restored.LoadFromSnapshot(snapshot); err != nil {
-		t.Fatalf("LoadFromSnapshot failed: %v", err)
-	}
-
-	if restored.PriceOverride() == nil {
-		t.Fatal("expected priceOverride to be restored from snapshot")
-	}
-	if restored.PriceOverride().Amount().Cmp(new(big.Rat).SetInt64(500)) != 0 {
-		t.Errorf("expected override 500, got %s", restored.PriceOverride().Amount().RatString())
-	}
-}
-
 func TestSnapshotRoundTrip_WithPendingPriceID(t *testing.T) {
 	agg := createActiveAggregate(t)
 	meta := newTestMetadata()
@@ -664,27 +507,6 @@ func TestLoadFromHistory_WithPriceChangeScheduled(t *testing.T) {
 
 	if restored.PendingPriceID() == nil || *restored.PendingPriceID() != priceB {
 		t.Errorf("expected pendingPriceID %s, got %v", priceB, restored.PendingPriceID())
-	}
-}
-
-func TestLoadFromHistory_WithPriceOverride(t *testing.T) {
-	agg := createActiveAggregate(t)
-	meta := newTestMetadata()
-
-	override := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
-	if err := agg.SetPriceOverride(override, meta); err != nil {
-		t.Fatalf("SetPriceOverride failed: %v", err)
-	}
-
-	events := agg.UncommittedEvents()
-
-	restored := NewContractAggregate(shared.ContractID("test-contract-001"), newTestClock())
-	if err := restored.LoadFromHistory(events); err != nil {
-		t.Fatalf("LoadFromHistory failed: %v", err)
-	}
-
-	if restored.PriceOverride() == nil {
-		t.Fatal("expected priceOverride after history replay")
 	}
 }
 
@@ -807,43 +629,6 @@ func TestPriceChangeUnscheduledEvent_Serialization(t *testing.T) {
 	}
 	if pcu.Reason != "changed mind" {
 		t.Errorf("expected reason 'changed mind', got %s", pcu.Reason)
-	}
-}
-
-func TestPriceOverrideEvents_Serialization(t *testing.T) {
-	agg := createActiveAggregate(t)
-	meta := newTestMetadata()
-
-	override := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
-	_ = agg.SetPriceOverride(override, meta)
-	_ = agg.ClearPriceOverride(meta)
-
-	events := agg.UncommittedEvents()
-
-	// Check SetEvent
-	setEvent := events[len(events)-2]
-	if setEvent.Type != EventTypePriceOverrideSet {
-		t.Fatalf("expected event type %s, got %s", EventTypePriceOverrideSet, setEvent.Type)
-	}
-	setDomain, err := contractEventRegistry.Deserialize(setEvent.Type, setEvent.Data)
-	if err != nil {
-		t.Fatalf("deserialize set event failed: %v", err)
-	}
-	if _, ok := setDomain.(*PriceOverrideSetEvent); !ok {
-		t.Fatalf("expected *PriceOverrideSetEvent, got %T", setDomain)
-	}
-
-	// Check ClearEvent
-	clearEvent := events[len(events)-1]
-	if clearEvent.Type != EventTypePriceOverrideCleared {
-		t.Fatalf("expected event type %s, got %s", EventTypePriceOverrideCleared, clearEvent.Type)
-	}
-	clearDomain, err := contractEventRegistry.Deserialize(clearEvent.Type, clearEvent.Data)
-	if err != nil {
-		t.Fatalf("deserialize clear event failed: %v", err)
-	}
-	if _, ok := clearDomain.(*PriceOverrideClearedEvent); !ok {
-		t.Fatalf("expected *PriceOverrideClearedEvent, got %T", clearDomain)
 	}
 }
 

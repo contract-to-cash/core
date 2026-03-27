@@ -28,7 +28,11 @@ func (u *PriceChangedEventUpcaster) Upcast(event eventstore.Event) (eventstore.E
 	}
 
 	// Add policy="immediate" if absent or empty (v1 events were always immediate)
-	if policyRaw, ok := raw["policy"]; !ok || string(policyRaw) == `""` || string(policyRaw) == `null` {
+	var existingPolicy string
+	if policyRaw, ok := raw["policy"]; ok {
+		_ = json.Unmarshal(policyRaw, &existingPolicy)
+	}
+	if existingPolicy == "" {
 		policyJSON, _ := json.Marshal(string(ChangePolicyImmediate))
 		raw["policy"] = policyJSON
 	}

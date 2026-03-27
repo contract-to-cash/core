@@ -28,8 +28,6 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 	r.Register(&CancellationUnscheduledEvent{})
 	r.Register(&PriceChangeScheduledEvent{})
 	r.Register(&PriceChangeUnscheduledEvent{})
-	r.Register(&PriceOverrideSetEvent{})
-	r.Register(&PriceOverrideClearedEvent{})
 	return r
 }()
 
@@ -66,7 +64,6 @@ type ContractAggregate struct {
 	autoRenew         bool
 	cancelAtPeriodEnd bool
 	pendingPriceID    *shared.PriceID
-	priceOverride     *shared.Money
 	metadata          map[string]string
 	createdAt         time.Time
 	updatedAt         time.Time
@@ -130,9 +127,6 @@ func (a *ContractAggregate) PendingPriceID() *shared.PriceID { return a.pendingP
 
 // HasPendingChange returns whether there is a pending price change.
 func (a *ContractAggregate) HasPendingChange() bool { return a.pendingPriceID != nil }
-
-// PriceOverride returns the per-contract price override, if any.
-func (a *ContractAggregate) PriceOverride() *shared.Money { return a.priceOverride }
 
 // GetMetadata returns a copy of the contract metadata.
 func (a *ContractAggregate) GetMetadata() map[string]string {
@@ -326,43 +320,6 @@ func (a *ContractAggregate) UnscheduleChange(reason string, metadata eventstore.
 		CancelledPriceID: *a.pendingPriceID,
 		Reason:           reason,
 		UnscheduledAt:    a.Clock().Now(),
-	}
-
-	if err := a.Apply(event); err != nil {
-		return err
-	}
-	return a.RaiseEvent(event, metadata)
-}
-
-// SetPriceOverride sets a per-contract price override.
-func (a *ContractAggregate) SetPriceOverride(override shared.Money, metadata eventstore.EventMetadata) error {
-	if a.status != ContractStatusActive {
-		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
-			fmt.Sprintf("cannot set price override: current status is %s", a.status))
-	}
-
-	event := &PriceOverrideSetEvent{
-		ContractID: a.contractID,
-		Override:   override,
-		SetAt:      a.Clock().Now(),
-	}
-
-	if err := a.Apply(event); err != nil {
-		return err
-	}
-	return a.RaiseEvent(event, metadata)
-}
-
-// ClearPriceOverride removes the per-contract price override.
-func (a *ContractAggregate) ClearPriceOverride(metadata eventstore.EventMetadata) error {
-	if a.priceOverride == nil {
-		return shared.NewDomainError(shared.ErrCodeBusinessRule,
-			"no price override to clear")
-	}
-
-	event := &PriceOverrideClearedEvent{
-		ContractID: a.contractID,
-		ClearedAt:  a.Clock().Now(),
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -576,6 +533,10 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *PriceChangedEvent:
 		a.priceID = e.NewPriceID
 		a.pendingPriceID = nil // IMMEDIATE clears pending
+		// Note: a.price (Money) is NOT updated here. In the new PriceID-based
+		// architecture, the authoritative price amount lives in the Price
+		// aggregate. The legacy a.price field is only set at creation time
+		// for backward compatibility.
 		a.updatedAt = e.ChangedAt
 
 	case *PriceChangeScheduledEvent:
@@ -585,14 +546,6 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *PriceChangeUnscheduledEvent:
 		a.pendingPriceID = nil
 		a.updatedAt = e.UnscheduledAt
-
-	case *PriceOverrideSetEvent:
-		a.priceOverride = &e.Override
-		a.updatedAt = e.SetAt
-
-	case *PriceOverrideClearedEvent:
-		a.priceOverride = nil
-		a.updatedAt = e.ClearedAt
 
 	case *PlanChangedEvent:
 		a.planID = e.NewPlanID
@@ -661,7 +614,6 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		AutoRenew:         a.autoRenew,
 		CancelAtPeriodEnd: a.cancelAtPeriodEnd,
 		PendingPriceID:    a.pendingPriceID,
-		PriceOverride:     a.priceOverride,
 		Metadata:          a.metadata,
 		CreatedAt:         a.createdAt,
 		UpdatedAt:         a.updatedAt,
@@ -710,7 +662,6 @@ type contractSnapshotState struct {
 	AutoRenew         bool                     `json:"auto_renew"`
 	CancelAtPeriodEnd bool                     `json:"cancel_at_period_end"`
 	PendingPriceID    *shared.PriceID          `json:"pending_price_id,omitempty"`
-	PriceOverride     *shared.Money            `json:"price_override,omitempty"`
 	Metadata          map[string]string        `json:"metadata,omitempty"`
 	CreatedAt         time.Time                `json:"created_at"`
 	UpdatedAt         time.Time                `json:"updated_at"`
@@ -739,7 +690,6 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.autoRenew = state.AutoRenew
 	a.cancelAtPeriodEnd = state.CancelAtPeriodEnd
 	a.pendingPriceID = state.PendingPriceID
-	a.priceOverride = state.PriceOverride
 	a.metadata = state.Metadata
 	a.createdAt = state.CreatedAt
 	a.updatedAt = state.UpdatedAt

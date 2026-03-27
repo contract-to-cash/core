@@ -25,8 +25,6 @@ const (
 	EventTypeCancellationUnscheduled eventstore.EventType = "contract.cancellation_unscheduled"
 	EventTypePriceChangeScheduled    eventstore.EventType = "contract.price_change_scheduled"
 	EventTypePriceChangeUnscheduled  eventstore.EventType = "contract.price_change_unscheduled"
-	EventTypePriceOverrideSet        eventstore.EventType = "contract.price_override_set"
-	EventTypePriceOverrideCleared    eventstore.EventType = "contract.price_override_cleared"
 )
 
 // ContractCreatedEvent is raised when a new contract is created.
@@ -121,27 +119,6 @@ type PriceChangeUnscheduledEvent struct {
 
 func (e *PriceChangeUnscheduledEvent) EventType() eventstore.EventType {
 	return EventTypePriceChangeUnscheduled
-}
-
-// PriceOverrideSetEvent is raised when a per-contract price override is set.
-type PriceOverrideSetEvent struct {
-	ContractID shared.ContractID `json:"contract_id"`
-	Override   shared.Money      `json:"override"`
-	SetAt      time.Time         `json:"set_at"`
-}
-
-func (e *PriceOverrideSetEvent) EventType() eventstore.EventType {
-	return EventTypePriceOverrideSet
-}
-
-// PriceOverrideClearedEvent is raised when a per-contract price override is cleared.
-type PriceOverrideClearedEvent struct {
-	ContractID shared.ContractID `json:"contract_id"`
-	ClearedAt  time.Time         `json:"cleared_at"`
-}
-
-func (e *PriceOverrideClearedEvent) EventType() eventstore.EventType {
-	return EventTypePriceOverrideCleared
 }
 
 // PlanChangedEvent is raised when a contract's plan changes.
