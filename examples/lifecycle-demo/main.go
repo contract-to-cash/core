@@ -101,7 +101,7 @@ func main() {
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo, creditRepo,
 		credit.CreditConfig{DowngradePolicy: credit.CreditPolicyLedger, CancellationPolicy: credit.CreditPolicyLedger},
-		nil, registry,
+		nil, nil, registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)

@@ -10,6 +10,7 @@ import (
 	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/pricing"
+	"github.com/contract-to-cash/core/domain/product"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/domain/usage"
 	"github.com/contract-to-cash/core/eventstore"
@@ -122,6 +123,26 @@ func (m *mockPlanRepo) FindByID(_ context.Context, _ shared.PlanID) (*pricing.Pl
 	return m.plan, nil
 }
 
+type mockPriceRepo struct{}
+
+func (m *mockPriceRepo) FindByID(_ context.Context, _ shared.PriceID) (*pricing.Price, error) {
+	return nil, nil
+}
+func (m *mockPriceRepo) FindByProductID(_ context.Context, _ shared.ProductID) ([]*pricing.Price, error) {
+	return nil, nil
+}
+func (m *mockPriceRepo) FindActiveByProductID(_ context.Context, _ shared.ProductID) ([]*pricing.Price, error) {
+	return nil, nil
+}
+func (m *mockPriceRepo) Save(_ context.Context, _ *pricing.Price) error { return nil }
+
+type mockProductRepo struct{}
+
+func (m *mockProductRepo) FindByID(_ context.Context, _ shared.ProductID) (*product.Product, error) {
+	return nil, nil
+}
+func (m *mockProductRepo) Save(_ context.Context, _ *product.Product) error { return nil }
+
 // --- Helpers ---
 
 func newTestClock() shared.FixedClock {
@@ -169,7 +190,8 @@ func TestGenerateInvoice_SubscriptionBasic(t *testing.T) {
 		&mockUsageRepo{},
 		nil, // no credit repo
 		credit.CreditConfig{},
-		&mockPlanRepo{},
+		&mockPriceRepo{},
+		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
@@ -209,7 +231,8 @@ func TestGenerateInvoice_DiscountCap(t *testing.T) {
 		&mockUsageRepo{},
 		nil,
 		credit.CreditConfig{},
-		&mockPlanRepo{},
+		&mockPriceRepo{},
+		&mockProductRepo{},
 		registry,
 		BillingConfig{DaysUntilDue: 30},
 		clock,
@@ -237,7 +260,8 @@ func TestGenerateInvoice_CreditNilSafe(t *testing.T) {
 		&mockUsageRepo{},
 		nil, // creditRepo is nil
 		credit.CreditConfig{},
-		&mockPlanRepo{},
+		&mockPriceRepo{},
+		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
@@ -268,7 +292,8 @@ func TestGenerateInvoice_WithCredits(t *testing.T) {
 		&mockUsageRepo{},
 		creditRepo,
 		credit.CreditConfig{},
-		&mockPlanRepo{},
+		&mockPriceRepo{},
+		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
@@ -311,7 +336,8 @@ func TestGenerateInvoice_InheritsContractPaymentMethod(t *testing.T) {
 		&mockUsageRepo{},
 		nil,
 		credit.CreditConfig{},
-		&mockPlanRepo{},
+		&mockPriceRepo{},
+		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
@@ -339,7 +365,8 @@ func TestGenerateInvoice_NoPaymentMethodWhenContractHasNone(t *testing.T) {
 		&mockUsageRepo{},
 		nil,
 		credit.CreditConfig{},
-		&mockPlanRepo{},
+		&mockPriceRepo{},
+		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
@@ -381,7 +408,8 @@ func newBillingSvc(agg *contract.ContractAggregate, invRepo *mockInvoiceRepo, cl
 		&mockUsageRepo{},
 		nil,
 		credit.CreditConfig{},
-		&mockPlanRepo{},
+		&mockPriceRepo{},
+		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,

@@ -84,7 +84,7 @@ func main() {
 			DowngradePolicy:    credit.CreditPolicyLedger,
 			CancellationPolicy: credit.CreditPolicyLedger,
 		},
-		nil, // planRepo: not needed for subscription type
+		nil, nil, // priceRepo/productRepo: not needed for subscription type
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,

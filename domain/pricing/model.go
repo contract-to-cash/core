@@ -10,6 +10,7 @@ type PricingModel interface {
 }
 
 // Plan represents a pricing plan with its pricing model and features.
+// Deprecated: Use product.Product and pricing.Price instead.
 type Plan struct {
 	id           shared.PlanID
 	name         string
@@ -21,6 +22,8 @@ type Plan struct {
 }
 
 // UsageMetric defines a usage-based metric within a plan.
+// Deprecated: For product definitions, use product.UsageMetric instead.
+// This type is retained because it carries a PricingModel for usage charge calculation.
 type UsageMetric struct {
 	Name             string
 	PricingModel     PricingModel
@@ -28,6 +31,7 @@ type UsageMetric struct {
 }
 
 // Feature defines a feature within a plan.
+// Deprecated: Use product.Feature instead.
 type Feature struct {
 	Name     string
 	Included bool
@@ -35,6 +39,7 @@ type Feature struct {
 }
 
 // NewPlan creates a new Plan.
+// Deprecated: Use product.NewProduct and pricing.NewPrice instead.
 func NewPlan(name string, description string, pricingModel PricingModel) *Plan {
 	return &Plan{
 		id:           shared.NewPlanID(),

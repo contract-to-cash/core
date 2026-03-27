@@ -3,6 +3,7 @@ package contract
 import (
 	"time"
 
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
@@ -28,14 +29,16 @@ const (
 	ContractTypeUsageBased   ContractType = "usage_based"
 )
 
-// BillingCycle represents how often billing occurs.
-type BillingCycle string
+// BillingCycle is an alias for pricing.BillingCycle.
+// Deprecated: Use pricing.BillingCycle directly in new code.
+type BillingCycle = pricing.BillingCycle
 
+// Deprecated: Use pricing.BillingCycleDaily etc. directly in new code.
 const (
-	BillingCycleDaily   BillingCycle = "daily"
-	BillingCycleWeekly  BillingCycle = "weekly"
-	BillingCycleMonthly BillingCycle = "monthly"
-	BillingCycleYearly  BillingCycle = "yearly"
+	BillingCycleDaily   = pricing.BillingCycleDaily
+	BillingCycleWeekly  = pricing.BillingCycleWeekly
+	BillingCycleMonthly = pricing.BillingCycleMonthly
+	BillingCycleYearly  = pricing.BillingCycleYearly
 )
 
 // Contract represents a contract entity.

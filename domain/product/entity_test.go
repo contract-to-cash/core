@@ -94,6 +94,18 @@ func TestProduct_Features_ReturnsCopy(t *testing.T) {
 	}
 }
 
+func TestProduct_UsageMetrics_ReturnsCopy(t *testing.T) {
+	p := NewProduct("Test", "")
+	p.AddUsageMetric(UsageMetric{Name: "api_calls", IncludedQuantity: 1000})
+
+	metrics := p.UsageMetrics()
+	metrics[0].Name = "MODIFIED"
+
+	if p.UsageMetrics()[0].Name != "api_calls" {
+		t.Error("UsageMetrics() should return a copy, not a reference")
+	}
+}
+
 func TestProduct_Metadata_ReturnsCopy(t *testing.T) {
 	p := NewProduct("Test", "")
 	p.SetMetadata("key", "value")
