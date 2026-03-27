@@ -28,7 +28,6 @@ import (
 	"github.com/contract-to-cash/core/application/service"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/credit"
-	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -138,7 +137,7 @@ func main() {
 
 	// AfterCharge hooks fire the provisioning
 	for _, h := range registry.GetAfterChargeHooks() {
-		must("hook:after-charge", h.AfterCharge(plugin.NewContext(ctx), pmt))
+		must("hook:after-charge", h.AfterCharge(plugin.NewPaymentContext(ctx, pmt, inv)))
 	}
 
 	serverMgr.PrintStatus()
@@ -204,7 +203,7 @@ func main() {
 	must("save", contractRepo.Save(ctx, agg))
 
 	for _, h := range registry.GetAfterChargeHooks() {
-		must("hook:after-charge", h.AfterCharge(plugin.NewContext(ctx), pmt2))
+		must("hook:after-charge", h.AfterCharge(plugin.NewPaymentContext(ctx, pmt2, inv2)))
 	}
 
 	serverMgr.PrintStatus()
@@ -398,8 +397,8 @@ func (p *serverProvisioningPlugin) OnContractActivate(_ *plugin.Context, c *cont
 }
 
 // AfterChargeHook - payment succeeded -> provision or confirm server
-func (p *serverProvisioningPlugin) AfterCharge(_ *plugin.Context, _ *payment.Payment) error {
-	// In production: look up contract from invoice via repository
+func (p *serverProvisioningPlugin) AfterCharge(ctx *plugin.PaymentContext) error {
+	// PaymentContext provides type-safe access to invoice and contract
 	cid := string(p.activeContractID)
 	state := p.mgr.GetState(cid)
 	if state == serverStateNone || state == serverStatePending {

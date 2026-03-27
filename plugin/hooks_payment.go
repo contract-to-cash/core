@@ -1,30 +1,29 @@
 package plugin
 
 import (
-	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
 // BeforeChargeHook is called before a charge is attempted.
 type BeforeChargeHook interface {
 	Plugin
-	BeforeCharge(ctx *Context, amount shared.Money) error
+	BeforeCharge(ctx *PaymentContext, amount shared.Money) error
 }
 
 // AfterChargeHook is called after a charge has been successfully processed.
 type AfterChargeHook interface {
 	Plugin
-	AfterCharge(ctx *Context, payment *payment.Payment) error
+	AfterCharge(ctx *PaymentContext) error
 }
 
 // OnPaymentFailedHook is called when a payment fails.
 type OnPaymentFailedHook interface {
 	Plugin
-	OnPaymentFailed(ctx *Context, payment *payment.Payment, err error) error
+	OnPaymentFailed(ctx *PaymentContext, err error) error
 }
 
 // OnRefundHook is called when a refund is processed.
 type OnRefundHook interface {
 	Plugin
-	OnRefund(ctx *Context, payment *payment.Payment, amount shared.Money) error
+	OnRefund(ctx *PaymentContext, refundAmount shared.Money) error
 }
