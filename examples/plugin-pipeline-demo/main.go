@@ -21,6 +21,7 @@ import (
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -42,6 +43,8 @@ func main() {
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
 
 	// ── 2. Register 4 plugins ──
 	registry := plugin.NewRegistry()
@@ -80,11 +83,15 @@ func main() {
 	fmt.Println()
 
 	// ── 3. Create a ¥10,000/month contract ──
+	priceEntity := pricing.NewPrice(shared.NewProductID(), moneyJPY(10000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+	must("save price", priceRepo.Save(ctx, priceEntity))
+
 	contractID := shared.NewContractID()
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create", agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acct-vip-001"),
 		PlanID:       shared.PlanID("plan-enterprise"),
+		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        moneyJPY(10000),
@@ -100,19 +107,15 @@ func main() {
 	fmt.Println("=== Invoice Generation Pipeline ===")
 	fmt.Println()
 
-	billingPeriod, _ := shared.NewDateRange(
-		time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
-	)
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo, creditRepo,
 		credit.CreditConfig{},
-		nil, nil, registry,
+		priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
-	inv, err := billingService.GenerateInvoice(ctx, contractID, billingPeriod)
+	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {
 		fatal("generate invoice", err)
 	}

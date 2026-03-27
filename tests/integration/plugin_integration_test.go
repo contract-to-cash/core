@@ -96,22 +96,25 @@ func TestMultipleDiscountPlugins(t *testing.T) {
 		t.Fatalf("failed to register plugin B: %v", err)
 	}
 
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
+
 	svc := service.NewBillingService(
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
 		creditRepo,
 		credit.CreditConfig{},
-		nil, nil,
+		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
 	price := moneyJPY(10000)
-	agg := createActiveContract(t, ctx, clock, contractRepo, price)
+	agg := createActiveContractWithPrice(t, ctx, clock, contractRepo, priceRepo, price)
 
-	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), billingPeriod())
+	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), agg.CurrentPeriod())
 	if err != nil {
 		t.Fatalf("GenerateInvoice failed: %v", err)
 	}
@@ -149,6 +152,8 @@ func TestPluginImplementsMultipleHooks(t *testing.T) {
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
 	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
 
 	// Register a single plugin that implements both DiscountHook and InvoiceLifecycleHook
@@ -165,16 +170,16 @@ func TestPluginImplementsMultipleHooks(t *testing.T) {
 		usageRepo,
 		creditRepo,
 		credit.CreditConfig{},
-		nil, nil,
+		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
 	price := moneyJPY(5000)
-	agg := createActiveContract(t, ctx, clock, contractRepo, price)
+	agg := createActiveContractWithPrice(t, ctx, clock, contractRepo, priceRepo, price)
 
-	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), billingPeriod())
+	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), agg.CurrentPeriod())
 	if err != nil {
 		t.Fatalf("GenerateInvoice failed: %v", err)
 	}

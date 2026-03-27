@@ -10,6 +10,7 @@ import (
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -26,34 +27,38 @@ func moneyJPY(amount int64) shared.Money {
 	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyJPY)
 }
 
-func billingPeriod() shared.DateRange {
-	dr, _ := shared.NewDateRange(
-		time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-	)
-	return dr
-}
-
 func emptyMetadata() eventstore.EventMetadata {
 	return eventstore.EventMetadata{UserID: "test-user"}
 }
 
-// createActiveContract creates a contract aggregate, applies Create and Activate,
-// saves it to the repository, and returns it.
-func createActiveContract(
+// createActiveContractWithPrice creates a contract aggregate with a matching Price entity,
+// applies Create and Activate, saves both to their repositories, and returns both.
+func createActiveContractWithPrice(
 	t *testing.T,
 	ctx context.Context,
 	clock shared.Clock,
 	contractRepo *inmemory.InMemoryContractRepository,
+	priceRepo *inmemory.InMemoryPriceRepository,
 	price shared.Money,
 ) *contract.ContractAggregate {
 	t.Helper()
+
+	// Create Price entity
+	priceEntity := pricing.NewPrice(
+		shared.NewProductID(), price, price.Currency(),
+		pricing.BillingCycleMonthly, nil,
+	)
+	if err := priceRepo.Save(ctx, priceEntity); err != nil {
+		t.Fatalf("failed to save price: %v", err)
+	}
+
 	contractID := shared.NewContractID()
 	agg := contract.NewContractAggregate(contractID, clock)
 
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-001"),
 		PlanID:       shared.PlanID("plan-001"),
+		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        price,
@@ -134,6 +139,8 @@ func TestSubscriptionBillingFlow(t *testing.T) {
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
 	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
 
 	svc := service.NewBillingService(
@@ -142,16 +149,16 @@ func TestSubscriptionBillingFlow(t *testing.T) {
 		usageRepo,
 		creditRepo,
 		credit.CreditConfig{},
-		nil, nil, // priceRepo/productRepo not needed for subscription
+		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
 	price := moneyJPY(5000)
-	agg := createActiveContract(t, ctx, clock, contractRepo, price)
+	agg := createActiveContractWithPrice(t, ctx, clock, contractRepo, priceRepo, price)
 
-	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), billingPeriod())
+	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), agg.CurrentPeriod())
 	if err != nil {
 		t.Fatalf("GenerateInvoice failed: %v", err)
 	}
@@ -186,6 +193,8 @@ func TestBillingWithDiscountAndTax(t *testing.T) {
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
 	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
 
 	// 10% discount (priority=100, lower number = higher priority)
@@ -206,16 +215,16 @@ func TestBillingWithDiscountAndTax(t *testing.T) {
 		usageRepo,
 		creditRepo,
 		credit.CreditConfig{},
-		nil, nil,
+		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
 	price := moneyJPY(10000)
-	agg := createActiveContract(t, ctx, clock, contractRepo, price)
+	agg := createActiveContractWithPrice(t, ctx, clock, contractRepo, priceRepo, price)
 
-	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), billingPeriod())
+	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), agg.CurrentPeriod())
 	if err != nil {
 		t.Fatalf("GenerateInvoice failed: %v", err)
 	}
@@ -243,6 +252,8 @@ func TestDiscountCapGuard(t *testing.T) {
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
 	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
 
 	// Plugin returns discount=2000, but subtotal is only 1000 -> capped to 1000
@@ -262,16 +273,16 @@ func TestDiscountCapGuard(t *testing.T) {
 		usageRepo,
 		creditRepo,
 		credit.CreditConfig{},
-		nil, nil,
+		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
 	price := moneyJPY(1000)
-	agg := createActiveContract(t, ctx, clock, contractRepo, price)
+	agg := createActiveContractWithPrice(t, ctx, clock, contractRepo, priceRepo, price)
 
-	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), billingPeriod())
+	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), agg.CurrentPeriod())
 	if err != nil {
 		t.Fatalf("GenerateInvoice failed: %v", err)
 	}
@@ -298,6 +309,8 @@ func TestBillingWithCreditApplication(t *testing.T) {
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
 	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	priceRepo := inmemory.NewInMemoryPriceRepository()
+	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
 
 	svc := service.NewBillingService(
@@ -306,14 +319,14 @@ func TestBillingWithCreditApplication(t *testing.T) {
 		usageRepo,
 		creditRepo,
 		credit.CreditConfig{},
-		nil, nil,
+		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
 
 	price := moneyJPY(5000)
-	agg := createActiveContract(t, ctx, clock, contractRepo, price)
+	agg := createActiveContractWithPrice(t, ctx, clock, contractRepo, priceRepo, price)
 
 	// Create a credit entry of 2000 JPY for the same account
 	creditEntry := credit.NewCreditEntry(
@@ -326,7 +339,7 @@ func TestBillingWithCreditApplication(t *testing.T) {
 		t.Fatalf("failed to save credit entry: %v", err)
 	}
 
-	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), billingPeriod())
+	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), agg.CurrentPeriod())
 	if err != nil {
 		t.Fatalf("GenerateInvoice failed: %v", err)
 	}
