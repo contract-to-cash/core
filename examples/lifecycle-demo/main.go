@@ -208,7 +208,7 @@ type advancingClock struct {
 	current time.Time
 }
 
-func (c *advancingClock) Now() time.Time      { return c.current }
+func (c *advancingClock) Now() time.Time          { return c.current }
 func (c *advancingClock) Advance(d time.Duration) { c.current = c.current.Add(d) }
 
 func moneyJPY(amount int64) shared.Money {
@@ -235,7 +235,7 @@ func printStep(title, format string, args ...interface{}) {
 
 type mockPaymentGateway struct{}
 
-func (g *mockPaymentGateway) ID() string                             { return "mock-gw" }
+func (g *mockPaymentGateway) ID() string { return "mock-gw" }
 func (g *mockPaymentGateway) SupportedMethods() []port.PaymentMethodType {
 	return []port.PaymentMethodType{port.PaymentMethodTypeCreditCard}
 }

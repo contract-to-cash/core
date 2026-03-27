@@ -44,10 +44,10 @@ func (m *mockContractRepo) FindByIDAsOf(_ context.Context, _ shared.ContractID, 
 }
 
 type mockInvoiceRepo struct {
-	saved               *invoice.Invoice
-	existingByContract  []*invoice.Invoice // returned by FindByContractID
-	existingByStatus    []*invoice.Invoice // returned by FindByContractAndStatus
-	existingByPeriod    []*invoice.Invoice // returned by FindByContractAndPeriod
+	saved              *invoice.Invoice
+	existingByContract []*invoice.Invoice // returned by FindByContractID
+	existingByStatus   []*invoice.Invoice // returned by FindByContractAndStatus
+	existingByPeriod   []*invoice.Invoice // returned by FindByContractAndPeriod
 }
 
 func (m *mockInvoiceRepo) Save(_ context.Context, inv *invoice.Invoice) error {

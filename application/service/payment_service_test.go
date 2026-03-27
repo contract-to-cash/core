@@ -20,7 +20,7 @@ type mockGateway struct {
 	failCharge bool
 }
 
-func (g *mockGateway) ID() string                              { return "mock" }
+func (g *mockGateway) ID() string                                 { return "mock" }
 func (g *mockGateway) SupportedMethods() []port.PaymentMethodType { return nil }
 func (g *mockGateway) Charge(_ context.Context, _ *port.ChargeRequest) (*port.ChargeResponse, error) {
 	if g.failCharge {
@@ -124,7 +124,7 @@ func (m *mockInvoiceRepoForPayment) FindUnpaidByContract(_ context.Context, _ sh
 // --- Hook spy plugins ---
 
 type afterChargeSpyPlugin struct {
-	called     bool
+	called      bool
 	receivedCtx *plugin.PaymentContext
 }
 

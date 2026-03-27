@@ -63,7 +63,7 @@ func main() {
 	must("register provisioning", registry.Register(provPlugin))
 
 	must("init plugins", registry.InitializeAll(ctx, map[string]plugin.Config{
-		"tax":                  {"priority": plugin.PriorityLow},
+		"tax":                 {"priority": plugin.PriorityLow},
 		"server-provisioning": {"priority": plugin.PriorityNormal},
 	}))
 	defer registry.ShutdownAll(ctx)
@@ -146,7 +146,7 @@ func main() {
 	printSection("Phase 3: Payment Failed -> Server Suspended")
 
 	clock.Advance(30 * 24 * time.Hour) // May 1
-	gateway.failNext = true             // simulate payment failure
+	gateway.failNext = true            // simulate payment failure
 
 	billingPeriod2, _ := shared.NewDateRange(
 		time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
@@ -181,7 +181,7 @@ func main() {
 	printSection("Phase 4: Payment Retry -> Server Resumed")
 
 	clock.Advance(3 * 24 * time.Hour) // May 4
-	gateway.failNext = false           // payment method updated
+	gateway.failNext = false          // payment method updated
 
 	pmt2, err := paymentService.ProcessPayment(ctx, inv2.ID(), service.ProcessPaymentInput{
 		PaymentMethodID: "pm-visa-tanaka-new",
@@ -258,12 +258,12 @@ func main() {
 type serverState string
 
 const (
-	serverStateNone        serverState = "none"
-	serverStatePending     serverState = "pending"
+	serverStateNone         serverState = "none"
+	serverStatePending      serverState = "pending"
 	serverStateProvisioning serverState = "provisioning"
-	serverStateRunning     serverState = "running"
-	serverStateStopped     serverState = "stopped"
-	serverStateTerminated  serverState = "terminated"
+	serverStateRunning      serverState = "running"
+	serverStateStopped      serverState = "stopped"
+	serverStateTerminated   serverState = "terminated"
 )
 
 type logEntry struct {
@@ -487,7 +487,7 @@ func (g *mockPaymentGateway) ListPaymentMethods(_ context.Context, _ string) ([]
 
 type advancingClock struct{ current time.Time }
 
-func (c *advancingClock) Now() time.Time         { return c.current }
+func (c *advancingClock) Now() time.Time          { return c.current }
 func (c *advancingClock) Advance(d time.Duration) { c.current = c.current.Add(d) }
 
 func moneyJPY(amount int64) shared.Money {

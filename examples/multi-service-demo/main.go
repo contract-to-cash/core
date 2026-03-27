@@ -78,7 +78,7 @@ func main() {
 		AccountID: accountID, PlanID: "plan-vps-standard",
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
-		Price: moneyJPY(5000), BasePrice: moneyJPY(5000),
+		Price:        moneyJPY(5000), BasePrice: moneyJPY(5000),
 	}, metadata))
 	must("activate vps", vps.Activate(metadata))
 	must("save vps", contractRepo.Save(ctx, vps))
@@ -92,7 +92,7 @@ func main() {
 		AccountID: accountID, PlanID: "plan-ssl-wildcard",
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleYearly,
-		Price: moneyJPY(20000), BasePrice: moneyJPY(20000),
+		Price:        moneyJPY(20000), BasePrice: moneyJPY(20000),
 	}, metadata))
 	must("activate ssl", ssl.Activate(metadata))
 	must("save ssl", contractRepo.Save(ctx, ssl))
@@ -106,7 +106,7 @@ func main() {
 		AccountID: accountID, PlanID: "plan-domain-jp",
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleYearly,
-		Price: moneyJPY(1500), BasePrice: moneyJPY(1500),
+		Price:        moneyJPY(1500), BasePrice: moneyJPY(1500),
 	}, metadata))
 	must("activate domain", dom.Activate(metadata))
 	must("save domain", contractRepo.Save(ctx, dom))
@@ -459,7 +459,7 @@ func (l *operationLog) Add(at time.Time, msg string) {
 
 type advancingClock struct{ current time.Time }
 
-func (c *advancingClock) Now() time.Time         { return c.current }
+func (c *advancingClock) Now() time.Time          { return c.current }
 func (c *advancingClock) Advance(d time.Duration) { c.current = c.current.Add(d) }
 
 func moneyJPY(amount int64) shared.Money {
