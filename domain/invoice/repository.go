@@ -16,4 +16,7 @@ type Repository interface {
 	FindOverdue(ctx context.Context) ([]*Invoice, error)
 	FindByStatus(ctx context.Context, status InvoiceStatus) ([]*Invoice, error)
 	FindByIDAsOf(ctx context.Context, id shared.InvoiceID, asOf time.Time) (*Invoice, error)
+	FindByContractAndStatus(ctx context.Context, contractID shared.ContractID, status InvoiceStatus) ([]*Invoice, error)
+	FindByContractAndPeriod(ctx context.Context, contractID shared.ContractID, period shared.DateRange) ([]*Invoice, error)
+	FindUnpaidByContract(ctx context.Context, contractID shared.ContractID) ([]*Invoice, error)
 }

@@ -76,10 +76,12 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("payment validation failed: %w", err)
 	}
 
+	// Build PaymentContext with invoice (payment is nil at this stage for BeforeCharge)
+	payCtx := plugin.NewPaymentContext(ctx, nil, inv)
+
 	// Execute BeforeCharge hooks
-	pluginCtx := plugin.NewContext(ctx)
 	for _, hook := range s.registry.GetBeforeChargeHooks() {
-		err = hook.BeforeCharge(pluginCtx, amount)
+		err = hook.BeforeCharge(payCtx, amount)
 		if err != nil {
 			return nil, fmt.Errorf("BeforeCharge hook error: %w", err)
 		}
@@ -109,9 +111,10 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			// Best-effort save of failed payment record
 			_ = s.paymentRepo.Save(ctx, failedPayment)
 		}
-		// Execute OnPaymentFailed hooks
+		// Execute OnPaymentFailed hooks with PaymentContext
+		failCtx := plugin.NewPaymentContext(ctx, failedPayment, inv)
 		for _, hook := range s.registry.GetOnPaymentFailedHooks() {
-			_ = hook.OnPaymentFailed(pluginCtx, failedPayment, err)
+			_ = hook.OnPaymentFailed(failCtx, err)
 		}
 		return nil, fmt.Errorf("gateway charge failed: %w", err)
 	}
@@ -143,9 +146,10 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("failed to save invoice after payment: %w", err)
 	}
 
-	// Execute AfterCharge hooks (errors are non-fatal)
+	// Execute AfterCharge hooks with full PaymentContext (errors are non-fatal)
+	successCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetAfterChargeHooks() {
-		if hookErr := hook.AfterCharge(pluginCtx, p); hookErr != nil {
+		if hookErr := hook.AfterCharge(successCtx); hookErr != nil {
 			// TODO: inject logger and log hookErr
 			_ = hookErr
 		}
@@ -193,10 +197,17 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		return fmt.Errorf("failed to save payment after refund: %w", err)
 	}
 
-	// Execute OnRefund hooks
-	pluginCtx := plugin.NewContext(ctx)
+	// Load invoice for PaymentContext (best-effort; hooks still fire with nil invoice)
+	inv, invErr := s.invoiceRepo.FindByID(ctx, p.InvoiceID())
+	if invErr != nil {
+		// TODO: inject logger and log invErr
+		inv = nil
+	}
+
+	// Execute OnRefund hooks with PaymentContext
+	refundCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetOnRefundHooks() {
-		if err := hook.OnRefund(pluginCtx, p, refundAmount); err != nil {
+		if err := hook.OnRefund(refundCtx, refundAmount); err != nil {
 			_ = err // log but don't fail
 		}
 	}

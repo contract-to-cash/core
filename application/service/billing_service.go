@@ -67,6 +67,16 @@ func NewBillingService(
 	}
 }
 
+// billableStatuses defines which contract statuses allow invoice generation.
+var billableStatuses = map[contract.ContractStatus]bool{
+	contract.ContractStatusDraft:    true,
+	contract.ContractStatusActive:   true,
+	contract.ContractStatusTrialing: true,
+	contract.ContractStatusPastDue:  true,
+	// Suspended is conditionally allowed based on BillingBehavior (checked separately).
+	contract.ContractStatusSuspended: true,
+}
+
 // GenerateInvoice generates an invoice for a contract and billing period.
 // It follows a 14-step calculation flow with plugin hooks.
 func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) (*invoice.Invoice, error) {
@@ -74,6 +84,30 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	agg, err := s.contractRepo.FindByID(ctx, contractID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load contract: %w", err)
+	}
+
+	// Status guard: only billable statuses can generate invoices
+	if !billableStatuses[agg.Status()] {
+		return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("cannot generate invoice: contract status is %s", agg.Status()))
+	}
+
+	// Suspended contracts: respect BillingBehavior
+	if agg.Status() == contract.ContractStatusSuspended {
+		cfg := agg.SuspensionConfig()
+		if cfg == nil || cfg.BillingBehavior == contract.SuspensionBillingSkip {
+			return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+				"cannot generate invoice: billing is skipped during suspension")
+		}
+		if cfg.BillingBehavior == contract.SuspensionBillingDefer {
+			return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+				"cannot generate invoice: billing is deferred during suspension")
+		}
+	}
+
+	// Duplicate invoice prevention
+	if err = s.checkDuplicateInvoice(ctx, agg, billingPeriod); err != nil {
+		return nil, err
 	}
 
 	// Create CalculationContext with zero subtotal initially
@@ -333,6 +367,50 @@ func (s *BillingService) applyCredits(ctx context.Context, accountID shared.Acco
 	}
 
 	return totalApplied, nil
+}
+
+// checkDuplicateInvoice prevents duplicate invoice generation based on contract state.
+func (s *BillingService) checkDuplicateInvoice(ctx context.Context, agg *contract.ContractAggregate, billingPeriod shared.DateRange) error {
+	switch {
+	case agg.Status() == contract.ContractStatusDraft:
+		// Draft contracts: only one draft invoice allowed
+		existing, err := s.invoiceRepo.FindByContractAndStatus(ctx, agg.ContractID(), invoice.InvoiceStatusDraft)
+		if err != nil {
+			return fmt.Errorf("failed to check existing draft invoices: %w", err)
+		}
+		if len(existing) > 0 {
+			return shared.NewDomainError(shared.ErrCodeConflict,
+				"draft invoice already exists for this contract")
+		}
+
+	case agg.GetContractType() == contract.ContractTypeOneTime:
+		// One-time contracts: only one invoice ever
+		existing, err := s.invoiceRepo.FindByContractID(ctx, agg.ContractID())
+		if err != nil {
+			return fmt.Errorf("failed to check existing invoices: %w", err)
+		}
+		for _, inv := range existing {
+			if inv.Status() != invoice.InvoiceStatusVoided {
+				return shared.NewDomainError(shared.ErrCodeConflict,
+					"invoice already exists for one-time contract")
+			}
+		}
+
+	default:
+		// Subscription/usage-based: one invoice per billing period
+		existing, err := s.invoiceRepo.FindByContractAndPeriod(ctx, agg.ContractID(), billingPeriod)
+		if err != nil {
+			return fmt.Errorf("failed to check existing invoices for period: %w", err)
+		}
+		for _, inv := range existing {
+			if inv.Status() != invoice.InvoiceStatusVoided {
+				return shared.NewDomainError(shared.ErrCodeConflict,
+					"invoice already exists for this billing period")
+			}
+		}
+	}
+
+	return nil
 }
 
 // MoneyFromInt64 is a helper that creates a Money value from an int64 amount.

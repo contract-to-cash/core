@@ -289,3 +289,14 @@ func WithIssueDate(t time.Time) InvoiceOption {
 	}
 }
 func (inv *Invoice) AllowPartialPay() bool { return inv.allowPartialPay }
+
+// Void transitions the invoice to voided status.
+// Only Draft and Finalized invoices can be voided.
+func (inv *Invoice) Void() error {
+	if inv.status != InvoiceStatusDraft && inv.status != InvoiceStatusFinalized {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot void invoice in status %s", inv.status))
+	}
+	inv.status = InvoiceStatusVoided
+	return nil
+}

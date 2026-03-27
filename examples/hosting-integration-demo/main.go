@@ -28,7 +28,6 @@ import (
 	"github.com/contract-to-cash/core/application/service"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/credit"
-	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -64,7 +63,7 @@ func main() {
 	must("register provisioning", registry.Register(provPlugin))
 
 	must("init plugins", registry.InitializeAll(ctx, map[string]plugin.Config{
-		"tax":                  {"priority": plugin.PriorityLow},
+		"tax":                 {"priority": plugin.PriorityLow},
 		"server-provisioning": {"priority": plugin.PriorityNormal},
 	}))
 	defer registry.ShutdownAll(ctx)
@@ -138,7 +137,7 @@ func main() {
 
 	// AfterCharge hooks fire the provisioning
 	for _, h := range registry.GetAfterChargeHooks() {
-		must("hook:after-charge", h.AfterCharge(plugin.NewContext(ctx), pmt))
+		must("hook:after-charge", h.AfterCharge(plugin.NewPaymentContext(ctx, pmt, inv)))
 	}
 
 	serverMgr.PrintStatus()
@@ -147,7 +146,7 @@ func main() {
 	printSection("Phase 3: Payment Failed -> Server Suspended")
 
 	clock.Advance(30 * 24 * time.Hour) // May 1
-	gateway.failNext = true             // simulate payment failure
+	gateway.failNext = true            // simulate payment failure
 
 	billingPeriod2, _ := shared.NewDateRange(
 		time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
@@ -182,7 +181,7 @@ func main() {
 	printSection("Phase 4: Payment Retry -> Server Resumed")
 
 	clock.Advance(3 * 24 * time.Hour) // May 4
-	gateway.failNext = false           // payment method updated
+	gateway.failNext = false          // payment method updated
 
 	pmt2, err := paymentService.ProcessPayment(ctx, inv2.ID(), service.ProcessPaymentInput{
 		PaymentMethodID: "pm-visa-tanaka-new",
@@ -204,7 +203,7 @@ func main() {
 	must("save", contractRepo.Save(ctx, agg))
 
 	for _, h := range registry.GetAfterChargeHooks() {
-		must("hook:after-charge", h.AfterCharge(plugin.NewContext(ctx), pmt2))
+		must("hook:after-charge", h.AfterCharge(plugin.NewPaymentContext(ctx, pmt2, inv2)))
 	}
 
 	serverMgr.PrintStatus()
@@ -259,12 +258,12 @@ func main() {
 type serverState string
 
 const (
-	serverStateNone        serverState = "none"
-	serverStatePending     serverState = "pending"
+	serverStateNone         serverState = "none"
+	serverStatePending      serverState = "pending"
 	serverStateProvisioning serverState = "provisioning"
-	serverStateRunning     serverState = "running"
-	serverStateStopped     serverState = "stopped"
-	serverStateTerminated  serverState = "terminated"
+	serverStateRunning      serverState = "running"
+	serverStateStopped      serverState = "stopped"
+	serverStateTerminated   serverState = "terminated"
 )
 
 type logEntry struct {
@@ -398,8 +397,8 @@ func (p *serverProvisioningPlugin) OnContractActivate(_ *plugin.Context, c *cont
 }
 
 // AfterChargeHook - payment succeeded -> provision or confirm server
-func (p *serverProvisioningPlugin) AfterCharge(_ *plugin.Context, _ *payment.Payment) error {
-	// In production: look up contract from invoice via repository
+func (p *serverProvisioningPlugin) AfterCharge(ctx *plugin.PaymentContext) error {
+	// PaymentContext provides type-safe access to invoice and contract
 	cid := string(p.activeContractID)
 	state := p.mgr.GetState(cid)
 	if state == serverStateNone || state == serverStatePending {
@@ -488,7 +487,7 @@ func (g *mockPaymentGateway) ListPaymentMethods(_ context.Context, _ string) ([]
 
 type advancingClock struct{ current time.Time }
 
-func (c *advancingClock) Now() time.Time         { return c.current }
+func (c *advancingClock) Now() time.Time          { return c.current }
 func (c *advancingClock) Advance(d time.Duration) { c.current = c.current.Add(d) }
 
 func moneyJPY(amount int64) shared.Money {

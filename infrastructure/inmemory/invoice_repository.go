@@ -124,3 +124,55 @@ func (r *InMemoryInvoiceRepository) FindByIDAsOf(_ context.Context, id shared.In
 	}
 	return inv, nil
 }
+
+// FindByContractAndStatus returns invoices for a contract with a specific status.
+func (r *InMemoryInvoiceRepository) FindByContractAndStatus(_ context.Context, contractID shared.ContractID, status invoice.InvoiceStatus) ([]*invoice.Invoice, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var result []*invoice.Invoice
+	for _, inv := range r.invoices {
+		if inv.ContractID() == contractID && inv.Status() == status {
+			result = append(result, inv)
+		}
+	}
+	return result, nil
+}
+
+// FindByContractAndPeriod returns invoices for a contract within a billing period.
+func (r *InMemoryInvoiceRepository) FindByContractAndPeriod(_ context.Context, contractID shared.ContractID, period shared.DateRange) ([]*invoice.Invoice, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var result []*invoice.Invoice
+	for _, inv := range r.invoices {
+		if inv.ContractID() == contractID &&
+			inv.BillingPeriod().Start().Equal(period.Start()) &&
+			inv.BillingPeriod().End().Equal(period.End()) {
+			result = append(result, inv)
+		}
+	}
+	return result, nil
+}
+
+// FindUnpaidByContract returns all unpaid invoices (Draft, Finalized, Issued, Overdue) for a contract.
+func (r *InMemoryInvoiceRepository) FindUnpaidByContract(_ context.Context, contractID shared.ContractID) ([]*invoice.Invoice, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	unpaidStatuses := map[invoice.InvoiceStatus]bool{
+		invoice.InvoiceStatusDraft:       true,
+		invoice.InvoiceStatusFinalized:   true,
+		invoice.InvoiceStatusIssued:      true,
+		invoice.InvoiceStatusOverdue:     true,
+		invoice.InvoiceStatusPartialPaid: true,
+	}
+
+	var result []*invoice.Invoice
+	for _, inv := range r.invoices {
+		if inv.ContractID() == contractID && unpaidStatuses[inv.Status()] {
+			result = append(result, inv)
+		}
+	}
+	return result, nil
+}
