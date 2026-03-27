@@ -53,6 +53,7 @@ type ContractAggregate struct {
 	trialConfig      *TrialConfiguration
 	suspensionConfig *SuspensionConfiguration
 	paymentMethodID   *string
+	priceID           shared.PriceID
 	price             shared.Money
 	basePrice         shared.Money
 	autoRenew         bool
@@ -106,6 +107,9 @@ func (a *ContractAggregate) Price() shared.Money { return a.price }
 
 // BasePrice returns the base price.
 func (a *ContractAggregate) BasePrice() shared.Money { return a.basePrice }
+
+// PriceID returns the current price ID.
+func (a *ContractAggregate) PriceID() shared.PriceID { return a.priceID }
 
 // AutoRenew returns whether the contract auto-renews.
 func (a *ContractAggregate) AutoRenew() bool { return a.autoRenew }
@@ -362,7 +366,8 @@ func (a *ContractAggregate) Renew(metadata eventstore.EventMetadata) error {
 
 	newPeriod := a.currentPeriod.Next(string(a.billingCycle))
 
-	var oldPriceID, newPriceID shared.PriceID
+	oldPriceID := a.priceID
+	newPriceID := a.priceID
 	priceChanged := false
 	if a.pendingPriceID != nil {
 		newPriceID = *a.pendingPriceID
@@ -492,10 +497,7 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 
 	case *ContractRenewedEvent:
 		a.currentPeriod = e.NewPeriod
-		if e.PriceChanged {
-			// Note: priceID tracking is via pendingPriceID; price amount is not changed here
-			// as the new price's amount would be resolved by the billing service.
-		}
+		a.priceID = e.NewPriceID
 		a.pendingPriceID = nil
 		a.updatedAt = e.RenewedAt
 
@@ -524,6 +526,7 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		TrialConfig:       a.trialConfig,
 		SuspensionConfig:  a.suspensionConfig,
 		PaymentMethodID:   a.paymentMethodID,
+		PriceID:           a.priceID,
 		Price:             a.price,
 		BasePrice:         a.basePrice,
 		AutoRenew:         a.autoRenew,
@@ -563,6 +566,7 @@ type contractSnapshotState struct {
 	TrialConfig       *TrialConfiguration      `json:"trial_config,omitempty"`
 	SuspensionConfig  *SuspensionConfiguration `json:"suspension_config,omitempty"`
 	PaymentMethodID   *string                  `json:"payment_method_id,omitempty"`
+	PriceID           shared.PriceID           `json:"price_id,omitempty"`
 	Price             shared.Money             `json:"price"`
 	BasePrice         shared.Money             `json:"base_price"`
 	AutoRenew         bool                     `json:"auto_renew"`
@@ -590,6 +594,7 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.trialConfig = state.TrialConfig
 	a.suspensionConfig = state.SuspensionConfig
 	a.paymentMethodID = state.PaymentMethodID
+	a.priceID = state.PriceID
 	a.price = state.Price
 	a.basePrice = state.BasePrice
 	a.autoRenew = state.AutoRenew

@@ -70,19 +70,35 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 	}
 
 	// Concurrent processing
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	sem := make(chan struct{}, concurrency)
 	var mu sync.Mutex
 
 	for _, agg := range contracts {
+		// Check if we should stop early (ContinueOnError=false and an error occurred)
+		if !opts.ContinueOnError {
+			mu.Lock()
+			failed := result.Failed
+			mu.Unlock()
+			if failed > 0 {
+				break
+			}
+		}
+
 		sem <- struct{}{}
 		go func(a *contract.ContractAggregate) {
 			defer func() { <-sem }()
 
-			if err := p.processOne(ctx, a, opts.DryRun); err != nil {
+			if err := p.processOne(cctx, a, opts.DryRun); err != nil {
 				mu.Lock()
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Errorf("contract %s: %w", a.ContractID(), err))
 				mu.Unlock()
+				if !opts.ContinueOnError {
+					cancel()
+				}
 			} else {
 				mu.Lock()
 				result.Succeeded++
@@ -105,11 +121,15 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 	}
 
 	if dryRun {
-		// In dry run mode, just validate that renewal would succeed
-		// by checking the guards without actually applying
+		// In dry run mode, validate all guards without applying side effects.
 		if agg.Status() != contract.ContractStatusActive {
 			return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 				fmt.Sprintf("cannot renew: status is %s", agg.Status()))
+		}
+		// Report that this contract would expire rather than renew.
+		if agg.CancelAtPeriodEnd() || !agg.AutoRenew() {
+			return shared.NewDomainError(shared.ErrCodeBusinessRule,
+				"contract would expire at period end (cancelAtPeriodEnd or autoRenew=false)")
 		}
 		return nil
 	}
