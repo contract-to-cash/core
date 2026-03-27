@@ -18,18 +18,18 @@ linters:
     - bodyclose
     - exhaustive
     - copyloopvar
-
-settings:
-  errcheck:
-    check-type-assertions: true
-  exhaustive:
-    default-signifies-exhaustive: true
-  nolintlint:
-    require-explanation: true
-    require-specific: true
-  govet:
-    enable:
-      - shadow
+  settings:
+    errcheck:
+      check-type-assertions: true
+    exhaustive:
+      default-signifies-exhaustive: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    govet:
+      settings:
+        shadow:
+          strict: true
 
 issues:
   max-issues-per-linter: 50
