@@ -146,6 +146,10 @@ Explicit PaymentMethodID (in ProcessPaymentInput)
       → Customer.DefaultPaymentMethodID
 ```
 
+:::note
+The Contract and Customer fallback levels require `contractRepo` to be passed to `PaymentService`. If omitted, resolution stops at Invoice level.
+:::
+
 ## Design Decisions
 
 | Decision | Rationale |

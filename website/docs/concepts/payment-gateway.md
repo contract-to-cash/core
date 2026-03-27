@@ -105,12 +105,27 @@ This reuses the `Suspended` state for both initial activation (awaiting first pa
 
 The `AfterChargeHook` or `OnContractResumeHook` can trigger service provisioning:
 
+:::note
+`AfterChargeHook` receives a `PaymentContext` where `Contract()` returns `nil` by default. To access contract information, you need to resolve it via `Invoice.ContractID()` and look up the contract yourself. For this reason, the recommended approach for payment-gated provisioning is to handle the Resume in your application code (not in a hook) after `ProcessPayment` succeeds, as shown in the [Payment Integration Guide](../guides/payment-integration).
+:::
+
 ```go
 func (p *ProvisioningPlugin) OnContractResume(ctx *plugin.Context, c *contract.ContractAggregate) error {
     // Provision or re-activate the service
     return p.provisioningService.Activate(ctx.Context(), c.ContractID())
 }
 ```
+
+:::caution Known Limitation
+`OnContractResumeHook` cannot distinguish between **initial activation** (first payment received) and **re-activation** (payment after suspension). This is because `SuspensionConfiguration` is cleared to `nil` in the aggregate's `Apply()` method before the hook fires.
+
+**Workarounds:**
+- Track provisioning state externally (e.g., a "provisioned" flag in your database)
+- Use the `plugin.Context` metadata to pass the suspension reason from the orchestrating code
+- Check if the service already exists before provisioning
+
+See [Issue #5](https://github.com/contract-to-cash/core/issues/5) for details.
+:::
 
 ## Payment Method Fallback Resolution
 
@@ -122,6 +137,10 @@ Payment methods are resolved hierarchically (Stripe-style):
 3. Contract.PaymentMethodID
 4. Customer.DefaultPaymentMethodID
 ```
+
+:::note
+The Contract and Customer levels of the fallback chain require `contractRepo` to be passed to `NewPaymentService`. If `contractRepo` is `nil`, resolution stops at the Invoice level.
+:::
 
 More specific levels override less specific ones. This enables:
 - **Per-contract payment methods** (B2B with separate cards per subscription)

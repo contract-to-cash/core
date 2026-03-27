@@ -210,6 +210,10 @@ Manages coupon-based discounts with:
 - Plan-level restrictions via `applicableTo`
 - Stacking control
 
+:::note
+Plan-level restrictions via `applicableTo` currently use `PlanID` for matching. This will be migrated to `ProductID`-based matching in a future release as part of the Product/Price separation.
+:::
+
 ```go
 couponPlugin := coupon.NewCouponPlugin(couponRepo, clock)
 ```

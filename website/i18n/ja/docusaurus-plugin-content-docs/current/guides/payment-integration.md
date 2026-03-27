@@ -97,6 +97,22 @@ if payment.Status() == "completed" {
 
 両方とも同じ方法で解決: 決済完了 → 再開 → サービス有効化。
 
+:::caution
+このパターンでは、**新規サービスのプロビジョニング**か**既存サービスの再有効化**かをアプリケーションコードで判定する必要があります。`OnContractResumeHook`は停止理由がフック発火前にクリアされるため、これらのケースを区別できません。
+
+一般的なアプローチとして、プロビジョニング状態を別途追跡します:
+
+```go
+// 決済成功とResume後
+if !provisioningStore.IsProvisioned(contractID) {
+    provisioningService.CreateServer(ctx, contractID)
+    provisioningStore.MarkProvisioned(contractID)
+} else {
+    provisioningService.StartServer(ctx, contractID)
+}
+```
+:::
+
 ## 冪等性
 
 重複課金を防ぐため、常に`IdempotencyKey`を提供：

@@ -126,6 +126,19 @@ func (p *HostingPlugin) OnContractCancel(ctx *plugin.Context, c *contract.Contra
 }
 ```
 
+:::caution
+`OnContractResume`フックは初回プロビジョニング（初回決済）と再有効化（停止後の決済）を区別できません。プロビジョニング状態を外部で追跡し、`OnContractResume`内で確認することを検討してください:
+
+```go
+func (p *HostingPlugin) OnContractResume(ctx *plugin.Context, c *contract.ContractAggregate) error {
+    if p.provisioningClient.Exists(ctx.Context(), c.ContractID()) {
+        return p.provisioningClient.StartServer(ctx.Context(), c.ContractID())
+    }
+    return p.provisioningClient.CreateServer(ctx.Context(), c.ContractID(), c.PlanID())
+}
+```
+:::
+
 ## カスタムプラグインの登録
 
 ```go

@@ -108,11 +108,26 @@ captureResp, _ := gateway.Capture(ctx, &port.CaptureRequest{
 
 `OnContractResumeHook`でサービスプロビジョニングをトリガー：
 
+:::note
+`AfterChargeHook`が受け取る`PaymentContext`では、`Contract()`はデフォルトで`nil`を返します。契約情報にアクセスするには、`Invoice.ContractID()`経由で自分で契約をルックアップする必要があります。そのため、決済ゲート付きプロビジョニングでは、フックではなく`ProcessPayment`成功後にアプリケーションコードでResumeを処理する方法が推奨されます（[決済統合ガイド](../guides/payment-integration)参照）。
+:::
+
 ```go
 func (p *ProvisioningPlugin) OnContractResume(ctx *plugin.Context, c *contract.ContractAggregate) error {
     return p.provisioningService.Activate(ctx.Context(), c.ContractID())
 }
 ```
+
+:::caution 既知の制約
+`OnContractResumeHook`は**初回有効化**（初回決済完了）と**再有効化**（停止後の決済完了）を区別できません。これは集約の`Apply()`メソッドで`SuspensionConfiguration`がフック発火前に`nil`にクリアされるためです。
+
+**回避策:**
+- プロビジョニング状態を外部で追跡（例: データベースに「プロビジョニング済み」フラグ）
+- `plugin.Context`のメタデータを使って停止理由をオーケストレーションコードから渡す
+- プロビジョニング前にサービスが既に存在するか確認する
+
+詳細は[Issue #5](https://github.com/contract-to-cash/core/issues/5)を参照。
+:::
 
 ## 決済手段のフォールバック解決
 
@@ -124,6 +139,10 @@ func (p *ProvisioningPlugin) OnContractResume(ctx *plugin.Context, c *contract.C
 3. Contract.PaymentMethodID
 4. Customer.DefaultPaymentMethodID
 ```
+
+:::note
+ContractおよびCustomerレベルのフォールバックには、`NewPaymentService`に`contractRepo`を渡す必要があります。`contractRepo`が`nil`の場合、解決はInvoiceレベルで止まります。
+:::
 
 より具体的なレベルがより一般的なレベルをオーバーライドします。
 

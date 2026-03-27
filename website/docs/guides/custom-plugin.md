@@ -141,6 +141,19 @@ func (p *HostingPlugin) OnContractCancel(ctx *plugin.Context, c *contract.Contra
 }
 ```
 
+:::caution
+The `OnContractResume` hook cannot distinguish between initial provisioning (first payment) and re-activation (payment after suspension). Consider tracking provisioning state externally and checking it in `OnContractResume`:
+
+```go
+func (p *HostingPlugin) OnContractResume(ctx *plugin.Context, c *contract.ContractAggregate) error {
+    if p.provisioningClient.Exists(ctx.Context(), c.ContractID()) {
+        return p.provisioningClient.StartServer(ctx.Context(), c.ContractID())
+    }
+    return p.provisioningClient.CreateServer(ctx.Context(), c.ContractID(), c.PlanID())
+}
+```
+:::
+
 ## Registering Custom Plugins
 
 ```go

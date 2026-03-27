@@ -98,6 +98,22 @@ This pattern reuses the `Suspended` state for both:
 
 Both resolve the same way: payment completes → Resume → service activated.
 
+:::caution
+In this pattern, your application code must determine whether to **provision a new service** or **re-activate an existing one**. The `OnContractResumeHook` cannot distinguish between these cases because the suspension reason is cleared before the hook fires.
+
+A common approach is to track provisioning state separately:
+
+```go
+// After successful payment and resume
+if !provisioningStore.IsProvisioned(contractID) {
+    provisioningService.CreateServer(ctx, contractID)
+    provisioningStore.MarkProvisioned(contractID)
+} else {
+    provisioningService.StartServer(ctx, contractID)
+}
+```
+:::
+
 ## Idempotency
 
 Always provide an `IdempotencyKey` to prevent duplicate charges:

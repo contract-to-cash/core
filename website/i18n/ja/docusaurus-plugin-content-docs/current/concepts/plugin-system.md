@@ -210,3 +210,7 @@ taxPlugin := tax.NewTaxPlugin(&tax.JapaneseTaxCalculator{}) // 10%
 ```go
 couponPlugin := coupon.NewCouponPlugin(couponRepo, clock)
 ```
+
+:::note
+`applicableTo`によるプラン別制限は現在`PlanID`ベースで照合しています。Product/Price分離の一環として、将来のリリースで`ProductID`ベースの照合に移行予定です。
+:::

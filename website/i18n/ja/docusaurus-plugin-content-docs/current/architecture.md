@@ -92,6 +92,21 @@ stateDiagram-v2
 13. **AfterCalculation**フック（InvoiceLifecycleHook）
 14. 請求書を返却
 
+## 決済処理
+
+`PaymentService.ProcessPayment()`は決済手段を階層的に解決します：
+
+```
+1. ProcessPaymentInput内の明示的PaymentMethodID
+2. Invoice.PaymentMethodID
+3. Contract.PaymentMethodID
+4. Customer.DefaultPaymentMethodID
+```
+
+:::note
+ContractおよびCustomerレベルのフォールバックには、`PaymentService`に`contractRepo`を渡す必要があります。省略した場合、解決はInvoiceレベルで止まります。
+:::
+
 ## Product/Priceモデル
 
 Stripeパターン（2020年にモノリシックPlanを廃止）に準拠：
