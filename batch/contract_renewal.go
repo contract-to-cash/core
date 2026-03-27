@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/contract-to-cash/core/domain/contract"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/plugin"
@@ -15,6 +16,7 @@ import (
 // billing period has ended.
 type ContractRenewalProcessor struct {
 	contractRepo contract.Repository
+	priceRepo    pricing.PriceRepository
 	registry     *plugin.Registry
 	clock        shared.Clock
 }
@@ -22,11 +24,13 @@ type ContractRenewalProcessor struct {
 // NewContractRenewalProcessor creates a new ContractRenewalProcessor.
 func NewContractRenewalProcessor(
 	contractRepo contract.Repository,
+	priceRepo pricing.PriceRepository,
 	registry *plugin.Registry,
 	clock shared.Clock,
 ) *ContractRenewalProcessor {
 	return &ContractRenewalProcessor{
 		contractRepo: contractRepo,
+		priceRepo:    priceRepo,
 		registry:     registry,
 		clock:        clock,
 	}
@@ -135,10 +139,11 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 	}
 
 	// Resolve the billing cycle for the next period.
-	// When a Price repository is available, this should load the pending Price's
-	// billingCycle. For now, use the contract's current cycle.
-	// TODO: Load Price entity to resolve billingCycle when pendingPriceID is set.
-	billingCycle := agg.GetBillingCycle()
+	// If there is a pending price change, load the new Price to get its billingCycle.
+	billingCycle, err := p.resolveBillingCycle(ctx, agg)
+	if err != nil {
+		return err
+	}
 
 	oldStatus := agg.Status()
 	if err := agg.Renew(billingCycle, metadata); err != nil {
@@ -193,4 +198,19 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 	}
 
 	return nil
+}
+
+// resolveBillingCycle determines the billing cycle for the next period.
+// If a pending price change exists and a PriceRepository is available,
+// it loads the new Price to get its billingCycle. Otherwise, it falls back
+// to the contract's current billingCycle.
+func (p *ContractRenewalProcessor) resolveBillingCycle(ctx context.Context, agg *contract.ContractAggregate) (contract.BillingCycle, error) {
+	if agg.PendingPriceID() != nil && p.priceRepo != nil {
+		price, err := p.priceRepo.FindByID(ctx, *agg.PendingPriceID())
+		if err != nil {
+			return "", fmt.Errorf("failed to load pending price %s: %w", *agg.PendingPriceID(), err)
+		}
+		return contract.BillingCycle(price.BillingCycle()), nil
+	}
+	return agg.GetBillingCycle(), nil
 }
