@@ -1,36 +1,45 @@
 version: "2"
 
-run:
-  timeout: 5m
-
 linters:
   enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - unused
-    - ineffassign
+    - bodyclose
+    - copyloopvar
+    - exhaustive
     - misspell
     - nolintlint
-    - bodyclose
-    - exhaustive
-    - copyloopvar
   settings:
     errcheck:
       check-type-assertions: true
     exhaustive:
       default-signifies-exhaustive: true
-    nolintlint:
-      require-explanation: true
-      require-specific: true
     govet:
       enable:
         - shadow
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 
 formatters:
   enable:
     - gofmt
     - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 
 issues:
   max-issues-per-linter: 50
