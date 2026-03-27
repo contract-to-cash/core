@@ -387,7 +387,9 @@ func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMe
 }
 
 // Renew renews the contract for a new billing period.
-func (a *ContractAggregate) Renew(metadata eventstore.EventMetadata) error {
+// The newBillingCycle parameter specifies the billing cycle for the next period,
+// typically resolved from the Price entity by the caller (e.g., batch processor).
+func (a *ContractAggregate) Renew(newBillingCycle BillingCycle, metadata eventstore.EventMetadata) error {
 	if a.status != ContractStatusActive {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot renew: status is %s", a.status))
@@ -401,7 +403,7 @@ func (a *ContractAggregate) Renew(metadata eventstore.EventMetadata) error {
 		return a.expire(metadata)
 	}
 
-	newPeriod := a.currentPeriod.Next(string(a.billingCycle))
+	newPeriod := a.currentPeriod.Next(string(newBillingCycle))
 
 	oldPriceID := a.priceID
 	newPriceID := a.priceID
@@ -412,13 +414,15 @@ func (a *ContractAggregate) Renew(metadata eventstore.EventMetadata) error {
 	}
 
 	event := &ContractRenewedEvent{
-		ContractID:   a.contractID,
-		OldPeriod:    a.currentPeriod,
-		NewPeriod:    newPeriod,
-		OldPriceID:   oldPriceID,
-		NewPriceID:   newPriceID,
-		PriceChanged: priceChanged,
-		RenewedAt:    a.Clock().Now(),
+		ContractID:      a.contractID,
+		OldPeriod:       a.currentPeriod,
+		NewPeriod:       newPeriod,
+		OldPriceID:      oldPriceID,
+		NewPriceID:      newPriceID,
+		PriceChanged:    priceChanged,
+		OldBillingCycle: a.billingCycle,
+		NewBillingCycle: newBillingCycle,
+		RenewedAt:       a.Clock().Now(),
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -573,6 +577,9 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.currentPeriod = e.NewPeriod
 		a.priceID = e.NewPriceID
 		a.pendingPriceID = nil
+		if e.NewBillingCycle != "" {
+			a.billingCycle = e.NewBillingCycle
+		}
 		a.updatedAt = e.RenewedAt
 
 	case *ContractExpiredEvent:

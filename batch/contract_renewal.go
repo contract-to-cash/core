@@ -134,8 +134,14 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		return nil
 	}
 
+	// Resolve the billing cycle for the next period.
+	// When a Price repository is available, this should load the pending Price's
+	// billingCycle. For now, use the contract's current cycle.
+	// TODO: Load Price entity to resolve billingCycle when pendingPriceID is set.
+	billingCycle := agg.GetBillingCycle()
+
 	oldStatus := agg.Status()
-	if err := agg.Renew(metadata); err != nil {
+	if err := agg.Renew(billingCycle, metadata); err != nil {
 		return err
 	}
 

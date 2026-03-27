@@ -145,7 +145,7 @@ func TestRenew_AppliesPending(t *testing.T) {
 		t.Fatalf("schedule failed: %v", err)
 	}
 
-	if err := agg.Renew(meta); err != nil {
+	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
