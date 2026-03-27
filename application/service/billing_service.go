@@ -12,12 +12,15 @@ import (
 	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/pricing"
+	"github.com/contract-to-cash/core/domain/product"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/domain/usage"
 	"github.com/contract-to-cash/core/plugin"
 )
 
 // PlanRepository provides access to pricing plans.
+// Deprecated: Use pricing.PriceRepository and product.Repository instead.
+// Retained temporarily for usage-based charge calculation until Sub-issue #10.
 type PlanRepository interface {
 	FindByID(ctx context.Context, id shared.PlanID) (*pricing.Plan, error)
 }
@@ -36,7 +39,9 @@ type BillingService struct {
 	usageRepo    usage.Repository
 	creditRepo   credit.Repository
 	creditConfig credit.CreditConfig
-	planRepo     PlanRepository
+	priceRepo    pricing.PriceRepository
+	productRepo  product.Repository
+	planRepo     PlanRepository // Deprecated: fallback for usage charge calculation until #10
 	registry     *plugin.Registry
 	config       BillingConfig
 	clock        shared.Clock
@@ -49,7 +54,8 @@ func NewBillingService(
 	usageRepo usage.Repository,
 	creditRepo credit.Repository,
 	creditConfig credit.CreditConfig,
-	planRepo PlanRepository,
+	priceRepo pricing.PriceRepository,
+	productRepo product.Repository,
 	registry *plugin.Registry,
 	config BillingConfig,
 	clock shared.Clock,
@@ -60,11 +66,20 @@ func NewBillingService(
 		usageRepo:    usageRepo,
 		creditRepo:   creditRepo,
 		creditConfig: creditConfig,
-		planRepo:     planRepo,
+		priceRepo:    priceRepo,
+		productRepo:  productRepo,
 		registry:     registry,
 		config:       config,
 		clock:        clock,
 	}
+}
+
+// WithPlanRepository sets the deprecated PlanRepository for usage-based charge
+// calculation. This will be removed when billing calculation is migrated to
+// use Price/Product entities (#10).
+func (s *BillingService) WithPlanRepository(repo PlanRepository) *BillingService {
+	s.planRepo = repo
+	return s
 }
 
 // billableStatuses defines which contract statuses allow invoice generation.
@@ -254,8 +269,15 @@ func (s *BillingService) calculateSubtotal(ctx context.Context, agg *contract.Co
 // calculateUsageCharge calculates usage-based charges by iterating over
 // plan usage metrics, querying usage summaries, applying included quantities,
 // and computing prices via the pricing model.
+//
+// NOTE: This method still uses the deprecated PlanRepository to load usage metrics
+// with their PricingModel. It will be migrated to use Product/Price entities in #10.
 func (s *BillingService) calculateUsageCharge(ctx context.Context, agg *contract.ContractAggregate, billingPeriod shared.DateRange) (shared.Money, error) {
 	currency := agg.Price().Currency()
+
+	if s.planRepo == nil {
+		return shared.Money{}, fmt.Errorf("usage-based billing requires PlanRepository (set via WithPlanRepository); will be migrated to Price/Product in #10")
+	}
 
 	// Load the plan to get usage metrics
 	plan, err := s.planRepo.FindByID(ctx, agg.PlanID())

@@ -24,7 +24,14 @@ type PaymentID string
 type UsageRecordID string
 
 // PlanID identifies a pricing plan.
+// Deprecated: Use ProductID instead. Kept for backward compatibility with existing events.
 type PlanID string
+
+// ProductID identifies a product.
+type ProductID string
+
+// PriceID identifies a price.
+type PriceID string
 
 // CreditEntryID identifies a credit entry.
 type CreditEntryID string
@@ -35,6 +42,8 @@ func (id InvoiceID) String() string     { return string(id) }
 func (id PaymentID) String() string     { return string(id) }
 func (id UsageRecordID) String() string { return string(id) }
 func (id PlanID) String() string        { return string(id) }
+func (id ProductID) String() string     { return string(id) }
+func (id PriceID) String() string       { return string(id) }
 func (id CreditEntryID) String() string { return string(id) }
 
 func generateULID() string {
@@ -57,7 +66,14 @@ func NewPaymentID() PaymentID { return PaymentID(generateULID()) }
 func NewUsageRecordID() UsageRecordID { return UsageRecordID(generateULID()) }
 
 // NewPlanID generates a new unique PlanID.
+// Deprecated: Use NewProductID instead.
 func NewPlanID() PlanID { return PlanID(generateULID()) }
+
+// NewProductID generates a new unique ProductID.
+func NewProductID() ProductID { return ProductID(generateULID()) }
+
+// NewPriceID generates a new unique PriceID.
+func NewPriceID() PriceID { return PriceID(generateULID()) }
 
 // NewCreditEntryID generates a new unique CreditEntryID.
 func NewCreditEntryID() CreditEntryID { return CreditEntryID(generateULID()) }

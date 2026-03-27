@@ -107,7 +107,7 @@ func main() {
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo, creditRepo,
 		credit.CreditConfig{},
-		nil, registry,
+		nil, nil, registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
 	)
