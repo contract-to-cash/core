@@ -708,6 +708,61 @@ func TestChangePaymentMethod_FromDraftAndTrialing(t *testing.T) {
 	}
 }
 
+func TestChangePaymentMethod_FromSuspended(t *testing.T) {
+	agg := createActiveAggregate(t)
+	meta := newTestMetadata()
+
+	_ = agg.Suspend(SuspensionConfiguration{
+		BillingBehavior: SuspensionBillingSkip,
+		Reason:          "non-payment",
+	}, meta)
+
+	pmID := "pm-new-card"
+	if err := agg.ChangePaymentMethod(&pmID, meta); err != nil {
+		t.Fatalf("ChangePaymentMethod from suspended failed: %v", err)
+	}
+	if agg.PaymentMethodID() == nil || *agg.PaymentMethodID() != "pm-new-card" {
+		t.Errorf("expected pm-new-card, got %v", agg.PaymentMethodID())
+	}
+}
+
+func TestLoadFromHistory_WithPaymentMethodChanged(t *testing.T) {
+	original := newTestAggregate()
+	meta := newTestMetadata()
+
+	if err := original.Create(newTestCommand(), meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := original.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+	pmID := "pm-history-test"
+	if err := original.ChangePaymentMethod(&pmID, meta); err != nil {
+		t.Fatalf("ChangePaymentMethod failed: %v", err)
+	}
+
+	events := original.UncommittedEvents()
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+
+	// Replay from history (exercises JSON serialize → deserialize → Apply)
+	restored := NewContractAggregate(shared.ContractID("test-contract-001"), newTestClock())
+	if err := restored.LoadFromHistory(events); err != nil {
+		t.Fatalf("LoadFromHistory failed: %v", err)
+	}
+
+	if restored.PaymentMethodID() == nil || *restored.PaymentMethodID() != "pm-history-test" {
+		t.Errorf("expected pm-history-test after history replay, got %v", restored.PaymentMethodID())
+	}
+	if restored.Status() != ContractStatusActive {
+		t.Errorf("expected active, got %s", restored.Status())
+	}
+	if restored.Version() != 3 {
+		t.Errorf("expected version 3, got %d", restored.Version())
+	}
+}
+
 func TestSnapshotRoundTrip_WithPaymentMethod(t *testing.T) {
 	agg := createActiveAggregate(t)
 	meta := newTestMetadata()

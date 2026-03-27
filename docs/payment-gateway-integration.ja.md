@@ -367,9 +367,11 @@ router := NewSimpleGatewayRouter(rules, map[string]port.PaymentGateway{
 
 // 3. PaymentService を作成
 paymentService := service.NewPaymentService(
-    stripeGW,       // またはルーターで選択されたゲートウェイ
+    stripeGW,         // またはルーターで選択されたゲートウェイ
     paymentRepo,
     invoiceRepo,
+    contractRepo,     // 支払い方法フォールバック解決用
+    customerGateway,  // 顧客デフォルト支払い方法の参照用
     eventStore,
     pluginRegistry,
     clock,
