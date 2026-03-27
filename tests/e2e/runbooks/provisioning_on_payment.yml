@@ -1,0 +1,79 @@
+desc: "Provisioning: payment triggers server setup, server state tracks contract"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Register provisioning plugin
+    req:
+      /plugins/provisioning/register:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Create contract
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-prov-001"
+              plan_id: "plan-vps"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 5000
+    test: |
+      current.res.status == 201
+  - desc: Server should be "none" before payment
+    req:
+      /servers/{{ steps[1].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.state == "none"
+  - desc: Activate contract
+    req:
+      /contracts/{{ steps[1].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Generate and finalize invoice
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[1].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+  - desc: Finalize
+    req:
+      /invoices/{{ steps[4].res.body.id }}/finalize:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Pay invoice (triggers AfterCharge -> server provisioned)
+    req:
+      /invoices/{{ steps[4].res.body.id }}/pay:
+        post:
+          body:
+            application/json:
+              amount: 5000
+              payment_method_id: "pm-001"
+    test: |
+      current.res.status == 201
+      && current.res.body.status == "completed"
+  - desc: Server should now be "running"
+    req:
+      /servers/{{ steps[1].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.state == "running"

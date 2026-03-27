@@ -1,0 +1,86 @@
+desc: "Partial payment: pay invoice in multiple installments"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Create and activate contract
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-partial-001"
+              plan_id: "plan-basic"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 10000
+    test: |
+      current.res.status == 201
+  - desc: Activate
+    req:
+      /contracts/{{ steps[0].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Generate invoice
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[0].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.amount_due == 10000
+  - desc: Finalize invoice
+    req:
+      /invoices/{{ steps[2].res.body.id }}/finalize:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: First partial payment (3000)
+    req:
+      /invoices/{{ steps[2].res.body.id }}/pay:
+        post:
+          body:
+            application/json:
+              amount: 3000
+              payment_method_id: "pm-001"
+    test: |
+      current.res.status == 201
+      && current.res.body.amount == 3000
+      && current.res.body.status == "completed"
+  - desc: Verify invoice is partial_paid
+    req:
+      /invoices/{{ steps[2].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "partial_paid"
+      && current.res.body.paid_amount == 3000
+  - desc: Second partial payment (7000 remaining)
+    req:
+      /invoices/{{ steps[2].res.body.id }}/pay:
+        post:
+          body:
+            application/json:
+              amount: 7000
+              payment_method_id: "pm-001"
+    test: |
+      current.res.status == 201
+      && current.res.body.amount == 7000
+  - desc: Verify invoice is fully paid
+    req:
+      /invoices/{{ steps[2].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "paid"
+      && current.res.body.paid_amount == 10000

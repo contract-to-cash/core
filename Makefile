@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration vet lint fmt check cover clean
+.PHONY: build test test-unit test-integration test-e2e vet lint fmt check cover clean
 
 build:
 	go build ./...
@@ -10,7 +10,10 @@ test-unit:
 	go test $(shell go list ./... | grep -v /tests/) -race -count=1
 
 test-integration:
-	go test ./tests/... -race -count=1
+	go test ./tests/integration/... -race -count=1
+
+test-e2e:
+	go test ./tests/e2e/... -race -count=1 -v
 
 vet:
 	go vet ./...

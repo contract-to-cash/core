@@ -1,0 +1,98 @@
+desc: "Payment lifecycle: pay, partial refund, full refund, and overpayment rejection"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Create and activate contract
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-pay-001"
+              plan_id: "plan-basic"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 5000
+    test: |
+      current.res.status == 201
+  - desc: Activate
+    req:
+      /contracts/{{ steps[0].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Generate invoice
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[0].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.total == 5000
+  - desc: Finalize invoice
+    req:
+      /invoices/{{ steps[2].res.body.id }}/finalize:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "finalized"
+  - desc: Overpayment should be rejected
+    req:
+      /invoices/{{ steps[2].res.body.id }}/pay:
+        post:
+          body:
+            application/json:
+              amount: 6000
+              payment_method_id: "pm-001"
+    test: |
+      current.res.status == 422
+  - desc: Pay the full amount
+    req:
+      /invoices/{{ steps[2].res.body.id }}/pay:
+        post:
+          body:
+            application/json:
+              amount: 5000
+              payment_method_id: "pm-001"
+    test: |
+      current.res.status == 201
+      && current.res.body.status == "completed"
+      && current.res.body.amount == 5000
+  - desc: Verify invoice is paid
+    req:
+      /invoices/{{ steps[2].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "paid"
+      && current.res.body.paid_amount == 5000
+  - desc: Partial refund (2000 of 5000)
+    req:
+      /payments/{{ steps[5].res.body.id }}/refund:
+        post:
+          body:
+            application/json:
+              amount: 2000
+              reason: "requested_by_customer"
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "partially_refunded"
+  - desc: Full refund (remaining)
+    req:
+      /payments/{{ steps[5].res.body.id }}/refund:
+        post:
+          body:
+            application/json:
+              reason: "requested_by_customer"
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "refunded"

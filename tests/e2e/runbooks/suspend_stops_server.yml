@@ -1,0 +1,105 @@
+desc: "Suspend stops server: payment failure -> suspend -> server stopped -> resume -> server running"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Register provisioning plugin
+    req:
+      /plugins/provisioning/register:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Create, activate, bill, and pay (setup running server)
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-susp-001"
+              plan_id: "plan-vps"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 5000
+    test: |
+      current.res.status == 201
+  - desc: Activate
+    req:
+      /contracts/{{ steps[1].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Generate invoice
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[1].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+  - desc: Finalize
+    req:
+      /invoices/{{ steps[3].res.body.id }}/finalize:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Pay (server becomes running)
+    req:
+      /invoices/{{ steps[3].res.body.id }}/pay:
+        post:
+          body:
+            application/json:
+              amount: 5000
+              payment_method_id: "pm-001"
+    test: |
+      current.res.status == 201
+  - desc: Verify server is running
+    req:
+      /servers/{{ steps[1].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.state == "running"
+  - desc: Suspend contract (payment overdue) -> server stopped
+    req:
+      /contracts/{{ steps[1].res.body.id }}/suspend:
+        post:
+          body:
+            application/json:
+              reason: "payment overdue"
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "suspended"
+  - desc: Server should be "stopped"
+    req:
+      /servers/{{ steps[1].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.state == "stopped"
+  - desc: Resume contract -> server restarted
+    req:
+      /contracts/{{ steps[1].res.body.id }}/resume:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Server should be "running" again
+    req:
+      /servers/{{ steps[1].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.state == "running"

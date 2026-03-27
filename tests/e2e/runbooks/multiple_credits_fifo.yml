@@ -1,0 +1,92 @@
+desc: "Credits FIFO: credits exceed invoice total, verify partial consumption across 2 invoices"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Create and activate contract (2000 JPY)
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-fifo-001"
+              plan_id: "plan-basic"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 2000
+    test: |
+      current.res.status == 201
+  - desc: Activate
+    req:
+      /contracts/{{ steps[0].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: "Add credit A: 1500 JPY"
+    req:
+      /credits:
+        post:
+          body:
+            application/json:
+              account_id: "acc-fifo-001"
+              amount: 1500
+              reason: "goodwill"
+    test: |
+      current.res.status == 201
+  - desc: "Add credit B: 1000 JPY"
+    req:
+      /credits:
+        post:
+          body:
+            application/json:
+              account_id: "acc-fifo-001"
+              amount: 1000
+              reason: "proration"
+    test: |
+      current.res.status == 201
+  - desc: "1st invoice (2000): credits cover it all (1500+500 from B), amount_due=0"
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[0].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.total == 2000
+      && current.res.body.applied_credit == 2000
+      && current.res.body.amount_due == 0
+  - desc: Advance clock and renew for next period
+    req:
+      /clock/advance:
+        post:
+          body:
+            application/json:
+              days: 31
+    test: |
+      current.res.status == 200
+  - desc: Renew contract
+    req:
+      /contracts/{{ steps[0].res.body.id }}/renew:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: "2nd invoice (2000): only 500 credit remaining from B, amount_due=1500"
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[0].res.body.id }}"
+              period_start: "2026-04-01"
+              period_end: "2026-05-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.total == 2000
+      && current.res.body.applied_credit == 500
+      && current.res.body.amount_due == 1500
