@@ -49,6 +49,7 @@ type Contract struct {
 	currentPeriod    shared.DateRange
 	trialConfig      *TrialConfiguration
 	suspensionConfig *SuspensionConfiguration
+	paymentMethodID  *string
 	price            shared.Money
 	basePrice        shared.Money
 	metadata         map[string]string
@@ -89,6 +90,9 @@ func (c *Contract) Price() shared.Money { return c.price }
 
 // BasePrice returns the base price.
 func (c *Contract) BasePrice() shared.Money { return c.basePrice }
+
+// PaymentMethodID returns the contract-level payment method ID.
+func (c *Contract) PaymentMethodID() *string { return c.paymentMethodID }
 
 // Metadata returns the contract metadata.
 func (c *Contract) Metadata() map[string]string {

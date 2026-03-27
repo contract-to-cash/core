@@ -21,6 +21,7 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 	r.Register(&PlanChangedEvent{})
 	r.Register(&TrialStartedEvent{})
 	r.Register(&TrialEndedEvent{})
+	r.Register(&PaymentMethodChangedEvent{})
 	return r
 }()
 
@@ -48,6 +49,7 @@ type ContractAggregate struct {
 	currentPeriod    shared.DateRange
 	trialConfig      *TrialConfiguration
 	suspensionConfig *SuspensionConfiguration
+	paymentMethodID  *string
 	price            shared.Money
 	basePrice        shared.Money
 	metadata         map[string]string
@@ -89,6 +91,9 @@ func (a *ContractAggregate) TrialConfig() *TrialConfiguration { return a.trialCo
 
 // SuspensionConfig returns the suspension configuration.
 func (a *ContractAggregate) SuspensionConfig() *SuspensionConfiguration { return a.suspensionConfig }
+
+// PaymentMethodID returns the contract-level payment method ID.
+func (a *ContractAggregate) PaymentMethodID() *string { return a.paymentMethodID }
 
 // Price returns the current price.
 func (a *ContractAggregate) Price() shared.Money { return a.price }
@@ -257,6 +262,26 @@ func (a *ContractAggregate) ChangePlan(newPlanID shared.PlanID, proration *PlanC
 	return a.RaiseEvent(event, metadata)
 }
 
+// ChangePaymentMethod changes the contract-level payment method.
+func (a *ContractAggregate) ChangePaymentMethod(paymentMethodID *string, metadata eventstore.EventMetadata) error {
+	if a.status == "" || a.status == ContractStatusCancelled || a.status == ContractStatusExpired {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot change payment method: current status is %s", a.status))
+	}
+
+	event := &PaymentMethodChangedEvent{
+		ContractID:         a.contractID,
+		OldPaymentMethodID: a.paymentMethodID,
+		NewPaymentMethodID: paymentMethodID,
+		ChangedAt:          a.Clock().Now(),
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
 // StartTrial starts a trial period.
 func (a *ContractAggregate) StartTrial(config TrialConfiguration, metadata eventstore.EventMetadata) error {
 	if a.status != ContractStatusDraft {
@@ -354,6 +379,10 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		}
 		a.updatedAt = e.EndedAt
 
+	case *PaymentMethodChangedEvent:
+		a.paymentMethodID = e.NewPaymentMethodID
+		a.updatedAt = e.ChangedAt
+
 	default:
 		return shared.NewDomainError(shared.ErrCodeUnknownEvent,
 			fmt.Sprintf("unknown event type: %T", event))
@@ -374,6 +403,7 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		CurrentPeriod:    a.currentPeriod,
 		TrialConfig:      a.trialConfig,
 		SuspensionConfig: a.suspensionConfig,
+		PaymentMethodID:  a.paymentMethodID,
 		Price:            a.price,
 		BasePrice:        a.basePrice,
 		Metadata:         a.metadata,
@@ -409,6 +439,7 @@ type contractSnapshotState struct {
 	CurrentPeriod    shared.DateRange         `json:"current_period"`
 	TrialConfig      *TrialConfiguration      `json:"trial_config,omitempty"`
 	SuspensionConfig *SuspensionConfiguration `json:"suspension_config,omitempty"`
+	PaymentMethodID  *string                  `json:"payment_method_id,omitempty"`
 	Price            shared.Money             `json:"price"`
 	BasePrice        shared.Money             `json:"base_price"`
 	Metadata         map[string]string        `json:"metadata,omitempty"`
@@ -432,6 +463,7 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.currentPeriod = state.CurrentPeriod
 	a.trialConfig = state.TrialConfig
 	a.suspensionConfig = state.SuspensionConfig
+	a.paymentMethodID = state.PaymentMethodID
 	a.price = state.Price
 	a.basePrice = state.BasePrice
 	a.metadata = state.Metadata

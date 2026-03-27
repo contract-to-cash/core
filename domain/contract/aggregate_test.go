@@ -621,6 +621,122 @@ func TestEndTrialNotConverted(t *testing.T) {
 	}
 }
 
+func TestChangePaymentMethod(t *testing.T) {
+	agg := createActiveAggregate(t)
+	meta := newTestMetadata()
+
+	pmID := "pm-visa-1234"
+	if err := agg.ChangePaymentMethod(&pmID, meta); err != nil {
+		t.Fatalf("ChangePaymentMethod failed: %v", err)
+	}
+	if agg.PaymentMethodID() == nil || *agg.PaymentMethodID() != "pm-visa-1234" {
+		t.Errorf("expected pm-visa-1234, got %v", agg.PaymentMethodID())
+	}
+
+	// Change to a different payment method
+	pmID2 := "pm-mastercard-5678"
+	if err := agg.ChangePaymentMethod(&pmID2, meta); err != nil {
+		t.Fatalf("ChangePaymentMethod (second) failed: %v", err)
+	}
+	if *agg.PaymentMethodID() != "pm-mastercard-5678" {
+		t.Errorf("expected pm-mastercard-5678, got %s", *agg.PaymentMethodID())
+	}
+
+	// Clear payment method (set to nil)
+	if err := agg.ChangePaymentMethod(nil, meta); err != nil {
+		t.Fatalf("ChangePaymentMethod (clear) failed: %v", err)
+	}
+	if agg.PaymentMethodID() != nil {
+		t.Errorf("expected nil, got %v", agg.PaymentMethodID())
+	}
+}
+
+func TestChangePaymentMethod_InvalidStates(t *testing.T) {
+	meta := newTestMetadata()
+	pmID := "pm-test"
+
+	tests := []struct {
+		name  string
+		setup func() *ContractAggregate
+	}{
+		{
+			name: "from cancelled",
+			setup: func() *ContractAggregate {
+				agg := createActiveAggregate(t)
+				_ = agg.Cancel("test", meta)
+				return agg
+			},
+		},
+		{
+			name: "from uninitialized",
+			setup: func() *ContractAggregate {
+				return newTestAggregate()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agg := tt.setup()
+			err := agg.ChangePaymentMethod(&pmID, meta)
+			if err == nil {
+				t.Fatal("expected error for invalid state transition, got nil")
+			}
+		})
+	}
+}
+
+func TestChangePaymentMethod_FromDraftAndTrialing(t *testing.T) {
+	meta := newTestMetadata()
+	pmID := "pm-test"
+
+	// Draft
+	agg := newTestAggregate()
+	_ = agg.Create(newTestCommand(), meta)
+	if err := agg.ChangePaymentMethod(&pmID, meta); err != nil {
+		t.Fatalf("ChangePaymentMethod from draft failed: %v", err)
+	}
+
+	// Trialing
+	agg2 := newTestAggregate()
+	_ = agg2.Create(newTestCommand(), meta)
+	_ = agg2.StartTrial(TrialConfiguration{
+		TrialEndDate: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+	}, meta)
+	if err := agg2.ChangePaymentMethod(&pmID, meta); err != nil {
+		t.Fatalf("ChangePaymentMethod from trialing failed: %v", err)
+	}
+}
+
+func TestSnapshotRoundTrip_WithPaymentMethod(t *testing.T) {
+	agg := createActiveAggregate(t)
+	meta := newTestMetadata()
+
+	pmID := "pm-snapshot-test"
+	_ = agg.ChangePaymentMethod(&pmID, meta)
+
+	// Marshal snapshot
+	data, err := agg.MarshalSnapshot()
+	if err != nil {
+		t.Fatalf("MarshalSnapshot failed: %v", err)
+	}
+
+	// Restore from snapshot
+	restored := NewContractAggregate(agg.ContractID(), newTestClock())
+	snapshot := eventstore.Snapshot{
+		StreamID: string(agg.ContractID()),
+		Version:  agg.Version(),
+		State:    data,
+	}
+	if err := restored.LoadFromSnapshot(snapshot); err != nil {
+		t.Fatalf("LoadFromSnapshot failed: %v", err)
+	}
+
+	if restored.PaymentMethodID() == nil || *restored.PaymentMethodID() != "pm-snapshot-test" {
+		t.Errorf("expected pm-snapshot-test after snapshot restore, got %v", restored.PaymentMethodID())
+	}
+}
+
 func TestCancelFromSuspended(t *testing.T) {
 	agg := createActiveAggregate(t)
 	meta := newTestMetadata()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/contract-to-cash/core/application/port"
+	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
@@ -13,6 +14,8 @@ import (
 )
 
 // ProcessPaymentInput holds the parameters for processing a payment.
+// PaymentMethodID is optional — if empty, the service resolves it via the
+// hierarchical fallback chain: Invoice → Contract → Customer.
 type ProcessPaymentInput struct {
 	PaymentMethodID string
 	Amount          shared.Money
@@ -29,12 +32,14 @@ type RefundInput struct {
 
 // PaymentService orchestrates payment processing with plugin hooks.
 type PaymentService struct {
-	gateway     port.PaymentGateway
-	paymentRepo payment.Repository
-	invoiceRepo invoice.Repository
-	eventStore  eventstore.Store
-	registry    *plugin.Registry
-	clock       shared.Clock
+	gateway         port.PaymentGateway
+	paymentRepo     payment.Repository
+	invoiceRepo     invoice.Repository
+	contractRepo    contract.Repository
+	customerGateway port.CustomerGateway
+	eventStore      eventstore.Store
+	registry        *plugin.Registry
+	clock           shared.Clock
 }
 
 // NewPaymentService creates a new PaymentService.
@@ -42,17 +47,21 @@ func NewPaymentService(
 	gateway port.PaymentGateway,
 	paymentRepo payment.Repository,
 	invoiceRepo invoice.Repository,
+	contractRepo contract.Repository,
+	customerGateway port.CustomerGateway,
 	eventStore eventstore.Store,
 	registry *plugin.Registry,
 	clock shared.Clock,
 ) *PaymentService {
 	return &PaymentService{
-		gateway:     gateway,
-		paymentRepo: paymentRepo,
-		invoiceRepo: invoiceRepo,
-		eventStore:  eventStore,
-		registry:    registry,
-		clock:       clock,
+		gateway:         gateway,
+		paymentRepo:     paymentRepo,
+		invoiceRepo:     invoiceRepo,
+		contractRepo:    contractRepo,
+		customerGateway: customerGateway,
+		eventStore:      eventStore,
+		registry:        registry,
+		clock:           clock,
 	}
 }
 
@@ -76,6 +85,16 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("payment validation failed: %w", err)
 	}
 
+	// Resolve payment method via fallback chain if not explicitly provided
+	pmID := input.PaymentMethodID
+	if pmID == "" {
+		resolved, resolveErr := s.ResolvePaymentMethod(ctx, inv)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("failed to resolve payment method: %w", resolveErr)
+		}
+		pmID = resolved
+	}
+
 	// Build PaymentContext with invoice (payment is nil at this stage for BeforeCharge)
 	payCtx := plugin.NewPaymentContext(ctx, nil, inv)
 
@@ -88,9 +107,9 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	}
 
 	// Charge via gateway
-	pmID := input.PaymentMethodID
 	chargeResp, err := s.gateway.Charge(ctx, &port.ChargeRequest{
 		Amount:          amount,
+		CustomerID:      string(inv.AccountID()),
 		PaymentMethodID: &pmID,
 		Description:     fmt.Sprintf("Invoice %s", invoiceID),
 		Metadata:        input.Metadata,
@@ -213,4 +232,39 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 	}
 
 	return nil
+}
+
+// ResolvePaymentMethod walks the hierarchical fallback chain to determine
+// which payment method to charge: Invoice → Contract → Customer.
+func (s *PaymentService) ResolvePaymentMethod(ctx context.Context, inv *invoice.Invoice) (string, error) {
+	// Level 1: Invoice-level override
+	if inv.PaymentMethodID() != nil && *inv.PaymentMethodID() != "" {
+		return *inv.PaymentMethodID(), nil
+	}
+
+	// Level 2: Contract-level default
+	if s.contractRepo != nil {
+		agg, err := s.contractRepo.FindByID(ctx, inv.ContractID())
+		if err != nil {
+			return "", fmt.Errorf("failed to load contract for payment method resolution: %w", err)
+		}
+		if agg.PaymentMethodID() != nil && *agg.PaymentMethodID() != "" {
+			return *agg.PaymentMethodID(), nil
+		}
+
+		// Level 3: Customer-level default (via gateway)
+		if s.customerGateway != nil {
+			customer, err := s.customerGateway.GetCustomer(ctx, string(agg.AccountID()))
+			if err != nil {
+				return "", fmt.Errorf("failed to load customer for payment method resolution: %w", err)
+			}
+			if customer.DefaultPaymentMethodID != nil && *customer.DefaultPaymentMethodID != "" {
+				return *customer.DefaultPaymentMethodID, nil
+			}
+		}
+	}
+
+	return "", shared.NewDomainError(shared.ErrCodeBusinessRule,
+		fmt.Sprintf("no payment method found for invoice %s: checked invoice, contract %s, and customer default",
+			inv.ID(), inv.ContractID()))
 }

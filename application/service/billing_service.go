@@ -196,6 +196,18 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	now := s.clock.Now()
 	dueDate := now.AddDate(0, 0, s.config.DaysUntilDue)
 
+	opts := []invoice.InvoiceOption{
+		invoice.WithStatus(invoice.InvoiceStatusDraft),
+		invoice.WithBillingPeriod(billingPeriod),
+		invoice.WithDueDate(dueDate),
+		invoice.WithAppliedCredit(appliedCredit),
+		invoice.WithAmountDue(amountDue),
+		invoice.WithIssueDate(now),
+	}
+	if agg.PaymentMethodID() != nil {
+		opts = append(opts, invoice.WithPaymentMethodID(agg.PaymentMethodID()))
+	}
+
 	inv := invoice.NewInvoice(
 		invoiceID,
 		agg.AccountID(),
@@ -203,12 +215,7 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 		subtotal,
 		totalDiscount,
 		totalTax,
-		invoice.WithStatus(invoice.InvoiceStatusDraft),
-		invoice.WithBillingPeriod(billingPeriod),
-		invoice.WithDueDate(dueDate),
-		invoice.WithAppliedCredit(appliedCredit),
-		invoice.WithAmountDue(amountDue),
-		invoice.WithIssueDate(now),
+		opts...,
 	)
 	calcCtx.SetInvoice(inv)
 

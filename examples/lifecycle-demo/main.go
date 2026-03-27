@@ -113,7 +113,7 @@ func main() {
 	must("save invoice", invoiceRepo.Save(ctx, inv))
 
 	gateway := &mockPaymentGateway{}
-	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, eventStore, registry, clock)
+	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, contractRepo, nil, eventStore, registry, clock)
 	pmt, err := paymentService.ProcessPayment(ctx, inv.ID(), service.ProcessPaymentInput{
 		PaymentMethodID: "pm-visa-1234",
 		Amount:          inv.AmountDue(),
