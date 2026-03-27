@@ -42,7 +42,7 @@ func NewCouponPlugin(repo CouponRepository, clock shared.Clock) *CouponPlugin {
 func (p *CouponPlugin) Name() string { return "coupon" }
 
 // Version returns the plugin version.
-func (p *CouponPlugin) Version() string { return "1.0.0" }
+func (p *CouponPlugin) Version() string { return "1.1.0" }
 
 // Priority returns the execution priority.
 func (p *CouponPlugin) Priority() int { return p.priority }
@@ -75,8 +75,21 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 	currency := ctx.Subtotal().Currency()
 	zero := shared.Zero(currency)
 
-	// 1. Find applicable coupons
-	coupons, err := p.repo.FindApplicable(ctx.Context(), ctx.ContractID(), p.clock.Now())
+	contract := ctx.Contract()
+	var accountID shared.AccountID
+	var planID shared.PlanID
+	if contract != nil {
+		accountID = contract.AccountID()
+		planID = contract.PlanID()
+	}
+
+	// 1. Find applicable coupons with full query context
+	coupons, err := p.repo.FindApplicable(ctx.Context(), CouponQuery{
+		ContractID: ctx.ContractID(),
+		AccountID:  accountID,
+		PlanID:     planID,
+		At:         p.clock.Now(),
+	})
 	if err != nil {
 		return zero, fmt.Errorf("coupon: find applicable: %w", err)
 	}
@@ -85,23 +98,52 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		return zero, nil
 	}
 
-	// 2. If stacking is not allowed, use only the first coupon
+	// 2. Filter coupons by plan applicability and account restrictions
+	var filtered []*Coupon
+	for _, c := range coupons {
+		if !c.IsApplicableToPlan(planID) {
+			continue
+		}
+		if !c.IsAccountAllowed(accountID) {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	coupons = filtered
+
+	if len(coupons) == 0 {
+		return zero, nil
+	}
+
+	// 3. If stacking is not allowed, use only the first coupon
 	if !p.config.AllowStacking {
 		coupons = coupons[:1]
 	}
 
-	// 3. Apply MaxCouponsPerInvoice limit
+	// 4. Apply MaxCouponsPerInvoice limit
 	if len(coupons) > p.config.MaxCouponsPerInvoice {
 		coupons = coupons[:p.config.MaxCouponsPerInvoice]
 	}
 
-	// 4. Calculate discount for each coupon
+	// 5. Calculate discount for each coupon
 	subtotal := ctx.Subtotal()
 	total := zero
+	now := p.clock.Now()
 	for _, c := range coupons {
 		// Check minimum purchase amount
 		if c.minAmount != nil && subtotal.Amount().Cmp(c.minAmount.Amount()) < 0 {
 			continue
+		}
+
+		// Check per-account usage limit
+		if c.perAccountUsageLimit != nil && accountID != "" {
+			used, err := p.repo.FindUsageByAccount(ctx.Context(), c.id, accountID)
+			if err != nil {
+				return zero, fmt.Errorf("coupon: find account usage: %w", err)
+			}
+			if used >= *c.perAccountUsageLimit {
+				continue
+			}
 		}
 
 		discount := c.CalculateDiscount(subtotal)
@@ -111,12 +153,25 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 			discount = subtotal
 		}
 
-		// 5. Record usage
+		// 6. Record usage
 		if err := p.repo.RecordUsage(ctx.Context(), c.id, ctx.ContractID()); err != nil {
 			return zero, fmt.Errorf("coupon: record usage: %w", err)
 		}
 
-		// 6. Record discount
+		// 7. Record redemption
+		redemption := NewRedemption(
+			RedemptionID(shared.GenerateID()),
+			c.id,
+			c.Code(),
+			accountID,
+			ctx.ContractID(),
+			now,
+		)
+		if err := p.repo.SaveRedemption(ctx.Context(), redemption); err != nil {
+			return zero, fmt.Errorf("coupon: save redemption: %w", err)
+		}
+
+		// 8. Record discount
 		ctx.RecordDiscount(plugin.AppliedDiscount{
 			PluginName: p.Name(),
 			Code:       c.Code(),
@@ -130,6 +185,6 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		total = sum
 	}
 
-	// 7. Return total discount
+	// 9. Return total discount
 	return total, nil
 }

@@ -237,7 +237,7 @@ func (r *inMemoryCouponRepo) FindByCode(_ context.Context, code string) (*coupon
 	return nil, fmt.Errorf("coupon not found: %s", code)
 }
 
-func (r *inMemoryCouponRepo) FindApplicable(_ context.Context, _ shared.ContractID, _ time.Time) ([]*coupon.Coupon, error) {
+func (r *inMemoryCouponRepo) FindApplicable(_ context.Context, _ coupon.CouponQuery) ([]*coupon.Coupon, error) {
 	return r.coupons, nil
 }
 
@@ -246,6 +246,19 @@ func (r *inMemoryCouponRepo) Save(_ context.Context, _ *coupon.Coupon) error { r
 func (r *inMemoryCouponRepo) RecordUsage(_ context.Context, _ coupon.CouponID, _ shared.ContractID) error {
 	fmt.Println("  >> [Coupon] Usage recorded for coupon SAVE10")
 	return nil
+}
+
+func (r *inMemoryCouponRepo) FindUsageByAccount(_ context.Context, _ coupon.CouponID, _ shared.AccountID) (int, error) {
+	return 0, nil
+}
+
+func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, _ *coupon.Redemption) error {
+	fmt.Println("  >> [Coupon] Redemption recorded")
+	return nil
+}
+
+func (r *inMemoryCouponRepo) FindRedemptions(_ context.Context, _ coupon.CouponID, _ *shared.AccountID) ([]*coupon.Redemption, error) {
+	return nil, nil
 }
 
 // ── Helpers ──
