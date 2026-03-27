@@ -14,19 +14,6 @@ import (
 // event has been migrated.
 type PriceChangedEventUpcaster struct{}
 
-// priceChangedEventV1 is the legacy format with Money fields only.
-type priceChangedEventV1 struct {
-	ContractID  json.RawMessage `json:"contract_id"`
-	OldPrice    json.RawMessage `json:"old_price"`
-	NewPrice    json.RawMessage `json:"new_price"`
-	ChangedAt   json.RawMessage `json:"changed_at"`
-	EffectiveAt json.RawMessage `json:"effective_at"`
-	// v2 fields may be absent in old events
-	OldPriceID json.RawMessage `json:"old_price_id,omitempty"`
-	NewPriceID json.RawMessage `json:"new_price_id,omitempty"`
-	Policy     json.RawMessage `json:"policy,omitempty"`
-}
-
 // CanUpcast returns true for PriceChangedEvent at schema version 1.
 func (u *PriceChangedEventUpcaster) CanUpcast(eventType eventstore.EventType, fromVersion int) bool {
 	return eventType == EventTypePriceChanged && fromVersion <= 1
