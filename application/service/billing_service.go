@@ -106,7 +106,7 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	}
 
 	// Duplicate invoice prevention
-	if err := s.checkDuplicateInvoice(ctx, agg, billingPeriod); err != nil {
+	if err = s.checkDuplicateInvoice(ctx, agg, billingPeriod); err != nil {
 		return nil, err
 	}
 
