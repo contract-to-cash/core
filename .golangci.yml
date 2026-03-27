@@ -24,9 +24,8 @@ linters:
       require-explanation: true
       require-specific: true
     govet:
-      settings:
-        shadow:
-          strict: true
+      enable:
+        - shadow
 
 formatters:
   enable:
