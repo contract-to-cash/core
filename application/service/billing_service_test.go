@@ -43,6 +43,9 @@ func (m *mockContractRepo) FindTrialsEndingSoon(_ context.Context, _ time.Time) 
 func (m *mockContractRepo) FindByIDAsOf(_ context.Context, _ shared.ContractID, _ time.Time) (*contract.ContractAggregate, error) {
 	return nil, nil
 }
+func (m *mockContractRepo) FindDueForRenewal(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+	return nil, nil
+}
 
 type mockInvoiceRepo struct {
 	saved              *invoice.Invoice

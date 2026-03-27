@@ -52,6 +52,31 @@ func (r DateRange) MarshalJSON() ([]byte, error) {
 	return marshalJSON(dateRangeJSON{Start: r.start, End: r.end})
 }
 
+// Next returns the next DateRange based on the billing cycle.
+// The new range starts where the current one ends.
+func (r DateRange) Next(cycle string) DateRange {
+	end := AddBillingCycleDuration(r.end, cycle)
+	return DateRange{start: r.end, end: end}
+}
+
+// AddBillingCycleDuration adds one billing cycle duration to a time.
+// This is the single source of truth for cycle-to-duration mapping,
+// used by both DateRange.Next() and contract aggregate logic.
+func AddBillingCycleDuration(t time.Time, cycle string) time.Time {
+	switch cycle {
+	case "monthly":
+		return t.AddDate(0, 1, 0)
+	case "yearly":
+		return t.AddDate(1, 0, 0)
+	case "weekly":
+		return t.AddDate(0, 0, 7)
+	case "daily":
+		return t.AddDate(0, 0, 1)
+	default:
+		return t.AddDate(0, 1, 0)
+	}
+}
+
 // UnmarshalJSON implements json.Unmarshaler for DateRange.
 func (r *DateRange) UnmarshalJSON(data []byte) error {
 	type dateRangeJSON struct {

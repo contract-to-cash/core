@@ -29,4 +29,7 @@ type Repository interface {
 
 	// FindByIDAsOf loads a contract aggregate as of a specific point in time.
 	FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)
+
+	// FindDueForRenewal returns active contracts whose current period ends on or before asOf.
+	FindDueForRenewal(ctx context.Context, asOf time.Time) ([]*ContractAggregate, error)
 }

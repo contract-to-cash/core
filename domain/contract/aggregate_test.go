@@ -808,3 +808,541 @@ func TestCancelFromSuspended(t *testing.T) {
 		t.Errorf("expected cancelled, got %s", agg.Status())
 	}
 }
+
+func createActiveAggregateWithAutoRenew(t *testing.T) *ContractAggregate {
+	t.Helper()
+	agg := newTestAggregate()
+	meta := newTestMetadata()
+	cmd := newTestCommand()
+	cmd.AutoRenew = true
+	if err := agg.Create(cmd, meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+	return agg
+}
+
+func TestRenew_HappyPath(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	oldPeriod := agg.CurrentPeriod()
+
+	if err := agg.Renew(meta); err != nil {
+		t.Fatalf("Renew failed: %v", err)
+	}
+
+	if agg.Status() != ContractStatusActive {
+		t.Errorf("expected status active, got %s", agg.Status())
+	}
+
+	newPeriod := agg.CurrentPeriod()
+	if !newPeriod.Start().Equal(oldPeriod.End()) {
+		t.Errorf("expected new period start %v, got %v", oldPeriod.End(), newPeriod.Start())
+	}
+	// Monthly billing cycle: new period end should be 1 month after old period end
+	expectedEnd := oldPeriod.End().AddDate(0, 1, 0)
+	if !newPeriod.End().Equal(expectedEnd) {
+		t.Errorf("expected new period end %v, got %v", expectedEnd, newPeriod.End())
+	}
+}
+
+func TestRenew_WithPendingPriceID(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	priceID := shared.PriceID("price-new-001")
+	agg.SetPendingPriceID(&priceID)
+
+	if err := agg.Renew(meta); err != nil {
+		t.Fatalf("Renew failed: %v", err)
+	}
+
+	if agg.PendingPriceID() != nil {
+		t.Error("expected pendingPriceID to be nil after renewal")
+	}
+	if agg.PriceID() != priceID {
+		t.Errorf("expected priceID %s after renewal, got %s", priceID, agg.PriceID())
+	}
+
+	// Verify the event has PriceChanged=true
+	events := agg.UncommittedEvents()
+	// Events: Create + Activate + Renew = 3
+	if len(events) < 3 {
+		t.Fatalf("expected at least 3 events, got %d", len(events))
+	}
+	lastEvent := events[len(events)-1]
+	if lastEvent.Type != EventTypeContractRenewed {
+		t.Fatalf("expected last event type %s, got %s", EventTypeContractRenewed, lastEvent.Type)
+	}
+	// Deserialize and check PriceChanged
+	domainEvent, err := contractEventRegistry.Deserialize(eventstore.EventType(lastEvent.Type), lastEvent.Data)
+	if err != nil {
+		t.Fatalf("failed to deserialize event: %v", err)
+	}
+	renewed, ok := domainEvent.(*ContractRenewedEvent)
+	if !ok {
+		t.Fatalf("expected *ContractRenewedEvent, got %T", domainEvent)
+	}
+	if !renewed.PriceChanged {
+		t.Error("expected PriceChanged=true in ContractRenewedEvent")
+	}
+	if renewed.NewPriceID != priceID {
+		t.Errorf("expected NewPriceID=%s, got %s", priceID, renewed.NewPriceID)
+	}
+}
+
+func TestRenew_AutoRenewFalse_Expires(t *testing.T) {
+	agg := createActiveAggregate(t) // autoRenew defaults to false
+	meta := newTestMetadata()
+
+	if err := agg.Renew(meta); err != nil {
+		t.Fatalf("Renew failed: %v", err)
+	}
+
+	if agg.Status() != ContractStatusExpired {
+		t.Errorf("expected status expired, got %s", agg.Status())
+	}
+}
+
+func TestRenew_CancelAtPeriodEnd_Cancels(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
+		t.Fatalf("ScheduleCancellation failed: %v", err)
+	}
+
+	if err := agg.Renew(meta); err != nil {
+		t.Fatalf("Renew failed: %v", err)
+	}
+
+	if agg.Status() != ContractStatusCancelled {
+		t.Errorf("expected status cancelled, got %s", agg.Status())
+	}
+}
+
+func TestRenew_NotActive_Fails(t *testing.T) {
+	meta := newTestMetadata()
+
+	tests := []struct {
+		name  string
+		setup func() *ContractAggregate
+	}{
+		{
+			name: "from draft",
+			setup: func() *ContractAggregate {
+				agg := newTestAggregate()
+				_ = agg.Create(newTestCommand(), meta)
+				return agg
+			},
+		},
+		{
+			name: "from cancelled",
+			setup: func() *ContractAggregate {
+				agg := createActiveAggregate(t)
+				_ = agg.Cancel("test", meta)
+				return agg
+			},
+		},
+		{
+			name: "from suspended",
+			setup: func() *ContractAggregate {
+				agg := createActiveAggregate(t)
+				_ = agg.Suspend(SuspensionConfiguration{
+					BillingBehavior: SuspensionBillingSkip,
+					Reason:          "test",
+				}, meta)
+				return agg
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agg := tt.setup()
+			err := agg.Renew(meta)
+			if err == nil {
+				t.Fatal("expected error for renew from non-active state, got nil")
+			}
+			var domErr *shared.DomainError
+			if !errors.As(err, &domErr) {
+				t.Fatalf("expected DomainError, got %T: %v", err, err)
+			}
+			if domErr.Code != shared.ErrCodeInvalidStateTransition {
+				t.Errorf("expected error code %s, got %s", shared.ErrCodeInvalidStateTransition, domErr.Code)
+			}
+		})
+	}
+}
+
+func TestActivate_SetsCurrentPeriod(t *testing.T) {
+	agg := newTestAggregate()
+	meta := newTestMetadata()
+
+	if err := agg.Create(newTestCommand(), meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	period := agg.CurrentPeriod()
+
+	if !period.Start().Equal(now) {
+		t.Errorf("expected period start %v, got %v", now, period.Start())
+	}
+	// Monthly billing cycle: end should be 1 month after start
+	expectedEnd := now.AddDate(0, 1, 0)
+	if !period.End().Equal(expectedEnd) {
+		t.Errorf("expected period end %v, got %v", expectedEnd, period.End())
+	}
+}
+
+func TestApplyContractRenewedEvent(t *testing.T) {
+	agg := newTestAggregate()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Set up aggregate to active state with a current period
+	_ = agg.Apply(&ContractCreatedEvent{
+		ContractID:   shared.ContractID("test-contract-001"),
+		AccountID:    shared.AccountID("acc-001"),
+		PlanID:       shared.PlanID("plan-001"),
+		Price:        newTestMoney(),
+		BasePrice:    newTestMoney(),
+		BillingCycle: BillingCycleMonthly,
+		ContractType: ContractTypeSubscription,
+		AutoRenew:    true,
+		CreatedAt:    now,
+	})
+
+	oldPeriodStart := now
+	oldPeriodEnd := now.AddDate(0, 1, 0)
+	oldPeriod, _ := shared.NewDateRange(oldPeriodStart, oldPeriodEnd)
+
+	_ = agg.Apply(&ContractActivatedEvent{
+		ContractID:    shared.ContractID("test-contract-001"),
+		ActivatedAt:   now,
+		CurrentPeriod: oldPeriod,
+	})
+
+	newPeriodStart := oldPeriodEnd
+	newPeriodEnd := oldPeriodEnd.AddDate(0, 1, 0)
+	newPeriod, _ := shared.NewDateRange(newPeriodStart, newPeriodEnd)
+
+	renewedAt := oldPeriodEnd
+	err := agg.Apply(&ContractRenewedEvent{
+		ContractID:   shared.ContractID("test-contract-001"),
+		OldPeriod:    oldPeriod,
+		NewPeriod:    newPeriod,
+		PriceChanged: false,
+		RenewedAt:    renewedAt,
+	})
+	if err != nil {
+		t.Fatalf("Apply ContractRenewedEvent failed: %v", err)
+	}
+
+	if !agg.CurrentPeriod().Start().Equal(newPeriodStart) {
+		t.Errorf("expected current period start %v, got %v", newPeriodStart, agg.CurrentPeriod().Start())
+	}
+	if !agg.CurrentPeriod().End().Equal(newPeriodEnd) {
+		t.Errorf("expected current period end %v, got %v", newPeriodEnd, agg.CurrentPeriod().End())
+	}
+	if agg.PendingPriceID() != nil {
+		t.Error("expected pendingPriceID to be nil after renewal")
+	}
+	if !agg.UpdatedAt().Equal(renewedAt) {
+		t.Errorf("expected updatedAt %v, got %v", renewedAt, agg.UpdatedAt())
+	}
+}
+
+func TestApplyContractExpiredEvent(t *testing.T) {
+	agg := newTestAggregate()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	_ = agg.Apply(&ContractCreatedEvent{
+		ContractID:   shared.ContractID("test-contract-001"),
+		AccountID:    shared.AccountID("acc-001"),
+		PlanID:       shared.PlanID("plan-001"),
+		Price:        newTestMoney(),
+		BasePrice:    newTestMoney(),
+		BillingCycle: BillingCycleMonthly,
+		ContractType: ContractTypeSubscription,
+		CreatedAt:    now,
+	})
+
+	period, _ := shared.NewDateRange(now, now.AddDate(0, 1, 0))
+	_ = agg.Apply(&ContractActivatedEvent{
+		ContractID:    shared.ContractID("test-contract-001"),
+		ActivatedAt:   now,
+		CurrentPeriod: period,
+	})
+
+	expiredAt := now.AddDate(0, 1, 0)
+	err := agg.Apply(&ContractExpiredEvent{
+		ContractID:  shared.ContractID("test-contract-001"),
+		ExpiredAt:   expiredAt,
+		FinalPeriod: period,
+	})
+	if err != nil {
+		t.Fatalf("Apply ContractExpiredEvent failed: %v", err)
+	}
+
+	if agg.Status() != ContractStatusExpired {
+		t.Errorf("expected status expired, got %s", agg.Status())
+	}
+	if !agg.UpdatedAt().Equal(expiredAt) {
+		t.Errorf("expected updatedAt %v, got %v", expiredAt, agg.UpdatedAt())
+	}
+}
+
+func TestScheduleCancellation_HappyPath(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
+		t.Fatalf("ScheduleCancellation failed: %v", err)
+	}
+
+	if !agg.CancelAtPeriodEnd() {
+		t.Error("expected cancelAtPeriodEnd to be true")
+	}
+	if agg.Status() != ContractStatusActive {
+		t.Errorf("expected status active, got %s", agg.Status())
+	}
+}
+
+func TestScheduleCancellation_NotActive_Fails(t *testing.T) {
+	agg := newTestAggregate()
+	meta := newTestMetadata()
+	_ = agg.Create(newTestCommand(), meta)
+
+	err := agg.ScheduleCancellation("test", meta)
+	if err == nil {
+		t.Fatal("expected error for ScheduleCancellation from draft state, got nil")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+}
+
+func TestScheduleCancellation_AlreadyScheduled_Fails(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	if err := agg.ScheduleCancellation("first", meta); err != nil {
+		t.Fatalf("first ScheduleCancellation failed: %v", err)
+	}
+
+	err := agg.ScheduleCancellation("second", meta)
+	if err == nil {
+		t.Fatal("expected error for duplicate ScheduleCancellation, got nil")
+	}
+}
+
+func TestUnscheduleCancellation_HappyPath(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
+		t.Fatalf("ScheduleCancellation failed: %v", err)
+	}
+	if err := agg.UnscheduleCancellation(meta); err != nil {
+		t.Fatalf("UnscheduleCancellation failed: %v", err)
+	}
+
+	if agg.CancelAtPeriodEnd() {
+		t.Error("expected cancelAtPeriodEnd to be false after unscheduling")
+	}
+}
+
+func TestUnscheduleCancellation_NotScheduled_Fails(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	err := agg.UnscheduleCancellation(meta)
+	if err == nil {
+		t.Fatal("expected error for UnscheduleCancellation when not scheduled, got nil")
+	}
+}
+
+func TestUnscheduleCancellation_ThenRenew_Renews(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
+		t.Fatalf("ScheduleCancellation failed: %v", err)
+	}
+	if err := agg.UnscheduleCancellation(meta); err != nil {
+		t.Fatalf("UnscheduleCancellation failed: %v", err)
+	}
+
+	oldPeriod := agg.CurrentPeriod()
+	if err := agg.Renew(meta); err != nil {
+		t.Fatalf("Renew failed: %v", err)
+	}
+
+	if agg.Status() != ContractStatusActive {
+		t.Errorf("expected status active, got %s", agg.Status())
+	}
+	if agg.CurrentPeriod().Start().Equal(oldPeriod.Start()) {
+		t.Error("expected period to advance after renewal")
+	}
+}
+
+func TestApplyCancellationScheduledEvent(t *testing.T) {
+	agg := newTestAggregate()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	_ = agg.Apply(&ContractCreatedEvent{
+		ContractID:   shared.ContractID("test-contract-001"),
+		AccountID:    shared.AccountID("acc-001"),
+		PlanID:       shared.PlanID("plan-001"),
+		Price:        newTestMoney(),
+		BasePrice:    newTestMoney(),
+		BillingCycle: BillingCycleMonthly,
+		ContractType: ContractTypeSubscription,
+		AutoRenew:    true,
+		CreatedAt:    now,
+	})
+
+	scheduledAt := now.Add(24 * time.Hour)
+	err := agg.Apply(&CancellationScheduledEvent{
+		ContractID:  shared.ContractID("test-contract-001"),
+		Reason:      "customer request",
+		ScheduledAt: scheduledAt,
+	})
+	if err != nil {
+		t.Fatalf("Apply CancellationScheduledEvent failed: %v", err)
+	}
+
+	if !agg.CancelAtPeriodEnd() {
+		t.Error("expected cancelAtPeriodEnd to be true")
+	}
+	if !agg.UpdatedAt().Equal(scheduledAt) {
+		t.Errorf("expected updatedAt %v, got %v", scheduledAt, agg.UpdatedAt())
+	}
+}
+
+func TestApplyCancellationUnscheduledEvent(t *testing.T) {
+	agg := newTestAggregate()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	_ = agg.Apply(&ContractCreatedEvent{
+		ContractID:   shared.ContractID("test-contract-001"),
+		AccountID:    shared.AccountID("acc-001"),
+		PlanID:       shared.PlanID("plan-001"),
+		Price:        newTestMoney(),
+		BasePrice:    newTestMoney(),
+		BillingCycle: BillingCycleMonthly,
+		ContractType: ContractTypeSubscription,
+		AutoRenew:    true,
+		CreatedAt:    now,
+	})
+
+	_ = agg.Apply(&CancellationScheduledEvent{
+		ContractID:  shared.ContractID("test-contract-001"),
+		Reason:      "test",
+		ScheduledAt: now,
+	})
+
+	unscheduledAt := now.Add(48 * time.Hour)
+	err := agg.Apply(&CancellationUnscheduledEvent{
+		ContractID:    shared.ContractID("test-contract-001"),
+		UnscheduledAt: unscheduledAt,
+	})
+	if err != nil {
+		t.Fatalf("Apply CancellationUnscheduledEvent failed: %v", err)
+	}
+
+	if agg.CancelAtPeriodEnd() {
+		t.Error("expected cancelAtPeriodEnd to be false")
+	}
+	if !agg.UpdatedAt().Equal(unscheduledAt) {
+		t.Errorf("expected updatedAt %v, got %v", unscheduledAt, agg.UpdatedAt())
+	}
+}
+
+func TestLoadFromHistory_WithCancellationScheduled(t *testing.T) {
+	original := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	if err := original.ScheduleCancellation("customer request", meta); err != nil {
+		t.Fatalf("ScheduleCancellation failed: %v", err)
+	}
+
+	events := original.UncommittedEvents()
+	// Events: Create + Activate + ScheduleCancellation = 3
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+
+	restored := NewContractAggregate(shared.ContractID("test-contract-001"), newTestClock())
+	if err := restored.LoadFromHistory(events); err != nil {
+		t.Fatalf("LoadFromHistory failed: %v", err)
+	}
+
+	if !restored.CancelAtPeriodEnd() {
+		t.Error("expected cancelAtPeriodEnd to be true after history replay")
+	}
+	if restored.Status() != ContractStatusActive {
+		t.Errorf("expected active, got %s", restored.Status())
+	}
+	if restored.Version() != 3 {
+		t.Errorf("expected version 3, got %d", restored.Version())
+	}
+}
+
+func TestSnapshotRoundTrip_WithCancelAtPeriodEnd(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
+		t.Fatalf("ScheduleCancellation failed: %v", err)
+	}
+
+	data, err := agg.MarshalSnapshot()
+	if err != nil {
+		t.Fatalf("MarshalSnapshot failed: %v", err)
+	}
+
+	restored := NewContractAggregate(agg.ContractID(), newTestClock())
+	snapshot := eventstore.Snapshot{
+		StreamID: string(agg.ContractID()),
+		Version:  agg.Version(),
+		State:    data,
+	}
+	if err := restored.LoadFromSnapshot(snapshot); err != nil {
+		t.Fatalf("LoadFromSnapshot failed: %v", err)
+	}
+
+	if !restored.CancelAtPeriodEnd() {
+		t.Error("expected cancelAtPeriodEnd to be true after snapshot restore")
+	}
+	if restored.Status() != ContractStatusActive {
+		t.Errorf("expected active, got %s", restored.Status())
+	}
+}
+
+func TestRenew_CancelAtPeriodEnd_ResetsCancelFlag(t *testing.T) {
+	agg := createActiveAggregateWithAutoRenew(t)
+	meta := newTestMetadata()
+
+	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
+		t.Fatalf("ScheduleCancellation failed: %v", err)
+	}
+	if err := agg.Renew(meta); err != nil {
+		t.Fatalf("Renew failed: %v", err)
+	}
+
+	if agg.Status() != ContractStatusCancelled {
+		t.Errorf("expected cancelled, got %s", agg.Status())
+	}
+	if agg.CancelAtPeriodEnd() {
+		t.Error("expected cancelAtPeriodEnd to be false after cancellation")
+	}
+}

@@ -67,3 +67,84 @@ func TestDateRange_Duration(t *testing.T) {
 		t.Errorf("expected %v, got %v", expected, dr.Duration())
 	}
 }
+
+func TestDateRangeNext_Daily(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	dr, _ := NewDateRange(start, end)
+
+	next := dr.Next("daily")
+
+	if next.Start() != end {
+		t.Errorf("expected start %v, got %v", end, next.Start())
+	}
+	wantEnd := time.Date(2026, 2, 2, 0, 0, 0, 0, time.UTC)
+	if next.End() != wantEnd {
+		t.Errorf("expected end %v, got %v", wantEnd, next.End())
+	}
+}
+
+func TestDateRangeNext_Weekly(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	dr, _ := NewDateRange(start, end)
+
+	next := dr.Next("weekly")
+
+	if next.Start() != end {
+		t.Errorf("expected start %v, got %v", end, next.Start())
+	}
+	wantEnd := time.Date(2026, 2, 8, 0, 0, 0, 0, time.UTC)
+	if next.End() != wantEnd {
+		t.Errorf("expected end %v, got %v", wantEnd, next.End())
+	}
+}
+
+func TestDateRangeNext_Monthly(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	dr, _ := NewDateRange(start, end)
+
+	next := dr.Next("monthly")
+
+	if next.Start() != end {
+		t.Errorf("expected start %v, got %v", end, next.Start())
+	}
+	wantEnd := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	if next.End() != wantEnd {
+		t.Errorf("expected end %v, got %v", wantEnd, next.End())
+	}
+}
+
+func TestDateRangeNext_Yearly(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	dr, _ := NewDateRange(start, end)
+
+	next := dr.Next("yearly")
+
+	if next.Start() != end {
+		t.Errorf("expected start %v, got %v", end, next.Start())
+	}
+	wantEnd := time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC)
+	if next.End() != wantEnd {
+		t.Errorf("expected end %v, got %v", wantEnd, next.End())
+	}
+}
+
+func TestDateRangeNext_UnknownCycle(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	dr, _ := NewDateRange(start, end)
+
+	next := dr.Next("biweekly")
+
+	// Unknown cycle defaults to monthly
+	if next.Start() != end {
+		t.Errorf("expected start %v, got %v", end, next.Start())
+	}
+	wantEnd := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	if next.End() != wantEnd {
+		t.Errorf("expected end %v, got %v", wantEnd, next.End())
+	}
+}

@@ -124,6 +124,23 @@ func (r *InMemoryContractRepository) FindTrialsEndingSoon(_ context.Context, bef
 	return result, nil
 }
 
+// FindDueForRenewal returns active contracts whose current period ends on or before asOf.
+func (r *InMemoryContractRepository) FindDueForRenewal(_ context.Context, asOf time.Time) ([]*contract.ContractAggregate, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var result []*contract.ContractAggregate
+	for _, agg := range r.contracts {
+		if agg.Status() == contract.ContractStatusActive {
+			period := agg.CurrentPeriod()
+			if !period.End().IsZero() && !period.End().After(asOf) {
+				result = append(result, agg)
+			}
+		}
+	}
+	return result, nil
+}
+
 // FindByIDAsOf loads a contract aggregate as of a specific point in time.
 func (r *InMemoryContractRepository) FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*contract.ContractAggregate, error) {
 	events, err := r.store.LoadUntil(ctx, string(id), asOf)

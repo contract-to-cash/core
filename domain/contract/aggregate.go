@@ -22,6 +22,10 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 	r.Register(&TrialStartedEvent{})
 	r.Register(&TrialEndedEvent{})
 	r.Register(&PaymentMethodChangedEvent{})
+	r.Register(&ContractRenewedEvent{})
+	r.Register(&ContractExpiredEvent{})
+	r.Register(&CancellationScheduledEvent{})
+	r.Register(&CancellationUnscheduledEvent{})
 	return r
 }()
 
@@ -34,27 +38,32 @@ type CreateContractCommand struct {
 	BillingCycle   BillingCycle
 	Price          shared.Money
 	BasePrice      shared.Money
+	AutoRenew      bool
 }
 
 // ContractAggregate is the event-sourced aggregate for contracts.
 type ContractAggregate struct {
 	eventstore.BaseAggregate
 
-	contractID       shared.ContractID
-	accountID        shared.AccountID
-	planID           shared.PlanID
-	status           ContractStatus
-	contractType     ContractType
-	billingCycle     BillingCycle
-	currentPeriod    shared.DateRange
-	trialConfig      *TrialConfiguration
-	suspensionConfig *SuspensionConfiguration
-	paymentMethodID  *string
-	price            shared.Money
-	basePrice        shared.Money
-	metadata         map[string]string
-	createdAt        time.Time
-	updatedAt        time.Time
+	contractID        shared.ContractID
+	accountID         shared.AccountID
+	planID            shared.PlanID
+	status            ContractStatus
+	contractType      ContractType
+	billingCycle      BillingCycle
+	currentPeriod     shared.DateRange
+	trialConfig       *TrialConfiguration
+	suspensionConfig  *SuspensionConfiguration
+	paymentMethodID   *string
+	priceID           shared.PriceID
+	price             shared.Money
+	basePrice         shared.Money
+	autoRenew         bool
+	cancelAtPeriodEnd bool
+	pendingPriceID    *shared.PriceID
+	metadata          map[string]string
+	createdAt         time.Time
+	updatedAt         time.Time
 }
 
 // NewContractAggregate creates a new ContractAggregate.
@@ -101,6 +110,18 @@ func (a *ContractAggregate) Price() shared.Money { return a.price }
 // BasePrice returns the base price.
 func (a *ContractAggregate) BasePrice() shared.Money { return a.basePrice }
 
+// PriceID returns the current price ID.
+func (a *ContractAggregate) PriceID() shared.PriceID { return a.priceID }
+
+// AutoRenew returns whether the contract auto-renews.
+func (a *ContractAggregate) AutoRenew() bool { return a.autoRenew }
+
+// CancelAtPeriodEnd returns whether the contract will cancel at the end of the current period.
+func (a *ContractAggregate) CancelAtPeriodEnd() bool { return a.cancelAtPeriodEnd }
+
+// PendingPriceID returns the pending price ID to apply at next renewal.
+func (a *ContractAggregate) PendingPriceID() *shared.PriceID { return a.pendingPriceID }
+
 // GetMetadata returns a copy of the contract metadata.
 func (a *ContractAggregate) GetMetadata() map[string]string {
 	if a.metadata == nil {
@@ -135,6 +156,7 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 		BasePrice:    cmd.BasePrice,
 		BillingCycle: cmd.BillingCycle,
 		ContractType: cmd.ContractType,
+		AutoRenew:    cmd.AutoRenew,
 		CreatedAt:    now,
 	}
 
@@ -151,9 +173,18 @@ func (a *ContractAggregate) Activate(metadata eventstore.EventMetadata) error {
 			fmt.Sprintf("cannot activate contract: current status is %s", a.status))
 	}
 
+	now := a.Clock().Now()
+	// Calculate the initial billing period based on billingCycle
+	periodEnd := addBillingCycle(now, a.billingCycle)
+	initialPeriod, err := shared.NewDateRange(now, periodEnd)
+	if err != nil {
+		return err
+	}
+
 	event := &ContractActivatedEvent{
-		ContractID:  a.contractID,
-		ActivatedAt: a.Clock().Now(),
+		ContractID:    a.contractID,
+		ActivatedAt:   now,
+		CurrentPeriod: initialPeriod,
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -320,6 +351,114 @@ func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMe
 	return a.RaiseEvent(event, metadata)
 }
 
+// Renew renews the contract for a new billing period.
+func (a *ContractAggregate) Renew(metadata eventstore.EventMetadata) error {
+	if a.status != ContractStatusActive {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot renew: status is %s", a.status))
+	}
+
+	if a.cancelAtPeriodEnd {
+		return a.Cancel("scheduled cancellation at period end", metadata)
+	}
+
+	if !a.autoRenew {
+		return a.expire(metadata)
+	}
+
+	newPeriod := a.currentPeriod.Next(string(a.billingCycle))
+
+	oldPriceID := a.priceID
+	newPriceID := a.priceID
+	priceChanged := false
+	if a.pendingPriceID != nil {
+		newPriceID = *a.pendingPriceID
+		priceChanged = true
+	}
+
+	event := &ContractRenewedEvent{
+		ContractID:   a.contractID,
+		OldPeriod:    a.currentPeriod,
+		NewPeriod:    newPeriod,
+		OldPriceID:   oldPriceID,
+		NewPriceID:   newPriceID,
+		PriceChanged: priceChanged,
+		RenewedAt:    a.Clock().Now(),
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// ScheduleCancellation schedules the contract for cancellation at the end of the current period.
+func (a *ContractAggregate) ScheduleCancellation(reason string, metadata eventstore.EventMetadata) error {
+	if a.status != ContractStatusActive {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot schedule cancellation: current status is %s", a.status))
+	}
+	if a.cancelAtPeriodEnd {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"cancellation is already scheduled")
+	}
+
+	event := &CancellationScheduledEvent{
+		ContractID:  a.contractID,
+		Reason:      reason,
+		ScheduledAt: a.Clock().Now(),
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// UnscheduleCancellation revokes a previously scheduled cancellation.
+func (a *ContractAggregate) UnscheduleCancellation(metadata eventstore.EventMetadata) error {
+	if !a.cancelAtPeriodEnd {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"no cancellation is scheduled")
+	}
+
+	event := &CancellationUnscheduledEvent{
+		ContractID:    a.contractID,
+		UnscheduledAt: a.Clock().Now(),
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// SetPendingPriceID sets the pending price ID to apply at next renewal.
+func (a *ContractAggregate) SetPendingPriceID(priceID *shared.PriceID) {
+	a.pendingPriceID = priceID
+}
+
+// expire transitions the contract to expired status.
+func (a *ContractAggregate) expire(metadata eventstore.EventMetadata) error {
+	event := &ContractExpiredEvent{
+		ContractID:  a.contractID,
+		ExpiredAt:   a.Clock().Now(),
+		FinalPeriod: a.currentPeriod,
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// addBillingCycle adds one billing cycle duration to a time.
+// This delegates to shared.AddBillingCycleDuration to avoid duplicating
+// the cycle-to-duration mapping with DateRange.Next().
+func addBillingCycle(t time.Time, cycle BillingCycle) time.Time {
+	return shared.AddBillingCycleDuration(t, string(cycle))
+}
+
 // Apply applies a domain event to update aggregate state.
 func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	switch e := event.(type) {
@@ -331,12 +470,14 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.basePrice = e.BasePrice
 		a.billingCycle = e.BillingCycle
 		a.contractType = e.ContractType
+		a.autoRenew = e.AutoRenew
 		a.status = ContractStatusDraft
 		a.createdAt = e.CreatedAt
 		a.updatedAt = e.CreatedAt
 
 	case *ContractActivatedEvent:
 		a.status = ContractStatusActive
+		a.currentPeriod = e.CurrentPeriod
 		a.updatedAt = e.ActivatedAt
 
 	case *ContractSuspendedEvent:
@@ -355,6 +496,7 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 
 	case *ContractCancelledEvent:
 		a.status = ContractStatusCancelled
+		a.cancelAtPeriodEnd = false
 		a.updatedAt = e.CancelledAt
 
 	case *PriceChangedEvent:
@@ -383,6 +525,24 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.paymentMethodID = e.NewPaymentMethodID
 		a.updatedAt = e.ChangedAt
 
+	case *ContractRenewedEvent:
+		a.currentPeriod = e.NewPeriod
+		a.priceID = e.NewPriceID
+		a.pendingPriceID = nil
+		a.updatedAt = e.RenewedAt
+
+	case *ContractExpiredEvent:
+		a.status = ContractStatusExpired
+		a.updatedAt = e.ExpiredAt
+
+	case *CancellationScheduledEvent:
+		a.cancelAtPeriodEnd = true
+		a.updatedAt = e.ScheduledAt
+
+	case *CancellationUnscheduledEvent:
+		a.cancelAtPeriodEnd = false
+		a.updatedAt = e.UnscheduledAt
+
 	default:
 		return shared.NewDomainError(shared.ErrCodeUnknownEvent,
 			fmt.Sprintf("unknown event type: %T", event))
@@ -394,21 +554,25 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 // MarshalSnapshot serializes the aggregate state for snapshot storage.
 func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 	state := contractSnapshotState{
-		ContractID:       a.contractID,
-		AccountID:        a.accountID,
-		PlanID:           a.planID,
-		Status:           a.status,
-		ContractType:     a.contractType,
-		BillingCycle:     a.billingCycle,
-		CurrentPeriod:    a.currentPeriod,
-		TrialConfig:      a.trialConfig,
-		SuspensionConfig: a.suspensionConfig,
-		PaymentMethodID:  a.paymentMethodID,
-		Price:            a.price,
-		BasePrice:        a.basePrice,
-		Metadata:         a.metadata,
-		CreatedAt:        a.createdAt,
-		UpdatedAt:        a.updatedAt,
+		ContractID:        a.contractID,
+		AccountID:         a.accountID,
+		PlanID:            a.planID,
+		Status:            a.status,
+		ContractType:      a.contractType,
+		BillingCycle:      a.billingCycle,
+		CurrentPeriod:     a.currentPeriod,
+		TrialConfig:       a.trialConfig,
+		SuspensionConfig:  a.suspensionConfig,
+		PaymentMethodID:   a.paymentMethodID,
+		PriceID:           a.priceID,
+		Price:             a.price,
+		BasePrice:         a.basePrice,
+		AutoRenew:         a.autoRenew,
+		CancelAtPeriodEnd: a.cancelAtPeriodEnd,
+		PendingPriceID:    a.pendingPriceID,
+		Metadata:          a.metadata,
+		CreatedAt:         a.createdAt,
+		UpdatedAt:         a.updatedAt,
 	}
 	return json.Marshal(state)
 }
@@ -430,21 +594,25 @@ func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error {
 
 // contractSnapshotState is the JSON representation of aggregate state for snapshots.
 type contractSnapshotState struct {
-	ContractID       shared.ContractID        `json:"contract_id"`
-	AccountID        shared.AccountID         `json:"account_id"`
-	PlanID           shared.PlanID            `json:"plan_id"`
-	Status           ContractStatus           `json:"status"`
-	ContractType     ContractType             `json:"contract_type"`
-	BillingCycle     BillingCycle             `json:"billing_cycle"`
-	CurrentPeriod    shared.DateRange         `json:"current_period"`
-	TrialConfig      *TrialConfiguration      `json:"trial_config,omitempty"`
-	SuspensionConfig *SuspensionConfiguration `json:"suspension_config,omitempty"`
-	PaymentMethodID  *string                  `json:"payment_method_id,omitempty"`
-	Price            shared.Money             `json:"price"`
-	BasePrice        shared.Money             `json:"base_price"`
-	Metadata         map[string]string        `json:"metadata,omitempty"`
-	CreatedAt        time.Time                `json:"created_at"`
-	UpdatedAt        time.Time                `json:"updated_at"`
+	ContractID        shared.ContractID        `json:"contract_id"`
+	AccountID         shared.AccountID         `json:"account_id"`
+	PlanID            shared.PlanID            `json:"plan_id"`
+	Status            ContractStatus           `json:"status"`
+	ContractType      ContractType             `json:"contract_type"`
+	BillingCycle      BillingCycle             `json:"billing_cycle"`
+	CurrentPeriod     shared.DateRange         `json:"current_period"`
+	TrialConfig       *TrialConfiguration      `json:"trial_config,omitempty"`
+	SuspensionConfig  *SuspensionConfiguration `json:"suspension_config,omitempty"`
+	PaymentMethodID   *string                  `json:"payment_method_id,omitempty"`
+	PriceID           shared.PriceID           `json:"price_id,omitempty"`
+	Price             shared.Money             `json:"price"`
+	BasePrice         shared.Money             `json:"base_price"`
+	AutoRenew         bool                     `json:"auto_renew"`
+	CancelAtPeriodEnd bool                     `json:"cancel_at_period_end"`
+	PendingPriceID    *shared.PriceID          `json:"pending_price_id,omitempty"`
+	Metadata          map[string]string        `json:"metadata,omitempty"`
+	CreatedAt         time.Time                `json:"created_at"`
+	UpdatedAt         time.Time                `json:"updated_at"`
 }
 
 // LoadFromSnapshot restores aggregate state from a snapshot.
@@ -464,8 +632,12 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.trialConfig = state.TrialConfig
 	a.suspensionConfig = state.SuspensionConfig
 	a.paymentMethodID = state.PaymentMethodID
+	a.priceID = state.PriceID
 	a.price = state.Price
 	a.basePrice = state.BasePrice
+	a.autoRenew = state.AutoRenew
+	a.cancelAtPeriodEnd = state.CancelAtPeriodEnd
+	a.pendingPriceID = state.PendingPriceID
 	a.metadata = state.Metadata
 	a.createdAt = state.CreatedAt
 	a.updatedAt = state.UpdatedAt
