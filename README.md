@@ -1,98 +1,175 @@
 # Contract Billing Core
 
-契約・決済ドメインのOSSパッケージ。イベントソーシングとプラグインアーキテクチャを採用し、SaaS/サブスクリプションビジネスに必要な機能を提供します。
+[![Go Reference](https://pkg.go.dev/badge/github.com/contract-to-cash/core.svg)](https://pkg.go.dev/github.com/contract-to-cash/core)
+[![CI](https://github.com/contract-to-cash/core/actions/workflows/ci.yml/badge.svg)](https://github.com/contract-to-cash/core/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 特徴
+[日本語](README.ja.md) | [Documentation](https://contract-to-cash.github.io/core/)
 
-- **イベントソーシング** - 全操作の完全な監査証跡、任意時点の状態再構築
-- **プラグインアーキテクチャ** - クーポン、税計算、通知などを柔軟に拡張
-- **複数の契約タイプ** - 買い切り、サブスクリプション、従量課金に対応
-- **ドメイン駆動設計** - 契約・請求書・支払いの明確なドメインモデル
+An event-sourced billing engine with a plugin architecture for SaaS and subscription businesses. Provides domain models, billing pipelines, and extension points — you bring your own database and payment gateway.
 
-## クイックスタート
+## Features
+
+- **Event Sourcing** — Full audit trail, temporal queries, snapshot recovery
+- **Plugin Architecture** — Extend via discount, tax, lifecycle, payment, and metrics hooks (ISP-compliant)
+- **Product/Price Separation** — Stripe-style immutable prices with grandfathering support
+- **Multiple Billing Models** — One-time, subscription, and usage-based (flat, tiered, volume)
+- **Contract Renewal** — Auto-renewal with pending price promotion (`pendingPriceID`)
+- **Payment Gateway Abstraction** — Charge, authorize/capture, refund, hierarchical method fallback
+- **Credit Ledger** — FIFO-based credits for prorations, cancellations, and adjustments
+- **Temporal Queries** — Reconstruct contract state at any past point in time
+
+## Quick Start
 
 ```bash
 go get github.com/contract-to-cash/core
 ```
 
-詳細な導入手順は[利用ガイド](docs/guides/usage-guide.md)を参照してください。
+Requires **Go 1.22** or later.
 
-## ドキュメント
+```go
+package main
 
-### アーキテクチャ
+import (
+    "context"
+    "math/big"
+    "time"
 
-- **[アーキテクチャ概要](docs/architecture.md)** - システム全体の構成と設計原則
+    "github.com/contract-to-cash/core/application/service"
+    "github.com/contract-to-cash/core/domain/contract"
+    "github.com/contract-to-cash/core/domain/credit"
+    "github.com/contract-to-cash/core/domain/pricing"
+    "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/eventstore"
+    "github.com/contract-to-cash/core/infrastructure/inmemory"
+    "github.com/contract-to-cash/core/plugin"
+    "github.com/contract-to-cash/core/plugins/tax"
+)
 
-### 設計詳細
+func main() {
+    ctx := context.Background()
+    clock := shared.FixedClock{FixedTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)}
 
-| ドキュメント | 内容 |
-|-------------|------|
-| [ドメインモデル](docs/design/domain-model.md) | エンティティ、値オブジェクト、リポジトリの詳細 |
-| [イベントソーシング](docs/design/event-sourcing.md) | Event Store、時点再構築、Projection |
-| [プラグインシステム](docs/design/plugin-system.md) | フック、レジストリ、カスタムプラグイン作成 |
-| [決済ゲートウェイ](docs/design/payment-gateway.md) | 決済インターフェース、Webhook処理 |
-| [メトリクス・インボイス生成](docs/design/metrics-invoicegen.md) | KPI収集、請求書生成・送付 |
+    // Infrastructure (replace with your own in production)
+    es := inmemory.NewInMemoryEventStore(clock)
+    contractRepo := inmemory.NewInMemoryContractRepository(es, clock)
+    invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
+    creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+    usageRepo := inmemory.NewInMemoryUsageRepository()
+    priceRepo := inmemory.NewInMemoryPriceRepository()
+    productRepo := inmemory.NewInMemoryProductRepository()
 
-### 意思決定・ガイド
+    // Register plugins
+    registry := plugin.NewRegistry()
+    registry.Register(tax.NewTaxPlugin(&tax.JapaneseTaxCalculator{}))
+    registry.InitializeAll(ctx, map[string]plugin.Config{
+        "tax": {"priority": plugin.PriorityLow},
+    })
+    defer registry.ShutdownAll(ctx)
 
-| ドキュメント | 内容 |
-|-------------|------|
-| [設計決定事項](docs/decisions/design-decisions.md) | 設計上の判断とその理由 |
-| [利用ガイド](docs/guides/usage-guide.md) | サービスへの導入方法 |
+    // Create a Price and Contract
+    price := shared.NewMoney(new(big.Rat).SetInt64(3000), shared.CurrencyJPY)
+    pe := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+    priceRepo.Save(ctx, pe)
 
-## ディレクトリ構成
+    cID := shared.NewContractID()
+    agg := contract.NewContractAggregate(cID, clock)
+    agg.Create(contract.CreateContractCommand{
+        AccountID: shared.AccountID("acct-001"), PlanID: shared.PlanID("plan-std"),
+        PriceID: pe.ID(), ContractType: contract.ContractTypeSubscription,
+        BillingCycle: contract.BillingCycleMonthly, Price: price, BasePrice: price,
+    }, eventstore.EventMetadata{UserID: "system"})
+    agg.Activate(eventstore.EventMetadata{UserID: "system"})
+    contractRepo.Save(ctx, agg)
+
+    // Generate invoice (¥3,000 + 10% tax = ¥3,300)
+    bs := service.NewBillingService(
+        contractRepo, invoiceRepo, usageRepo, creditRepo,
+        credit.CreditConfig{}, priceRepo, productRepo, registry,
+        service.BillingConfig{DaysUntilDue: 30}, clock,
+    )
+    inv, _ := bs.GenerateInvoice(ctx, cID, agg.CurrentPeriod())
+    // inv.Total() => ¥3,300
+    _ = inv
+}
+```
+
+## Examples
+
+All examples use in-memory implementations and require no external dependencies.
+
+```bash
+go run ./examples/billing-demo/           # Full contract-to-cash flow
+go run ./examples/event-sourcing-demo/    # Time travel & snapshots
+go run ./examples/plugin-pipeline-demo/   # Multi-plugin billing pipeline
+go run ./examples/lifecycle-demo/         # Trial, suspend, cancel, credits
+go run ./examples/hosting-integration-demo/ # Provisioning via lifecycle hooks
+go run ./examples/multi-service-demo/     # Multi-service routing
+go run ./examples/pricing-models-demo/    # Flat, tiered, volume, usage-based
+```
+
+## Architecture
 
 ```
-docs/
-├── architecture.md              # アーキテクチャ概要
-├── design/                      # 設計詳細
-│   ├── domain-model.md          # ドメインモデル設計
-│   ├── event-sourcing.md        # イベントソーシング設計
-│   ├── plugin-system.md         # プラグインシステム設計
-│   ├── payment-gateway.md       # 決済ゲートウェイ設計
-│   └── metrics-invoicegen.md    # メトリクス・インボイス生成設計
-├── decisions/                   # 設計決定記録
-│   └── design-decisions.md
-└── guides/                      # 利用ガイド
-    └── usage-guide.md
+domain/           # Entities, value objects, aggregates (zero dependencies)
+├── contract/     # Event-sourced contract aggregate
+├── invoice/      # Invoice entity
+├── payment/      # Payment entity
+├── credit/       # Credit ledger
+├── usage/        # Usage records
+├── pricing/      # Immutable Price entity, pricing models
+├── product/      # Product entity
+└── shared/       # Money, DateRange, IDs, Clock, errors
+
+application/      # Services, ports, queries
+├── service/      # BillingService, PaymentService, SnapshotService
+├── port/         # PaymentGateway interface
+├── query/        # TemporalQueryService
+└── projection/   # Event projections
+
+plugin/           # Hook interfaces and registry
+plugins/          # Official plugins (tax, coupon)
+eventstore/       # Event store interface, aggregate base, snapshots
+infrastructure/   # In-memory implementations (for testing/demos)
+batch/            # Batch processors (renewal, dunning)
 ```
 
-## 主要ドメイン
+## Plugin System
 
-| ドメイン | 説明 |
-|---------|------|
-| **Contract** | 契約のライフサイクル管理（作成、有効化、一時停止、解約、更新） |
-| **Invoice** | 請求書の生成、発行、支払い記録 |
-| **Payment** | 決済処理、返金 |
-| **Usage** | 従量課金のメトリクス記録・集計 |
+Implement only the hooks you need:
 
-## 契約タイプ
+| Category | Hooks | Purpose |
+|----------|-------|---------|
+| **Billing** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | Discounts, tax, pre/post calculation |
+| **Contract** | `OnContractCreate/Activate/Suspend/Resume/Cancel/RenewHook` | Lifecycle reactions |
+| **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | Payment flow |
+| **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |
+| **Invoice Gen** | `InvoiceGenerationHook` | PDF rendering, delivery |
 
-| タイプ | 説明 |
-|--------|------|
-| `one_time` | 買い切り |
-| `subscription` | サブスクリプション（定期課金） |
-| `usage_based` | 従量課金 |
+Official plugins: **Tax** (Japanese consumption tax), **Coupon** (percentage/fixed, stacking, usage limits).
 
-## プラグイン
+## Documentation
 
-### 公式プラグイン
+Full documentation is available at **[contract-to-cash.github.io/core](https://contract-to-cash.github.io/core/)** (English & Japanese).
 
-- **Coupon** - クーポン・割引
-- **Tax** - 税計算
+| Section | Description |
+|---------|-------------|
+| [Introduction](https://contract-to-cash.github.io/core/docs/introduction) | Overview and design principles |
+| [Quick Start](https://contract-to-cash.github.io/core/docs/quick-start) | Installation and first billing flow |
+| [Architecture](https://contract-to-cash.github.io/core/docs/architecture) | System design deep dive |
+| [Core Concepts](https://contract-to-cash.github.io/core/docs/concepts/domain-model) | Domain model, event sourcing, plugins, payment gateway |
+| [Guides](https://contract-to-cash.github.io/core/docs/guides/integration) | Integration, custom plugins, temporal queries |
+| [API Reference](https://contract-to-cash.github.io/core/docs/api/domain-types) | Types, services, hooks, event store |
 
-### 拡張ポイント
+## Contributing
 
-| カテゴリ | フック例 | 用途 |
-|---------|---------|------|
-| **請求計算** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引・税計算、計算前後処理 |
-| **契約ライフサイクル** | `OnContractCreateHook`, `OnContractCancelHook` 等 | 契約の各イベントに個別対応 |
-| **支払い** | `BeforeChargeHook`, `AfterChargeHook` 等 | 課金前後、失敗時、返金時 |
-| **メトリクス** | `OnContractChangeHook`, `OnInvoiceIssuedHook` 等 | KPI収集 |
-| **請求書生成** | `InvoiceGenerationHook` | PDF生成、送付 |
+Contributions are welcome! Please open an issue to discuss your idea before submitting a pull request.
 
-全フックがISP（インターフェース分離の原則）に準拠。必要なフックだけ実装すればよい。
+```bash
+make lint   # Run linter
+make test   # Run tests
+```
 
-## ライセンス
+## License
 
-[LICENSE](LICENSE)ファイルを参照してください。
+[MIT](LICENSE)

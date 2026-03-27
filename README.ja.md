@@ -1,0 +1,175 @@
+# Contract Billing Core
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/contract-to-cash/core.svg)](https://pkg.go.dev/github.com/contract-to-cash/core)
+[![CI](https://github.com/contract-to-cash/core/actions/workflows/ci.yml/badge.svg)](https://github.com/contract-to-cash/core/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+[English](README.md) | [ドキュメント](https://contract-to-cash.github.io/core/ja/)
+
+SaaS・サブスクリプションビジネス向けのイベントソーシング課金エンジン。プラグインアーキテクチャによる拡張性を備え、ドメインモデル、課金パイプライン、拡張ポイントを提供します。データベースと決済ゲートウェイはあなた自身が用意します。
+
+## 特徴
+
+- **イベントソーシング** — 完全な監査証跡、時間旅行クエリ、スナップショット復元
+- **プラグインアーキテクチャ** — 割引、税、ライフサイクル、決済、メトリクスフックで拡張（ISP準拠）
+- **Product/Price分離** — Stripeスタイルの不変Price。グランドファザリング対応
+- **複数の課金モデル** — 買い切り、サブスクリプション、従量課金（定額、段階制、ボリューム）
+- **契約更新** — `pendingPriceID`による保留価格プロモーション付き自動更新
+- **決済ゲートウェイ抽象化** — チャージ、オーソリ/キャプチャ、返金、階層型フォールバック
+- **クレジット台帳** — 日割り、解約、調整のためのFIFOベースクレジット
+- **時間旅行クエリ** — 過去の任意の時点での契約状態を再構築
+
+## クイックスタート
+
+```bash
+go get github.com/contract-to-cash/core
+```
+
+**Go 1.22**以上が必要です。
+
+```go
+package main
+
+import (
+    "context"
+    "math/big"
+    "time"
+
+    "github.com/contract-to-cash/core/application/service"
+    "github.com/contract-to-cash/core/domain/contract"
+    "github.com/contract-to-cash/core/domain/credit"
+    "github.com/contract-to-cash/core/domain/pricing"
+    "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/eventstore"
+    "github.com/contract-to-cash/core/infrastructure/inmemory"
+    "github.com/contract-to-cash/core/plugin"
+    "github.com/contract-to-cash/core/plugins/tax"
+)
+
+func main() {
+    ctx := context.Background()
+    clock := shared.FixedClock{FixedTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)}
+
+    // インフラ（本番環境では独自の実装に置き換え）
+    es := inmemory.NewInMemoryEventStore(clock)
+    contractRepo := inmemory.NewInMemoryContractRepository(es, clock)
+    invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
+    creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+    usageRepo := inmemory.NewInMemoryUsageRepository()
+    priceRepo := inmemory.NewInMemoryPriceRepository()
+    productRepo := inmemory.NewInMemoryProductRepository()
+
+    // プラグイン登録
+    registry := plugin.NewRegistry()
+    registry.Register(tax.NewTaxPlugin(&tax.JapaneseTaxCalculator{}))
+    registry.InitializeAll(ctx, map[string]plugin.Config{
+        "tax": {"priority": plugin.PriorityLow},
+    })
+    defer registry.ShutdownAll(ctx)
+
+    // PriceとContractの作成
+    price := shared.NewMoney(new(big.Rat).SetInt64(3000), shared.CurrencyJPY)
+    pe := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+    priceRepo.Save(ctx, pe)
+
+    cID := shared.NewContractID()
+    agg := contract.NewContractAggregate(cID, clock)
+    agg.Create(contract.CreateContractCommand{
+        AccountID: shared.AccountID("acct-001"), PlanID: shared.PlanID("plan-std"),
+        PriceID: pe.ID(), ContractType: contract.ContractTypeSubscription,
+        BillingCycle: contract.BillingCycleMonthly, Price: price, BasePrice: price,
+    }, eventstore.EventMetadata{UserID: "system"})
+    agg.Activate(eventstore.EventMetadata{UserID: "system"})
+    contractRepo.Save(ctx, agg)
+
+    // 請求書生成（¥3,000 + 消費税10% = ¥3,300）
+    bs := service.NewBillingService(
+        contractRepo, invoiceRepo, usageRepo, creditRepo,
+        credit.CreditConfig{}, priceRepo, productRepo, registry,
+        service.BillingConfig{DaysUntilDue: 30}, clock,
+    )
+    inv, _ := bs.GenerateInvoice(ctx, cID, agg.CurrentPeriod())
+    // inv.Total() => ¥3,300
+    _ = inv
+}
+```
+
+## サンプル
+
+すべてのサンプルはインメモリ実装を使用し、外部依存はありません。
+
+```bash
+go run ./examples/billing-demo/           # 契約から決済までの完全フロー
+go run ./examples/event-sourcing-demo/    # 時間旅行とスナップショット
+go run ./examples/plugin-pipeline-demo/   # マルチプラグイン課金パイプライン
+go run ./examples/lifecycle-demo/         # トライアル、停止、解約、クレジット
+go run ./examples/hosting-integration-demo/ # ライフサイクルフック経由のプロビジョニング
+go run ./examples/multi-service-demo/     # マルチサービスルーティング
+go run ./examples/pricing-models-demo/    # 定額、段階制、ボリューム、従量課金
+```
+
+## アーキテクチャ
+
+```
+domain/           # エンティティ、値オブジェクト、集約（依存ゼロ）
+├── contract/     # イベントソース契約集約
+├── invoice/      # 請求書エンティティ
+├── payment/      # 支払いエンティティ
+├── credit/       # クレジット台帳
+├── usage/        # 使用量レコード
+├── pricing/      # 不変Priceエンティティ、価格モデル
+├── product/      # Productエンティティ
+└── shared/       # Money, DateRange, ID, Clock, エラー
+
+application/      # サービス、ポート、クエリ
+├── service/      # BillingService, PaymentService, SnapshotService
+├── port/         # PaymentGatewayインターフェース
+├── query/        # TemporalQueryService
+└── projection/   # イベントプロジェクション
+
+plugin/           # フックインターフェースとレジストリ
+plugins/          # 公式プラグイン（税、クーポン）
+eventstore/       # Event Storeインターフェース、集約ベース、スナップショット
+infrastructure/   # インメモリ実装（テスト・デモ用）
+batch/            # バッチプロセッサ（更新、ダニング）
+```
+
+## プラグインシステム
+
+必要なフックだけを実装：
+
+| カテゴリ | フック | 用途 |
+|---------|--------|------|
+| **課金計算** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引、税計算、計算前後処理 |
+| **契約** | `OnContractCreate/Activate/Suspend/Resume/Cancel/RenewHook` | ライフサイクル反応 |
+| **決済** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | 決済フロー |
+| **メトリクス** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI収集 |
+| **請求書生成** | `InvoiceGenerationHook` | PDFレンダリング、配信 |
+
+公式プラグイン: **Tax**（消費税計算）、**Coupon**（パーセンテージ/固定、スタッキング、使用制限）
+
+## ドキュメント
+
+完全なドキュメントは **[contract-to-cash.github.io/core](https://contract-to-cash.github.io/core/ja/)** で利用可能です（英語・日本語）。
+
+| セクション | 内容 |
+|-----------|------|
+| [はじめに](https://contract-to-cash.github.io/core/ja/docs/introduction) | 概要と設計原則 |
+| [クイックスタート](https://contract-to-cash.github.io/core/ja/docs/quick-start) | インストールと最初の課金フロー |
+| [アーキテクチャ](https://contract-to-cash.github.io/core/ja/docs/architecture) | システム設計の詳細 |
+| [コア概念](https://contract-to-cash.github.io/core/ja/docs/concepts/domain-model) | ドメインモデル、イベントソーシング、プラグイン、決済ゲートウェイ |
+| [ガイド](https://contract-to-cash.github.io/core/ja/docs/guides/integration) | 統合、カスタムプラグイン、時間旅行クエリ |
+| [APIリファレンス](https://contract-to-cash.github.io/core/ja/docs/api/domain-types) | 型、サービス、フック、Event Store |
+
+## コントリビュート
+
+コントリビューション歓迎です。プルリクエストを送る前に、まずイシューでアイデアを議論してください。
+
+```bash
+make lint   # リンター実行
+make test   # テスト実行
+```
+
+## ライセンス
+
+[MIT](LICENSE)
