@@ -2,6 +2,7 @@ package batch
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -142,7 +143,10 @@ func TestContractRenewalProcessor_DryRun(t *testing.T) {
 
 func TestContractRenewalProcessor_DryRun_CancelAtPeriodEnd(t *testing.T) {
 	agg := newActiveContract("c1")
-	agg.SetCancelAtPeriodEnd(true)
+	meta := eventstore.EventMetadata{UserID: "test"}
+	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
+		t.Fatalf("ScheduleCancellation failed: %v", err)
+	}
 	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
 
 	processor := NewContractRenewalProcessor(repo, nil, processorClock())
@@ -216,6 +220,86 @@ func TestContractRenewalProcessor_NoContracts(t *testing.T) {
 	}
 	if result.Failed != 0 {
 		t.Errorf("Failed: got %d, want 0", result.Failed)
+	}
+}
+
+func TestContractRenewalProcessor_StopOnError(t *testing.T) {
+	// First contract: cancelled, so renewal will fail.
+	cancelledClock := shared.FixedClock{FixedTime: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
+	cancelledAgg := contract.NewContractAggregate(shared.ContractID("c-fail"), cancelledClock)
+	meta := eventstore.EventMetadata{UserID: "test"}
+	cmd := contract.CreateContractCommand{
+		AccountID:    shared.AccountID("a1"),
+		PlanID:       shared.PlanID("p1"),
+		ContractType: contract.ContractTypeSubscription,
+		BillingCycle: contract.BillingCycleMonthly,
+		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:    true,
+	}
+	if err := cancelledAgg.Create(cmd, meta); err != nil {
+		t.Fatalf("failed to create cancelled contract: %v", err)
+	}
+	if err := cancelledAgg.Activate(meta); err != nil {
+		t.Fatalf("failed to activate cancelled contract: %v", err)
+	}
+	if err := cancelledAgg.Cancel("test cancellation", meta); err != nil {
+		t.Fatalf("failed to cancel contract: %v", err)
+	}
+
+	// Second contract: active (should succeed but won't be reached).
+	successAgg := newActiveContract("c-ok")
+
+	repo := &mockRenewalRepo{
+		contracts: []*contract.ContractAggregate{cancelledAgg, successAgg},
+	}
+
+	processor := NewContractRenewalProcessor(repo, nil, processorClock())
+
+	// ContinueOnError=false (default): should stop after first failure.
+	result, err := processor.Process(context.Background(), BatchOptions{ContinueOnError: false})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Failed != 1 {
+		t.Errorf("Failed: got %d, want 1", result.Failed)
+	}
+	// Second contract should NOT have been processed.
+	if result.Succeeded != 0 {
+		t.Errorf("Succeeded: got %d, want 0 (should stop after first error)", result.Succeeded)
+	}
+	if len(repo.saved) != 0 {
+		t.Errorf("saved count: got %d, want 0", len(repo.saved))
+	}
+}
+
+func TestContractRenewalProcessor_Concurrent(t *testing.T) {
+	// Create multiple active contracts.
+	contracts := make([]*contract.ContractAggregate, 5)
+	for i := 0; i < 5; i++ {
+		contracts[i] = newActiveContract(fmt.Sprintf("c%d", i))
+	}
+
+	repo := &mockRenewalRepo{contracts: contracts}
+	processor := NewContractRenewalProcessor(repo, nil, processorClock())
+
+	result, err := processor.Process(context.Background(), BatchOptions{Concurrency: 3})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Total != 5 {
+		t.Errorf("Total: got %d, want 5", result.Total)
+	}
+	if result.Succeeded != 5 {
+		t.Errorf("Succeeded: got %d, want 5", result.Succeeded)
+	}
+	if result.Failed != 0 {
+		t.Errorf("Failed: got %d, want 0", result.Failed)
+	}
+	if len(repo.saved) != 5 {
+		t.Errorf("saved count: got %d, want 5", len(repo.saved))
 	}
 }
 

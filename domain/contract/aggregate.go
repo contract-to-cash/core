@@ -24,6 +24,8 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 	r.Register(&PaymentMethodChangedEvent{})
 	r.Register(&ContractRenewedEvent{})
 	r.Register(&ContractExpiredEvent{})
+	r.Register(&CancellationScheduledEvent{})
+	r.Register(&CancellationUnscheduledEvent{})
 	return r
 }()
 
@@ -43,15 +45,15 @@ type CreateContractCommand struct {
 type ContractAggregate struct {
 	eventstore.BaseAggregate
 
-	contractID       shared.ContractID
-	accountID        shared.AccountID
-	planID           shared.PlanID
-	status           ContractStatus
-	contractType     ContractType
-	billingCycle     BillingCycle
-	currentPeriod    shared.DateRange
-	trialConfig      *TrialConfiguration
-	suspensionConfig *SuspensionConfiguration
+	contractID        shared.ContractID
+	accountID         shared.AccountID
+	planID            shared.PlanID
+	status            ContractStatus
+	contractType      ContractType
+	billingCycle      BillingCycle
+	currentPeriod     shared.DateRange
+	trialConfig       *TrialConfiguration
+	suspensionConfig  *SuspensionConfiguration
 	paymentMethodID   *string
 	priceID           shared.PriceID
 	price             shared.Money
@@ -357,7 +359,7 @@ func (a *ContractAggregate) Renew(metadata eventstore.EventMetadata) error {
 	}
 
 	if a.cancelAtPeriodEnd {
-		return a.expire(metadata)
+		return a.Cancel("scheduled cancellation at period end", metadata)
 	}
 
 	if !a.autoRenew {
@@ -390,9 +392,45 @@ func (a *ContractAggregate) Renew(metadata eventstore.EventMetadata) error {
 	return a.RaiseEvent(event, metadata)
 }
 
-// SetCancelAtPeriodEnd sets whether the contract should cancel at the end of the current period.
-func (a *ContractAggregate) SetCancelAtPeriodEnd(cancel bool) {
-	a.cancelAtPeriodEnd = cancel
+// ScheduleCancellation schedules the contract for cancellation at the end of the current period.
+func (a *ContractAggregate) ScheduleCancellation(reason string, metadata eventstore.EventMetadata) error {
+	if a.status != ContractStatusActive {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot schedule cancellation: current status is %s", a.status))
+	}
+	if a.cancelAtPeriodEnd {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"cancellation is already scheduled")
+	}
+
+	event := &CancellationScheduledEvent{
+		ContractID:  a.contractID,
+		Reason:      reason,
+		ScheduledAt: a.Clock().Now(),
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// UnscheduleCancellation revokes a previously scheduled cancellation.
+func (a *ContractAggregate) UnscheduleCancellation(metadata eventstore.EventMetadata) error {
+	if !a.cancelAtPeriodEnd {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"no cancellation is scheduled")
+	}
+
+	event := &CancellationUnscheduledEvent{
+		ContractID:    a.contractID,
+		UnscheduledAt: a.Clock().Now(),
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
 }
 
 // SetPendingPriceID sets the pending price ID to apply at next renewal.
@@ -415,19 +453,10 @@ func (a *ContractAggregate) expire(metadata eventstore.EventMetadata) error {
 }
 
 // addBillingCycle adds one billing cycle duration to a time.
+// This delegates to shared.AddBillingCycleDuration to avoid duplicating
+// the cycle-to-duration mapping with DateRange.Next().
 func addBillingCycle(t time.Time, cycle BillingCycle) time.Time {
-	switch cycle {
-	case BillingCycleMonthly:
-		return t.AddDate(0, 1, 0)
-	case BillingCycleYearly:
-		return t.AddDate(1, 0, 0)
-	case BillingCycleWeekly:
-		return t.AddDate(0, 0, 7)
-	case BillingCycleDaily:
-		return t.AddDate(0, 0, 1)
-	default:
-		return t.AddDate(0, 1, 0)
-	}
+	return shared.AddBillingCycleDuration(t, string(cycle))
 }
 
 // Apply applies a domain event to update aggregate state.
@@ -467,6 +496,7 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 
 	case *ContractCancelledEvent:
 		a.status = ContractStatusCancelled
+		a.cancelAtPeriodEnd = false
 		a.updatedAt = e.CancelledAt
 
 	case *PriceChangedEvent:
@@ -504,6 +534,14 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *ContractExpiredEvent:
 		a.status = ContractStatusExpired
 		a.updatedAt = e.ExpiredAt
+
+	case *CancellationScheduledEvent:
+		a.cancelAtPeriodEnd = true
+		a.updatedAt = e.ScheduledAt
+
+	case *CancellationUnscheduledEvent:
+		a.cancelAtPeriodEnd = false
+		a.updatedAt = e.UnscheduledAt
 
 	default:
 		return shared.NewDomainError(shared.ErrCodeUnknownEvent,

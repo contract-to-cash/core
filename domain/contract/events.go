@@ -9,18 +9,20 @@ import (
 
 // Event type constants.
 const (
-	EventTypeContractCreated      eventstore.EventType = "contract.created"
-	EventTypeContractActivated    eventstore.EventType = "contract.activated"
-	EventTypeContractSuspended    eventstore.EventType = "contract.suspended"
-	EventTypeContractResumed      eventstore.EventType = "contract.resumed"
-	EventTypeContractCancelled    eventstore.EventType = "contract.cancelled"
-	EventTypePriceChanged         eventstore.EventType = "contract.price_changed"
-	EventTypePlanChanged          eventstore.EventType = "contract.plan_changed"
-	EventTypeTrialStarted         eventstore.EventType = "contract.trial_started"
-	EventTypeTrialEnded           eventstore.EventType = "contract.trial_ended"
-	EventTypePaymentMethodChanged eventstore.EventType = "contract.payment_method_changed"
-	EventTypeContractRenewed      eventstore.EventType = "contract.renewed"
-	EventTypeContractExpired      eventstore.EventType = "contract.expired"
+	EventTypeContractCreated         eventstore.EventType = "contract.created"
+	EventTypeContractActivated       eventstore.EventType = "contract.activated"
+	EventTypeContractSuspended       eventstore.EventType = "contract.suspended"
+	EventTypeContractResumed         eventstore.EventType = "contract.resumed"
+	EventTypeContractCancelled       eventstore.EventType = "contract.cancelled"
+	EventTypePriceChanged            eventstore.EventType = "contract.price_changed"
+	EventTypePlanChanged             eventstore.EventType = "contract.plan_changed"
+	EventTypeTrialStarted            eventstore.EventType = "contract.trial_started"
+	EventTypeTrialEnded              eventstore.EventType = "contract.trial_ended"
+	EventTypePaymentMethodChanged    eventstore.EventType = "contract.payment_method_changed"
+	EventTypeContractRenewed         eventstore.EventType = "contract.renewed"
+	EventTypeContractExpired         eventstore.EventType = "contract.expired"
+	EventTypeCancellationScheduled   eventstore.EventType = "contract.cancellation_scheduled"
+	EventTypeCancellationUnscheduled eventstore.EventType = "contract.cancellation_unscheduled"
 )
 
 // ContractCreatedEvent is raised when a new contract is created.
@@ -148,3 +150,24 @@ type ContractExpiredEvent struct {
 }
 
 func (e *ContractExpiredEvent) EventType() eventstore.EventType { return EventTypeContractExpired }
+
+// CancellationScheduledEvent is raised when a contract is scheduled for cancellation at period end.
+type CancellationScheduledEvent struct {
+	ContractID  shared.ContractID `json:"contract_id"`
+	Reason      string            `json:"reason"`
+	ScheduledAt time.Time         `json:"scheduled_at"`
+}
+
+func (e *CancellationScheduledEvent) EventType() eventstore.EventType {
+	return EventTypeCancellationScheduled
+}
+
+// CancellationUnscheduledEvent is raised when a scheduled cancellation is revoked.
+type CancellationUnscheduledEvent struct {
+	ContractID    shared.ContractID `json:"contract_id"`
+	UnscheduledAt time.Time         `json:"unscheduled_at"`
+}
+
+func (e *CancellationUnscheduledEvent) EventType() eventstore.EventType {
+	return EventTypeCancellationUnscheduled
+}

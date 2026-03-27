@@ -143,8 +143,8 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		pluginCtx := plugin.NewContext(ctx)
 		newStatus := agg.Status()
 
-		if newStatus == contract.ContractStatusExpired {
-			// Contract expired (cancelAtPeriodEnd or autoRenew=false).
+		if newStatus == contract.ContractStatusExpired || newStatus == contract.ContractStatusCancelled {
+			// Contract expired (autoRenew=false) or cancelled (cancelAtPeriodEnd).
 			// Fire OnContractChangeHooks with appropriate change type.
 			changeEvent := plugin.ContractChangeEvent{
 				ContractID: agg.ContractID(),

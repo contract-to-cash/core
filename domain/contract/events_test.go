@@ -21,6 +21,11 @@ func TestEventTypes(t *testing.T) {
 		{"PlanChangedEvent", &PlanChangedEvent{}, EventTypePlanChanged},
 		{"TrialStartedEvent", &TrialStartedEvent{}, EventTypeTrialStarted},
 		{"TrialEndedEvent", &TrialEndedEvent{}, EventTypeTrialEnded},
+		{"PaymentMethodChangedEvent", &PaymentMethodChangedEvent{}, EventTypePaymentMethodChanged},
+		{"ContractRenewedEvent", &ContractRenewedEvent{}, EventTypeContractRenewed},
+		{"ContractExpiredEvent", &ContractExpiredEvent{}, EventTypeContractExpired},
+		{"CancellationScheduledEvent", &CancellationScheduledEvent{}, EventTypeCancellationScheduled},
+		{"CancellationUnscheduledEvent", &CancellationUnscheduledEvent{}, EventTypeCancellationUnscheduled},
 	}
 
 	for _, tt := range tests {
@@ -34,15 +39,20 @@ func TestEventTypes(t *testing.T) {
 
 func TestEventTypeConstants(t *testing.T) {
 	expectations := map[eventstore.EventType]string{
-		EventTypeContractCreated:   "contract.created",
-		EventTypeContractActivated: "contract.activated",
-		EventTypeContractSuspended: "contract.suspended",
-		EventTypeContractResumed:   "contract.resumed",
-		EventTypeContractCancelled: "contract.cancelled",
-		EventTypePriceChanged:      "contract.price_changed",
-		EventTypePlanChanged:       "contract.plan_changed",
-		EventTypeTrialStarted:      "contract.trial_started",
-		EventTypeTrialEnded:        "contract.trial_ended",
+		EventTypeContractCreated:         "contract.created",
+		EventTypeContractActivated:       "contract.activated",
+		EventTypeContractSuspended:       "contract.suspended",
+		EventTypeContractResumed:         "contract.resumed",
+		EventTypeContractCancelled:       "contract.cancelled",
+		EventTypePriceChanged:            "contract.price_changed",
+		EventTypePlanChanged:             "contract.plan_changed",
+		EventTypeTrialStarted:            "contract.trial_started",
+		EventTypeTrialEnded:              "contract.trial_ended",
+		EventTypePaymentMethodChanged:    "contract.payment_method_changed",
+		EventTypeContractRenewed:         "contract.renewed",
+		EventTypeContractExpired:         "contract.expired",
+		EventTypeCancellationScheduled:   "contract.cancellation_scheduled",
+		EventTypeCancellationUnscheduled: "contract.cancellation_unscheduled",
 	}
 
 	for et, expected := range expectations {
