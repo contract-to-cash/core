@@ -34,7 +34,7 @@ type BillingService struct {
 	creditConfig credit.CreditConfig
 	priceRepo    pricing.PriceRepository
 	productRepo  product.Repository
-	registry *plugin.Registry
+	registry     *plugin.Registry
 	config       BillingConfig
 	clock        shared.Clock
 }
@@ -261,21 +261,25 @@ func (s *BillingService) calculateSubtotal(ctx context.Context, agg *contract.Co
 		return shared.Money{}, nil, fmt.Errorf("failed to load price: %w", err)
 	}
 
-	// 3. Use Price entity amount
+	// 4. Use Price entity amount
 	effectiveAmount := price.Amount()
 
-	// 4. Calculate based on pricing model
+	// 5. Calculate based on pricing model
 	if price.PricingModel() == nil {
 		// Pure subscription or one-time — return the flat amount with a line item
+		description := "Subscription"
+		if agg.GetContractType() == contract.ContractTypeOneTime {
+			description = "One-time charge"
+		}
 		li := invoice.NewLineItem(
-			shared.GenerateID(), "Subscription", 1,
+			shared.GenerateID(), description, 1,
 			effectiveAmount, effectiveAmount, nil,
 			invoice.WithPriceID(price.ID()),
 		)
 		return effectiveAmount, []invoice.LineItem{li}, nil
 	}
 
-	// 5. Usage-based: load product for usage metrics, calculate usage charges
+	// 6. Usage-based: load product for usage metrics, calculate usage charges
 	return s.calculateUsageCharge(ctx, agg, price, billingPeriod, effectiveAmount)
 }
 
