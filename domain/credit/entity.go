@@ -29,6 +29,7 @@ type CreditEntry struct {
 	description     string
 	expiresAt       *time.Time
 	createdAt       time.Time
+	version         int // optimistic locking; incremented on each Consume
 }
 
 // NewCreditEntry creates a new CreditEntry with the given parameters.
@@ -87,8 +88,18 @@ func (e *CreditEntry) IsFullyConsumed() bool {
 	return e.remainingAmount.IsZero()
 }
 
+// Version returns the optimistic lock version of this credit entry.
+// Repository implementations should check this on save to detect
+// concurrent modifications.
+func (e *CreditEntry) Version() int { return e.version }
+
+// SetVersion sets the version. Used by repository implementations
+// after a successful save to keep the in-memory version in sync.
+func (e *CreditEntry) SetVersion(v int) { e.version = v }
+
 // Consume reduces the remaining amount by the given amount.
 // Returns the actually consumed amount (may be less than requested if insufficient balance).
+// Increments the version for optimistic lock detection.
 func (e *CreditEntry) Consume(amount shared.Money) (shared.Money, error) {
 	available := e.remainingAmount
 	consumed, err := available.Min(amount)
@@ -99,5 +110,6 @@ func (e *CreditEntry) Consume(amount shared.Money) (shared.Money, error) {
 	if err != nil {
 		return shared.Money{}, err
 	}
+	e.version++
 	return consumed, nil
 }
