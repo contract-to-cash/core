@@ -21,7 +21,7 @@ linters:
   exclusions:
     generated: lax
     rules:
-      - linter: govet
+      - linters: [govet]
         text: 'shadow: declaration of "err" shadows declaration at'
     presets:
       - comments
