@@ -1,0 +1,87 @@
+desc: "Price change: end-of-term price change applied at renewal"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Create contract at 5000 JPY
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-price-001"
+              plan_id: "plan-basic"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 5000
+    test: |
+      current.res.status == 201
+      && current.res.body.price == 5000
+  - desc: Activate
+    req:
+      /contracts/{{ steps[0].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Schedule end-of-term price change to 8000
+    req:
+      /contracts/{{ steps[0].res.body.id }}/change-price:
+        post:
+          body:
+            application/json:
+              new_price: 8000
+              policy: "end_of_term"
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Generate invoice (should still be 5000 since end-of-term)
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[0].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.subtotal == 5000
+  - desc: Advance clock past period end
+    req:
+      /clock/advance:
+        post:
+          body:
+            application/json:
+              days: 31
+    test: |
+      current.res.status == 200
+  - desc: Renew contract (applies pending price change)
+    req:
+      /contracts/{{ steps[0].res.body.id }}/renew:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Verify contract now shows new price via GET
+    req:
+      /contracts/{{ steps[0].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Generate invoice at new period (should use new price 8000)
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[0].res.body.id }}"
+              period_start: "2026-04-01"
+              period_end: "2026-05-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.subtotal == 8000

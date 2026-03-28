@@ -1,0 +1,86 @@
+desc: "Contract renewal: period advances, new invoice billable at new period"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Create contract (3000 JPY monthly, auto-renew)
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-renew-001"
+              plan_id: "plan-basic"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 3000
+    test: |
+      current.res.status == 201
+  - desc: Activate (sets initial period 2026-03-01 to 2026-04-01)
+    req:
+      /contracts/{{ steps[0].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Generate invoice for first period
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[0].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.subtotal == 3000
+  - desc: Advance clock past first period end (31 days)
+    req:
+      /clock/advance:
+        post:
+          body:
+            application/json:
+              days: 31
+    test: |
+      current.res.status == 200
+  - desc: Batch renewal
+    req:
+      /batch/renewals:
+        post:
+          body:
+            application/json:
+              concurrency: 1
+    test: |
+      current.res.status == 200
+      && current.res.body.total == 1
+      && current.res.body.succeeded == 1
+  - desc: Verify contract still active
+    req:
+      /contracts/{{ steps[0].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Generate invoice for SECOND period (proves period advanced)
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[0].res.body.id }}"
+              period_start: "2026-04-01"
+              period_end: "2026-05-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.subtotal == 3000
+  - desc: First period invoice should still be accessible
+    req:
+      /invoices/{{ steps[2].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.subtotal == 3000

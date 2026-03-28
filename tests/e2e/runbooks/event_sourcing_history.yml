@@ -1,0 +1,98 @@
+desc: "Event sourcing: verify event types in history and temporal query for intermediate state"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Create contract
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-hist-001"
+              plan_id: "plan-basic"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 3000
+    test: |
+      current.res.status == 201
+  - desc: Activate
+    req:
+      /contracts/{{ steps[0].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Advance clock 1 day (so suspend event has different timestamp)
+    req:
+      /clock/advance:
+        post:
+          body:
+            application/json:
+              days: 1
+    test: |
+      current.res.status == 200
+  - desc: Suspend
+    req:
+      /contracts/{{ steps[0].res.body.id }}/suspend:
+        post:
+          body:
+            application/json:
+              reason: "non-payment"
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "suspended"
+  - desc: Advance clock 1 more day
+    req:
+      /clock/advance:
+        post:
+          body:
+            application/json:
+              days: 1
+    test: |
+      current.res.status == 200
+  - desc: Resume
+    req:
+      /contracts/{{ steps[0].res.body.id }}/resume:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: "History should have 4 events: created, activated, suspended, resumed"
+    req:
+      /contracts/{{ steps[0].res.body.id }}/history:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && len(current.res.body) == 4
+      && current.res.body[0].event_type == "contract.created"
+      && current.res.body[1].event_type == "contract.activated"
+      && current.res.body[2].event_type == "contract.suspended"
+      && current.res.body[3].event_type == "contract.resumed"
+  - desc: "Temporal query: as-of BEFORE suspend should return 'active'"
+    req:
+      /contracts/{{ steps[0].res.body.id }}/as-of?at=2026-03-01T12:00:00Z:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: "Temporal query: as-of AFTER suspend but BEFORE resume should return 'suspended'"
+    req:
+      /contracts/{{ steps[0].res.body.id }}/as-of?at=2026-03-02T12:00:00Z:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "suspended"
+  - desc: "Temporal query: as-of AFTER resume should return 'active'"
+    req:
+      /contracts/{{ steps[0].res.body.id }}/as-of?at=2026-03-03T12:00:00Z:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"

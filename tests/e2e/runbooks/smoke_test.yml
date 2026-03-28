@@ -1,0 +1,85 @@
+desc: "Smoke test: basic contract creation, billing, and state transitions"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Health check
+    req:
+      /health:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+  - desc: Create contract
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-smoke"
+              plan_id: "plan-smoke"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 1000
+    test: |
+      current.res.status == 201
+      && current.res.body.status == "draft"
+  - desc: Activate
+    req:
+      /contracts/{{ steps[1].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Generate invoice
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[1].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.subtotal == 1000
+      && current.res.body.total == 1000
+  - desc: GET contract returns same data
+    req:
+      /contracts/{{ steps[1].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.id == steps[1].res.body.id
+  - desc: GET invoice returns same data
+    req:
+      /invoices/{{ steps[3].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.id == steps[3].res.body.id
+  - desc: Cannot suspend draft contract (create a new one)
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-smoke-2"
+              plan_id: "plan-smoke"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 1000
+    test: |
+      current.res.status == 201
+  - desc: Suspend draft should fail
+    req:
+      /contracts/{{ steps[6].res.body.id }}/suspend:
+        post:
+          body:
+            application/json:
+              reason: "test"
+    test: |
+      current.res.status == 422

@@ -1,0 +1,51 @@
+desc: "Trial lifecycle: create, start trial, convert to active"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Create contract
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-trial-001"
+              plan_id: "plan-trial"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 1000
+    test: |
+      current.res.status == 201
+      && current.res.body.status == "draft"
+  - desc: Start 14-day trial
+    req:
+      /contracts/{{ steps[0].res.body.id }}/start-trial:
+        post:
+          body:
+            application/json:
+              trial_days: 14
+              auto_convert: true
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "trialing"
+  - desc: End trial with conversion
+    req:
+      /contracts/{{ steps[0].res.body.id }}/end-trial:
+        post:
+          body:
+            application/json:
+              converted: true
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Generate invoice after conversion
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[0].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.total == 1000

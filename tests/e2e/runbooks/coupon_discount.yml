@@ -1,0 +1,91 @@
+desc: "Coupon plugin: apply coupon, verify plan restriction blocks non-matching plans"
+runners:
+  req: "{{ env.BASE_URL }}"
+steps:
+  - desc: Register coupon plugin with plan-restricted 20% coupon
+    req:
+      /plugins/coupon/register:
+        post:
+          body:
+            application/json:
+              coupons:
+                - code: "PREMIUM20"
+                  type: "percentage"
+                  value: 20
+                  valid_from: "2026-01-01"
+                  valid_until: "2026-12-31"
+                  plans:
+                    - "plan-premium"
+    test: |
+      current.res.status == 200
+  - desc: Create contract on plan-premium (coupon should apply)
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-coupon-001"
+              plan_id: "plan-premium"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 10000
+    test: |
+      current.res.status == 201
+  - desc: Activate premium contract
+    req:
+      /contracts/{{ steps[1].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: "Invoice for premium: 20% coupon applied, discount=2000, total=8000"
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[1].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.subtotal == 10000
+      && current.res.body.discount_amount == 2000
+      && current.res.body.total == 8000
+      && current.res.body.amount_due == 8000
+  - desc: Create contract on plan-basic (coupon should NOT apply)
+    req:
+      /contracts:
+        post:
+          body:
+            application/json:
+              account_id: "acc-coupon-002"
+              plan_id: "plan-basic"
+              contract_type: "subscription"
+              billing_cycle: "monthly"
+              price: 5000
+    test: |
+      current.res.status == 201
+  - desc: Activate basic contract
+    req:
+      /contracts/{{ steps[4].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: "Invoice for basic: no coupon, discount=0, total=5000"
+    req:
+      /invoices/generate:
+        post:
+          body:
+            application/json:
+              contract_id: "{{ steps[4].res.body.id }}"
+              period_start: "2026-03-01"
+              period_end: "2026-04-01"
+    test: |
+      current.res.status == 201
+      && current.res.body.subtotal == 5000
+      && current.res.body.discount_amount == 0
+      && current.res.body.total == 5000
