@@ -31,7 +31,7 @@ linters:
     paths:
       - third_party$
       - builtin$
-      - examples$
+      - examples/
 
 formatters:
   enable:
@@ -42,7 +42,7 @@ formatters:
     paths:
       - third_party$
       - builtin$
-      - examples$
+      - examples/
 
 issues:
   max-issues-per-linter: 50
