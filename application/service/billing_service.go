@@ -5,7 +5,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"math/big"
 	"time"
 
@@ -29,14 +28,6 @@ type BillingConfig struct {
 // BillingServiceOption configures optional dependencies of BillingService.
 type BillingServiceOption func(*BillingService)
 
-// WithBillingLogger sets a structured logger for the BillingService.
-// If not provided, slog.Default() is used.
-func WithBillingLogger(l *slog.Logger) BillingServiceOption {
-	return func(s *BillingService) {
-		s.logger = l
-	}
-}
-
 // WithCreditRepo sets the credit repository used for credit application.
 func WithCreditRepo(repo credit.Repository) BillingServiceOption {
 	return func(s *BillingService) {
@@ -56,12 +47,11 @@ type BillingService struct {
 	registry     *plugin.Registry
 	config       BillingConfig
 	clock        shared.Clock
-	logger       *slog.Logger
 }
 
 // NewBillingService creates a new BillingService.
 // Required dependencies are positional arguments; optional dependencies
-// (logger, credit repository) are provided via BillingServiceOption.
+// (credit repository) are provided via BillingServiceOption.
 func NewBillingService(
 	contractRepo contract.Repository,
 	invoiceRepo invoice.Repository,
@@ -87,9 +77,6 @@ func NewBillingService(
 	}
 	for _, opt := range opts {
 		opt(s)
-	}
-	if s.logger == nil {
-		s.logger = slog.Default()
 	}
 	return s
 }

@@ -76,13 +76,13 @@ func NewPaymentService(
 	opts ...PaymentServiceOption,
 ) *PaymentService {
 	s := &PaymentService{
-		gateway:     gateway,
-		paymentRepo: paymentRepo,
-		invoiceRepo: invoiceRepo,
+		gateway:      gateway,
+		paymentRepo:  paymentRepo,
+		invoiceRepo:  invoiceRepo,
 		contractRepo: contractRepo,
-		eventStore:  eventStore,
-		registry:    registry,
-		clock:       clock,
+		eventStore:   eventStore,
+		registry:     registry,
+		clock:        clock,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -163,6 +163,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		for _, hook := range s.registry.GetOnPaymentFailedHooks() {
 			if hookErr := hook.OnPaymentFailed(failCtx, err); hookErr != nil {
 				s.logger.Warn("OnPaymentFailed hook failed",
+					"paymentID", failedPayment.ID(),
 					"invoiceID", invoiceID,
 					"error", hookErr,
 				)
