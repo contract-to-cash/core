@@ -105,8 +105,8 @@ type Invoice struct {
     discountAmount  shared.Money     // Total discount applied
     taxAmount       shared.Money     // Total tax
     total           shared.Money     // subtotal - discount + tax
-    appliedCredit   shared.Money     // Credit consumed from ledger
-    amountDue       shared.Money     // total - appliedCredit
+    appliedBalance   shared.Money     // Credit consumed from ledger
+    amountDue       shared.Money     // total - appliedBalance
     billingPeriod   shared.DateRange
     dueDate         time.Time
     status          InvoiceStatus
@@ -199,12 +199,12 @@ shared.NewAccountID()    // AccountID
 FIFO-based credit system for handling prorations, cancellation credits, and adjustments:
 
 ```go
-type CreditEntry struct {
-    id              shared.CreditEntryID
+type BalanceEntry struct {
+    id              shared.BalanceEntryID
     accountID       shared.AccountID
     originalAmount  shared.Money
     remainingAmount shared.Money
-    reason          CreditReason  // proration, cancellation, manual_adjustment, etc.
+    reason          BalanceReason  // proration, cancellation, manual_adjustment, etc.
     expiresAt       *time.Time
 }
 ```

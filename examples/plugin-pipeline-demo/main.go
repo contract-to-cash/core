@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/application/service"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
@@ -41,7 +41,7 @@ func main() {
 	eventStore := inmemory.NewInMemoryEventStore(clock)
 	contractRepo := inmemory.NewInMemoryContractRepository(eventStore, clock)
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
 	priceRepo := inmemory.NewInMemoryPriceRepository()
 	productRepo := inmemory.NewInMemoryProductRepository()
@@ -109,11 +109,11 @@ func main() {
 
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo,
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 
 	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())

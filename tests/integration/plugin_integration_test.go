@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/contract-to-cash/core/application/service"
-	"github.com/contract-to-cash/core/domain/credit"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -73,7 +73,7 @@ func TestMultipleDiscountPlugins(t *testing.T) {
 	contractRepo := inmemory.NewInMemoryContractRepository(eventStore, clock)
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	registry := plugin.NewRegistry()
 
 	// Plugin A: 5% discount, priority=100 (higher priority, runs first)
@@ -103,12 +103,12 @@ func TestMultipleDiscountPlugins(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 
 	price := moneyJPY(10000)
@@ -151,7 +151,7 @@ func TestPluginImplementsMultipleHooks(t *testing.T) {
 	contractRepo := inmemory.NewInMemoryContractRepository(eventStore, clock)
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	priceRepo := inmemory.NewInMemoryPriceRepository()
 	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
@@ -168,12 +168,12 @@ func TestPluginImplementsMultipleHooks(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 
 	price := moneyJPY(5000)

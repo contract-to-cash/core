@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/application/service"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
@@ -138,7 +138,7 @@ func TestSubscriptionBillingFlow(t *testing.T) {
 	contractRepo := inmemory.NewInMemoryContractRepository(eventStore, clock)
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	priceRepo := inmemory.NewInMemoryPriceRepository()
 	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
@@ -147,12 +147,12 @@ func TestSubscriptionBillingFlow(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 
 	price := moneyJPY(5000)
@@ -192,7 +192,7 @@ func TestBillingWithDiscountAndTax(t *testing.T) {
 	contractRepo := inmemory.NewInMemoryContractRepository(eventStore, clock)
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	priceRepo := inmemory.NewInMemoryPriceRepository()
 	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
@@ -213,12 +213,12 @@ func TestBillingWithDiscountAndTax(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 
 	price := moneyJPY(10000)
@@ -251,7 +251,7 @@ func TestDiscountCapGuard(t *testing.T) {
 	contractRepo := inmemory.NewInMemoryContractRepository(eventStore, clock)
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	priceRepo := inmemory.NewInMemoryPriceRepository()
 	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
@@ -271,12 +271,12 @@ func TestDiscountCapGuard(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 
 	price := moneyJPY(1000)
@@ -308,7 +308,7 @@ func TestBillingWithCreditApplication(t *testing.T) {
 	contractRepo := inmemory.NewInMemoryContractRepository(eventStore, clock)
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	priceRepo := inmemory.NewInMemoryPriceRepository()
 	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
@@ -317,26 +317,26 @@ func TestBillingWithCreditApplication(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 
 	price := moneyJPY(5000)
 	agg := createActiveContractWithPrice(t, ctx, clock, contractRepo, priceRepo, price)
 
 	// Create a credit entry of 2000 JPY for the same account
-	creditEntry := credit.NewCreditEntry(
+	creditEntry := balance.NewBalanceEntry(
 		shared.AccountID("acc-001"),
 		moneyJPY(2000),
-		credit.CreditReasonManualAdjustment,
+		balance.BalanceReasonManualAdjustment,
 		clock.Now(),
 	)
-	if err := creditRepo.Save(ctx, creditEntry); err != nil {
-		t.Fatalf("failed to save credit entry: %v", err)
+	if err := balanceRepo.Save(ctx, creditEntry); err != nil {
+		t.Fatalf("failed to save balance entry: %v", err)
 	}
 
 	inv, err := svc.GenerateInvoice(ctx, agg.ContractID(), agg.CurrentPeriod())
@@ -347,8 +347,8 @@ func TestBillingWithCreditApplication(t *testing.T) {
 	// total = 5000 (no discount/tax)
 	assertMoneyEquals(t, "total", inv.Total(), 5000)
 
-	// appliedCredit = 2000
-	assertMoneyEquals(t, "appliedCredit", inv.AppliedCredit(), 2000)
+	// appliedBalance = 2000
+	assertMoneyEquals(t, "appliedBalance", inv.AppliedBalance(), 2000)
 
 	// amountDue = 5000 - 2000 = 3000
 	assertMoneyEquals(t, "amountDue", inv.AmountDue(), 3000)

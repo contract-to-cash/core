@@ -14,7 +14,7 @@ github.com/contract-to-cash/core/
 │   ├── contract/        # Contract aggregate (event-sourced)
 │   ├── invoice/         # Invoice entity
 │   ├── payment/         # Payment entity
-│   ├── credit/          # Credit ledger entries
+│   ├── balance/          # Credit ledger entries
 │   ├── usage/           # Usage records and summaries
 │   ├── pricing/         # Price entity and pricing models
 │   ├── product/         # Product entity

@@ -59,7 +59,7 @@ Suspension billing behaviors:
 agg.Cancel("customer request", metadata)
 ```
 
-When configured with `CreditPolicyLedger`, unused days are credited to the account's credit ledger. These credits are automatically applied (FIFO) on future invoices.
+When configured with `BalancePolicyLedger`, unused days are credited to the account's credit ledger. These credits are automatically applied (FIFO) on future invoices.
 
 ## Key Takeaways
 

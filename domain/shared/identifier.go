@@ -33,18 +33,18 @@ type ProductID string
 // PriceID identifies a price.
 type PriceID string
 
-// CreditEntryID identifies a credit entry.
-type CreditEntryID string
+// BalanceEntryID identifies a balance entry (account credit/debit).
+type BalanceEntryID string
 
-func (id AccountID) String() string     { return string(id) }
-func (id ContractID) String() string    { return string(id) }
-func (id InvoiceID) String() string     { return string(id) }
-func (id PaymentID) String() string     { return string(id) }
-func (id UsageRecordID) String() string { return string(id) }
-func (id PlanID) String() string        { return string(id) }
-func (id ProductID) String() string     { return string(id) }
-func (id PriceID) String() string       { return string(id) }
-func (id CreditEntryID) String() string { return string(id) }
+func (id AccountID) String() string      { return string(id) }
+func (id ContractID) String() string     { return string(id) }
+func (id InvoiceID) String() string      { return string(id) }
+func (id PaymentID) String() string      { return string(id) }
+func (id UsageRecordID) String() string  { return string(id) }
+func (id PlanID) String() string         { return string(id) }
+func (id ProductID) String() string      { return string(id) }
+func (id PriceID) String() string        { return string(id) }
+func (id BalanceEntryID) String() string { return string(id) }
 
 func generateULID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
@@ -75,8 +75,8 @@ func NewProductID() ProductID { return ProductID(generateULID()) }
 // NewPriceID generates a new unique PriceID.
 func NewPriceID() PriceID { return PriceID(generateULID()) }
 
-// NewCreditEntryID generates a new unique CreditEntryID.
-func NewCreditEntryID() CreditEntryID { return CreditEntryID(generateULID()) }
+// NewBalanceEntryID generates a new unique BalanceEntryID.
+func NewBalanceEntryID() BalanceEntryID { return BalanceEntryID(generateULID()) }
 
 // GenerateID generates a new unique ID string (for event IDs etc.).
 func GenerateID() string {

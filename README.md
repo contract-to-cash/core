@@ -37,7 +37,7 @@ import (
 
     "github.com/contract-to-cash/core/application/service"
     "github.com/contract-to-cash/core/domain/contract"
-    "github.com/contract-to-cash/core/domain/credit"
+    "github.com/contract-to-cash/core/domain/balance"
     "github.com/contract-to-cash/core/domain/pricing"
     "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/eventstore"
@@ -54,7 +54,7 @@ func main() {
     es := inmemory.NewInMemoryEventStore(clock)
     contractRepo := inmemory.NewInMemoryContractRepository(es, clock)
     invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
-    creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+    balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
     usageRepo := inmemory.NewInMemoryUsageRepository()
     priceRepo := inmemory.NewInMemoryPriceRepository()
     productRepo := inmemory.NewInMemoryProductRepository()
@@ -84,8 +84,8 @@ func main() {
 
     // Generate invoice (¥3,000 + 10% tax = ¥3,300)
     bs := service.NewBillingService(
-        contractRepo, invoiceRepo, usageRepo, creditRepo,
-        credit.CreditConfig{}, priceRepo, productRepo, registry,
+        contractRepo, invoiceRepo, usageRepo, balanceRepo,
+        credit.BalanceConfig{}, priceRepo, productRepo, registry,
         service.BillingConfig{DaysUntilDue: 30}, clock,
     )
     inv, _ := bs.GenerateInvoice(ctx, cID, agg.CurrentPeriod())
@@ -115,7 +115,7 @@ domain/           # Entities, value objects, aggregates (zero dependencies)
 ├── contract/     # Event-sourced contract aggregate
 ├── invoice/      # Invoice entity
 ├── payment/      # Payment entity
-├── credit/       # Credit ledger
+├── balance/       # Credit ledger
 ├── usage/        # Usage records
 ├── pricing/      # Immutable Price entity, pricing models
 ├── product/      # Product entity

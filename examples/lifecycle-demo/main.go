@@ -15,8 +15,8 @@ import (
 
 	"github.com/contract-to-cash/core/application/port"
 	"github.com/contract-to-cash/core/application/service"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
@@ -34,7 +34,7 @@ func main() {
 	contractRepo := inmemory.NewInMemoryContractRepository(eventStore, clock)
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	paymentRepo := inmemory.NewInMemoryPaymentRepository()
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
 	priceRepo := inmemory.NewInMemoryPriceRepository()
 	productRepo := inmemory.NewInMemoryProductRepository()
@@ -105,11 +105,11 @@ func main() {
 	clock.Advance(16 * 24 * time.Hour) // May 1
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo,
-		credit.CreditConfig{DowngradePolicy: credit.CreditPolicyLedger, CancellationPolicy: credit.CreditPolicyLedger},
+		balance.BalanceConfig{DowngradePolicy: balance.BalancePolicyLedger, CancellationPolicy: balance.BalancePolicyLedger},
 		priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {
@@ -154,15 +154,15 @@ func main() {
 	printStep("6. Contract Resumed", "Back to active on %s", clock.Now().Format("2006-01-02"))
 
 	// ── 7. Issue credits ──
-	credit1 := credit.NewCreditEntry(accountID, moneyJPY(1000), credit.CreditReasonGoodwill, clock.Now())
-	must("save credit1", creditRepo.Save(ctx, credit1))
+	balance1 := balance.NewBalanceEntry(accountID, moneyJPY(1000), balance.BalanceReasonGoodwill, clock.Now())
+	must("save balance1", balanceRepo.Save(ctx, balance1))
 
 	clock.Advance(time.Hour)
-	credit2 := credit.NewCreditEntry(accountID, moneyJPY(500), credit.CreditReasonProration, clock.Now())
-	must("save credit2", creditRepo.Save(ctx, credit2))
+	balance2 := balance.NewBalanceEntry(accountID, moneyJPY(500), balance.BalanceReasonProration, clock.Now())
+	must("save balance2", balanceRepo.Save(ctx, balance2))
 
-	printStep("7. Credits Issued",
-		"Credit 1: ¥1,000 (goodwill)\n     Credit 2: ¥500 (proration)\n     Total credits: ¥1,500")
+	printStep("7. Balance Entries Issued",
+		"Balance 1: ¥1,000 (goodwill)\n     Balance 2: ¥500 (proration)\n     Total balance: ¥1,500")
 
 	// ── 8. Generate next invoice - credits applied FIFO ──
 	clock.Advance(15 * 24 * time.Hour) // July 1
@@ -173,12 +173,12 @@ func main() {
 	if err != nil {
 		fatal("generate invoice 2", err)
 	}
-	printStep("8. Second Invoice (Credits Applied FIFO)",
-		"Subtotal=¥%s, Tax=¥%s, Total=¥%s\n     Applied Credit=¥%s (FIFO: goodwill first, then proration)\n     Amount Due=¥%s",
+	printStep("8. Second Invoice (Balance Applied FIFO)",
+		"Subtotal=¥%s, Tax=¥%s, Total=¥%s\n     Applied Balance=¥%s (FIFO: goodwill first, then proration)\n     Amount Due=¥%s",
 		inv2.Subtotal().Amount().RatString(),
 		inv2.TaxAmount().Amount().RatString(),
 		inv2.Total().Amount().RatString(),
-		inv2.AppliedCredit().Amount().RatString(),
+		inv2.AppliedBalance().Amount().RatString(),
 		inv2.AmountDue().Amount().RatString())
 
 	// ── 9. Cancel contract ──

@@ -130,7 +130,7 @@ func NewBillingModule(db *sql.DB, gateway port.PaymentGateway) *BillingModule {
     contractRepo := NewPostgresContractRepository(db, eventStore, clock)
     invoiceRepo := NewPostgresInvoiceRepository(db, clock)
     paymentRepo := NewPostgresPaymentRepository(db)
-    creditRepo := NewPostgresCreditRepository(db, clock)
+    balanceRepo := NewPostgresCreditRepository(db, clock)
     usageRepo := NewPostgresUsageRepository(db)
     priceRepo := NewPostgresPriceRepository(db)
     productRepo := NewPostgresProductRepository(db)
@@ -142,10 +142,10 @@ func NewBillingModule(db *sql.DB, gateway port.PaymentGateway) *BillingModule {
     registry.InitializeAll(ctx, configs)
 
     billingService := service.NewBillingService(
-        contractRepo, invoiceRepo, usageRepo, creditRepo,
-        credit.CreditConfig{
-            DowngradePolicy:    credit.CreditPolicyLedger,
-            CancellationPolicy: credit.CreditPolicyLedger,
+        contractRepo, invoiceRepo, usageRepo, balanceRepo,
+        credit.BalanceConfig{
+            DowngradePolicy:    credit.BalancePolicyLedger,
+            CancellationPolicy: credit.BalancePolicyLedger,
         },
         priceRepo, productRepo, registry,
         service.BillingConfig{DaysUntilDue: 30},

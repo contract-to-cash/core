@@ -6,31 +6,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/contract-to-cash/core/domain/credit"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
 func TestFindAvailable_FIFOAndExcludesExpired(t *testing.T) {
 	now := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	clock := shared.FixedClock{FixedTime: now}
-	repo := NewInMemoryCreditRepository(clock)
+	repo := NewInMemoryBalanceRepository(clock)
 	ctx := context.Background()
 	accountID := shared.NewAccountID()
 
 	jpy := shared.CurrencyJPY
 
 	// Create entries at different times.
-	entry1 := credit.NewCreditEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(1000), jpy), credit.CreditReasonGoodwill, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
-	entry2 := credit.NewCreditEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(2000), jpy), credit.CreditReasonGoodwill, time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC))
-	entry3 := credit.NewCreditEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(500), jpy), credit.CreditReasonGoodwill, time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC))
+	entry1 := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(1000), jpy), balance.BalanceReasonGoodwill, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	entry2 := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(2000), jpy), balance.BalanceReasonGoodwill, time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC))
+	entry3 := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(500), jpy), balance.BalanceReasonGoodwill, time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC))
 
 	// entry3 is expired (we'll use SetExpiresAt if available, otherwise we create a fully consumed one)
 	// Since CreditEntry doesn't have a public setter for expiresAt, we create a consumed entry instead.
 	// Actually, let's create an entry that is fully consumed.
-	entryConsumed := credit.NewCreditEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(100), jpy), credit.CreditReasonGoodwill, time.Date(2025, 4, 1, 0, 0, 0, 0, time.UTC))
+	entryConsumed := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(100), jpy), balance.BalanceReasonGoodwill, time.Date(2025, 4, 1, 0, 0, 0, 0, time.UTC))
 	_, _ = entryConsumed.Consume(shared.NewMoney(new(big.Rat).SetInt64(100), jpy))
 
-	for _, e := range []*credit.CreditEntry{entry1, entry2, entry3, entryConsumed} {
+	for _, e := range []*balance.BalanceEntry{entry1, entry2, entry3, entryConsumed} {
 		if err := repo.Save(ctx, e); err != nil {
 			t.Fatalf("Save failed: %v", err)
 		}
@@ -61,22 +61,22 @@ func TestFindAvailable_FIFOAndExcludesExpired(t *testing.T) {
 func TestGetBalance(t *testing.T) {
 	now := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	clock := shared.FixedClock{FixedTime: now}
-	repo := NewInMemoryCreditRepository(clock)
+	repo := NewInMemoryBalanceRepository(clock)
 	ctx := context.Background()
 	accountID := shared.NewAccountID()
 	jpy := shared.CurrencyJPY
 
-	entry1 := credit.NewCreditEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(1000), jpy), credit.CreditReasonGoodwill, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
-	entry2 := credit.NewCreditEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(2000), jpy), credit.CreditReasonGoodwill, time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC))
+	entry1 := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(1000), jpy), balance.BalanceReasonGoodwill, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	entry2 := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(2000), jpy), balance.BalanceReasonGoodwill, time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC))
 
 	// Consume part of entry1.
 	_, _ = entry1.Consume(shared.NewMoney(new(big.Rat).SetInt64(300), jpy))
 
 	// Fully consume a third entry.
-	entryConsumed := credit.NewCreditEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(500), jpy), credit.CreditReasonGoodwill, time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC))
+	entryConsumed := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(500), jpy), balance.BalanceReasonGoodwill, time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC))
 	_, _ = entryConsumed.Consume(shared.NewMoney(new(big.Rat).SetInt64(500), jpy))
 
-	for _, e := range []*credit.CreditEntry{entry1, entry2, entryConsumed} {
+	for _, e := range []*balance.BalanceEntry{entry1, entry2, entryConsumed} {
 		if err := repo.Save(ctx, e); err != nil {
 			t.Fatalf("Save failed: %v", err)
 		}

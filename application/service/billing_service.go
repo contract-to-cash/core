@@ -9,8 +9,9 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/contract-to-cash/core/application/tx"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/product"
@@ -37,26 +38,35 @@ func WithBillingLogger(l *slog.Logger) BillingServiceOption {
 	}
 }
 
-// WithCreditRepo sets the credit repository used for credit application.
-func WithCreditRepo(repo credit.Repository) BillingServiceOption {
+// WithBalanceRepo sets the credit repository used for credit application.
+func WithBalanceRepo(repo balance.Repository) BillingServiceOption {
 	return func(s *BillingService) {
-		s.creditRepo = repo
+		s.balanceRepo = repo
+	}
+}
+
+// WithBillingTxManager sets the transaction manager for the BillingService.
+// If not provided, a NoopTxManager is used (no transaction wrapping).
+func WithBillingTxManager(tm tx.TxManager) BillingServiceOption {
+	return func(s *BillingService) {
+		s.txManager = tm
 	}
 }
 
 // BillingService orchestrates the invoice generation flow.
 type BillingService struct {
-	contractRepo contract.Repository
-	invoiceRepo  invoice.Repository
-	usageRepo    usage.Repository
-	creditRepo   credit.Repository
-	creditConfig credit.CreditConfig
-	priceRepo    pricing.PriceRepository
-	productRepo  product.Repository
-	registry     *plugin.Registry
-	config       BillingConfig
-	clock        shared.Clock
-	logger       *slog.Logger // FIXME: not yet used; wired for future logging (#26)
+	contractRepo  contract.Repository
+	invoiceRepo   invoice.Repository
+	usageRepo     usage.Repository
+	balanceRepo   balance.Repository
+	balanceConfig balance.BalanceConfig
+	priceRepo     pricing.PriceRepository
+	productRepo   product.Repository
+	registry      *plugin.Registry
+	config        BillingConfig
+	clock         shared.Clock
+	logger        *slog.Logger
+	txManager     tx.TxManager
 }
 
 // NewBillingService creates a new BillingService.
@@ -66,7 +76,7 @@ func NewBillingService(
 	contractRepo contract.Repository,
 	invoiceRepo invoice.Repository,
 	usageRepo usage.Repository,
-	creditConfig credit.CreditConfig,
+	balanceConfig balance.BalanceConfig,
 	priceRepo pricing.PriceRepository,
 	productRepo product.Repository,
 	registry *plugin.Registry,
@@ -75,21 +85,28 @@ func NewBillingService(
 	opts ...BillingServiceOption,
 ) *BillingService {
 	s := &BillingService{
-		contractRepo: contractRepo,
-		invoiceRepo:  invoiceRepo,
-		usageRepo:    usageRepo,
-		creditConfig: creditConfig,
-		priceRepo:    priceRepo,
-		productRepo:  productRepo,
-		registry:     registry,
-		config:       config,
-		clock:        clock,
+		contractRepo:  contractRepo,
+		invoiceRepo:   invoiceRepo,
+		usageRepo:     usageRepo,
+		balanceConfig: balanceConfig,
+		priceRepo:     priceRepo,
+		productRepo:   productRepo,
+		registry:      registry,
+		config:        config,
+		clock:         clock,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
+	}
+	if s.txManager == nil {
+		s.txManager = tx.NewNoopTxManager(tx.Repos{
+			Contracts: contractRepo,
+			Invoices:  invoiceRepo,
+			Balances:  s.balanceRepo,
+		})
 	}
 	return s
 }
@@ -204,61 +221,74 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	// Step 9: Generate invoice ID upfront (needed for CreditApplication records)
 	invoiceID := shared.NewInvoiceID()
 
-	// Step 10: Apply credits (FIFO, skip expired) - only if creditRepo is not nil
-	appliedCredit := shared.Zero(currency)
-	if s.creditRepo != nil {
-		appliedCredit, err = s.applyCredits(ctx, agg.AccountID(), invoiceID, total, currency)
-		if err != nil {
-			return nil, fmt.Errorf("failed to apply credits: %w", err)
+	// Steps 10-14: All writes are atomic within a transaction.
+	// Credit reads (FindAvailable) must also be inside the transaction to ensure
+	// optimistic locking correctness — the read that captures the version and
+	// the conditional write (WHERE version = ?) share the same tx boundary.
+	var inv *invoice.Invoice
+	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+		// Step 10: Apply credits (FIFO, skip expired) - uses transactional credit repo
+		appliedBalance := shared.Zero(currency)
+		if repos.Balances != nil {
+			var balanceErr error
+			appliedBalance, balanceErr = s.applyBalances(txCtx, repos.Balances, agg.AccountID(), invoiceID, total, currency)
+			if balanceErr != nil {
+				return fmt.Errorf("failed to apply credits: %w", balanceErr)
+			}
 		}
-	}
 
-	// Step 11: Calculate amount due
-	amountDue, err := total.Subtract(appliedCredit)
+		// Step 11: Calculate amount due
+		amountDue, amtErr := total.Subtract(appliedBalance)
+		if amtErr != nil {
+			return fmt.Errorf("failed to calculate amount due: %w", amtErr)
+		}
+
+		// Step 12: Create invoice
+		now := s.clock.Now()
+		dueDate := now.AddDate(0, 0, s.config.DaysUntilDue)
+
+		invOpts := []invoice.InvoiceOption{
+			invoice.WithStatus(invoice.InvoiceStatusDraft),
+			invoice.WithBillingPeriod(billingPeriod),
+			invoice.WithDueDate(dueDate),
+			invoice.WithAppliedBalance(appliedBalance),
+			invoice.WithAmountDue(amountDue),
+			invoice.WithIssueDate(now),
+		}
+		if len(lineItems) > 0 {
+			invOpts = append(invOpts, invoice.WithLineItems(lineItems))
+		}
+		if agg.PaymentMethodID() != nil {
+			invOpts = append(invOpts, invoice.WithPaymentMethodID(agg.PaymentMethodID()))
+		}
+
+		inv = invoice.NewInvoice(
+			invoiceID,
+			agg.AccountID(),
+			contractID,
+			subtotal,
+			totalDiscount,
+			totalTax,
+			invOpts...,
+		)
+		calcCtx.SetInvoice(inv)
+
+		// Step 13: AfterCalculation (InvoiceLifecycleHooks)
+		for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
+			if hookErr := hook.AfterCalculation(calcCtx, inv); hookErr != nil {
+				return fmt.Errorf("AfterCalculation hook error: %w", hookErr)
+			}
+		}
+
+		// Step 14: Save invoice (uses transactional invoice repo)
+		if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {
+			return fmt.Errorf("failed to save invoice: %w", saveErr)
+		}
+
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to calculate amount due: %w", err)
-	}
-
-	// Step 12: Create invoice
-	now := s.clock.Now()
-	dueDate := now.AddDate(0, 0, s.config.DaysUntilDue)
-
-	opts := []invoice.InvoiceOption{
-		invoice.WithStatus(invoice.InvoiceStatusDraft),
-		invoice.WithBillingPeriod(billingPeriod),
-		invoice.WithDueDate(dueDate),
-		invoice.WithAppliedCredit(appliedCredit),
-		invoice.WithAmountDue(amountDue),
-		invoice.WithIssueDate(now),
-	}
-	if len(lineItems) > 0 {
-		opts = append(opts, invoice.WithLineItems(lineItems))
-	}
-	if agg.PaymentMethodID() != nil {
-		opts = append(opts, invoice.WithPaymentMethodID(agg.PaymentMethodID()))
-	}
-
-	inv := invoice.NewInvoice(
-		invoiceID,
-		agg.AccountID(),
-		contractID,
-		subtotal,
-		totalDiscount,
-		totalTax,
-		opts...,
-	)
-	calcCtx.SetInvoice(inv)
-
-	// Step 13: AfterCalculation (InvoiceLifecycleHooks)
-	for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
-		if err := hook.AfterCalculation(calcCtx, inv); err != nil {
-			return nil, fmt.Errorf("AfterCalculation hook error: %w", err)
-		}
-	}
-
-	// Step 14: Save invoice
-	if err := s.invoiceRepo.Save(ctx, inv); err != nil {
-		return nil, fmt.Errorf("failed to save invoice: %w", err)
+		return nil, err
 	}
 
 	return inv, nil
@@ -369,17 +399,14 @@ func (s *BillingService) calculateUsageCharge(
 	return totalCharge, lineItems, nil
 }
 
-// applyCredits applies available credits to the total using FIFO order.
+// applyBalances applies available credits to the total using FIFO order.
 // Expired credits are skipped. For each consumed credit, a CreditApplication
 // record is created as an audit trail.
-//
-// NOTE: The caller is responsible for providing transactional guarantees.
-// If a persistence error occurs mid-loop, some credits may be saved while
-// others are not. In production, wrap this in a database transaction.
-func (s *BillingService) applyCredits(ctx context.Context, accountID shared.AccountID, invoiceID shared.InvoiceID, total shared.Money, currency shared.Currency) (shared.Money, error) {
-	credits, err := s.creditRepo.FindAvailable(ctx, accountID, currency)
+// The balanceRepo parameter is the transaction-scoped repository from RunInTx.
+func (s *BillingService) applyBalances(ctx context.Context, balanceRepo balance.Repository, accountID shared.AccountID, invoiceID shared.InvoiceID, total shared.Money, currency shared.Currency) (shared.Money, error) {
+	credits, err := balanceRepo.FindAvailable(ctx, accountID, currency)
 	if err != nil {
-		return shared.Zero(currency), fmt.Errorf("failed to find available credits: %w", err)
+		return shared.Zero(currency), fmt.Errorf("failed to find available balances: %w", err)
 	}
 
 	now := s.clock.Now()
@@ -388,8 +415,8 @@ func (s *BillingService) applyCredits(ctx context.Context, accountID shared.Acco
 
 	// Collect all mutations so we can persist them together
 	type creditMutation struct {
-		entry       *credit.CreditEntry
-		application *credit.CreditApplication
+		entry       *balance.BalanceEntry
+		application *balance.BalanceApplication
 	}
 	var mutations []creditMutation
 
@@ -425,23 +452,24 @@ func (s *BillingService) applyCredits(ctx context.Context, accountID shared.Acco
 
 		mutations = append(mutations, creditMutation{
 			entry: entry,
-			application: &credit.CreditApplication{
-				ID:            shared.GenerateID(),
-				CreditEntryID: entry.ID(),
-				InvoiceID:     invoiceID,
-				Amount:        consumed,
-				AppliedAt:     now,
+			application: &balance.BalanceApplication{
+				ID:             shared.GenerateID(),
+				BalanceEntryID: entry.ID(),
+				InvoiceID:      invoiceID,
+				Amount:         consumed,
+				AppliedAt:      now,
 			},
 		})
 	}
 
-	// Persist all mutations: credit entries and application records
+	// Persist all mutations: credit entries and application records.
+	// All saves participate in the caller's transaction boundary.
 	for _, m := range mutations {
-		if err := s.creditRepo.Save(ctx, m.entry); err != nil {
-			return shared.Zero(currency), fmt.Errorf("failed to save credit entry: %w", err)
+		if err := balanceRepo.Save(ctx, m.entry); err != nil {
+			return shared.Zero(currency), fmt.Errorf("failed to save balance entry: %w", err)
 		}
-		if err := s.creditRepo.SaveApplication(ctx, m.application); err != nil {
-			return shared.Zero(currency), fmt.Errorf("failed to save credit application: %w", err)
+		if err := balanceRepo.SaveApplication(ctx, m.application); err != nil {
+			return shared.Zero(currency), fmt.Errorf("failed to save balance application: %w", err)
 		}
 	}
 
