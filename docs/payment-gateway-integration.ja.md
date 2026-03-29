@@ -371,10 +371,10 @@ paymentService := service.NewPaymentService(
     paymentRepo,
     invoiceRepo,
     contractRepo,     // 支払い方法フォールバック解決用
-    customerGateway,  // 顧客デフォルト支払い方法の参照用
     eventStore,
     pluginRegistry,
     clock,
+    service.WithCustomerGateway(customerGateway),  // オプション: 顧客デフォルト支払い方法の参照用
 )
 
 // 4. Webhook処理のセットアップ

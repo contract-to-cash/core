@@ -43,6 +43,21 @@ func (p *failingOnRefundPlugin) OnRefund(_ *plugin.PaymentContext, _ shared.Mone
 	return p.err
 }
 
+type failingOnPaymentFailedPlugin struct {
+	err error
+}
+
+func (p *failingOnPaymentFailedPlugin) Name() string { return "failing-on-payment-failed" }
+func (p *failingOnPaymentFailedPlugin) Version() string { return "1.0.0" }
+func (p *failingOnPaymentFailedPlugin) Initialize(_ context.Context, _ plugin.Config) error {
+	return nil
+}
+func (p *failingOnPaymentFailedPlugin) Shutdown(_ context.Context) error { return nil }
+func (p *failingOnPaymentFailedPlugin) Priority() int                    { return 500 }
+func (p *failingOnPaymentFailedPlugin) OnPaymentFailed(_ *plugin.PaymentContext, _ error) error {
+	return p.err
+}
+
 func TestWithPaymentLogger_AfterChargeHookError_LogsWarning(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -189,6 +204,49 @@ func TestWithPaymentLogger_OnRefundHookError_LogsWarning(t *testing.T) {
 		t.Fatal("expected log output for OnRefund hook error, got nothing")
 	}
 	if !containsAll(logOutput, "OnRefund hook failed", "refund notification failed") {
+		t.Errorf("log output missing expected content, got: %s", logOutput)
+	}
+}
+
+func TestWithPaymentLogger_OnPaymentFailedHookError_LogsWarning(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+
+	hookErr := fmt.Errorf("payment failure notification failed")
+	failPlugin := &failingOnPaymentFailedPlugin{err: hookErr}
+	registry := plugin.NewRegistry()
+	_ = registry.Register(failPlugin)
+
+	svc := NewPaymentService(
+		&mockGateway{failCharge: true},
+		&mockPaymentRepo{},
+		invRepo,
+		nil,
+		&mockEventStore{},
+		registry,
+		clock,
+		WithPaymentLogger(logger),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-fail-001",
+	})
+	if err == nil {
+		t.Fatal("expected error for failed charge")
+	}
+
+	logOutput := buf.String()
+	if logOutput == "" {
+		t.Fatal("expected log output for OnPaymentFailed hook error, got nothing")
+	}
+	if !containsAll(logOutput, "OnPaymentFailed hook failed", "payment failure notification failed") {
 		t.Errorf("log output missing expected content, got: %s", logOutput)
 	}
 }

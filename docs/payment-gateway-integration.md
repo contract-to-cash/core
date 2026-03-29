@@ -446,10 +446,10 @@ paymentService := service.NewPaymentService(
     paymentRepo,
     invoiceRepo,
     contractRepo,     // for payment method fallback resolution
-    customerGateway,  // for customer default payment method lookup
     eventStore,
     pluginRegistry,
     clock,
+    service.WithCustomerGateway(customerGateway),  // optional: customer default payment method lookup
 )
 
 // 4. Set up webhook processing
