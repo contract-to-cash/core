@@ -61,10 +61,10 @@ paymentService := service.NewPaymentService(
     paymentRepo,   // payment.Repository
     invoiceRepo,   // invoice.Repository
     contractRepo,  // contract.Repository
-    customerGateway, // port.CustomerGateway (optional, for fallback resolution)
     eventStore,    // eventstore.Store
     registry,      // *plugin.Registry
     clock,         // shared.Clock
+    service.WithCustomerGateway(customerGateway), // optional: fallback resolution
 )
 ```
 

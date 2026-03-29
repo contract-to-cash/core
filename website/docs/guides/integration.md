@@ -155,7 +155,7 @@ func NewBillingModule(db *sql.DB, gateway port.PaymentGateway) *BillingModule {
 
     paymentService := service.NewPaymentService(
         gateway, paymentRepo, invoiceRepo, contractRepo,
-        nil, eventStore, registry, clock,
+        eventStore, registry, clock,
     )
 
     return &BillingModule{

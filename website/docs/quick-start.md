@@ -116,7 +116,7 @@ func main() {
 ```go
     paymentService := service.NewPaymentService(
         myGateway, paymentRepo, invoiceRepo, contractRepo,
-        nil, eventStore, registry, clock,
+        eventStore, registry, clock,
     )
 
     inv.Finalize()
