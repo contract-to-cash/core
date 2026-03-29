@@ -5,6 +5,7 @@ package projection
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/contract-to-cash/core/eventstore"
@@ -25,6 +26,7 @@ type ProjectionOptions struct {
 	BatchSize  int
 	MaxRetries int
 	RetryDelay time.Duration
+	Logger     *slog.Logger
 }
 
 // ProjectionService manages projectors and processes events from the event store.
@@ -36,6 +38,9 @@ type ProjectionService struct {
 
 // NewProjectionService creates a new ProjectionService.
 func NewProjectionService(eventStore eventstore.Store, options ProjectionOptions) *ProjectionService {
+	if options.Logger == nil {
+		options.Logger = slog.Default()
+	}
 	return &ProjectionService{
 		eventStore: eventStore,
 		options:    options,
@@ -64,11 +69,15 @@ func (s *ProjectionService) Start(ctx context.Context) error {
 				return nil
 			}
 			if err := s.ProcessEvent(ctx, event); err != nil {
-				// In sync mode, return the error; otherwise continue
 				if s.options.SyncMode {
 					return err
 				}
-				// In async mode, we log and continue (caller can wrap with logging)
+				s.options.Logger.Error("projection failed in async mode",
+					"eventType", event.Type,
+					"streamID", event.StreamID,
+					"version", event.Version,
+					"error", err,
+				)
 			}
 		}
 	}

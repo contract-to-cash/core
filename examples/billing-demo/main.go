@@ -83,7 +83,7 @@ func main() {
 
 	// ── 5. Generate an invoice via BillingService ──
 	billingService := service.NewBillingService(
-		contractRepo, invoiceRepo, usageRepo, creditRepo,
+		contractRepo, invoiceRepo, usageRepo,
 		credit.CreditConfig{
 			DowngradePolicy:    credit.CreditPolicyLedger,
 			CancellationPolicy: credit.CreditPolicyLedger,
@@ -92,6 +92,7 @@ func main() {
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
+		service.WithCreditRepo(creditRepo),
 	)
 
 	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
@@ -115,7 +116,7 @@ func main() {
 	// ── 7. Process payment via PaymentService ──
 	gateway := &mockPaymentGateway{}
 	paymentService := service.NewPaymentService(
-		gateway, paymentRepo, invoiceRepo, contractRepo, nil, eventStore, registry, clock,
+		gateway, paymentRepo, invoiceRepo, contractRepo, eventStore, registry, clock,
 	)
 
 	payment, err := paymentService.ProcessPayment(ctx, inv.ID(), service.ProcessPaymentInput{

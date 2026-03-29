@@ -104,11 +104,12 @@ func main() {
 	// ── 4. Generate first invoice and pay ──
 	clock.Advance(16 * 24 * time.Hour) // May 1
 	billingService := service.NewBillingService(
-		contractRepo, invoiceRepo, usageRepo, creditRepo,
+		contractRepo, invoiceRepo, usageRepo,
 		credit.CreditConfig{DowngradePolicy: credit.CreditPolicyLedger, CancellationPolicy: credit.CreditPolicyLedger},
 		priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
+		service.WithCreditRepo(creditRepo),
 	)
 	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {
@@ -118,7 +119,7 @@ func main() {
 	must("save invoice", invoiceRepo.Save(ctx, inv))
 
 	gateway := &mockPaymentGateway{}
-	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, contractRepo, nil, eventStore, registry, clock)
+	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, contractRepo, eventStore, registry, clock)
 	pmt, err := paymentService.ProcessPayment(ctx, inv.ID(), service.ProcessPaymentInput{
 		PaymentMethodID: "pm-visa-1234",
 		Amount:          inv.AmountDue(),

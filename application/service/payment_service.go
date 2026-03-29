@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/contract-to-cash/core/application/port"
 	"github.com/contract-to-cash/core/domain/contract"
@@ -30,6 +31,24 @@ type RefundInput struct {
 	Reason port.RefundReason
 }
 
+// PaymentServiceOption configures optional dependencies of PaymentService.
+type PaymentServiceOption func(*PaymentService)
+
+// WithPaymentLogger sets a structured logger for the PaymentService.
+// If not provided, slog.Default() is used.
+func WithPaymentLogger(l *slog.Logger) PaymentServiceOption {
+	return func(s *PaymentService) {
+		s.logger = l
+	}
+}
+
+// WithCustomerGateway sets the customer gateway used for payment method resolution.
+func WithCustomerGateway(gw port.CustomerGateway) PaymentServiceOption {
+	return func(s *PaymentService) {
+		s.customerGateway = gw
+	}
+}
+
 // PaymentService orchestrates payment processing with plugin hooks.
 type PaymentService struct {
 	gateway         port.PaymentGateway
@@ -40,29 +59,38 @@ type PaymentService struct {
 	eventStore      eventstore.Store
 	registry        *plugin.Registry
 	clock           shared.Clock
+	logger          *slog.Logger
 }
 
 // NewPaymentService creates a new PaymentService.
+// Required dependencies are positional arguments; optional dependencies
+// (logger, customer gateway) are provided via PaymentServiceOption.
 func NewPaymentService(
 	gateway port.PaymentGateway,
 	paymentRepo payment.Repository,
 	invoiceRepo invoice.Repository,
 	contractRepo contract.Repository,
-	customerGateway port.CustomerGateway,
 	eventStore eventstore.Store,
 	registry *plugin.Registry,
 	clock shared.Clock,
+	opts ...PaymentServiceOption,
 ) *PaymentService {
-	return &PaymentService{
-		gateway:         gateway,
-		paymentRepo:     paymentRepo,
-		invoiceRepo:     invoiceRepo,
-		contractRepo:    contractRepo,
-		customerGateway: customerGateway,
-		eventStore:      eventStore,
-		registry:        registry,
-		clock:           clock,
+	s := &PaymentService{
+		gateway:     gateway,
+		paymentRepo: paymentRepo,
+		invoiceRepo: invoiceRepo,
+		contractRepo: contractRepo,
+		eventStore:  eventStore,
+		registry:    registry,
+		clock:       clock,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	if s.logger == nil {
+		s.logger = slog.Default()
+	}
+	return s
 }
 
 // ProcessPayment charges an invoice and records the payment.
@@ -169,8 +197,11 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	successCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetAfterChargeHooks() {
 		if hookErr := hook.AfterCharge(successCtx); hookErr != nil {
-			// TODO: inject logger and log hookErr
-			_ = hookErr
+			s.logger.Warn("AfterCharge hook failed",
+				"paymentID", p.ID(),
+				"invoiceID", invoiceID,
+				"error", hookErr,
+			)
 		}
 	}
 
@@ -219,7 +250,11 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 	// Load invoice for PaymentContext (best-effort; hooks still fire with nil invoice)
 	inv, invErr := s.invoiceRepo.FindByID(ctx, p.InvoiceID())
 	if invErr != nil {
-		// TODO: inject logger and log invErr
+		s.logger.Warn("invoice lookup failed on refund",
+			"paymentID", paymentID,
+			"invoiceID", p.InvoiceID(),
+			"error", invErr,
+		)
 		inv = nil
 	}
 
@@ -227,7 +262,10 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 	refundCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetOnRefundHooks() {
 		if err := hook.OnRefund(refundCtx, refundAmount); err != nil {
-			_ = err // log but don't fail
+			s.logger.Warn("OnRefund hook failed",
+				"paymentID", paymentID,
+				"error", err,
+			)
 		}
 	}
 

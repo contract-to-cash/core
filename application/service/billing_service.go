@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"time"
 
@@ -25,6 +26,24 @@ type BillingConfig struct {
 	CollectionMethod string
 }
 
+// BillingServiceOption configures optional dependencies of BillingService.
+type BillingServiceOption func(*BillingService)
+
+// WithBillingLogger sets a structured logger for the BillingService.
+// If not provided, slog.Default() is used.
+func WithBillingLogger(l *slog.Logger) BillingServiceOption {
+	return func(s *BillingService) {
+		s.logger = l
+	}
+}
+
+// WithCreditRepo sets the credit repository used for credit application.
+func WithCreditRepo(repo credit.Repository) BillingServiceOption {
+	return func(s *BillingService) {
+		s.creditRepo = repo
+	}
+}
+
 // BillingService orchestrates the invoice generation flow.
 type BillingService struct {
 	contractRepo contract.Repository
@@ -37,26 +56,28 @@ type BillingService struct {
 	registry     *plugin.Registry
 	config       BillingConfig
 	clock        shared.Clock
+	logger       *slog.Logger
 }
 
 // NewBillingService creates a new BillingService.
+// Required dependencies are positional arguments; optional dependencies
+// (logger, credit repository) are provided via BillingServiceOption.
 func NewBillingService(
 	contractRepo contract.Repository,
 	invoiceRepo invoice.Repository,
 	usageRepo usage.Repository,
-	creditRepo credit.Repository,
 	creditConfig credit.CreditConfig,
 	priceRepo pricing.PriceRepository,
 	productRepo product.Repository,
 	registry *plugin.Registry,
 	config BillingConfig,
 	clock shared.Clock,
+	opts ...BillingServiceOption,
 ) *BillingService {
-	return &BillingService{
+	s := &BillingService{
 		contractRepo: contractRepo,
 		invoiceRepo:  invoiceRepo,
 		usageRepo:    usageRepo,
-		creditRepo:   creditRepo,
 		creditConfig: creditConfig,
 		priceRepo:    priceRepo,
 		productRepo:  productRepo,
@@ -64,6 +85,13 @@ func NewBillingService(
 		config:       config,
 		clock:        clock,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	if s.logger == nil {
+		s.logger = slog.Default()
+	}
+	return s
 }
 
 // billableStatuses defines which contract statuses allow invoice generation.
