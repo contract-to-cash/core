@@ -29,8 +29,8 @@ type CreditEntry struct {
 	description     string
 	expiresAt       *time.Time
 	createdAt       time.Time
-	version       int // incremented on each Consume(); used for optimistic locking
-	loadedVersion int // version at load time; compared on save for conflict detection
+	version         int // incremented on each Consume(); used for optimistic locking
+	loadedVersion   int // version at load time; compared on save for conflict detection
 }
 
 // NewCreditEntry creates a new CreditEntry with the given parameters.

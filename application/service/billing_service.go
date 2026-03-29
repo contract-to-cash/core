@@ -64,9 +64,9 @@ type BillingService struct {
 	productRepo  product.Repository
 	registry     *plugin.Registry
 	config       BillingConfig
-	clock     shared.Clock
-	logger    *slog.Logger
-	txManager tx.TxManager
+	clock        shared.Clock
+	logger       *slog.Logger
+	txManager    tx.TxManager
 }
 
 // NewBillingService creates a new BillingService.

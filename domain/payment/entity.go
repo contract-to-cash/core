@@ -75,10 +75,10 @@ func (p *Payment) Amount() shared.Money         { return p.amount }
 func (p *Payment) Method() PaymentMethod        { return p.method }
 func (p *Payment) Status() PaymentStatus        { return p.status }
 func (p *Payment) GatewayTransactionID() string { return p.gatewayTransactionID }
-func (p *Payment) IdempotencyKey() string        { return p.idempotencyKey }
-func (p *Payment) RefundedAmount() shared.Money  { return p.refundedAmount }
-func (p *Payment) FailureReason() *string        { return p.failureReason }
-func (p *Payment) ProcessedAt() time.Time        { return p.processedAt }
+func (p *Payment) IdempotencyKey() string       { return p.idempotencyKey }
+func (p *Payment) RefundedAmount() shared.Money { return p.refundedAmount }
+func (p *Payment) FailureReason() *string       { return p.failureReason }
+func (p *Payment) ProcessedAt() time.Time       { return p.processedAt }
 
 // SetIdempotencyKey sets the idempotency key for deduplication.
 func (p *Payment) SetIdempotencyKey(key string) { p.idempotencyKey = key }
