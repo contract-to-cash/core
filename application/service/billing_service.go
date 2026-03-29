@@ -56,7 +56,7 @@ type BillingService struct {
 	registry     *plugin.Registry
 	config       BillingConfig
 	clock        shared.Clock
-	logger       *slog.Logger //nolint:unused // FIXME: not yet used; wired for future logging (#26)
+	logger       *slog.Logger // FIXME: not yet used; wired for future logging (#26)
 }
 
 // NewBillingService creates a new BillingService.
