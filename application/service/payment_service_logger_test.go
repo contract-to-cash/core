@@ -47,7 +47,7 @@ type failingOnPaymentFailedPlugin struct {
 	err error
 }
 
-func (p *failingOnPaymentFailedPlugin) Name() string { return "failing-on-payment-failed" }
+func (p *failingOnPaymentFailedPlugin) Name() string    { return "failing-on-payment-failed" }
 func (p *failingOnPaymentFailedPlugin) Version() string { return "1.0.0" }
 func (p *failingOnPaymentFailedPlugin) Initialize(_ context.Context, _ plugin.Config) error {
 	return nil

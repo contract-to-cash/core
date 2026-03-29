@@ -151,4 +151,3 @@ func TestProjectionService_NoLogger_NoPanic(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-
