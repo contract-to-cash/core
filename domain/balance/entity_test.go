@@ -1,4 +1,4 @@
-package credit
+package balance
 
 import (
 	"math/big"
@@ -8,11 +8,11 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
-func TestNewCreditEntry(t *testing.T) {
+func TestNewBalanceEntry(t *testing.T) {
 	accountID := shared.NewAccountID()
 	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
 
-	entry := NewCreditEntry(accountID, amount, CreditReasonProration, time.Now())
+	entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
 
 	if entry.ID() == "" {
 		t.Error("expected non-empty ID")
@@ -26,27 +26,27 @@ func TestNewCreditEntry(t *testing.T) {
 	if entry.RemainingAmount().Amount().Cmp(amount.Amount()) != 0 {
 		t.Errorf("expected remaining amount %s, got %s", amount.Amount().RatString(), entry.RemainingAmount().Amount().RatString())
 	}
-	if entry.Reason() != CreditReasonProration {
-		t.Errorf("expected reason %s, got %s", CreditReasonProration, entry.Reason())
+	if entry.Reason() != BalanceReasonProration {
+		t.Errorf("expected reason %s, got %s", BalanceReasonProration, entry.Reason())
 	}
 	if entry.CreatedAt().IsZero() {
 		t.Error("expected non-zero createdAt")
 	}
 }
 
-func TestCreditEntry_IsExpired(t *testing.T) {
+func TestBalanceEntry_IsExpired(t *testing.T) {
 	accountID := shared.NewAccountID()
 	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
 
 	t.Run("no expiration", func(t *testing.T) {
-		entry := NewCreditEntry(accountID, amount, CreditReasonGoodwill, time.Now())
+		entry := NewBalanceEntry(accountID, amount, BalanceReasonGoodwill, time.Now())
 		if entry.IsExpired(time.Now()) {
 			t.Error("expected not expired when no expiresAt is set")
 		}
 	})
 
 	t.Run("not yet expired", func(t *testing.T) {
-		entry := NewCreditEntry(accountID, amount, CreditReasonGoodwill, time.Now())
+		entry := NewBalanceEntry(accountID, amount, BalanceReasonGoodwill, time.Now())
 		future := time.Now().Add(24 * time.Hour)
 		entry.expiresAt = &future
 		if entry.IsExpired(time.Now()) {
@@ -55,7 +55,7 @@ func TestCreditEntry_IsExpired(t *testing.T) {
 	})
 
 	t.Run("expired", func(t *testing.T) {
-		entry := NewCreditEntry(accountID, amount, CreditReasonGoodwill, time.Now())
+		entry := NewBalanceEntry(accountID, amount, BalanceReasonGoodwill, time.Now())
 		past := time.Now().Add(-24 * time.Hour)
 		entry.expiresAt = &past
 		if !entry.IsExpired(time.Now()) {
@@ -64,10 +64,10 @@ func TestCreditEntry_IsExpired(t *testing.T) {
 	})
 }
 
-func TestCreditEntry_Version(t *testing.T) {
+func TestBalanceEntry_Version(t *testing.T) {
 	accountID := shared.NewAccountID()
 	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
-	entry := NewCreditEntry(accountID, amount, CreditReasonProration, time.Now())
+	entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
 
 	if entry.Version() != 0 {
 		t.Errorf("expected initial version 0, got %d", entry.Version())
@@ -79,10 +79,10 @@ func TestCreditEntry_Version(t *testing.T) {
 	}
 }
 
-func TestCreditEntry_Consume_IncrementsVersion(t *testing.T) {
+func TestBalanceEntry_Consume_IncrementsVersion(t *testing.T) {
 	accountID := shared.NewAccountID()
 	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
-	entry := NewCreditEntry(accountID, amount, CreditReasonProration, time.Now())
+	entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
 
 	consumeAmt := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
 	_, err := entry.Consume(consumeAmt)
@@ -102,10 +102,10 @@ func TestCreditEntry_Consume_IncrementsVersion(t *testing.T) {
 	}
 }
 
-func TestCreditEntry_Consume_ZeroAmountDoesNotIncrementVersion(t *testing.T) {
+func TestBalanceEntry_Consume_ZeroAmountDoesNotIncrementVersion(t *testing.T) {
 	accountID := shared.NewAccountID()
 	amount := shared.NewMoney(new(big.Rat).SetInt64(0), shared.CurrencyJPY)
-	entry := NewCreditEntry(accountID, amount, CreditReasonProration, time.Now())
+	entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
 
 	consumeAmt := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
 	consumed, err := entry.Consume(consumeAmt)
@@ -120,12 +120,12 @@ func TestCreditEntry_Consume_ZeroAmountDoesNotIncrementVersion(t *testing.T) {
 	}
 }
 
-func TestCreditEntry_IsFullyConsumed(t *testing.T) {
+func TestBalanceEntry_IsFullyConsumed(t *testing.T) {
 	accountID := shared.NewAccountID()
 
 	t.Run("not consumed", func(t *testing.T) {
 		amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
-		entry := NewCreditEntry(accountID, amount, CreditReasonProration, time.Now())
+		entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
 		if entry.IsFullyConsumed() {
 			t.Error("expected not fully consumed")
 		}
@@ -133,7 +133,7 @@ func TestCreditEntry_IsFullyConsumed(t *testing.T) {
 
 	t.Run("fully consumed", func(t *testing.T) {
 		amount := shared.NewMoney(new(big.Rat).SetInt64(0), shared.CurrencyJPY)
-		entry := NewCreditEntry(accountID, amount, CreditReasonProration, time.Now())
+		entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
 		if !entry.IsFullyConsumed() {
 			t.Error("expected fully consumed when amount is zero")
 		}

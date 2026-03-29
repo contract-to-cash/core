@@ -91,7 +91,7 @@ type Invoice struct {
 	taxAmount       shared.Money
 	discountAmount  shared.Money
 	total           shared.Money
-	appliedCredit   shared.Money
+	appliedBalance  shared.Money
 	amountDue       shared.Money
 	paidAmount      shared.Money
 	balance         shared.Money
@@ -129,10 +129,10 @@ func WithDueDate(t time.Time) InvoiceOption {
 	}
 }
 
-// WithAppliedCredit sets the applied credit amount and recalculates amountDue and balance.
-func WithAppliedCredit(c shared.Money) InvoiceOption {
+// WithAppliedBalance sets the applied balance amount and recalculates amountDue and balance.
+func WithAppliedBalance(c shared.Money) InvoiceOption {
 	return func(inv *Invoice) {
-		inv.appliedCredit = c
+		inv.appliedBalance = c
 		amountDue, err := inv.total.Subtract(c)
 		if err == nil {
 			inv.amountDue = amountDue
@@ -191,7 +191,7 @@ func NewInvoice(
 		discountAmount: discountAmount,
 		taxAmount:      taxAmount,
 		total:          total,
-		appliedCredit:  shared.Zero(subtotal.Currency()),
+		appliedBalance: shared.Zero(subtotal.Currency()),
 		amountDue:      total,
 		paidAmount:     shared.Zero(subtotal.Currency()),
 		balance:        total,
@@ -286,7 +286,7 @@ func (inv *Invoice) Subtotal() shared.Money          { return inv.subtotal }
 func (inv *Invoice) TaxAmount() shared.Money         { return inv.taxAmount }
 func (inv *Invoice) DiscountAmount() shared.Money    { return inv.discountAmount }
 func (inv *Invoice) Total() shared.Money             { return inv.total }
-func (inv *Invoice) AppliedCredit() shared.Money     { return inv.appliedCredit }
+func (inv *Invoice) AppliedBalance() shared.Money    { return inv.appliedBalance }
 func (inv *Invoice) AmountDue() shared.Money         { return inv.amountDue }
 func (inv *Invoice) PaidAmount() shared.Money        { return inv.paidAmount }
 func (inv *Invoice) Balance() shared.Money           { return inv.balance }

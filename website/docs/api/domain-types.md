@@ -62,7 +62,7 @@ ULID-based identifiers:
 | `PriceID` | `NewPriceID()` |
 | `PlanID` | `NewPlanID()` |
 | `UsageRecordID` | `NewUsageRecordID()` |
-| `CreditEntryID` | `NewCreditEntryID()` |
+| `BalanceEntryID` | `NewBalanceEntryID()` |
 
 ### Clock
 
@@ -226,7 +226,7 @@ inv := invoice.NewInvoice(id, accountID, contractID, subtotal, discountAmount, t
     invoice.WithBillingPeriod(period),
     invoice.WithDueDate(dueDate),
     invoice.WithStatus(invoice.InvoiceStatusDraft),
-    invoice.WithAppliedCredit(creditAmount),
+    invoice.WithAppliedBalance(creditAmount),
     invoice.WithAmountDue(amountDue),
     invoice.WithAllowPartialPayment(false),
     invoice.WithInvoiceNumber("INV-2026-001"),
@@ -243,7 +243,7 @@ inv.Subtotal() shared.Money
 inv.DiscountAmount() shared.Money
 inv.TaxAmount() shared.Money
 inv.Total() shared.Money
-inv.AppliedCredit() shared.Money
+inv.AppliedBalance() shared.Money
 inv.AmountDue() shared.Money
 inv.PaidAmount() shared.Money
 inv.Balance() shared.Money
@@ -332,10 +332,10 @@ pricing.TieredPrice{Tiers: []pricing.PriceTier{...}, Mode: pricing.TieredPricing
 ## Credit
 
 ```go
-import "github.com/contract-to-cash/core/domain/credit"
+import "github.com/contract-to-cash/core/domain/balance"
 ```
 
-**Reason constants**: `CreditReasonProration`, `CreditReasonCancellation`, `CreditReasonManualAdjustment`, `CreditReasonRefundConversion`, `CreditReasonGoodwill`
+**Reason constants**: `BalanceReasonProration`, `BalanceReasonCancellation`, `BalanceReasonManualAdjustment`, `BalanceReasonRefundConversion`, `BalanceReasonGoodwill`
 
 ```go
 entry.IsExpired(now time.Time) bool

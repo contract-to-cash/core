@@ -187,7 +187,7 @@ type InvoiceMetrics struct {
     TotalOverdue      shared.Money `json:"total_overdue"`      // 延滞額
 
     // クレジット充当
-    TotalAppliedCredit shared.Money `json:"total_applied_credit"` // クレジット充当合計
+    TotalAppliedBalance shared.Money `json:"total_applied_balance"` // クレジット充当合計
     InvoicesWithCredit int64        `json:"invoices_with_credit"` // クレジット充当された請求書数
 
     // 平均

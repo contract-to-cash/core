@@ -68,7 +68,7 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 		WithStatus(InvoiceStatusFinalized),
 		WithBillingPeriod(period),
 		WithDueDate(due),
-		WithAppliedCredit(credit),
+		WithAppliedBalance(credit),
 		WithAllowPartialPayment(true),
 		WithInvoiceNumber("INV-2026-001"),
 	)
@@ -82,8 +82,8 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 	if inv.BillingPeriod().Start() != start {
 		t.Errorf("expected billing period start %v, got %v", start, inv.BillingPeriod().Start())
 	}
-	if inv.AppliedCredit().Amount().Cmp(big.NewRat(100, 1)) != 0 {
-		t.Errorf("expected applied credit 100, got %s", inv.AppliedCredit().Amount().RatString())
+	if inv.AppliedBalance().Amount().Cmp(big.NewRat(100, 1)) != 0 {
+		t.Errorf("expected applied balance 100, got %s", inv.AppliedBalance().Amount().RatString())
 	}
 	if !inv.AllowPartialPay() {
 		t.Error("expected allowPartialPay to be true")

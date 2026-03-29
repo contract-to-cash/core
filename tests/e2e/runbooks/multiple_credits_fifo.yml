@@ -1,4 +1,4 @@
-desc: "Credits FIFO: credits exceed invoice total, verify partial consumption across 2 invoices"
+desc: "Credits FIFO: balances exceed invoice total, verify partial consumption across 2 invoices"
 runners:
   req: "{{ env.BASE_URL }}"
 steps:
@@ -23,9 +23,9 @@ steps:
             application/json: {}
     test: |
       current.res.status == 200
-  - desc: "Add credit A: 1500 JPY"
+  - desc: "Add balance A: 1500 JPY"
     req:
-      /credits:
+      /balances:
         post:
           body:
             application/json:
@@ -34,9 +34,9 @@ steps:
               reason: "goodwill"
     test: |
       current.res.status == 201
-  - desc: "Add credit B: 1000 JPY"
+  - desc: "Add balance B: 1000 JPY"
     req:
-      /credits:
+      /balances:
         post:
           body:
             application/json:
@@ -45,7 +45,7 @@ steps:
               reason: "proration"
     test: |
       current.res.status == 201
-  - desc: "1st invoice (2000): credits cover it all (1500+500 from B), amount_due=0"
+  - desc: "1st invoice (2000): balances cover it all (1500+500 from B), amount_due=0"
     req:
       /invoices/generate:
         post:
@@ -57,7 +57,7 @@ steps:
     test: |
       current.res.status == 201
       && current.res.body.total == 2000
-      && current.res.body.applied_credit == 2000
+      && current.res.body.applied_balance == 2000
       && current.res.body.amount_due == 0
   - desc: Advance clock and renew for next period
     req:
@@ -76,7 +76,7 @@ steps:
             application/json: {}
     test: |
       current.res.status == 200
-  - desc: "2nd invoice (2000): only 500 credit remaining from B, amount_due=1500"
+  - desc: "2nd invoice (2000): only 500 balance remaining from B, amount_due=1500"
     req:
       /invoices/generate:
         post:
@@ -88,5 +88,5 @@ steps:
     test: |
       current.res.status == 201
       && current.res.body.total == 2000
-      && current.res.body.applied_credit == 500
+      && current.res.body.applied_balance == 500
       && current.res.body.amount_due == 1500

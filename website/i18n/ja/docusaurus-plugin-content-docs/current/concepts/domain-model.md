@@ -104,8 +104,8 @@ type Invoice struct {
     discountAmount  shared.Money     // 適用された割引合計
     taxAmount       shared.Money     // 税額合計
     total           shared.Money     // subtotal - discount + tax
-    appliedCredit   shared.Money     // クレジット台帳から消費されたクレジット
-    amountDue       shared.Money     // total - appliedCredit
+    appliedBalance   shared.Money     // クレジット台帳から消費されたクレジット
+    amountDue       shared.Money     // total - appliedBalance
     billingPeriod   shared.DateRange
     dueDate         time.Time
     status          InvoiceStatus
@@ -198,12 +198,12 @@ shared.NewAccountID()    // AccountID
 日割り計算、解約クレジット、調整処理のためのFIFOベースクレジットシステム：
 
 ```go
-type CreditEntry struct {
-    id              shared.CreditEntryID
+type BalanceEntry struct {
+    id              shared.BalanceEntryID
     accountID       shared.AccountID
     originalAmount  shared.Money
     remainingAmount shared.Money
-    reason          CreditReason  // proration, cancellation, manual_adjustmentなど
+    reason          BalanceReason  // proration, cancellation, manual_adjustmentなど
     expiresAt       *time.Time
 }
 ```

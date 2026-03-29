@@ -15,8 +15,8 @@ import (
 	"github.com/contract-to-cash/core/application/query"
 	"github.com/contract-to-cash/core/application/service"
 	"github.com/contract-to-cash/core/batch"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/pricing"
@@ -37,7 +37,7 @@ type testEnv struct {
 	invoiceRepo   *inmemory.InMemoryInvoiceRepository
 	paymentRepo   *inmemory.InMemoryPaymentRepository
 	usageRepo     *inmemory.InMemoryUsageRepository
-	creditRepo    *inmemory.InMemoryCreditRepository
+	balanceRepo   *inmemory.InMemoryBalanceRepository
 	priceRepo     *inmemory.InMemoryPriceRepository
 	productRepo   *inmemory.InMemoryProductRepository
 	registry      *plugin.Registry
@@ -123,7 +123,7 @@ func newTestEnv() *testEnv {
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	paymentRepo := inmemory.NewInMemoryPaymentRepository()
 	usageRepo := inmemory.NewInMemoryUsageRepository()
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	priceRepo := inmemory.NewInMemoryPriceRepository()
 	productRepo := inmemory.NewInMemoryProductRepository()
 	registry := plugin.NewRegistry()
@@ -131,9 +131,9 @@ func newTestEnv() *testEnv {
 
 	billingSvc := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo,
-		credit.CreditConfig{}, priceRepo, productRepo, registry,
+		balance.BalanceConfig{}, priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30}, clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 
 	paymentSvc := service.NewPaymentService(
@@ -150,7 +150,7 @@ func newTestEnv() *testEnv {
 		invoiceRepo:  invoiceRepo,
 		paymentRepo:  paymentRepo,
 		usageRepo:    usageRepo,
-		creditRepo:   creditRepo,
+		balanceRepo:  balanceRepo,
 		priceRepo:    priceRepo,
 		productRepo:  productRepo,
 		registry:     registry,
@@ -200,7 +200,7 @@ func registerHandlers(mux *http.ServeMux, env *testEnv) {
 	mux.HandleFunc("GET /payments/{id}", handleGetPayment(env))
 
 	// --- Credit ---
-	mux.HandleFunc("POST /credits", handleCreateCredit(env))
+	mux.HandleFunc("POST /balances", handleCreateBalance(env))
 
 	// --- Contract (additional) ---
 	mux.HandleFunc("POST /contracts/{id}/renew", handleRenewContract(env))
@@ -560,7 +560,7 @@ type invoiceResponse struct {
 	DiscountAmount int64  `json:"discount_amount"`
 	TaxAmount      int64  `json:"tax_amount"`
 	Total          int64  `json:"total"`
-	AppliedCredit  int64  `json:"applied_credit"`
+	AppliedBalance int64  `json:"applied_balance"`
 	AmountDue      int64  `json:"amount_due"`
 	PaidAmount     int64  `json:"paid_amount"`
 }
@@ -583,7 +583,7 @@ func invoiceToResponse(inv *invoice.Invoice) invoiceResponse {
 		DiscountAmount: moneyToInt64(inv.DiscountAmount()),
 		TaxAmount:      moneyToInt64(inv.TaxAmount()),
 		Total:          moneyToInt64(inv.Total()),
-		AppliedCredit:  moneyToInt64(inv.AppliedCredit()),
+		AppliedBalance: moneyToInt64(inv.AppliedBalance()),
 		AmountDue:      moneyToInt64(inv.AmountDue()),
 		PaidAmount:     moneyToInt64(inv.PaidAmount()),
 	}
@@ -780,7 +780,7 @@ func handleGetPayment(env *testEnv) http.HandlerFunc {
 
 // --- Credit handlers ---
 
-func handleCreateCredit(env *testEnv) http.HandlerFunc {
+func handleCreateBalance(env *testEnv) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			AccountID string `json:"account_id"`
@@ -792,13 +792,13 @@ func handleCreateCredit(env *testEnv) http.HandlerFunc {
 			return
 		}
 
-		entry := credit.NewCreditEntry(
+		entry := balance.NewBalanceEntry(
 			shared.AccountID(req.AccountID),
 			moneyJPY(req.Amount),
-			credit.CreditReason(req.Reason),
+			balance.BalanceReason(req.Reason),
 			env.clock.Now(),
 		)
-		if err := env.creditRepo.Save(r.Context(), entry); err != nil {
+		if err := env.balanceRepo.Save(r.Context(), entry); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}

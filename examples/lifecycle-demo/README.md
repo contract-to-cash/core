@@ -40,7 +40,7 @@ Applied Credit: ¥1,500
 Amount Due:     ¥1,800
 ```
 
-Credits are applied in FIFO order (oldest first), skipping expired entries. Each application creates an audit record (`CreditApplication`).
+Credits are applied in FIFO order (oldest first), skipping expired entries. Each application creates an audit record (`BalanceApplication`).
 
 ## Run
 

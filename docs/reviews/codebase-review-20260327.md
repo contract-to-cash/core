@@ -31,7 +31,7 @@ core/
 │   ├── payment/               #   支払いエンティティ・督促
 │   ├── pricing/               #   料金モデル（定額/従量/段階）
 │   ├── product/               #   商品エンティティ
-│   ├── credit/                #   クレジット管理
+│   ├── balance/                #   クレジット管理
 │   ├── usage/                 #   利用量記録
 │   └── shared/                #   共有値オブジェクト（Money, Clock等）
 ├── application/               # アプリケーション層
@@ -125,7 +125,7 @@ core/
 | eventstore | 66.7% | ★★☆ |
 | domain/invoice | 66.3% | ★★☆ |
 | plugin | 55.2% | ★☆☆ |
-| domain/credit | 47.8% | ★☆☆ |
+| domain/balance | 47.8% | ★☆☆ |
 | plugins/tax | 42.9% | ★☆☆ |
 | plugins/invoicecleanup | 42.1% | ★☆☆ |
 | domain/payment | 35.3% | ★☆☆ |
@@ -157,7 +157,7 @@ core/
 | # | カテゴリ | 内容 | 根拠 |
 |---|---------|------|------|
 | 8 | バリデーション | `Product.AddFeature/AddUsageMetric`に重複チェックがない | `domain/product/entity.go:92-100` — blindにappend。同名のfeature/metricが重複登録される |
-| 9 | 型安全性 | `CreditEntry.sourceType`が未型付きstring | `domain/credit/entity.go:27` — `CreditReason`はtyped stringだが`sourceType`はraw string。タイポが検出されない |
+| 9 | 型安全性 | `BalanceEntry.sourceType`が未型付きstring | `domain/balance/entity.go:27` — `BalanceReason`はtyped stringだが`sourceType`はraw string。タイポが検出されない |
 | 10 | 型安全性 | `UsageRecord.metricName`が未型付きstring | `domain/usage/entity.go:13` — `"api_calls"`と`"apiCalls"`が別メトリックとして扱われ、課金ミスにつながる |
 | 11 | テスト | `infrastructure/inmemory/` の7ファイルにテストなし | payment, usage, invoice, product, contract repository等。ただし統合テストで間接的に一部カバー |
 

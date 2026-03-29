@@ -37,7 +37,7 @@ import (
 
     "github.com/contract-to-cash/core/application/service"
     "github.com/contract-to-cash/core/domain/contract"
-    "github.com/contract-to-cash/core/domain/credit"
+    "github.com/contract-to-cash/core/domain/balance"
     "github.com/contract-to-cash/core/domain/pricing"
     "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/eventstore"
@@ -54,7 +54,7 @@ func main() {
     es := inmemory.NewInMemoryEventStore(clock)
     contractRepo := inmemory.NewInMemoryContractRepository(es, clock)
     invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
-    creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+    balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
     usageRepo := inmemory.NewInMemoryUsageRepository()
     priceRepo := inmemory.NewInMemoryPriceRepository()
     productRepo := inmemory.NewInMemoryProductRepository()
@@ -84,8 +84,8 @@ func main() {
 
     // 請求書生成（¥3,000 + 消費税10% = ¥3,300）
     bs := service.NewBillingService(
-        contractRepo, invoiceRepo, usageRepo, creditRepo,
-        credit.CreditConfig{}, priceRepo, productRepo, registry,
+        contractRepo, invoiceRepo, usageRepo, balanceRepo,
+        credit.BalanceConfig{}, priceRepo, productRepo, registry,
         service.BillingConfig{DaysUntilDue: 30}, clock,
     )
     inv, _ := bs.GenerateInvoice(ctx, cID, agg.CurrentPeriod())
@@ -115,7 +115,7 @@ domain/           # エンティティ、値オブジェクト、集約（依存
 ├── contract/     # イベントソース契約集約
 ├── invoice/      # 請求書エンティティ
 ├── payment/      # 支払いエンティティ
-├── credit/       # クレジット台帳
+├── balance/       # クレジット台帳
 ├── usage/        # 使用量レコード
 ├── pricing/      # 不変Priceエンティティ、価格モデル
 ├── product/      # Productエンティティ

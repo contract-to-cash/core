@@ -11,8 +11,8 @@ import (
 
 	"github.com/contract-to-cash/core/application/port"
 	"github.com/contract-to-cash/core/application/service"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
@@ -30,7 +30,7 @@ func main() {
 	contractRepo := inmemory.NewInMemoryContractRepository(eventStore, clock)
 	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
 	paymentRepo := inmemory.NewInMemoryPaymentRepository()
-	creditRepo := inmemory.NewInMemoryCreditRepository(clock)
+	balanceRepo := inmemory.NewInMemoryBalanceRepository(clock)
 	usageRepo := inmemory.NewInMemoryUsageRepository()
 	priceRepo := inmemory.NewInMemoryPriceRepository()
 	productRepo := inmemory.NewInMemoryProductRepository()
@@ -84,15 +84,15 @@ func main() {
 	// ── 5. Generate an invoice via BillingService ──
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo,
-		credit.CreditConfig{
-			DowngradePolicy:    credit.CreditPolicyLedger,
-			CancellationPolicy: credit.CreditPolicyLedger,
+		balance.BalanceConfig{
+			DowngradePolicy:    balance.BalancePolicyLedger,
+			CancellationPolicy: balance.BalancePolicyLedger,
 		},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
-		service.WithCreditRepo(creditRepo),
+		service.WithBalanceRepo(balanceRepo),
 	)
 
 	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())

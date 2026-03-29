@@ -1,4 +1,4 @@
-package credit
+package balance
 
 import (
 	"time"
@@ -6,24 +6,24 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
-// CreditReason describes why a credit was issued.
-type CreditReason string
+// BalanceReason describes why a credit was issued.
+type BalanceReason string
 
 const (
-	CreditReasonProration        CreditReason = "proration"
-	CreditReasonCancellation     CreditReason = "cancellation"
-	CreditReasonManualAdjustment CreditReason = "manual_adjustment"
-	CreditReasonRefundConversion CreditReason = "refund_conversion"
-	CreditReasonGoodwill         CreditReason = "goodwill"
+	BalanceReasonProration        BalanceReason = "proration"
+	BalanceReasonCancellation     BalanceReason = "cancellation"
+	BalanceReasonManualAdjustment BalanceReason = "manual_adjustment"
+	BalanceReasonRefundConversion BalanceReason = "refund_conversion"
+	BalanceReasonGoodwill         BalanceReason = "goodwill"
 )
 
-// CreditEntry represents a credit issued to an account.
-type CreditEntry struct {
-	id              shared.CreditEntryID
+// BalanceEntry represents a credit issued to an account.
+type BalanceEntry struct {
+	id              shared.BalanceEntryID
 	accountID       shared.AccountID
 	originalAmount  shared.Money
 	remainingAmount shared.Money
-	reason          CreditReason
+	reason          BalanceReason
 	sourceType      string
 	sourceID        string
 	description     string
@@ -33,11 +33,11 @@ type CreditEntry struct {
 	loadedVersion   int // version at load time; compared on save for conflict detection
 }
 
-// NewCreditEntry creates a new CreditEntry with the given parameters.
+// NewBalanceEntry creates a new BalanceEntry with the given parameters.
 // createdAt should be provided by the caller via Clock.Now().
-func NewCreditEntry(accountID shared.AccountID, amount shared.Money, reason CreditReason, createdAt time.Time) *CreditEntry {
-	return &CreditEntry{
-		id:              shared.NewCreditEntryID(),
+func NewBalanceEntry(accountID shared.AccountID, amount shared.Money, reason BalanceReason, createdAt time.Time) *BalanceEntry {
+	return &BalanceEntry{
+		id:              shared.NewBalanceEntryID(),
 		accountID:       accountID,
 		originalAmount:  amount,
 		remainingAmount: amount,
@@ -47,37 +47,37 @@ func NewCreditEntry(accountID shared.AccountID, amount shared.Money, reason Cred
 }
 
 // ID returns the credit entry ID.
-func (e *CreditEntry) ID() shared.CreditEntryID { return e.id }
+func (e *BalanceEntry) ID() shared.BalanceEntryID { return e.id }
 
 // AccountID returns the account ID.
-func (e *CreditEntry) AccountID() shared.AccountID { return e.accountID }
+func (e *BalanceEntry) AccountID() shared.AccountID { return e.accountID }
 
 // OriginalAmount returns the original credit amount.
-func (e *CreditEntry) OriginalAmount() shared.Money { return e.originalAmount }
+func (e *BalanceEntry) OriginalAmount() shared.Money { return e.originalAmount }
 
 // RemainingAmount returns the remaining credit amount.
-func (e *CreditEntry) RemainingAmount() shared.Money { return e.remainingAmount }
+func (e *BalanceEntry) RemainingAmount() shared.Money { return e.remainingAmount }
 
 // Reason returns the credit reason.
-func (e *CreditEntry) Reason() CreditReason { return e.reason }
+func (e *BalanceEntry) Reason() BalanceReason { return e.reason }
 
 // SourceType returns the source type.
-func (e *CreditEntry) SourceType() string { return e.sourceType }
+func (e *BalanceEntry) SourceType() string { return e.sourceType }
 
 // SourceID returns the source ID.
-func (e *CreditEntry) SourceID() string { return e.sourceID }
+func (e *BalanceEntry) SourceID() string { return e.sourceID }
 
 // Description returns the description.
-func (e *CreditEntry) Description() string { return e.description }
+func (e *BalanceEntry) Description() string { return e.description }
 
 // ExpiresAt returns the expiration time, or nil if no expiration.
-func (e *CreditEntry) ExpiresAt() *time.Time { return e.expiresAt }
+func (e *BalanceEntry) ExpiresAt() *time.Time { return e.expiresAt }
 
 // CreatedAt returns the creation time.
-func (e *CreditEntry) CreatedAt() time.Time { return e.createdAt }
+func (e *BalanceEntry) CreatedAt() time.Time { return e.createdAt }
 
 // IsExpired returns true if the credit has expired as of the given time.
-func (e *CreditEntry) IsExpired(now time.Time) bool {
+func (e *BalanceEntry) IsExpired(now time.Time) bool {
 	if e.expiresAt == nil {
 		return false
 	}
@@ -85,27 +85,27 @@ func (e *CreditEntry) IsExpired(now time.Time) bool {
 }
 
 // IsFullyConsumed returns true if the remaining amount is zero.
-func (e *CreditEntry) IsFullyConsumed() bool {
+func (e *BalanceEntry) IsFullyConsumed() bool {
 	return e.remainingAmount.IsZero()
 }
 
 // Version returns the current version for optimistic locking.
-func (e *CreditEntry) Version() int { return e.version }
+func (e *BalanceEntry) Version() int { return e.version }
 
 // SetVersion sets the version and records it as the loaded version.
 // Called by repository implementations after loading from persistence.
-func (e *CreditEntry) SetVersion(v int) {
+func (e *BalanceEntry) SetVersion(v int) {
 	e.version = v
 	e.loadedVersion = v
 }
 
 // LoadedVersion returns the version at the time the entity was loaded.
 // Repository implementations compare this against the stored version on save.
-func (e *CreditEntry) LoadedVersion() int { return e.loadedVersion }
+func (e *BalanceEntry) LoadedVersion() int { return e.loadedVersion }
 
 // Consume reduces the remaining amount by the given amount and increments the version.
 // Returns the actually consumed amount (may be less than requested if insufficient balance).
-func (e *CreditEntry) Consume(amount shared.Money) (shared.Money, error) {
+func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error) {
 	available := e.remainingAmount
 	consumed, err := available.Min(amount)
 	if err != nil {

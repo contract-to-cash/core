@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/product"
@@ -97,27 +97,27 @@ func (m *mockUsageRepo) GetRecords(_ context.Context, _ shared.ContractID, _ str
 	return nil, nil
 }
 
-type mockCreditRepo struct {
-	credits []*credit.CreditEntry
+type mockBalanceRepo struct {
+	credits []*balance.BalanceEntry
 }
 
-func (m *mockCreditRepo) Save(_ context.Context, _ *credit.CreditEntry) error { return nil }
-func (m *mockCreditRepo) FindByID(_ context.Context, _ shared.CreditEntryID) (*credit.CreditEntry, error) {
+func (m *mockBalanceRepo) Save(_ context.Context, _ *balance.BalanceEntry) error { return nil }
+func (m *mockBalanceRepo) FindByID(_ context.Context, _ shared.BalanceEntryID) (*balance.BalanceEntry, error) {
 	return nil, nil
 }
-func (m *mockCreditRepo) FindAvailable(_ context.Context, _ shared.AccountID, _ shared.Currency) ([]*credit.CreditEntry, error) {
+func (m *mockBalanceRepo) FindAvailable(_ context.Context, _ shared.AccountID, _ shared.Currency) ([]*balance.BalanceEntry, error) {
 	return m.credits, nil
 }
-func (m *mockCreditRepo) GetBalance(_ context.Context, _ shared.AccountID, _ shared.Currency) (shared.Money, error) {
+func (m *mockBalanceRepo) GetBalance(_ context.Context, _ shared.AccountID, _ shared.Currency) (shared.Money, error) {
 	return shared.Zero(shared.CurrencyJPY), nil
 }
-func (m *mockCreditRepo) SaveApplication(_ context.Context, _ *credit.CreditApplication) error {
+func (m *mockBalanceRepo) SaveApplication(_ context.Context, _ *balance.BalanceApplication) error {
 	return nil
 }
-func (m *mockCreditRepo) FindApplicationsByInvoice(_ context.Context, _ shared.InvoiceID) ([]*credit.CreditApplication, error) {
+func (m *mockBalanceRepo) FindApplicationsByInvoice(_ context.Context, _ shared.InvoiceID) ([]*balance.BalanceApplication, error) {
 	return nil, nil
 }
-func (m *mockCreditRepo) SaveRefund(_ context.Context, _ *credit.CreditRefund) error { return nil }
+func (m *mockBalanceRepo) SaveRefund(_ context.Context, _ *balance.BalanceRefund) error { return nil }
 
 type mockPriceRepo struct {
 	price *pricing.Price
@@ -216,7 +216,7 @@ func TestGenerateInvoice_SubscriptionBasic(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		invRepo,
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -256,7 +256,7 @@ func TestGenerateInvoice_DiscountCap(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		invRepo,
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		registry,
@@ -284,7 +284,7 @@ func TestGenerateInvoice_CreditNilSafe(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -298,8 +298,8 @@ func TestGenerateInvoice_CreditNilSafe(t *testing.T) {
 	}
 
 	// Applied credit should be zero
-	if !inv.AppliedCredit().IsZero() {
-		t.Errorf("expected zero applied credit, got %v", inv.AppliedCredit().Amount())
+	if !inv.AppliedBalance().IsZero() {
+		t.Errorf("expected zero applied balance, got %v", inv.AppliedBalance().Amount())
 	}
 }
 
@@ -308,20 +308,20 @@ func TestGenerateInvoice_WithCredits(t *testing.T) {
 	price := jpy(10000)
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
 
-	creditEntry := credit.NewCreditEntry(agg.AccountID(), jpy(3000), credit.CreditReasonGoodwill, clock.Now())
-	creditRepo := &mockCreditRepo{credits: []*credit.CreditEntry{creditEntry}}
+	creditEntry := balance.NewBalanceEntry(agg.AccountID(), jpy(3000), balance.BalanceReasonGoodwill, clock.Now())
+	balanceRepo := &mockBalanceRepo{credits: []*balance.BalanceEntry{creditEntry}}
 
 	svc := NewBillingService(
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
 		BillingConfig{DaysUntilDue: 30},
 		clock,
-		WithCreditRepo(creditRepo),
+		WithBalanceRepo(balanceRepo),
 	)
 
 	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
@@ -331,8 +331,8 @@ func TestGenerateInvoice_WithCredits(t *testing.T) {
 
 	// Applied credit should be 3000
 	expectedCredit := new(big.Rat).SetInt64(3000)
-	if inv.AppliedCredit().Amount().Cmp(expectedCredit) != 0 {
-		t.Errorf("expected applied credit 3000, got %v", inv.AppliedCredit().Amount())
+	if inv.AppliedBalance().Amount().Cmp(expectedCredit) != 0 {
+		t.Errorf("expected applied balance 3000, got %v", inv.AppliedBalance().Amount())
 	}
 
 	// Amount due should be 10000 - 3000 = 7000
@@ -359,7 +359,7 @@ func TestGenerateInvoice_InheritsContractPaymentMethod(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		invRepo,
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -387,7 +387,7 @@ func TestGenerateInvoice_NoPaymentMethodWhenContractHasNone(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		invRepo,
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -431,7 +431,7 @@ func newBillingSvcWithPrice(agg *contract.ContractAggregate, invRepo *mockInvoic
 		&mockContractRepo{agg: agg},
 		invRepo,
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -603,7 +603,7 @@ func TestCalculateSubtotal_BillingPeriodMismatch(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		&mockPriceRepo{price: priceEntity},
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -630,7 +630,7 @@ func TestCalculateSubtotal_SubscriptionUsesPriceEntity(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		&mockPriceRepo{price: priceEntity},
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -658,7 +658,7 @@ func TestCalculateSubtotal_OneTimeUsesPriceEntity(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		&mockPriceRepo{price: priceEntity},
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -700,7 +700,7 @@ func TestCalculateSubtotal_UsageBased_ViaProductAndPrice(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		usageRepo,
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		&mockPriceRepo{price: priceEntity},
 		&mockProductRepo{product: prod},
 		plugin.NewRegistry(),
@@ -744,7 +744,7 @@ func TestCalculateSubtotal_UsageBased_IncludedQuantityCoversAll(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		usageRepo,
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		&mockPriceRepo{price: priceEntity},
 		&mockProductRepo{product: prod},
 		plugin.NewRegistry(),
@@ -777,7 +777,7 @@ func TestGenerateInvoice_LineItemHasPriceID(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		invRepo,
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepoFor(priceEntity),
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -831,7 +831,7 @@ func TestCalculateSubtotal_EmptyPriceID(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		&mockPriceRepo{},
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -853,7 +853,7 @@ func TestCalculateSubtotal_PriceRepoError(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		&mockPriceRepo{err: fmt.Errorf("price not found")},
 		&mockProductRepo{},
 		plugin.NewRegistry(),
@@ -877,7 +877,7 @@ func TestCalculateUsageCharge_ProductRepoError(t *testing.T) {
 		&mockContractRepo{agg: agg},
 		&mockInvoiceRepo{},
 		&mockUsageRepo{},
-		credit.CreditConfig{},
+		balance.BalanceConfig{},
 		priceRepoFor(priceEntity),
 		&mockProductRepo{err: fmt.Errorf("product not found")},
 		plugin.NewRegistry(),

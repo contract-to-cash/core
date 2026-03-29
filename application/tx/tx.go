@@ -9,8 +9,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/payment"
 )
@@ -26,7 +26,7 @@ type Repos struct {
 	Contracts contract.Repository
 	Invoices  invoice.Repository
 	Payments  payment.Repository
-	Credits   credit.Repository
+	Balances  balance.Repository
 }
 
 // TxManager manages transaction boundaries.

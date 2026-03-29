@@ -143,7 +143,7 @@ type InvoiceID string
 type PaymentID string
 type UsageRecordID string
 type PlanID string
-type CreditEntryID string
+type BalanceEntryID string
 
 // ID生成ヘルパー
 func NewAccountID() AccountID     { return AccountID(generateULID()) }
@@ -179,10 +179,10 @@ type BillingInfo struct {
     Address      Address
     TaxID        string
     PaymentTerms int              // 支払い期限（日数）
-    CreditConfig *credit.CreditConfig // クレジット設定（nil = グローバルデフォルトを使用）
+    BalanceConfig *credit.BalanceConfig // クレジット設定（nil = グローバルデフォルトを使用）
 }
 // NOTE: credit パッケージ（セクション9）の import が必要
-// import "domain/credit"
+// import "domain/balance"
 
 type Address struct {
     Line1      string
@@ -417,8 +417,8 @@ type Invoice struct {
     taxAmount         shared.Money
     discountAmount    shared.Money
     total             shared.Money              // 割引・税込み合計
-    appliedCredit     shared.Money              // クレジット台帳から充当された金額
-    amountDue         shared.Money              // 実請求額（total - appliedCredit）
+    appliedBalance     shared.Money              // クレジット台帳から充当された金額
+    amountDue         shared.Money              // 実請求額（total - appliedBalance）
     paidAmount        shared.Money              // 入金済み金額
     balance           shared.Money              // 未払い残高（amountDue - paidAmount）
     status            InvoiceStatus
@@ -767,7 +767,7 @@ func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*
 }
 // 決済時の動作:
 //   アップグレード（Adjustment > 0）→ AdjustmentAmount のみ1回請求
-//   ダウングレード（Adjustment < 0）→ CreditPolicy に従って処理（後述）
+//   ダウングレード（Adjustment < 0）→ BalancePolicy に従って処理（後述）
 //   同額プラン変更（Adjustment = 0）→ 決済なし
 ```
 
@@ -785,33 +785,33 @@ func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*
 利用者がクレジットの扱いを設定できる。
 
 ```go
-// domain/credit/policy.go
+// domain/balance/policy.go
 package credit
 
-// CreditPolicy クレジット発生時のポリシー
-type CreditPolicy string
+// BalancePolicy クレジット発生時のポリシー
+type BalancePolicy string
 
 const (
-    // CreditPolicyLedger クレジット台帳に積み、次回以降の請求書で自動差引
-    CreditPolicyLedger CreditPolicy = "ledger"
+    // BalancePolicyLedger クレジット台帳に積み、次回以降の請求書で自動差引
+    BalancePolicyLedger BalancePolicy = "ledger"
 
-    // CreditPolicyRefund 即座に元の決済手段に返金
-    CreditPolicyRefund CreditPolicy = "refund"
+    // BalancePolicyRefund 即座に元の決済手段に返金
+    BalancePolicyRefund BalancePolicy = "refund"
 
-    // CreditPolicyNone クレジットを発生させない（差額は切り捨て）
-    CreditPolicyNone CreditPolicy = "none"
+    // BalancePolicyNone クレジットを発生させない（差額は切り捨て）
+    BalancePolicyNone BalancePolicy = "none"
 )
 
-// CreditConfig クレジット設定
+// BalanceConfig クレジット設定
 // Account.BillingInfo に含める。未設定の場合はグローバルデフォルトを使用。
-type CreditConfig struct {
+type BalanceConfig struct {
     // DowngradePolicy ダウングレード時のクレジットポリシー
-    // デフォルト: CreditPolicyLedger
-    DowngradePolicy CreditPolicy
+    // デフォルト: BalancePolicyLedger
+    DowngradePolicy BalancePolicy
 
     // CancellationPolicy 解約時の未使用期間分のクレジットポリシー
-    // デフォルト: CreditPolicyNone
-    CancellationPolicy CreditPolicy
+    // デフォルト: BalancePolicyNone
+    CancellationPolicy BalancePolicy
 
     // AllowManualRefund クレジット残高からの手動返金を許可するか
     // true: オペレーターがクレジット残高を返金に変換できる
@@ -827,7 +827,7 @@ type CreditConfig struct {
 ### 9.2 クレジットエントリ
 
 ```go
-// domain/credit/entity.go
+// domain/balance/entity.go
 package credit
 
 import (
@@ -836,15 +836,15 @@ import (
     "github.com/contract-to-cash/core/domain/shared"
 )
 
-// CreditEntryID は shared/identifier.go で定義
+// BalanceEntryID は shared/identifier.go で定義
 
-// CreditEntry クレジット台帳の1エントリ
-type CreditEntry struct {
-    id              shared.CreditEntryID
+// BalanceEntry クレジット台帳の1エントリ
+type BalanceEntry struct {
+    id              shared.BalanceEntryID
     accountID       shared.AccountID
     originalAmount  shared.Money      // 発生時の金額
     remainingAmount shared.Money      // 未使用残高
-    reason          CreditReason      // 発生理由
+    reason          BalanceReason      // 発生理由
     sourceType      string            // 発生元の種類（"proration", "manual", "refund_conversion"）
     sourceID        string            // 発生元ID（ProrationResult ID, 管理者操作ID等）
     description     string            // 説明（「Proプラン→Basicプランへの日割り調整」等）
@@ -852,23 +852,23 @@ type CreditEntry struct {
     createdAt       time.Time
 }
 
-type CreditReason string
+type BalanceReason string
 
 const (
-    CreditReasonProration        CreditReason = "proration"          // プラン変更の日割り差額
-    CreditReasonCancellation     CreditReason = "cancellation"       // 解約時の未使用期間
-    CreditReasonManualAdjustment CreditReason = "manual_adjustment"  // 手動調整（CS対応等）
-    CreditReasonRefundConversion CreditReason = "refund_conversion"  // 返金→クレジット変換
-    CreditReasonGoodwill         CreditReason = "goodwill"           // お詫び・補填
+    BalanceReasonProration        BalanceReason = "proration"          // プラン変更の日割り差額
+    BalanceReasonCancellation     BalanceReason = "cancellation"       // 解約時の未使用期間
+    BalanceReasonManualAdjustment BalanceReason = "manual_adjustment"  // 手動調整（CS対応等）
+    BalanceReasonRefundConversion BalanceReason = "refund_conversion"  // 返金→クレジット変換
+    BalanceReasonGoodwill         BalanceReason = "goodwill"           // お詫び・補填
 )
 
 // IsExpired 有効期限切れか判定
-func (e *CreditEntry) IsExpired(now time.Time) bool {
+func (e *BalanceEntry) IsExpired(now time.Time) bool {
     return e.expiresAt != nil && now.After(*e.expiresAt)
 }
 
 // IsFullyConsumed 全額消費済みか判定
-func (e *CreditEntry) IsFullyConsumed() bool {
+func (e *BalanceEntry) IsFullyConsumed() bool {
     return e.remainingAmount.IsZero()
 }
 ```
@@ -876,7 +876,7 @@ func (e *CreditEntry) IsFullyConsumed() bool {
 ### 9.3 クレジット適用記録
 
 ```go
-// domain/credit/application.go
+// domain/balance/application.go
 package credit
 
 import (
@@ -885,22 +885,22 @@ import (
     "github.com/contract-to-cash/core/domain/shared"
 )
 
-// CreditApplication クレジットの消費記録
+// BalanceApplication クレジットの消費記録
 // どのクレジットが、どの請求書で、いくら使われたかを追跡
-type CreditApplication struct {
+type BalanceApplication struct {
     id            string
-    creditEntryID shared.CreditEntryID     // 消費元のクレジット
+    creditEntryID shared.BalanceEntryID     // 消費元のクレジット
     invoiceID     shared.InvoiceID  // 適用先の請求書
     amount        shared.Money      // 適用額
     appliedAt     time.Time
 }
 
-// CreditRefund クレジット残高からの返金記録
-// CreditConfig.AllowManualRefund = true の場合のみ作成可能
-// AllowManualRefund = false の場合、返金は CreditEntry の作成元（決済トランザクション）経由で行う
-type CreditRefund struct {
+// BalanceRefund クレジット残高からの返金記録
+// BalanceConfig.AllowManualRefund = true の場合のみ作成可能
+// AllowManualRefund = false の場合、返金は BalanceEntry の作成元（決済トランザクション）経由で行う
+type BalanceRefund struct {
     id            string
-    creditEntryID shared.CreditEntryID
+    creditEntryID shared.BalanceEntryID
     accountID     shared.AccountID
     amount        shared.Money
     refundedAt    time.Time
@@ -910,7 +910,7 @@ type CreditRefund struct {
 ### 9.4 リポジトリインターフェース
 
 ```go
-// domain/credit/repository.go
+// domain/balance/repository.go
 package credit
 
 import (
@@ -920,12 +920,12 @@ import (
 )
 
 type Repository interface {
-    Save(ctx context.Context, entry *CreditEntry) error
-    FindByID(ctx context.Context, id shared.CreditEntryID) (*CreditEntry, error)
+    Save(ctx context.Context, entry *BalanceEntry) error
+    FindByID(ctx context.Context, id shared.BalanceEntryID) (*BalanceEntry, error)
 
     // FindAvailable 有効なクレジット残高を持つエントリを取得
     // 指定通貨のみ、有効期限内、古い順（FIFO消費）
-    FindAvailable(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*CreditEntry, error)
+    FindAvailable(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*BalanceEntry, error)
 
     // GetBalance アカウントのクレジット残高合計
     // 有効期限内（expiresAt が nil または now より後）かつ
@@ -934,11 +934,11 @@ type Repository interface {
     GetBalance(ctx context.Context, accountID shared.AccountID, currency shared.Currency) (shared.Money, error)
 
     // 適用記録
-    SaveApplication(ctx context.Context, app *CreditApplication) error
-    FindApplicationsByInvoice(ctx context.Context, invoiceID shared.InvoiceID) ([]*CreditApplication, error)
+    SaveApplication(ctx context.Context, app *BalanceApplication) error
+    FindApplicationsByInvoice(ctx context.Context, invoiceID shared.InvoiceID) ([]*BalanceApplication, error)
 
     // 返金記録
-    SaveRefund(ctx context.Context, refund *CreditRefund) error
+    SaveRefund(ctx context.Context, refund *BalanceRefund) error
 }
 ```
 
@@ -954,11 +954,11 @@ type Repository interface {
   │   - FindAvailable(accountID, invoice.Currency()) で
   │     同一通貨かつ有効期限内のクレジットをFIFO取得
   │   - 古いクレジットから順に消費（有効期限切れはスキップ）
-  │   - Invoice.appliedCredit に適用額を記録
-  │   - CreditApplication レコード作成
+  │   - Invoice.appliedBalance に適用額を記録
+  │   - BalanceApplication レコード作成
   │   - 適用額は min(entry.remainingAmount, 残り充当必要額) で算出
   │     （remainingAmount がマイナスになることを防止）
-  │   - CreditEntry.remainingAmount を減算
+  │   - BalanceEntry.remainingAmount を減算
   ⑥ 実請求額 = 合計 - クレジット適用額
   │   - 実請求額 > 0: 決済実行
   │   - 実請求額 = 0: 決済不要（全額クレジットで充当）
@@ -966,7 +966,7 @@ type Repository interface {
 
 #### トランザクション戦略
 
-クレジット適用は **CreditEntry（Credit集約）** と **Invoice（Invoice集約）** を
+クレジット適用は **BalanceEntry（Credit集約）** と **Invoice（Invoice集約）** を
 跨ぐ操作であり、イベントソーシングの「1トランザクション = 1集約」原則と緊張関係にある。
 
 本プロジェクトでは **簡易CQRS（同一DB）** を採用しているため、以下の方式を適用する:
@@ -977,9 +977,9 @@ type Repository interface {
 // application/service/billing_service.go
 func (s *BillingService) applyCredits(ctx context.Context, tx *sql.Tx, invoice *invoice.Invoice) error {
     // 同一DBトランザクション内で以下を実行:
-    // 1. CreditEntry.remainingAmount を減算（SELECT FOR UPDATE でロック）
-    // 2. CreditApplication レコードを作成
-    // 3. Invoice.appliedCredit / amountDue を更新
+    // 1. BalanceEntry.remainingAmount を減算（SELECT FOR UPDATE でロック）
+    // 2. BalanceApplication レコードを作成
+    // 3. Invoice.appliedBalance / amountDue を更新
     //
     // 同一DBを使用するため、通常のDBトランザクション(BEGIN/COMMIT)で
     // アトミック性を保証できる。イベントソーシングのイベント追加も
@@ -992,25 +992,25 @@ func (s *BillingService) applyCredits(ctx context.Context, tx *sql.Tx, invoice *
 
 フルCQRS（別DB）に移行する場合は、以下の Saga / Process Manager パターンに置き換える:
 1. `InvoiceFinalizedEvent` を発行
-2. `CreditApplicationSaga` がイベントを受信し、クレジット適用コマンドを発行
+2. `BalanceApplicationSaga` がイベントを受信し、クレジット適用コマンドを発行
 3. 成功時: `CreditAppliedEvent` → Invoice の amountDue を更新
 4. 失敗時: 補償トランザクション（クレジット適用取消）を実行
 
 現時点では簡易CQRS前提のため、DBトランザクション方式で十分である。
 
-### 9.6 ダウングレード時のフロー（CreditPolicy別）
+### 9.6 ダウングレード時のフロー（BalancePolicy別）
 
 ```
 ProrationResult.AdjustmentAmount < 0（ダウングレード）
   │
-  ├─ CreditPolicyLedger（デフォルト）
-  │   → CreditEntry 作成（reason: proration）
+  ├─ BalancePolicyLedger（デフォルト）
+  │   → BalanceEntry 作成（reason: proration）
   │   → 次回以降の請求書で自動差引
   │
-  ├─ CreditPolicyRefund
+  ├─ BalancePolicyRefund
   │   → PaymentGateway.Refund() で即時返金
   │   → 元の決済手段に返金
   │
-  └─ CreditPolicyNone
+  └─ BalancePolicyNone
       → 何もしない（差額は切り捨て）
 ```

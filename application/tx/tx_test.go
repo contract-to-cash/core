@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/contract-to-cash/core/application/tx"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/payment"
 )
@@ -151,6 +151,6 @@ func TestRepos_HasExpectedFields(t *testing.T) {
 		Contracts: (contract.Repository)(nil),
 		Invoices:  (invoice.Repository)(nil),
 		Payments:  (payment.Repository)(nil),
-		Credits:   (credit.Repository)(nil),
+		Balances:  (balance.Repository)(nil),
 	}
 }

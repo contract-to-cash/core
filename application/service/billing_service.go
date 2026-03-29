@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/application/tx"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
-	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/product"
@@ -38,10 +38,10 @@ func WithBillingLogger(l *slog.Logger) BillingServiceOption {
 	}
 }
 
-// WithCreditRepo sets the credit repository used for credit application.
-func WithCreditRepo(repo credit.Repository) BillingServiceOption {
+// WithBalanceRepo sets the credit repository used for credit application.
+func WithBalanceRepo(repo balance.Repository) BillingServiceOption {
 	return func(s *BillingService) {
-		s.creditRepo = repo
+		s.balanceRepo = repo
 	}
 }
 
@@ -55,18 +55,18 @@ func WithBillingTxManager(tm tx.TxManager) BillingServiceOption {
 
 // BillingService orchestrates the invoice generation flow.
 type BillingService struct {
-	contractRepo contract.Repository
-	invoiceRepo  invoice.Repository
-	usageRepo    usage.Repository
-	creditRepo   credit.Repository
-	creditConfig credit.CreditConfig
-	priceRepo    pricing.PriceRepository
-	productRepo  product.Repository
-	registry     *plugin.Registry
-	config       BillingConfig
-	clock        shared.Clock
-	logger       *slog.Logger
-	txManager    tx.TxManager
+	contractRepo  contract.Repository
+	invoiceRepo   invoice.Repository
+	usageRepo     usage.Repository
+	balanceRepo   balance.Repository
+	balanceConfig balance.BalanceConfig
+	priceRepo     pricing.PriceRepository
+	productRepo   product.Repository
+	registry      *plugin.Registry
+	config        BillingConfig
+	clock         shared.Clock
+	logger        *slog.Logger
+	txManager     tx.TxManager
 }
 
 // NewBillingService creates a new BillingService.
@@ -76,7 +76,7 @@ func NewBillingService(
 	contractRepo contract.Repository,
 	invoiceRepo invoice.Repository,
 	usageRepo usage.Repository,
-	creditConfig credit.CreditConfig,
+	balanceConfig balance.BalanceConfig,
 	priceRepo pricing.PriceRepository,
 	productRepo product.Repository,
 	registry *plugin.Registry,
@@ -85,15 +85,15 @@ func NewBillingService(
 	opts ...BillingServiceOption,
 ) *BillingService {
 	s := &BillingService{
-		contractRepo: contractRepo,
-		invoiceRepo:  invoiceRepo,
-		usageRepo:    usageRepo,
-		creditConfig: creditConfig,
-		priceRepo:    priceRepo,
-		productRepo:  productRepo,
-		registry:     registry,
-		config:       config,
-		clock:        clock,
+		contractRepo:  contractRepo,
+		invoiceRepo:   invoiceRepo,
+		usageRepo:     usageRepo,
+		balanceConfig: balanceConfig,
+		priceRepo:     priceRepo,
+		productRepo:   productRepo,
+		registry:      registry,
+		config:        config,
+		clock:         clock,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -105,7 +105,7 @@ func NewBillingService(
 		s.txManager = tx.NewNoopTxManager(tx.Repos{
 			Contracts: contractRepo,
 			Invoices:  invoiceRepo,
-			Credits:   s.creditRepo,
+			Balances:  s.balanceRepo,
 		})
 	}
 	return s
@@ -228,17 +228,17 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	var inv *invoice.Invoice
 	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
 		// Step 10: Apply credits (FIFO, skip expired) - uses transactional credit repo
-		appliedCredit := shared.Zero(currency)
-		if repos.Credits != nil {
-			var creditErr error
-			appliedCredit, creditErr = s.applyCredits(txCtx, repos.Credits, agg.AccountID(), invoiceID, total, currency)
-			if creditErr != nil {
-				return fmt.Errorf("failed to apply credits: %w", creditErr)
+		appliedBalance := shared.Zero(currency)
+		if repos.Balances != nil {
+			var balanceErr error
+			appliedBalance, balanceErr = s.applyBalances(txCtx, repos.Balances, agg.AccountID(), invoiceID, total, currency)
+			if balanceErr != nil {
+				return fmt.Errorf("failed to apply credits: %w", balanceErr)
 			}
 		}
 
 		// Step 11: Calculate amount due
-		amountDue, amtErr := total.Subtract(appliedCredit)
+		amountDue, amtErr := total.Subtract(appliedBalance)
 		if amtErr != nil {
 			return fmt.Errorf("failed to calculate amount due: %w", amtErr)
 		}
@@ -251,7 +251,7 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 			invoice.WithStatus(invoice.InvoiceStatusDraft),
 			invoice.WithBillingPeriod(billingPeriod),
 			invoice.WithDueDate(dueDate),
-			invoice.WithAppliedCredit(appliedCredit),
+			invoice.WithAppliedBalance(appliedBalance),
 			invoice.WithAmountDue(amountDue),
 			invoice.WithIssueDate(now),
 		}
@@ -399,14 +399,14 @@ func (s *BillingService) calculateUsageCharge(
 	return totalCharge, lineItems, nil
 }
 
-// applyCredits applies available credits to the total using FIFO order.
+// applyBalances applies available credits to the total using FIFO order.
 // Expired credits are skipped. For each consumed credit, a CreditApplication
 // record is created as an audit trail.
-// The creditRepo parameter is the transaction-scoped repository from RunInTx.
-func (s *BillingService) applyCredits(ctx context.Context, creditRepo credit.Repository, accountID shared.AccountID, invoiceID shared.InvoiceID, total shared.Money, currency shared.Currency) (shared.Money, error) {
-	credits, err := creditRepo.FindAvailable(ctx, accountID, currency)
+// The balanceRepo parameter is the transaction-scoped repository from RunInTx.
+func (s *BillingService) applyBalances(ctx context.Context, balanceRepo balance.Repository, accountID shared.AccountID, invoiceID shared.InvoiceID, total shared.Money, currency shared.Currency) (shared.Money, error) {
+	credits, err := balanceRepo.FindAvailable(ctx, accountID, currency)
 	if err != nil {
-		return shared.Zero(currency), fmt.Errorf("failed to find available credits: %w", err)
+		return shared.Zero(currency), fmt.Errorf("failed to find available balances: %w", err)
 	}
 
 	now := s.clock.Now()
@@ -415,8 +415,8 @@ func (s *BillingService) applyCredits(ctx context.Context, creditRepo credit.Rep
 
 	// Collect all mutations so we can persist them together
 	type creditMutation struct {
-		entry       *credit.CreditEntry
-		application *credit.CreditApplication
+		entry       *balance.BalanceEntry
+		application *balance.BalanceApplication
 	}
 	var mutations []creditMutation
 
@@ -452,12 +452,12 @@ func (s *BillingService) applyCredits(ctx context.Context, creditRepo credit.Rep
 
 		mutations = append(mutations, creditMutation{
 			entry: entry,
-			application: &credit.CreditApplication{
-				ID:            shared.GenerateID(),
-				CreditEntryID: entry.ID(),
-				InvoiceID:     invoiceID,
-				Amount:        consumed,
-				AppliedAt:     now,
+			application: &balance.BalanceApplication{
+				ID:             shared.GenerateID(),
+				BalanceEntryID: entry.ID(),
+				InvoiceID:      invoiceID,
+				Amount:         consumed,
+				AppliedAt:      now,
 			},
 		})
 	}
@@ -465,11 +465,11 @@ func (s *BillingService) applyCredits(ctx context.Context, creditRepo credit.Rep
 	// Persist all mutations: credit entries and application records.
 	// All saves participate in the caller's transaction boundary.
 	for _, m := range mutations {
-		if err := creditRepo.Save(ctx, m.entry); err != nil {
-			return shared.Zero(currency), fmt.Errorf("failed to save credit entry: %w", err)
+		if err := balanceRepo.Save(ctx, m.entry); err != nil {
+			return shared.Zero(currency), fmt.Errorf("failed to save balance entry: %w", err)
 		}
-		if err := creditRepo.SaveApplication(ctx, m.application); err != nil {
-			return shared.Zero(currency), fmt.Errorf("failed to save credit application: %w", err)
+		if err := balanceRepo.SaveApplication(ctx, m.application); err != nil {
+			return shared.Zero(currency), fmt.Errorf("failed to save balance application: %w", err)
 		}
 	}
 

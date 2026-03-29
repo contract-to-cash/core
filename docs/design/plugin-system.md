@@ -860,7 +860,7 @@ import (
     "github.com/contract-to-cash/core/application/port"
     "github.com/contract-to-cash/core/domain/billing"
     "github.com/contract-to-cash/core/domain/contract"
-    "github.com/contract-to-cash/core/domain/credit"
+    "github.com/contract-to-cash/core/domain/balance"
     "github.com/contract-to-cash/core/domain/invoice"
     "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/plugin"
@@ -889,8 +889,8 @@ type BillingService struct {
     contractRepo contract.Repository
     invoiceRepo  invoice.Repository
     usageRepo    usage.Repository
-    creditRepo   credit.Repository    // nil許容: クレジット機能未使用の場合
-    creditConfig credit.CreditConfig
+    balanceRepo   credit.Repository    // nil許容: クレジット機能未使用の場合
+    balanceConfig credit.BalanceConfig
     registry     *plugin.Registry
     config       BillingConfig
     clock        shared.Clock
@@ -902,8 +902,8 @@ func NewBillingService(
     contractRepo contract.Repository,
     invoiceRepo invoice.Repository,
     usageRepo usage.Repository,
-    creditRepo credit.Repository, // nil許容: クレジット機能はオプショナル
-    creditConfig credit.CreditConfig,
+    balanceRepo credit.Repository, // nil許容: クレジット機能はオプショナル
+    balanceConfig credit.BalanceConfig,
     registry *plugin.Registry,
     config BillingConfig,
     clock shared.Clock,
@@ -914,8 +914,8 @@ func NewBillingService(
         contractRepo: contractRepo,
         invoiceRepo:  invoiceRepo,
         usageRepo:    usageRepo,
-        creditRepo:   creditRepo,
-        creditConfig: creditConfig,
+        balanceRepo:   balanceRepo,
+        balanceConfig: balanceConfig,
         registry:     registry,
         config:       config,
         clock:        clock,
@@ -1005,9 +1005,9 @@ func (s *BillingService) GenerateInvoice(
     }
 
     // 6. クレジット台帳からの充当（domain-model.md セクション9.5参照）
-    appliedCredit := shared.Zero(total.Currency())
-    if s.creditRepo != nil {
-        credits, err := s.creditRepo.FindAvailable(ctx, c.AccountID(), total.Currency())
+    appliedBalance := shared.Zero(total.Currency())
+    if s.balanceRepo != nil {
+        credits, err := s.balanceRepo.FindAvailable(ctx, c.AccountID(), total.Currency())
         if err != nil {
             return nil, fmt.Errorf("credit lookup failed: %w", err)
         }
@@ -1015,7 +1015,7 @@ func (s *BillingService) GenerateInvoice(
             if entry.IsExpired(s.clock.Now()) {
                 continue
             }
-            remaining, err := total.Subtract(appliedCredit) // まだ充当が必要な額
+            remaining, err := total.Subtract(appliedBalance) // まだ充当が必要な額
             if err != nil {
                 return nil, fmt.Errorf("credit remaining calculation failed: %w", err)
             }
@@ -1026,15 +1026,15 @@ func (s *BillingService) GenerateInvoice(
             if err != nil {
                 return nil, fmt.Errorf("credit min calculation failed: %w", err)
             }
-            appliedCredit, err = appliedCredit.Add(apply)
+            appliedBalance, err = appliedBalance.Add(apply)
             if err != nil {
                 return nil, fmt.Errorf("credit accumulation failed: %w", err)
             }
-            // CreditApplication 作成 + CreditEntry.remainingAmount 減算
+            // BalanceApplication 作成 + BalanceEntry.remainingAmount 減算
             // （同一DBトランザクション内でアトミックに実行 — domain-model.md 9.5参照）
         }
     }
-    amountDue, err := total.Subtract(appliedCredit)
+    amountDue, err := total.Subtract(appliedBalance)
     if err != nil {
         return nil, fmt.Errorf("amount due calculation failed: %w", err)
     }
@@ -1050,7 +1050,7 @@ func (s *BillingService) GenerateInvoice(
         invoice.WithStatus(invoice.InvoiceStatusDraft),
         invoice.WithBillingPeriod(billingPeriod),
         invoice.WithDueDate(s.calculateDueDate(billingPeriod)),
-        invoice.WithAppliedCredit(appliedCredit),
+        invoice.WithAppliedBalance(appliedBalance),
         invoice.WithAmountDue(amountDue),
     )
     calcCtx.SetInvoice(inv)
@@ -1164,7 +1164,7 @@ func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID string) 
 }
 
 // ProcessPlanChange プラン変更時のクレジット処理
-// ProrationResult.AdjustmentAmount < 0 の場合、CreditPolicy に従い分岐
+// ProrationResult.AdjustmentAmount < 0 の場合、BalancePolicy に従い分岐
 func (s *BillingService) ProcessPlanChange(ctx context.Context, contractID shared.ContractID, newPlanID string) error {
     // 1. 日割り計算
     proration, err := s.calculator.CalculateProration(ctx, contractID, newPlanID)
@@ -1180,20 +1180,20 @@ func (s *BillingService) ProcessPlanChange(ctx context.Context, contractID share
 
     // 2. AdjustmentAmount の符号で分岐
     if proration.AdjustmentAmount.IsNegative() {
-        // ダウングレード: CreditPolicy に従う
-        switch s.creditConfig.DowngradePolicy {
-        case credit.CreditPolicyLedger:
+        // ダウングレード: BalancePolicy に従う
+        switch s.balanceConfig.DowngradePolicy {
+        case credit.BalancePolicyLedger:
             // クレジット台帳に積む
-            entry := credit.NewCreditEntry(accountID, proration.AdjustmentAmount.Negate(), credit.CreditReasonProration)
-            if err := s.creditRepo.Save(ctx, entry); err != nil {
+            entry := credit.NewBalanceEntry(accountID, proration.AdjustmentAmount.Negate(), credit.BalanceReasonProration)
+            if err := s.balanceRepo.Save(ctx, entry); err != nil {
                 return fmt.Errorf("credit entry save failed: %w", err)
             }
-        case credit.CreditPolicyRefund:
+        case credit.BalancePolicyRefund:
             // 即時返金
             if err := s.gateway.Refund(ctx, &port.RefundRequest{Amount: proration.AdjustmentAmount.Negate()}); err != nil {
                 return fmt.Errorf("refund failed: %w", err)
             }
-        case credit.CreditPolicyNone:
+        case credit.BalancePolicyNone:
             // 何もしない
         }
     } else if !proration.AdjustmentAmount.IsZero() {

@@ -15,8 +15,8 @@ billingService := service.NewBillingService(
     contractRepo,  // contract.Repository
     invoiceRepo,   // invoice.Repository
     usageRepo,     // usage.Repository
-    creditRepo,    // credit.Repository
-    creditConfig,  // credit.CreditConfig
+    balanceRepo,    // credit.Repository
+    balanceConfig,  // credit.BalanceConfig
     priceRepo,     // pricing.PriceRepository
     productRepo,   // product.Repository
     registry,      // *plugin.Registry
