@@ -288,10 +288,16 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		return fmt.Errorf("gateway refund failed: %w", err)
 	}
 
-	// Determine refund amount
-	refundAmount := p.Amount()
+	// Determine refund amount: if not specified, refund the remaining unrefunded amount.
+	var refundAmount shared.Money
 	if input.Amount != nil {
 		refundAmount = *input.Amount
+	} else {
+		remaining, subErr := p.Amount().Subtract(p.RefundedAmount())
+		if subErr != nil {
+			return fmt.Errorf("failed to calculate remaining refund amount: %w", subErr)
+		}
+		refundAmount = remaining
 	}
 
 	// Phase 3: local save in transaction

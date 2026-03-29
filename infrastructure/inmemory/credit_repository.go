@@ -48,6 +48,8 @@ func (r *InMemoryCreditRepository) Save(_ context.Context, entry *credit.CreditE
 
 	r.entries[entry.ID()] = entry
 	r.versions[entry.ID()] = entry.Version()
+	// Update loadedVersion so subsequent saves from the same pointer don't conflict.
+	entry.SetVersion(entry.Version())
 	return nil
 }
 
