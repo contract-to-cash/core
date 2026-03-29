@@ -255,7 +255,7 @@ func TestProcessPayment_AfterChargeHook_ReceivesPaymentContext(t *testing.T) {
 	registry := plugin.NewRegistry()
 	_ = registry.Register(spy)
 
-	svc := NewPaymentService(&mockGateway{}, &mockPaymentRepo{}, invRepo, nil, nil, &mockEventStore{}, registry, clock)
+	svc := NewPaymentService(&mockGateway{}, &mockPaymentRepo{}, invRepo, nil, &mockEventStore{}, registry, clock)
 
 	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
 		PaymentMethodID: "pm-001",
@@ -293,7 +293,7 @@ func TestProcessPayment_OnPaymentFailedHook_ReceivesPaymentContext(t *testing.T)
 	registry := plugin.NewRegistry()
 	_ = registry.Register(spy)
 
-	svc := NewPaymentService(&mockGateway{failCharge: true}, &mockPaymentRepo{}, invRepo, nil, nil, &mockEventStore{}, registry, clock)
+	svc := NewPaymentService(&mockGateway{failCharge: true}, &mockPaymentRepo{}, invRepo, nil, &mockEventStore{}, registry, clock)
 
 	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
 		PaymentMethodID: "pm-001",
@@ -335,7 +335,6 @@ func TestResolvePaymentMethod_ExplicitInput(t *testing.T) {
 		&mockPaymentRepo{},
 		invRepo,
 		&mockContractRepo{agg: agg},
-		nil,
 		&mockEventStore{},
 		plugin.NewRegistry(),
 		clock,
@@ -365,7 +364,6 @@ func TestResolvePaymentMethod_FallbackToInvoice(t *testing.T) {
 		&mockPaymentRepo{},
 		&mockInvoiceRepoForPayment{inv: inv},
 		&mockContractRepo{agg: agg},
-		nil,
 		&mockEventStore{},
 		plugin.NewRegistry(),
 		clock,
@@ -392,7 +390,6 @@ func TestResolvePaymentMethod_FallbackToContract(t *testing.T) {
 		&mockPaymentRepo{},
 		&mockInvoiceRepoForPayment{inv: inv},
 		&mockContractRepo{agg: agg},
-		nil,
 		&mockEventStore{},
 		plugin.NewRegistry(),
 		clock,
@@ -425,10 +422,10 @@ func TestResolvePaymentMethod_FallbackToCustomer(t *testing.T) {
 		&mockPaymentRepo{},
 		&mockInvoiceRepoForPayment{inv: inv},
 		&mockContractRepo{agg: agg},
-		custGateway,
 		&mockEventStore{},
 		plugin.NewRegistry(),
 		clock,
+		WithCustomerGateway(custGateway),
 	)
 
 	resolved, err := svc.ResolvePaymentMethod(context.Background(), inv)
@@ -453,7 +450,6 @@ func TestResolvePaymentMethod_InvoiceOverridesContract(t *testing.T) {
 		&mockPaymentRepo{},
 		&mockInvoiceRepoForPayment{inv: inv},
 		&mockContractRepo{agg: agg},
-		nil,
 		&mockEventStore{},
 		plugin.NewRegistry(),
 		clock,
@@ -485,10 +481,10 @@ func TestResolvePaymentMethod_NoPaymentMethodFound(t *testing.T) {
 		&mockPaymentRepo{},
 		&mockInvoiceRepoForPayment{inv: inv},
 		&mockContractRepo{agg: agg},
-		custGateway,
 		&mockEventStore{},
 		plugin.NewRegistry(),
 		clock,
+		WithCustomerGateway(custGateway),
 	)
 
 	_, err := svc.ResolvePaymentMethod(context.Background(), inv)
@@ -510,7 +506,6 @@ func TestProcessPayment_AutoResolvesPaymentMethod(t *testing.T) {
 		&mockPaymentRepo{},
 		invRepo,
 		&mockContractRepo{agg: agg},
-		nil,
 		&mockEventStore{},
 		plugin.NewRegistry(),
 		clock,

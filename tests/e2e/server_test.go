@@ -130,13 +130,14 @@ func newTestEnv() *testEnv {
 	gw := &mockGateway{}
 
 	billingSvc := service.NewBillingService(
-		contractRepo, invoiceRepo, usageRepo, creditRepo,
+		contractRepo, invoiceRepo, usageRepo,
 		credit.CreditConfig{}, priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30}, clock,
+		service.WithCreditRepo(creditRepo),
 	)
 
 	paymentSvc := service.NewPaymentService(
-		gw, paymentRepo, invoiceRepo, contractRepo, nil, es, registry, clock,
+		gw, paymentRepo, invoiceRepo, contractRepo, es, registry, clock,
 	)
 
 	renewalProc := batch.NewContractRenewalProcessor(contractRepo, priceRepo, registry, clock)

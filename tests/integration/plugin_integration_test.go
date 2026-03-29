@@ -103,12 +103,12 @@ func TestMultipleDiscountPlugins(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		creditRepo,
 		credit.CreditConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
+		service.WithCreditRepo(creditRepo),
 	)
 
 	price := moneyJPY(10000)
@@ -168,12 +168,12 @@ func TestPluginImplementsMultipleHooks(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		creditRepo,
 		credit.CreditConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
+		service.WithCreditRepo(creditRepo),
 	)
 
 	price := moneyJPY(5000)

@@ -110,9 +110,10 @@ func main() {
 	printSection("Phase 2: First Payment & Server Provisioning")
 
 	billingService := service.NewBillingService(
-		contractRepo, invoiceRepo, usageRepo, creditRepo,
+		contractRepo, invoiceRepo, usageRepo,
 		credit.CreditConfig{}, priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30}, clock,
+		service.WithCreditRepo(creditRepo),
 	)
 	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {
@@ -127,7 +128,7 @@ func main() {
 		inv.TaxAmount().Amount().RatString())
 
 	gateway := &mockPaymentGateway{clock: clock}
-	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, contractRepo, nil, es, registry, clock)
+	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, contractRepo, es, registry, clock)
 	pmt, err := paymentService.ProcessPayment(ctx, inv.ID(), service.ProcessPaymentInput{
 		PaymentMethodID: "pm-visa-tanaka",
 		Amount:          inv.AmountDue(),

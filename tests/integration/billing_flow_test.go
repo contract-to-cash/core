@@ -147,12 +147,12 @@ func TestSubscriptionBillingFlow(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		creditRepo,
 		credit.CreditConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
+		service.WithCreditRepo(creditRepo),
 	)
 
 	price := moneyJPY(5000)
@@ -213,12 +213,12 @@ func TestBillingWithDiscountAndTax(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		creditRepo,
 		credit.CreditConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
+		service.WithCreditRepo(creditRepo),
 	)
 
 	price := moneyJPY(10000)
@@ -271,12 +271,12 @@ func TestDiscountCapGuard(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		creditRepo,
 		credit.CreditConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
+		service.WithCreditRepo(creditRepo),
 	)
 
 	price := moneyJPY(1000)
@@ -317,12 +317,12 @@ func TestBillingWithCreditApplication(t *testing.T) {
 		contractRepo,
 		invoiceRepo,
 		usageRepo,
-		creditRepo,
 		credit.CreditConfig{},
 		priceRepo, productRepo,
 		registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
+		service.WithCreditRepo(creditRepo),
 	)
 
 	price := moneyJPY(5000)

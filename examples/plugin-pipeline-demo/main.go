@@ -108,11 +108,12 @@ func main() {
 	fmt.Println()
 
 	billingService := service.NewBillingService(
-		contractRepo, invoiceRepo, usageRepo, creditRepo,
+		contractRepo, invoiceRepo, usageRepo,
 		credit.CreditConfig{},
 		priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30},
 		clock,
+		service.WithCreditRepo(creditRepo),
 	)
 
 	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
