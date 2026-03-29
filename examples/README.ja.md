@@ -18,7 +18,7 @@ Contract-to-Cash Core は、**イベントソーシング**、**拡張可能な�
 
 ## 前提条件
 
-- Go 1.22+
+- Go 1.25+
 
 ## 実行方法
 
@@ -54,7 +54,7 @@ graph TD
     App --> ES
 
     Domain["<b>ドメイン</b><br/>契約 · 請求書 · 決済<br/>クレジット · 料金設定 · 使用量"]
-    Plugin["<b>プラグインシステム</b><br/>レジストリ · フック<br/>税金 · クーポン · カスタム"]
+    Plugin["<b>プラグインシステム</b><br/>レジストリ · フック<br/>税金 · クーポン · 請求書クリーンアップ · カスタム"]
     ES["<b>イベントストア</b><br/>Store · Snapshot · Subscribe"]
 
     ES --> Infra["<b>インフラストラクチャ</b><br/>InMemory* (Postgres等に差替可能)"]

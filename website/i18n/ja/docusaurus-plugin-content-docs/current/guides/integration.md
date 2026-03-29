@@ -8,7 +8,7 @@ sidebar_position: 1
 
 ## 前提条件
 
-- Go 1.22以上
+- Go 1.25以上
 - イベントストアとリポジトリ用のデータベース（PostgreSQL、MySQL、DynamoDBなど）
 - 決済ゲートウェイの実装
 
@@ -30,7 +30,7 @@ type Repository interface {
 }
 ```
 
-同様に`invoice.Repository`, `payment.Repository`, `credit.Repository`, `usage.Repository`, `pricing.PriceRepository`, `product.Repository`も実装します。
+同様に`invoice.Repository`, `payment.Repository`, `balance.Repository`, `usage.Repository`, `pricing.PriceRepository`, `product.Repository`も実装します。
 
 ### 例: PostgreSQLの契約リポジトリ
 
@@ -140,14 +140,15 @@ func NewBillingModule(db *sql.DB, gateway port.PaymentGateway) *BillingModule {
     registry.InitializeAll(ctx, configs)
 
     billingService := service.NewBillingService(
-        contractRepo, invoiceRepo, usageRepo, balanceRepo,
-        credit.BalanceConfig{
-            DowngradePolicy:    credit.BalancePolicyLedger,
-            CancellationPolicy: credit.BalancePolicyLedger,
+        contractRepo, invoiceRepo, usageRepo,
+        balance.BalanceConfig{
+            DowngradePolicy:    balance.BalancePolicyLedger,
+            CancellationPolicy: balance.BalancePolicyLedger,
         },
         priceRepo, productRepo, registry,
         service.BillingConfig{DaysUntilDue: 30},
         clock,
+        service.WithBalanceRepo(balanceRepo),
     )
 
     paymentService := service.NewPaymentService(

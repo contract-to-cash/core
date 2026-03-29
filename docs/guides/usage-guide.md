@@ -109,7 +109,7 @@ service-a/
 ```go
 module github.com/yourcompany/service-a
 
-go 1.22
+go 1.25
 
 require (
     github.com/contract-to-cash/core v1.0.0
@@ -358,6 +358,8 @@ import (
 
     // OSSパッケージ
     billingService "github.com/contract-to-cash/core/application/service"
+    "github.com/contract-to-cash/core/domain/balance"
+    "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/plugin"
     couponPlugin "github.com/contract-to-cash/core/plugins/coupon"
 
@@ -392,6 +394,7 @@ func main() {
     // ============================================================
     // 3. プラグイン設定
     // ============================================================
+    clock := shared.NewSystemClock()  // shared.Clock 実装
     eventBus := NewEventBus()
     logger := NewLogger()
     
@@ -416,16 +419,26 @@ func main() {
     // ============================================================
     usageRepo := postgres.NewUsageRepository(db)
 
+    balanceRepo := postgres.NewBalanceRepository(db)
+    balanceConfig := balance.BalanceConfig{/* ... */}
+    priceRepo := postgres.NewPriceRepository(db)
+    productRepo := postgres.NewProductRepository(db)
+
     billingSvc := billingService.NewBillingService(
         contractRepo,
         invoiceRepo,
         usageRepo,
+        balanceConfig,
+        priceRepo,
+        productRepo,
         registry,
         billingService.BillingConfig{
             GracePeriod:      1 * time.Hour,   // 請求書確定までの猶予期間
             DaysUntilDue:     30,               // 支払い期限（日数）
             CollectionMethod: "charge_automatically",
         },
+        clock,
+        billingService.WithBalanceRepo(balanceRepo), // balanceRepoはオプションで注入
     )
 
     // ============================================================

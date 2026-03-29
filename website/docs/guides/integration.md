@@ -8,7 +8,7 @@ This guide explains how to integrate Contract Billing Core into your service.
 
 ## Prerequisites
 
-- Go 1.22+
+- Go 1.25+
 - A database for event store and repositories (PostgreSQL, MySQL, DynamoDB, etc.)
 - A payment gateway implementation
 
@@ -30,7 +30,7 @@ type Repository interface {
 }
 ```
 
-Similarly for `invoice.Repository`, `payment.Repository`, `credit.Repository`, `usage.Repository`, `pricing.PriceRepository`, and `product.Repository`.
+Similarly for `invoice.Repository`, `payment.Repository`, `balance.Repository`, `usage.Repository`, `pricing.PriceRepository`, and `product.Repository`.
 
 ### Example: PostgreSQL Contract Repository
 
@@ -142,14 +142,15 @@ func NewBillingModule(db *sql.DB, gateway port.PaymentGateway) *BillingModule {
     registry.InitializeAll(ctx, configs)
 
     billingService := service.NewBillingService(
-        contractRepo, invoiceRepo, usageRepo, balanceRepo,
-        credit.BalanceConfig{
-            DowngradePolicy:    credit.BalancePolicyLedger,
-            CancellationPolicy: credit.BalancePolicyLedger,
+        contractRepo, invoiceRepo, usageRepo,
+        balance.BalanceConfig{
+            DowngradePolicy:    balance.BalancePolicyLedger,
+            CancellationPolicy: balance.BalancePolicyLedger,
         },
         priceRepo, productRepo, registry,
         service.BillingConfig{DaysUntilDue: 30},
         clock,
+        service.WithBalanceRepo(balanceRepo),
     )
 
     paymentService := service.NewPaymentService(

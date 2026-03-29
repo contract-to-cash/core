@@ -1564,18 +1564,25 @@ github.com/contract-to-cash/core/
 │   ├── payment/
 │   │   ├── entity.go           # Payment エンティティ
 │   │   ├── repository.go       # Payment リポジトリIF
-│   │   ├── gateway.go          # ★ Gateway インターフェース
-│   │   ├── gateway_types.go    # ★ リクエスト/レスポンス型
-│   │   ├── customer.go         # ★ CustomerGateway IF
-│   │   ├── webhook.go          # ★ Webhook IF
-│   │   ├── subscription_gateway.go  # ★ 定期課金IF（オプション）
-│   │   ├── router.go           # ★ Gateway ルーター
-│   │   ├── errors.go           # ★ エラー定義
+│   │   ├── errors.go           # エラー定義
 │   │   └── events.go
+│   ├── balance/
+│   ├── billing/
+│   ├── pricing/
+│   ├── product/
 │   ├── usage/
 │   └── shared/
 │
 ├── application/
+│   ├── port/                   # ★ 外部サービスとの統合境界
+│   │   ├── gateway.go          # PaymentGateway IF（13メソッド）
+│   │   ├── gateway_types.go    # リクエスト/レスポンス型
+│   │   ├── customer_gateway.go # CustomerGateway IF
+│   │   ├── webhook.go          # WebhookHandler IF
+│   │   └── gateway_router.go   # GatewayRouter IF
+│   ├── query/
+│   ├── projection/
+│   ├── tx/
 │   └── service/
 │       ├── billing_service.go
 │       ├── payment_service.go  # ★ 決済サービス
@@ -1586,7 +1593,9 @@ github.com/contract-to-cash/core/
 ├── eventstore/
 │
 ├── plugins/
-│   └── coupon/
+│   ├── coupon/
+│   ├── tax/
+│   └── invoicecleanup/
 │
 └── infrastructure/             # 参照実装（オプション）
     ├── gateway/
@@ -1596,7 +1605,7 @@ github.com/contract-to-cash/core/
     │   │   └── webhook.go
     │   └── mock/               # テスト用モック
     │       └── gateway.go
-    └── postgres/
+    └── inmemory/
 ```
 
 ---

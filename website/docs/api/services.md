@@ -15,13 +15,14 @@ billingService := service.NewBillingService(
     contractRepo,  // contract.Repository
     invoiceRepo,   // invoice.Repository
     usageRepo,     // usage.Repository
-    balanceRepo,    // credit.Repository
-    balanceConfig,  // credit.BalanceConfig
+    balanceConfig, // balance.BalanceConfig
     priceRepo,     // pricing.PriceRepository
     productRepo,   // product.Repository
     registry,      // *plugin.Registry
     billingConfig, // service.BillingConfig
     clock,         // shared.Clock
+    // Optional:
+    service.WithBalanceRepo(balanceRepo), // balance.Repository (via option)
 )
 ```
 

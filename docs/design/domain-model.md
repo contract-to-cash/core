@@ -179,9 +179,9 @@ type BillingInfo struct {
     Address      Address
     TaxID        string
     PaymentTerms int              // 支払い期限（日数）
-    BalanceConfig *credit.BalanceConfig // クレジット設定（nil = グローバルデフォルトを使用）
+    BalanceConfig *balance.BalanceConfig // クレジット設定（nil = グローバルデフォルトを使用）
 }
-// NOTE: credit パッケージ（セクション9）の import が必要
+// NOTE: balance パッケージ（セクション9）の import が必要
 // import "domain/balance"
 
 type Address struct {
@@ -786,7 +786,7 @@ func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*
 
 ```go
 // domain/balance/policy.go
-package credit
+package balance
 
 // BalancePolicy クレジット発生時のポリシー
 type BalancePolicy string
@@ -828,7 +828,7 @@ type BalanceConfig struct {
 
 ```go
 // domain/balance/entity.go
-package credit
+package balance
 
 import (
     "time"
@@ -877,7 +877,7 @@ func (e *BalanceEntry) IsFullyConsumed() bool {
 
 ```go
 // domain/balance/application.go
-package credit
+package balance
 
 import (
     "time"
@@ -911,7 +911,7 @@ type BalanceRefund struct {
 
 ```go
 // domain/balance/repository.go
-package credit
+package balance
 
 import (
     "context"

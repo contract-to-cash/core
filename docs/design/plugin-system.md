@@ -857,11 +857,11 @@ package service
 import (
     "context"
 
-    "github.com/contract-to-cash/core/application/port"
-    "github.com/contract-to-cash/core/domain/billing"
-    "github.com/contract-to-cash/core/domain/contract"
     "github.com/contract-to-cash/core/domain/balance"
+    "github.com/contract-to-cash/core/domain/contract"
     "github.com/contract-to-cash/core/domain/invoice"
+    "github.com/contract-to-cash/core/domain/pricing"
+    "github.com/contract-to-cash/core/domain/product"
     "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/plugin"
 )
@@ -889,39 +889,50 @@ type BillingService struct {
     contractRepo contract.Repository
     invoiceRepo  invoice.Repository
     usageRepo    usage.Repository
-    balanceRepo   credit.Repository    // nil許容: クレジット機能未使用の場合
-    balanceConfig credit.BalanceConfig
+    balanceRepo   balance.Repository   // nil許容: クレジット機能未使用の場合（WithBalanceRepoオプションで設定）
+    balanceConfig balance.BalanceConfig
+    priceRepo    pricing.PriceRepository
+    productRepo  product.Repository
     registry     *plugin.Registry
     config       BillingConfig
     clock        shared.Clock
-    calculator   billing.Calculator
-    gateway      port.PaymentGateway
+}
+
+// BillingServiceOption NewBillingServiceのオプション引数
+type BillingServiceOption func(*BillingService)
+
+// WithBalanceRepo balanceRepoを設定するオプション
+func WithBalanceRepo(repo balance.Repository) BillingServiceOption {
+    return func(s *BillingService) { s.balanceRepo = repo }
 }
 
 func NewBillingService(
     contractRepo contract.Repository,
     invoiceRepo invoice.Repository,
     usageRepo usage.Repository,
-    balanceRepo credit.Repository, // nil許容: クレジット機能はオプショナル
-    balanceConfig credit.BalanceConfig,
+    balanceConfig balance.BalanceConfig,
+    priceRepo pricing.PriceRepository,
+    productRepo product.Repository,
     registry *plugin.Registry,
     config BillingConfig,
     clock shared.Clock,
-    calculator billing.Calculator,
-    gateway port.PaymentGateway,
+    opts ...BillingServiceOption,
 ) *BillingService {
-    return &BillingService{
-        contractRepo: contractRepo,
-        invoiceRepo:  invoiceRepo,
-        usageRepo:    usageRepo,
-        balanceRepo:   balanceRepo,
+    s := &BillingService{
+        contractRepo:  contractRepo,
+        invoiceRepo:   invoiceRepo,
+        usageRepo:     usageRepo,
         balanceConfig: balanceConfig,
-        registry:     registry,
-        config:       config,
-        clock:        clock,
-        calculator:   calculator,
-        gateway:      gateway,
+        priceRepo:     priceRepo,
+        productRepo:   productRepo,
+        registry:      registry,
+        config:        config,
+        clock:         clock,
     }
+    for _, opt := range opts {
+        opt(s)
+    }
+    return s
 }
 
 // GenerateInvoice 請求書を生成する（draft状態）
@@ -1182,18 +1193,18 @@ func (s *BillingService) ProcessPlanChange(ctx context.Context, contractID share
     if proration.AdjustmentAmount.IsNegative() {
         // ダウングレード: BalancePolicy に従う
         switch s.balanceConfig.DowngradePolicy {
-        case credit.BalancePolicyLedger:
+        case balance.BalancePolicyLedger:
             // クレジット台帳に積む
-            entry := credit.NewBalanceEntry(accountID, proration.AdjustmentAmount.Negate(), credit.BalanceReasonProration)
+            entry := balance.NewBalanceEntry(accountID, proration.AdjustmentAmount.Negate(), balance.BalanceReasonProration)
             if err := s.balanceRepo.Save(ctx, entry); err != nil {
                 return fmt.Errorf("credit entry save failed: %w", err)
             }
-        case credit.BalancePolicyRefund:
+        case balance.BalancePolicyRefund:
             // 即時返金
             if err := s.gateway.Refund(ctx, &port.RefundRequest{Amount: proration.AdjustmentAmount.Negate()}); err != nil {
                 return fmt.Errorf("refund failed: %w", err)
             }
-        case credit.BalancePolicyNone:
+        case balance.BalancePolicyNone:
             // 何もしない
         }
     } else if !proration.AdjustmentAmount.IsZero() {

@@ -25,7 +25,7 @@ An event-sourced billing engine with a plugin architecture for SaaS and subscrip
 go get github.com/contract-to-cash/core
 ```
 
-Requires **Go 1.22** or later.
+Requires **Go 1.25** or later.
 
 ```go
 package main
@@ -84,9 +84,11 @@ func main() {
 
     // Generate invoice (¥3,000 + 10% tax = ¥3,300)
     bs := service.NewBillingService(
-        contractRepo, invoiceRepo, usageRepo, balanceRepo,
-        credit.BalanceConfig{}, priceRepo, productRepo, registry,
+        contractRepo, invoiceRepo, usageRepo,
+        balance.BalanceConfig{},
+        priceRepo, productRepo, registry,
         service.BillingConfig{DaysUntilDue: 30}, clock,
+        service.WithBalanceRepo(balanceRepo),
     )
     inv, _ := bs.GenerateInvoice(ctx, cID, agg.CurrentPeriod())
     // inv.Total() => ¥3,300
@@ -128,10 +130,10 @@ application/      # Services, ports, queries
 └── projection/   # Event projections
 
 plugin/           # Hook interfaces and registry
-plugins/          # Official plugins (tax, coupon)
+plugins/          # Official plugins (tax, coupon, invoicecleanup)
 eventstore/       # Event store interface, aggregate base, snapshots
 infrastructure/   # In-memory implementations (for testing/demos)
-batch/            # Batch processors (renewal, dunning)
+batch/            # Batch processors (contract renewal)
 ```
 
 ## Plugin System
@@ -141,12 +143,12 @@ Implement only the hooks you need:
 | Category | Hooks | Purpose |
 |----------|-------|---------|
 | **Billing** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | Discounts, tax, pre/post calculation |
-| **Contract** | `OnContractCreate/Activate/Suspend/Resume/Cancel/RenewHook` | Lifecycle reactions |
+| **Contract** | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | Lifecycle reactions |
 | **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | Payment flow |
 | **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |
 | **Invoice Gen** | `InvoiceGenerationHook` | PDF rendering, delivery |
 
-Official plugins: **Tax** (Japanese consumption tax), **Coupon** (percentage/fixed, stacking, usage limits).
+Official plugins: **Tax** (Japanese consumption tax), **Coupon** (percentage/fixed, stacking, usage limits), **InvoiceCleanup** (void orphaned invoices on cancellation).
 
 ## Documentation
 

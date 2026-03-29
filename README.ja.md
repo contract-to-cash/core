@@ -25,7 +25,7 @@ SaaS・サブスクリプションビジネス向けのイベントソーシン�
 go get github.com/contract-to-cash/core
 ```
 
-**Go 1.22**以上が必要です。
+**Go 1.25**以上が必要です。
 
 ```go
 package main
@@ -84,9 +84,11 @@ func main() {
 
     // 請求書生成（¥3,000 + 消費税10% = ¥3,300）
     bs := service.NewBillingService(
-        contractRepo, invoiceRepo, usageRepo, balanceRepo,
-        credit.BalanceConfig{}, priceRepo, productRepo, registry,
+        contractRepo, invoiceRepo, usageRepo,
+        balance.BalanceConfig{},
+        priceRepo, productRepo, registry,
         service.BillingConfig{DaysUntilDue: 30}, clock,
+        service.WithBalanceRepo(balanceRepo),
     )
     inv, _ := bs.GenerateInvoice(ctx, cID, agg.CurrentPeriod())
     // inv.Total() => ¥3,300
@@ -128,10 +130,10 @@ application/      # サービス、ポート、クエリ
 └── projection/   # イベントプロジェクション
 
 plugin/           # フックインターフェースとレジストリ
-plugins/          # 公式プラグイン（税、クーポン）
+plugins/          # 公式プラグイン（税、クーポン、請求書クリーンアップ）
 eventstore/       # Event Storeインターフェース、集約ベース、スナップショット
 infrastructure/   # インメモリ実装（テスト・デモ用）
-batch/            # バッチプロセッサ（更新、ダニング）
+batch/            # バッチプロセッサ（契約更新）
 ```
 
 ## プラグインシステム
@@ -141,12 +143,12 @@ batch/            # バッチプロセッサ（更新、ダニング）
 | カテゴリ | フック | 用途 |
 |---------|--------|------|
 | **課金計算** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引、税計算、計算前後処理 |
-| **契約** | `OnContractCreate/Activate/Suspend/Resume/Cancel/RenewHook` | ライフサイクル反応 |
+| **契約** | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | ライフサイクル反応 |
 | **決済** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | 決済フロー |
 | **メトリクス** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI収集 |
 | **請求書生成** | `InvoiceGenerationHook` | PDFレンダリング、配信 |
 
-公式プラグイン: **Tax**（消費税計算）、**Coupon**（パーセンテージ/固定、スタッキング、使用制限）
+公式プラグイン: **Tax**（消費税計算）、**Coupon**（パーセンテージ/固定、スタッキング、使用制限）、**InvoiceCleanup**（解約時に未発行請求書を自動void）
 
 ## ドキュメント
 

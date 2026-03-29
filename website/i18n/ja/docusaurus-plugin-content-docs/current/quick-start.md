@@ -12,7 +12,7 @@ Contract Billing Coreを数分でセットアップしましょう。
 go get github.com/contract-to-cash/core
 ```
 
-Go 1.22以上が必要です。
+Go 1.25以上が必要です。
 
 ## 基本的な課金フロー
 
@@ -97,11 +97,12 @@ func main() {
 
 ```go
     billingService := service.NewBillingService(
-        contractRepo, invoiceRepo, usageRepo, balanceRepo,
-        credit.BalanceConfig{},
+        contractRepo, invoiceRepo, usageRepo,
+        balance.BalanceConfig{},
         priceRepo, productRepo, registry,
         service.BillingConfig{DaysUntilDue: 30},
         clock,
+        service.WithBalanceRepo(balanceRepo),
     )
 
     inv, _ := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())

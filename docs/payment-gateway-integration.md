@@ -495,7 +495,7 @@ http.HandleFunc("/webhooks/stripe", func(w http.ResponseWriter, r *http.Request)
 
 ## Checklist for New Gateway Integration
 
-- [ ] Implement `PaymentGateway` interface (all 12 methods)
+- [ ] Implement `PaymentGateway` interface (all 13 methods)
 - [ ] Implement `WebhookHandler` for the provider
 - [ ] Map provider-specific errors to `GatewayError` codes
 - [ ] Map provider-specific statuses to `TransactionStatus`
