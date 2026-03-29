@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/contract-to-cash/core/application/port"
@@ -255,22 +256,9 @@ func TestWithCustomerGateway_ResolvesFallback(t *testing.T) {
 // containsAll checks that s contains all substrings.
 func containsAll(s string, substrs ...string) bool {
 	for _, sub := range substrs {
-		if !contains(s, sub) {
+		if !strings.Contains(s, sub) {
 			return false
 		}
 	}
 	return true
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

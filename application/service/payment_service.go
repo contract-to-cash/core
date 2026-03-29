@@ -161,7 +161,12 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		// Execute OnPaymentFailed hooks with PaymentContext
 		failCtx := plugin.NewPaymentContext(ctx, failedPayment, inv)
 		for _, hook := range s.registry.GetOnPaymentFailedHooks() {
-			_ = hook.OnPaymentFailed(failCtx, err)
+			if hookErr := hook.OnPaymentFailed(failCtx, err); hookErr != nil {
+				s.logger.Warn("OnPaymentFailed hook failed",
+					"invoiceID", invoiceID,
+					"error", hookErr,
+				)
+			}
 		}
 		return nil, fmt.Errorf("gateway charge failed: %w", err)
 	}

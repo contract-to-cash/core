@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,10 +93,10 @@ func TestProjectionService_AsyncMode_LogsError(t *testing.T) {
 	if logOutput == "" {
 		t.Fatal("expected log output for async projection error, got nothing")
 	}
-	if !containsStr(logOutput, "projection failed") {
+	if !strings.Contains(logOutput, "projection failed") {
 		t.Errorf("log output missing expected content, got: %s", logOutput)
 	}
-	if !containsStr(logOutput, "TestEvent") {
+	if !strings.Contains(logOutput, "TestEvent") {
 		t.Errorf("log output should contain event type, got: %s", logOutput)
 	}
 }
@@ -151,11 +152,3 @@ func TestProjectionService_NoLogger_NoPanic(t *testing.T) {
 	}
 }
 
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
