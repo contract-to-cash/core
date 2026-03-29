@@ -102,7 +102,7 @@ A common pattern for hosting/cloud providers where service activation depends on
 6. Contract: Active    → Resume → Provision service
 ```
 
-This reuses the `Suspended` state for both initial activation (awaiting first payment) and non-payment suspension (dunning). Both resolve the same way: payment → resume.
+This reuses the `Suspended` state for both initial activation (awaiting first payment) and non-payment suspension. Both resolve the same way: payment → resume.
 
 The `AfterChargeHook` or `OnContractResumeHook` can trigger service provisioning:
 

@@ -215,3 +215,11 @@ Plan-level restrictions via `applicableTo` currently use `PlanID` for matching. 
 ```go
 couponPlugin := coupon.NewCouponPlugin(couponRepo, clock)
 ```
+
+### InvoiceCleanup Plugin
+
+Handles cleanup of draft and stale invoices:
+
+```go
+cleanupPlugin := invoicecleanup.NewInvoiceCleanupPlugin(invoiceRepo, clock)
+```

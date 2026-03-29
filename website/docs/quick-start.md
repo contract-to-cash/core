@@ -12,7 +12,7 @@ Get up and running with Contract Billing Core in minutes.
 go get github.com/contract-to-cash/core
 ```
 
-Requires Go 1.22 or later.
+Requires Go 1.25 or later.
 
 ## Basic Billing Flow
 
@@ -97,11 +97,12 @@ func main() {
 
 ```go
     billingService := service.NewBillingService(
-        contractRepo, invoiceRepo, usageRepo, balanceRepo,
-        credit.BalanceConfig{},
+        contractRepo, invoiceRepo, usageRepo,
+        balance.BalanceConfig{},
         priceRepo, productRepo, registry,
         service.BillingConfig{DaysUntilDue: 30},
         clock,
+        service.WithBalanceRepo(balanceRepo),
     )
 
     inv, _ := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
@@ -115,7 +116,7 @@ func main() {
 ```go
     paymentService := service.NewPaymentService(
         myGateway, paymentRepo, invoiceRepo, contractRepo,
-        nil, eventStore, registry, clock,
+        eventStore, registry, clock,
     )
 
     inv.Finalize()

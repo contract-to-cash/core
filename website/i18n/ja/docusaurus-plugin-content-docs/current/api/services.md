@@ -15,13 +15,14 @@ billingService := service.NewBillingService(
     contractRepo,  // contract.Repository
     invoiceRepo,   // invoice.Repository
     usageRepo,     // usage.Repository
-    balanceRepo,    // credit.Repository
-    balanceConfig,  // credit.BalanceConfig
+    balanceConfig,  // balance.BalanceConfig
     priceRepo,     // pricing.PriceRepository
     productRepo,   // product.Repository
     registry,      // *plugin.Registry
     billingConfig, // service.BillingConfig
     clock,         // shared.Clock
+    // オプション:
+    service.WithBalanceRepo(balanceRepo), // balance.Repository
 )
 ```
 
@@ -60,10 +61,10 @@ paymentService := service.NewPaymentService(
     paymentRepo,   // payment.Repository
     invoiceRepo,   // invoice.Repository
     contractRepo,  // contract.Repository
-    customerGateway, // port.CustomerGateway（オプション、フォールバック解決用）
     eventStore,    // eventstore.Store
     registry,      // *plugin.Registry
     clock,         // shared.Clock
+    service.WithCustomerGateway(customerGateway), // オプション: フォールバック解決用
 )
 ```
 

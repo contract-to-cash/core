@@ -1382,10 +1382,18 @@ type PaymentService struct {
     paymentRepo     payment.Repository
     invoiceRepo     invoice.Repository
     contractRepo    contract.Repository    // 支払い方法フォールバック解決用
-    customerGateway port.CustomerGateway   // 顧客デフォルト支払い方法の参照用
+    customerGateway port.CustomerGateway   // オプション: 顧客デフォルト支払い方法の参照用
     eventStore      eventstore.Store
     pluginRegistry  *plugin.Registry
     clock           shared.Clock
+}
+
+// PaymentServiceOption NewPaymentServiceのオプション引数
+type PaymentServiceOption func(*PaymentService)
+
+// WithCustomerGateway 顧客ゲートウェイを設定するオプション
+func WithCustomerGateway(gw port.CustomerGateway) PaymentServiceOption {
+    return func(s *PaymentService) { s.customerGateway = gw }
 }
 
 func NewPaymentService(
@@ -1393,21 +1401,24 @@ func NewPaymentService(
     paymentRepo payment.Repository,
     invoiceRepo invoice.Repository,
     contractRepo contract.Repository,
-    customerGateway port.CustomerGateway,
     eventStore eventstore.Store,
     pluginRegistry *plugin.Registry,
     clock shared.Clock,
+    opts ...PaymentServiceOption,
 ) *PaymentService {
-    return &PaymentService{
-        gateway:         gateway,
-        paymentRepo:     paymentRepo,
-        invoiceRepo:     invoiceRepo,
-        contractRepo:    contractRepo,
-        customerGateway: customerGateway,
-        eventStore:      eventStore,
-        pluginRegistry:  pluginRegistry,
-        clock:           clock,
+    s := &PaymentService{
+        gateway:        gateway,
+        paymentRepo:    paymentRepo,
+        invoiceRepo:    invoiceRepo,
+        contractRepo:   contractRepo,
+        eventStore:     eventStore,
+        pluginRegistry: pluginRegistry,
+        clock:          clock,
     }
+    for _, opt := range opts {
+        opt(s)
+    }
+    return s
 }
 
 // ProcessPayment 請求書の支払いを処理
@@ -1564,18 +1575,25 @@ github.com/contract-to-cash/core/
 │   ├── payment/
 │   │   ├── entity.go           # Payment エンティティ
 │   │   ├── repository.go       # Payment リポジトリIF
-│   │   ├── gateway.go          # ★ Gateway インターフェース
-│   │   ├── gateway_types.go    # ★ リクエスト/レスポンス型
-│   │   ├── customer.go         # ★ CustomerGateway IF
-│   │   ├── webhook.go          # ★ Webhook IF
-│   │   ├── subscription_gateway.go  # ★ 定期課金IF（オプション）
-│   │   ├── router.go           # ★ Gateway ルーター
-│   │   ├── errors.go           # ★ エラー定義
+│   │   ├── errors.go           # エラー定義
 │   │   └── events.go
+│   ├── balance/
+│   ├── billing/
+│   ├── pricing/
+│   ├── product/
 │   ├── usage/
 │   └── shared/
 │
 ├── application/
+│   ├── port/                   # ★ 外部サービスとの統合境界
+│   │   ├── gateway.go          # PaymentGateway IF（13メソッド）
+│   │   ├── gateway_types.go    # リクエスト/レスポンス型
+│   │   ├── customer_gateway.go # CustomerGateway IF
+│   │   ├── webhook.go          # WebhookHandler IF
+│   │   └── gateway_router.go   # GatewayRouter IF
+│   ├── query/
+│   ├── projection/
+│   ├── tx/
 │   └── service/
 │       ├── billing_service.go
 │       ├── payment_service.go  # ★ 決済サービス
@@ -1586,7 +1604,9 @@ github.com/contract-to-cash/core/
 ├── eventstore/
 │
 ├── plugins/
-│   └── coupon/
+│   ├── coupon/
+│   ├── tax/
+│   └── invoicecleanup/
 │
 └── infrastructure/             # 参照実装（オプション）
     ├── gateway/
@@ -1596,7 +1616,7 @@ github.com/contract-to-cash/core/
     │   │   └── webhook.go
     │   └── mock/               # テスト用モック
     │       └── gateway.go
-    └── postgres/
+    └── inmemory/
 ```
 
 ---
@@ -1773,10 +1793,10 @@ func main() {
         paymentRepo,
         invoiceRepo,
         contractRepo,    // 支払い方法フォールバック解決用
-        customerGateway, // 顧客デフォルト支払い方法の参照用
         eventStore,
         pluginRegistry,
         clock,
+        service.WithCustomerGateway(customerGateway), // オプション: 顧客デフォルト支払い方法の参照用
     )
 
     // ...

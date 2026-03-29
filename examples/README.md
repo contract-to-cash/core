@@ -18,7 +18,7 @@ These examples demonstrate the library's key capabilities. Each example is a sta
 
 ## Prerequisites
 
-- Go 1.22+
+- Go 1.25+
 
 ## Running
 
@@ -54,7 +54,7 @@ graph TD
     App --> ES
 
     Domain["<b>Domain</b><br/>Contract · Invoice · Payment<br/>Credit · Pricing · Usage"]
-    Plugin["<b>Plugin System</b><br/>Registry · Hooks<br/>Tax · Coupon · Custom"]
+    Plugin["<b>Plugin System</b><br/>Registry · Hooks<br/>Tax · Coupon · InvoiceCleanup · Custom"]
     ES["<b>Event Store</b><br/>Store · Snapshot · Subscribe"]
 
     ES --> Infra["<b>Infrastructure</b><br/>InMemory* (swap to Postgres, etc.)"]

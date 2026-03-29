@@ -42,7 +42,7 @@ func (g *MyStripeGateway) Charge(ctx context.Context, req *port.ChargeRequest) (
 ```go
 paymentService := service.NewPaymentService(
     gateway, paymentRepo, invoiceRepo, contractRepo,
-    nil, eventStore, registry, clock,
+    eventStore, registry, clock,
 )
 
 payment, err := paymentService.ProcessPayment(ctx, invoiceID, service.ProcessPaymentInput{

@@ -422,7 +422,7 @@ http.HandleFunc("/webhooks/stripe", func(w http.ResponseWriter, r *http.Request)
 
 ## 新規ゲートウェイ連携チェックリスト
 
-- [ ] `PaymentGateway` インターフェースを実装（全12メソッド）
+- [ ] `PaymentGateway` インターフェースを実装（全13メソッド）
 - [ ] プロバイダ用の `WebhookHandler` を実装
 - [ ] プロバイダ固有エラーを `GatewayError` コードにマッピング
 - [ ] プロバイダ固有ステータスを `TransactionStatus` にマッピング

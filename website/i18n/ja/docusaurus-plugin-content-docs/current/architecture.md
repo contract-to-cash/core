@@ -23,10 +23,11 @@ github.com/contract-to-cash/core/
 │   ├── service/         # BillingService, PaymentService, SnapshotService
 │   ├── port/            # PaymentGatewayインターフェース（ヘキサゴナルポート）
 │   ├── query/           # TemporalQueryService
-│   └── projection/      # プロジェクションサービス（読み取りモデル）
+│   ├── projection/      # プロジェクションサービス（読み取りモデル）
+│   └── tx/              # トランザクション管理
 ├── eventstore/          # イベントソーシング基盤
 ├── plugin/              # プラグインシステム
-├── plugins/             # 公式プラグイン実装
+├── plugins/             # 公式プラグイン実装（tax, coupon, invoicecleanup）
 ├── infrastructure/      # インフラ実装
 │   └── inmemory/        # インメモリ実装（テスト・デモ用）
 ├── batch/               # バッチプロセッサ

@@ -91,21 +91,27 @@ graph TB
 github.com/contract-to-cash/core/
 ├── domain/                      # ドメイン層（依存なし）
 │   ├── contract/
-│   │   ├── entity.go
+│   │   ├── aggregate.go         # イベントソーシング集約
 │   │   ├── repository.go        # インターフェース定義
 │   │   ├── events.go
-│   │   └── service.go
+│   │   └── entity.go
 │   ├── invoice/
 │   ├── payment/
+│   ├── balance/                 # クレジット台帳
+│   ├── billing/                 # 計算抽象化
+│   ├── pricing/                 # 不変Price、料金モデル
+│   ├── product/                 # Product定義
 │   ├── usage/
 │   └── shared/                  # 共通値オブジェクト
 │       ├── money.go
-│       ├── datetime.go
+│       ├── daterange.go
 │       └── identifier.go
 │
 ├── application/                 # アプリケーション層
-│   ├── command/
+│   ├── port/                    # 外部連携IF（PaymentGateway等）
 │   ├── query/
+│   ├── projection/
+│   ├── tx/
 │   └── service/
 │
 ├── plugin/                      # プラグインシステム
@@ -122,18 +128,13 @@ github.com/contract-to-cash/core/
 │   ├── processor.go
 │   └── ...
 │
-├── infrastructure/              # インフラ実装（別モジュール可）
-│   ├── postgres/
-│   ├── mysql/
-│   └── inmemory/               # テスト用
+├── infrastructure/              # インフラ実装
+│   └── inmemory/               # テスト・デモ用インメモリ実装
 │
-├── plugins/                     # 公式プラグイン
-│   ├── coupon/
-│   └── tax/
-│
-└── api/                        # API層
-    ├── http/
-    └── grpc/
+└── plugins/                     # 公式プラグイン
+    ├── coupon/
+    ├── tax/
+    └── invoicecleanup/
 ```
 
 ## 4. 主要コンポーネント

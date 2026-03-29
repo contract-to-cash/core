@@ -193,7 +193,7 @@ type BatchOptions struct {
 | `PaymentRetry` | 失敗決済リトライ |
 | `TrialExpiration` | トライアル終了処理 |
 | `UsageAggregator` | 従量課金集計 |
-| `CreditExpiration` | 有効期限切れクレジットの失効処理 |
+| `BalanceExpiration` | 有効期限切れ残高（クレジット）の失効処理 |
 
 **理由：**
 - スケジューラは環境依存（cron, Kubernetes CronJob, Cloud Scheduler等）

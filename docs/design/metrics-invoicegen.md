@@ -1228,15 +1228,22 @@ github.com/contract-to-cash/core/
 │   ├── contract/
 │   ├── invoice/
 │   ├── payment/
+│   ├── balance/
+│   ├── billing/
+│   ├── pricing/
+│   ├── product/
 │   ├── usage/
 │   └── shared/
 │
 ├── application/
+│   ├── port/
+│   ├── query/
+│   ├── projection/
+│   ├── tx/
 │   └── service/
 │       ├── billing_service.go
 │       ├── payment_service.go
-│       ├── subscription_service.go
-│       └── temporal_query_service.go
+│       └── subscription_service.go
 │
 ├── eventstore/
 │   ├── store.go
@@ -1265,12 +1272,11 @@ github.com/contract-to-cash/core/
 ├── plugins/                  # 公式プラグイン（実装例）
 │   ├── coupon/
 │   ├── tax/
-│   ├── metrics-basic/        # 基本メトリクス実装
-│   └── invoicegen-pdf/       # PDF生成実装
+│   └── invoicecleanup/
 │
 └── infrastructure/
     ├── gateway/
-    └── postgres/
+    └── inmemory/
 ```
 
 ---

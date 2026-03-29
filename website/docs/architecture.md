@@ -40,7 +40,8 @@ github.com/contract-to-cash/core/
 │   └── hooks_invoicegen.go # Invoice generation hooks
 ├── plugins/             # Official plugin implementations
 │   ├── tax/             # Tax calculation (Japanese consumption tax)
-│   └── coupon/          # Coupon/discount management
+│   ├── coupon/          # Coupon/discount management
+│   └── invoicecleanup/  # Invoice cleanup utilities
 ├── infrastructure/      # Infrastructure implementations
 │   └── inmemory/        # In-memory implementations (for testing/demos)
 ├── batch/               # Batch processors

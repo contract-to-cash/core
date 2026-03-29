@@ -10,7 +10,7 @@
 
 | 項目 | 値 |
 |------|-----|
-| 言語 | Go 1.22 |
+| 言語 | Go 1.25 |
 | アーキテクチャ | DDD + Event Sourcing + CQRS + Plugin Architecture |
 | テスト | Go標準 testing パッケージ (280テスト関数) |
 | CI | GitHub Actions (build, test -race, lint, vet, fmt) |
@@ -38,9 +38,10 @@ core/
 │   ├── service/               #   BillingService, PaymentService, SnapshotService
 │   ├── port/                  #   外部ゲートウェイインターフェース
 │   ├── query/                 #   時間旅行クエリサービス
-│   └── projection/            #   プロジェクション（読み取りモデル）
+│   ├── projection/            #   プロジェクション（読み取りモデル）
+│   └── tx/                    #   トランザクション管理
 ├── eventstore/                # イベントソーシング基盤
-├── plugin/                    # プラグインシステム（18種のフック）
+├── plugin/                    # プラグインシステム（17種のフック）
 ├── plugins/                   # 公式プラグイン実装
 │   ├── coupon/                #   クーポン/割引
 │   ├── tax/                   #   税金計算（日本消費税対応）
@@ -81,7 +82,7 @@ core/
 **責務**: 拡張ポイントを提供し、ビジネスロジックのカスタマイズを可能にする
 **ファイル**: `plugin/registry.go`, `plugin/hooks.go` 他
 
-- 18種のフックインターフェース（ISP準拠）
+- 17種のフックインターフェース（ISP準拠）
 - 優先度ベースの実行順制御
 - スレッドセーフなレジストリ（sync.RWMutex）
 - 初期化/シャットダウンのライフサイクル管理
@@ -192,7 +193,7 @@ core/
 | Strategy | PricingModel (Flat/Tiered/Usage) | 課金方式の柔軟な切り替え |
 | Value Object | Money, DateRange, Currency | 型安全な概念モデリング |
 | Functional Options | Invoice構築 | 柔軟なコンストラクタ |
-| Plugin/Hook | 18種のフックインターフェース | 変更なしで拡張可能 |
+| Plugin/Hook | 17種のフックインターフェース | 変更なしで拡張可能 |
 | State Machine | Contract, Invoice, Payment | 厳密な状態遷移バリデーション |
 | Ports & Adapters | application/port | 外部システムの抽象化 |
 | Optimistic Locking | EventStore | 同時実行制御 |
@@ -204,7 +205,7 @@ core/
 | S - 単一責務 | ★★★ | BillingService/PaymentService等の明確な責務分離 |
 | O - 開放閉鎖 | ★★★ | プラグインフックで変更なく拡張可能 |
 | L - リスコフ置換 | ★★★ | 全プラグイン・リポジトリがインターフェース準拠 |
-| I - インターフェース分離 | ★★★ | 18フックを個別インターフェースで定義 |
+| I - インターフェース分離 | ★★★ | 17フックを個別インターフェースで定義 |
 | D - 依存性逆転 | ★★★ | ドメイン層が外部パッケージに一切依存しない |
 
 ### 依存関係の健全性
@@ -233,7 +234,7 @@ plugin/plugins （プラグイン - フックの実装）
 
 ### 総合評価: **A-（優秀）**
 
-- **技術的特徴**: DDD + Event Sourcing + Plugin Architecture の教科書的な実装。`big.Rat`による精密な金額計算、18種のプラグインフック、時間旅行クエリなど、契約課金ドメインに求められる機能を網羅
+- **技術的特徴**: DDD + Event Sourcing + Plugin Architecture の教科書的な実装。`big.Rat`による精密な金額計算、17種のプラグインフック、時間旅行クエリなど、契約課金ドメインに求められる機能を網羅
 - **品質状態**: 全テストがrace detector付きでパス、golangci-lintで警告ゼロ。コアドメインのテストカバレッジは67-100%と良好
 - **精査結果**: 初期レビューの12件中、実コード検証の結果 **7件が対応推奨（高）、4件が改善推奨（中）、2件がNice-to-have（低）**。5件は過大評価として取り下げ
 - **最優先対応**: 負値バリデーション不足（#1-3）は課金ドメインとして致命的になりうるため、最優先で対処すべき
