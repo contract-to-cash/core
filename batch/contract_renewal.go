@@ -3,8 +3,10 @@ package batch
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
@@ -19,20 +21,35 @@ type ContractRenewalProcessor struct {
 	priceRepo    pricing.PriceRepository
 	registry     *plugin.Registry
 	clock        shared.Clock
+	txManager    tx.TxManager
+	logger       *slog.Logger
 }
 
 // NewContractRenewalProcessor creates a new ContractRenewalProcessor.
+// If txManager is nil, a NoopTxManager is used.
 func NewContractRenewalProcessor(
 	contractRepo contract.Repository,
 	priceRepo pricing.PriceRepository,
 	registry *plugin.Registry,
 	clock shared.Clock,
+	txManager tx.TxManager,
+	logger *slog.Logger,
 ) *ContractRenewalProcessor {
+	if txManager == nil {
+		txManager = tx.NewNoopTxManager(tx.Repos{
+			Contracts: contractRepo,
+		})
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &ContractRenewalProcessor{
 		contractRepo: contractRepo,
 		priceRepo:    priceRepo,
 		registry:     registry,
 		clock:        clock,
+		txManager:    txManager,
+		logger:       logger,
 	}
 }
 
@@ -149,14 +166,23 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 	if err := agg.Renew(billingCycle, metadata); err != nil {
 		return err
 	}
+	newStatus := agg.Status()
 
+	// Persist within transaction — save BEFORE hooks to prevent
+	// "notified but not persisted" inconsistency.
+	err = p.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+		return repos.Contracts.Save(txCtx, agg)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to save renewed contract: %w", err)
+	}
+
+	// Post-commit hooks — non-fatal. Contract is already persisted;
+	// hook failures are logged but do not fail the renewal.
 	if p.registry != nil {
 		pluginCtx := plugin.NewContext(ctx)
-		newStatus := agg.Status()
 
 		if newStatus == contract.ContractStatusExpired || newStatus == contract.ContractStatusCancelled {
-			// Contract expired (autoRenew=false) or cancelled (cancelAtPeriodEnd).
-			// Fire OnContractChangeHooks with appropriate change type.
 			changeEvent := plugin.ContractChangeEvent{
 				ContractID: agg.ContractID(),
 				ChangeType: plugin.ContractChangeCancelled,
@@ -165,19 +191,25 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 				Timestamp:  p.clock.Now(),
 			}
 			for _, hook := range p.registry.GetOnContractChangeHooks() {
-				if err := hook.OnContractChange(pluginCtx, changeEvent); err != nil {
-					return fmt.Errorf("change hook %q failed: %w", hook.Name(), err)
+				if hookErr := hook.OnContractChange(pluginCtx, changeEvent); hookErr != nil {
+					p.logger.Warn("post-commit change hook failed",
+						"hook", hook.Name(),
+						"contractID", agg.ContractID(),
+						"error", hookErr,
+					)
 				}
 			}
 		} else {
-			// Contract renewed successfully — fire renew hooks.
 			for _, hook := range p.registry.GetOnContractRenewHooks() {
-				if err := hook.OnContractRenew(pluginCtx, agg); err != nil {
-					return fmt.Errorf("renew hook %q failed: %w", hook.Name(), err)
+				if hookErr := hook.OnContractRenew(pluginCtx, agg); hookErr != nil {
+					p.logger.Warn("post-commit renew hook failed",
+						"hook", hook.Name(),
+						"contractID", agg.ContractID(),
+						"error", hookErr,
+					)
 				}
 			}
 
-			// Fire OnContractChangeHooks with ContractChangeRenewed.
 			changeEvent := plugin.ContractChangeEvent{
 				ContractID: agg.ContractID(),
 				ChangeType: plugin.ContractChangeRenewed,
@@ -186,15 +218,15 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 				Timestamp:  p.clock.Now(),
 			}
 			for _, hook := range p.registry.GetOnContractChangeHooks() {
-				if err := hook.OnContractChange(pluginCtx, changeEvent); err != nil {
-					return fmt.Errorf("change hook %q failed: %w", hook.Name(), err)
+				if hookErr := hook.OnContractChange(pluginCtx, changeEvent); hookErr != nil {
+					p.logger.Warn("post-commit change hook failed",
+						"hook", hook.Name(),
+						"contractID", agg.ContractID(),
+						"error", hookErr,
+					)
 				}
 			}
 		}
-	}
-
-	if err := p.contractRepo.Save(ctx, agg); err != nil {
-		return fmt.Errorf("failed to save renewed contract: %w", err)
 	}
 
 	return nil

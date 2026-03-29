@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/contract-to-cash/core/application/port"
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/payment"
@@ -49,6 +50,14 @@ func WithCustomerGateway(gw port.CustomerGateway) PaymentServiceOption {
 	}
 }
 
+// WithPaymentTxManager sets the transaction manager for the PaymentService.
+// If not provided, a NoopTxManager is used (no transaction wrapping).
+func WithPaymentTxManager(tm tx.TxManager) PaymentServiceOption {
+	return func(s *PaymentService) {
+		s.txManager = tm
+	}
+}
+
 // PaymentService orchestrates payment processing with plugin hooks.
 type PaymentService struct {
 	gateway         port.PaymentGateway
@@ -60,6 +69,7 @@ type PaymentService struct {
 	registry        *plugin.Registry
 	clock           shared.Clock
 	logger          *slog.Logger
+	txManager       tx.TxManager
 }
 
 // NewPaymentService creates a new PaymentService.
@@ -89,6 +99,12 @@ func NewPaymentService(
 	}
 	if s.logger == nil {
 		s.logger = slog.Default()
+	}
+	if s.txManager == nil {
+		s.txManager = tx.NewNoopTxManager(tx.Repos{
+			Payments: paymentRepo,
+			Invoices: invoiceRepo,
+		})
 	}
 	return s
 }
@@ -172,6 +188,15 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("gateway charge failed: %w", err)
 	}
 
+	// Phase 2: Saga compensation for gateway charge
+	saga := tx.NewSaga()
+	saga.AddCompensation(func(compCtx context.Context) error {
+		_, voidErr := s.gateway.Void(compCtx, &port.VoidRequest{
+			AuthorizationID: chargeResp.TransactionID,
+		})
+		return voidErr
+	})
+
 	// Create payment record
 	p := payment.NewPayment(
 		shared.NewPaymentID(),
@@ -181,6 +206,9 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		chargeResp.TransactionID,
 		s.clock.Now(),
 	)
+	if input.IdempotencyKey != "" {
+		p.SetIdempotencyKey(input.IdempotencyKey)
+	}
 	if err := p.Complete(); err != nil {
 		return nil, fmt.Errorf("failed to complete payment: %w", err)
 	}
@@ -190,16 +218,43 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("failed to record payment on invoice: %w", err)
 	}
 
-	// Save payment and invoice together — if either fails, return error
-	// so the caller can compensate (e.g. void the gateway charge)
-	if err := s.paymentRepo.Save(ctx, p); err != nil {
-		return nil, fmt.Errorf("failed to save payment: %w", err)
-	}
-	if err := s.invoiceRepo.Save(ctx, inv); err != nil {
-		return nil, fmt.Errorf("failed to save invoice after payment: %w", err)
+	// Phase 3: All local writes are atomic within a transaction.
+	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+		// Idempotency check: if a payment with this key already exists, skip
+		if input.IdempotencyKey != "" {
+			existing, findErr := repos.Payments.FindByIdempotencyKey(txCtx, input.IdempotencyKey)
+			if findErr != nil {
+				return fmt.Errorf("idempotency check failed: %w", findErr)
+			}
+			if existing != nil {
+				p = existing
+				return nil
+			}
+		}
+
+		if saveErr := repos.Payments.Save(txCtx, p); saveErr != nil {
+			return fmt.Errorf("failed to save payment: %w", saveErr)
+		}
+		if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {
+			return fmt.Errorf("failed to save invoice after payment: %w", saveErr)
+		}
+		return nil
+	})
+	if err != nil {
+		// Local save failed — compensate by voiding the gateway charge
+		if compErr := saga.Compensate(ctx); compErr != nil {
+			s.logger.Error("local save failed and compensation also failed (MANUAL RECONCILIATION REQUIRED)",
+				"paymentID", p.ID(),
+				"invoiceID", invoiceID,
+				"saveError", err,
+				"compensationError", compErr,
+			)
+			return nil, fmt.Errorf("local save failed: %w; compensation also failed: %v", err, compErr)
+		}
+		return nil, fmt.Errorf("local save failed (gateway charge voided): %w", err)
 	}
 
-	// Execute AfterCharge hooks with full PaymentContext (errors are non-fatal)
+	// Phase 4: AfterCharge hooks (non-fatal, outside transaction)
 	successCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetAfterChargeHooks() {
 		if hookErr := hook.AfterCharge(successCtx); hookErr != nil {
@@ -239,21 +294,25 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		refundAmount = *input.Amount
 	}
 
-	// Update payment status
-	if input.Amount != nil && refundAmount.Amount().Cmp(p.Amount().Amount()) < 0 {
-		if err := p.MarkPartiallyRefunded(); err != nil {
-			return fmt.Errorf("failed to mark payment partially refunded: %w", err)
+	// Phase 3: local save in transaction
+	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+		if refundErr := p.RecordRefund(refundAmount); refundErr != nil {
+			return refundErr
 		}
-	} else {
-		if err := p.MarkRefunded(); err != nil {
-			return fmt.Errorf("failed to mark payment refunded: %w", err)
-		}
-	}
-	if err := s.paymentRepo.Save(ctx, p); err != nil {
-		return fmt.Errorf("failed to save payment after refund: %w", err)
+		return repos.Payments.Save(txCtx, p)
+	})
+	if err != nil {
+		// Gateway refund succeeded but local save failed — this requires manual reconciliation.
+		// Refunds cannot be reversed, so we log at Error level.
+		s.logger.Error("local save failed after gateway refund (MANUAL RECONCILIATION REQUIRED)",
+			"paymentID", paymentID,
+			"refundAmount", refundAmount,
+			"error", err,
+		)
+		return fmt.Errorf("local save failed after gateway refund (MANUAL RECONCILIATION REQUIRED): %w", err)
 	}
 
-	// Load invoice for PaymentContext (best-effort; hooks still fire with nil invoice)
+	// Phase 4: post-commit hooks (non-fatal)
 	inv, invErr := s.invoiceRepo.FindByID(ctx, p.InvoiceID())
 	if invErr != nil {
 		s.logger.Warn("invoice lookup failed on refund",
@@ -264,13 +323,12 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		inv = nil
 	}
 
-	// Execute OnRefund hooks with PaymentContext
 	refundCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetOnRefundHooks() {
-		if err := hook.OnRefund(refundCtx, refundAmount); err != nil {
+		if hookErr := hook.OnRefund(refundCtx, refundAmount); hookErr != nil {
 			s.logger.Warn("OnRefund hook failed",
 				"paymentID", paymentID,
-				"error", err,
+				"error", hookErr,
 			)
 		}
 	}

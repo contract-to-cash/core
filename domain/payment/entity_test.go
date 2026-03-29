@@ -216,6 +216,136 @@ func TestPayment_Metadata_ReturnsCopy(t *testing.T) {
 	}
 }
 
+// --- RecordRefund tests ---
+
+func TestPayment_RecordRefund_FullRefund(t *testing.T) {
+	p := newTestPayment()
+	completePayment(t, p)
+
+	err := p.RecordRefund(p.Amount())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Status() != PaymentStatusRefunded {
+		t.Errorf("expected refunded, got %s", p.Status())
+	}
+	if p.RefundedAmount().Amount().Cmp(p.Amount().Amount()) != 0 {
+		t.Errorf("expected refundedAmount == amount")
+	}
+}
+
+func TestPayment_RecordRefund_PartialRefund(t *testing.T) {
+	p := newTestPayment()
+	completePayment(t, p)
+
+	partial := shared.NewMoney(big.NewRat(2000, 1), shared.CurrencyJPY)
+	err := p.RecordRefund(partial)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Status() != PaymentStatusPartiallyRefunded {
+		t.Errorf("expected partially_refunded, got %s", p.Status())
+	}
+	if p.RefundedAmount().Amount().Cmp(big.NewRat(2000, 1)) != 0 {
+		t.Errorf("expected refundedAmount 2000, got %s", p.RefundedAmount().Amount().RatString())
+	}
+}
+
+func TestPayment_RecordRefund_CumulativePartialRefunds(t *testing.T) {
+	p := newTestPayment() // amount = 5000
+	completePayment(t, p)
+
+	partial := shared.NewMoney(big.NewRat(2000, 1), shared.CurrencyJPY)
+
+	// First partial refund
+	if err := p.RecordRefund(partial); err != nil {
+		t.Fatalf("first refund failed: %v", err)
+	}
+	if p.Status() != PaymentStatusPartiallyRefunded {
+		t.Errorf("expected partially_refunded after first refund, got %s", p.Status())
+	}
+
+	// Second partial refund from partially_refunded state
+	if err := p.RecordRefund(partial); err != nil {
+		t.Fatalf("second refund failed: %v", err)
+	}
+	if p.Status() != PaymentStatusPartiallyRefunded {
+		t.Errorf("expected partially_refunded after second refund, got %s", p.Status())
+	}
+	if p.RefundedAmount().Amount().Cmp(big.NewRat(4000, 1)) != 0 {
+		t.Errorf("expected cumulative refundedAmount 4000, got %s", p.RefundedAmount().Amount().RatString())
+	}
+
+	// Final refund to reach full amount
+	remaining := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
+	if err := p.RecordRefund(remaining); err != nil {
+		t.Fatalf("final refund failed: %v", err)
+	}
+	if p.Status() != PaymentStatusRefunded {
+		t.Errorf("expected refunded after final refund, got %s", p.Status())
+	}
+}
+
+func TestPayment_RecordRefund_ExceedsAmount(t *testing.T) {
+	p := newTestPayment() // amount = 5000
+	completePayment(t, p)
+
+	excess := shared.NewMoney(big.NewRat(6000, 1), shared.CurrencyJPY)
+	err := p.RecordRefund(excess)
+	if err == nil {
+		t.Fatal("expected error when refund exceeds payment amount")
+	}
+}
+
+func TestPayment_RecordRefund_CumulativeExceedsAmount(t *testing.T) {
+	p := newTestPayment() // amount = 5000
+	completePayment(t, p)
+
+	partial := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+	if err := p.RecordRefund(partial); err != nil {
+		t.Fatalf("first refund failed: %v", err)
+	}
+
+	// Second refund would exceed total
+	excess := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+	err := p.RecordRefund(excess)
+	if err == nil {
+		t.Fatal("expected error when cumulative refund exceeds payment amount")
+	}
+}
+
+func TestPayment_RecordRefund_InvalidState(t *testing.T) {
+	// Pending payment cannot be refunded
+	p := newTestPayment()
+	refundAmt := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
+	err := p.RecordRefund(refundAmt)
+	if err == nil {
+		t.Fatal("expected error refunding pending payment")
+	}
+
+	// Failed payment cannot be refunded
+	p2 := newTestPayment()
+	_ = p2.Fail("test")
+	err = p2.RecordRefund(refundAmt)
+	if err == nil {
+		t.Fatal("expected error refunding failed payment")
+	}
+}
+
+// --- IdempotencyKey tests ---
+
+func TestPayment_IdempotencyKey(t *testing.T) {
+	p := newTestPayment()
+	if p.IdempotencyKey() != "" {
+		t.Error("expected empty idempotency key by default")
+	}
+
+	p.SetIdempotencyKey("idem-123")
+	if p.IdempotencyKey() != "idem-123" {
+		t.Errorf("expected idem-123, got %s", p.IdempotencyKey())
+	}
+}
+
 func TestPaymentMethod_Constants(t *testing.T) {
 	methods := []PaymentMethod{
 		PaymentMethodCreditCard,

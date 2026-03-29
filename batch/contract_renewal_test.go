@@ -115,7 +115,7 @@ func TestContractRenewalProcessor_HappyPath(t *testing.T) {
 	agg := newActiveContract("c1")
 	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
 
-	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
 
 	result, err := processor.Process(context.Background(), BatchOptions{})
 	if err != nil {
@@ -145,7 +145,7 @@ func TestContractRenewalProcessor_DryRun(t *testing.T) {
 	oldPeriod := agg.CurrentPeriod()
 	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
 
-	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
 
 	result, err := processor.Process(context.Background(), BatchOptions{DryRun: true})
 	if err != nil {
@@ -179,7 +179,7 @@ func TestContractRenewalProcessor_DryRun_CancelAtPeriodEnd(t *testing.T) {
 	}
 	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
 
-	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
 
 	result, err := processor.Process(context.Background(), BatchOptions{DryRun: true})
 	if err != nil {
@@ -218,7 +218,7 @@ func TestContractRenewalProcessor_DryRun_AutoRenewFalse(t *testing.T) {
 	}
 
 	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
-	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
 
 	result, err := processor.Process(context.Background(), BatchOptions{DryRun: true})
 	if err != nil {
@@ -235,7 +235,7 @@ func TestContractRenewalProcessor_DryRun_AutoRenewFalse(t *testing.T) {
 func TestContractRenewalProcessor_NoContracts(t *testing.T) {
 	repo := &mockRenewalRepo{contracts: nil}
 
-	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
 
 	result, err := processor.Process(context.Background(), BatchOptions{})
 	if err != nil {
@@ -284,7 +284,7 @@ func TestContractRenewalProcessor_StopOnError(t *testing.T) {
 		contracts: []*contract.ContractAggregate{cancelledAgg, successAgg},
 	}
 
-	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
 
 	// ContinueOnError=false (default): should stop after first failure.
 	result, err := processor.Process(context.Background(), BatchOptions{ContinueOnError: false})
@@ -312,7 +312,7 @@ func TestContractRenewalProcessor_Concurrent(t *testing.T) {
 	}
 
 	repo := &mockRenewalRepo{contracts: contracts}
-	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
 
 	result, err := processor.Process(context.Background(), BatchOptions{Concurrency: 3})
 	if err != nil {
@@ -364,7 +364,7 @@ func TestContractRenewalProcessor_ContinueOnError(t *testing.T) {
 		contracts: []*contract.ContractAggregate{cancelledAgg, successAgg},
 	}
 
-	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
 
 	result, err := processor.Process(context.Background(), BatchOptions{ContinueOnError: true})
 	if err != nil {
@@ -430,7 +430,7 @@ func TestContractRenewalProcessor_BillingCycleChange(t *testing.T) {
 	}
 
 	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
-	processor := NewContractRenewalProcessor(repo, priceRepo, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, priceRepo, nil, processorClock(), nil, nil)
 
 	oldPeriod := agg.CurrentPeriod()
 	result, err := processor.Process(context.Background(), BatchOptions{})
@@ -462,7 +462,7 @@ func TestContractRenewalProcessor_NilPriceRepo_FallsBack(t *testing.T) {
 	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
 
 	// nil priceRepo
-	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock())
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
 
 	result, err := processor.Process(context.Background(), BatchOptions{})
 	if err != nil {

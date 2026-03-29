@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/credit"
 	"github.com/contract-to-cash/core/domain/shared"
 )
@@ -17,6 +18,7 @@ var _ credit.Repository = (*InMemoryCreditRepository)(nil)
 type InMemoryCreditRepository struct {
 	mu           sync.RWMutex
 	entries      map[shared.CreditEntryID]*credit.CreditEntry
+	versions     map[shared.CreditEntryID]int // tracks persisted version per entry
 	applications []*credit.CreditApplication
 	refunds      []*credit.CreditRefund
 	clock        shared.Clock
@@ -25,17 +27,27 @@ type InMemoryCreditRepository struct {
 // NewInMemoryCreditRepository creates a new InMemoryCreditRepository.
 func NewInMemoryCreditRepository(clock shared.Clock) *InMemoryCreditRepository {
 	return &InMemoryCreditRepository{
-		entries: make(map[shared.CreditEntryID]*credit.CreditEntry),
-		clock:   clock,
+		entries:  make(map[shared.CreditEntryID]*credit.CreditEntry),
+		versions: make(map[shared.CreditEntryID]int),
+		clock:    clock,
 	}
 }
 
-// Save persists a credit entry.
+// Save persists a credit entry with optimistic locking.
+// Compares the entry's loaded version against the stored version. If they differ,
+// another caller has modified the entry since this caller loaded it.
 func (r *InMemoryCreditRepository) Save(_ context.Context, entry *credit.CreditEntry) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if storedVersion, ok := r.versions[entry.ID()]; ok {
+		if entry.LoadedVersion() != storedVersion {
+			return tx.ErrVersionConflict
+		}
+	}
+
 	r.entries[entry.ID()] = entry
+	r.versions[entry.ID()] = entry.Version()
 	return nil
 }
 

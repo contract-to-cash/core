@@ -29,6 +29,8 @@ type CreditEntry struct {
 	description     string
 	expiresAt       *time.Time
 	createdAt       time.Time
+	version       int // incremented on each Consume(); used for optimistic locking
+	loadedVersion int // version at load time; compared on save for conflict detection
 }
 
 // NewCreditEntry creates a new CreditEntry with the given parameters.
@@ -87,7 +89,21 @@ func (e *CreditEntry) IsFullyConsumed() bool {
 	return e.remainingAmount.IsZero()
 }
 
-// Consume reduces the remaining amount by the given amount.
+// Version returns the current version for optimistic locking.
+func (e *CreditEntry) Version() int { return e.version }
+
+// SetVersion sets the version and records it as the loaded version.
+// Called by repository implementations after loading from persistence.
+func (e *CreditEntry) SetVersion(v int) {
+	e.version = v
+	e.loadedVersion = v
+}
+
+// LoadedVersion returns the version at the time the entity was loaded.
+// Repository implementations compare this against the stored version on save.
+func (e *CreditEntry) LoadedVersion() int { return e.loadedVersion }
+
+// Consume reduces the remaining amount by the given amount and increments the version.
 // Returns the actually consumed amount (may be less than requested if insufficient balance).
 func (e *CreditEntry) Consume(amount shared.Money) (shared.Money, error) {
 	available := e.remainingAmount
@@ -98,6 +114,9 @@ func (e *CreditEntry) Consume(amount shared.Money) (shared.Money, error) {
 	e.remainingAmount, err = e.remainingAmount.Subtract(consumed)
 	if err != nil {
 		return shared.Money{}, err
+	}
+	if !consumed.IsZero() {
+		e.version++
 	}
 	return consumed, nil
 }

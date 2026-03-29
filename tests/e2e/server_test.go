@@ -140,7 +140,7 @@ func newTestEnv() *testEnv {
 		gw, paymentRepo, invoiceRepo, contractRepo, es, registry, clock,
 	)
 
-	renewalProc := batch.NewContractRenewalProcessor(contractRepo, priceRepo, registry, clock)
+	renewalProc := batch.NewContractRenewalProcessor(contractRepo, priceRepo, registry, clock, nil, nil)
 	temporalSvc := query.NewTemporalQueryService(es, clock)
 
 	return &testEnv{

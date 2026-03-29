@@ -60,3 +60,19 @@ func (r *InMemoryPaymentRepository) FindByInvoiceID(_ context.Context, invoiceID
 	}
 	return result, nil
 }
+
+// FindByIdempotencyKey returns a payment with the given idempotency key, or nil if not found.
+func (r *InMemoryPaymentRepository) FindByIdempotencyKey(_ context.Context, key string) (*payment.Payment, error) {
+	if key == "" {
+		return nil, nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, p := range r.payments {
+		if p.IdempotencyKey() == key {
+			return p, nil
+		}
+	}
+	return nil, nil
+}

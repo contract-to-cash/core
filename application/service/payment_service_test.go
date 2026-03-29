@@ -83,6 +83,9 @@ func (m *mockPaymentRepo) FindByID(_ context.Context, _ shared.PaymentID) (*paym
 func (m *mockPaymentRepo) FindByInvoiceID(_ context.Context, _ shared.InvoiceID) ([]*payment.Payment, error) {
 	return nil, nil
 }
+func (m *mockPaymentRepo) FindByIdempotencyKey(_ context.Context, _ string) (*payment.Payment, error) {
+	return nil, nil
+}
 
 type mockInvoiceRepoForPayment struct {
 	inv *invoice.Invoice

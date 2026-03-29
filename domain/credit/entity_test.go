@@ -64,6 +64,62 @@ func TestCreditEntry_IsExpired(t *testing.T) {
 	})
 }
 
+func TestCreditEntry_Version(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry := NewCreditEntry(accountID, amount, CreditReasonProration, time.Now())
+
+	if entry.Version() != 0 {
+		t.Errorf("expected initial version 0, got %d", entry.Version())
+	}
+
+	entry.SetVersion(5)
+	if entry.Version() != 5 {
+		t.Errorf("expected version 5 after SetVersion, got %d", entry.Version())
+	}
+}
+
+func TestCreditEntry_Consume_IncrementsVersion(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry := NewCreditEntry(accountID, amount, CreditReasonProration, time.Now())
+
+	consumeAmt := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
+	_, err := entry.Consume(consumeAmt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry.Version() != 1 {
+		t.Errorf("expected version 1 after first consume, got %d", entry.Version())
+	}
+
+	_, err = entry.Consume(consumeAmt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry.Version() != 2 {
+		t.Errorf("expected version 2 after second consume, got %d", entry.Version())
+	}
+}
+
+func TestCreditEntry_Consume_ZeroAmountDoesNotIncrementVersion(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(0), shared.CurrencyJPY)
+	entry := NewCreditEntry(accountID, amount, CreditReasonProration, time.Now())
+
+	consumeAmt := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
+	consumed, err := entry.Consume(consumeAmt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !consumed.IsZero() {
+		t.Error("expected zero consumed from zero-balance entry")
+	}
+	if entry.Version() != 0 {
+		t.Errorf("expected version 0 (no actual consumption), got %d", entry.Version())
+	}
+}
+
 func TestCreditEntry_IsFullyConsumed(t *testing.T) {
 	accountID := shared.NewAccountID()
 
