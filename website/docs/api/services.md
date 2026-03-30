@@ -22,7 +22,9 @@ billingService := service.NewBillingService(
     billingConfig, // service.BillingConfig
     clock,         // shared.Clock
     // Optional:
-    service.WithBalanceRepo(balanceRepo), // balance.Repository (via option)
+    service.WithBalanceRepo(balanceRepo),       // balance.Repository (via option)
+    service.WithBillingTxManager(txManager),    // tx.TxManager (via option, defaults to NoopTxManager)
+    service.WithBillingLogger(logger),          // *slog.Logger (via option, defaults to slog.Default())
 )
 ```
 
@@ -64,7 +66,10 @@ paymentService := service.NewPaymentService(
     eventStore,    // eventstore.Store
     registry,      // *plugin.Registry
     clock,         // shared.Clock
-    service.WithCustomerGateway(customerGateway), // optional: fallback resolution
+    // Optional:
+    service.WithCustomerGateway(customerGateway),  // port.CustomerGateway — fallback resolution
+    service.WithPaymentTxManager(txManager),       // tx.TxManager (defaults to NoopTxManager)
+    service.WithPaymentLogger(logger),             // *slog.Logger (defaults to slog.Default())
 )
 ```
 
@@ -87,6 +92,103 @@ func (s *PaymentService) ProcessPayment(
 ```
 
 Flow: BeforeChargeHook → Gateway.Charge → AfterChargeHook (success) / OnPaymentFailedHook (failure)
+
+### Refund
+
+```go
+type RefundInput struct {
+    Amount *shared.Money     // nil = refund full remaining amount
+    Reason port.RefundReason
+}
+
+func (s *PaymentService) Refund(
+    ctx context.Context,
+    paymentID shared.PaymentID,
+    input RefundInput,
+) error
+```
+
+Processes a refund for a payment. If `Amount` is nil, the remaining unrefunded amount is refunded. The refund is issued via the payment gateway and recorded on the payment entity within a transaction. Post-commit `OnRefundHook` hooks are fired.
+
+---
+
+## CreditNoteService
+
+Orchestrates credit note creation, issuance, and invoice revision workflows.
+
+```go
+creditNoteService := service.NewCreditNoteService(
+    invoiceRepo,    // invoice.Repository
+    creditNoteRepo, // invoice.CreditNoteRepository
+    registry,       // *plugin.Registry
+    clock,          // shared.Clock
+    // Optional:
+    service.WithBillingService(billingService),     // *BillingService — required for ReissueInvoice
+    service.WithCreditNoteTxManager(txManager),     // tx.TxManager (defaults to NoopTxManager)
+    service.WithCreditNoteLogger(logger),           // *slog.Logger (defaults to slog.Default())
+)
+```
+
+### CreateCreditNote
+
+```go
+func (s *CreditNoteService) CreateCreditNote(
+    ctx context.Context,
+    invoiceID shared.InvoiceID,
+    reason invoice.CreditNoteReason,
+    items []invoice.CreditNoteItem,
+    memo string,
+) (*invoice.CreditNote, error)
+```
+
+Creates a new credit note in draft status for an existing invoice. The invoice must be in an eligible status (`issued`, `paid`, `partial_paid`, or `overdue`). Validates that items are non-empty and that the credit note total does not exceed the invoice total.
+
+### IssueCreditNote
+
+```go
+func (s *CreditNoteService) IssueCreditNote(
+    ctx context.Context,
+    creditNoteID shared.CreditNoteID,
+) (*invoice.CreditNote, error)
+```
+
+Transitions a credit note from draft to issued and fires `OnCreditNoteIssuedHook` hooks.
+
+### ApplyCreditNote
+
+```go
+func (s *CreditNoteService) ApplyCreditNote(
+    ctx context.Context,
+    creditNoteID shared.CreditNoteID,
+    creditAmount shared.Money,
+) (*invoice.CreditNote, error)
+```
+
+Transitions a credit note from issued to applied (account credit). The credit amount must not exceed the credit note total.
+
+### RefundCreditNote
+
+```go
+func (s *CreditNoteService) RefundCreditNote(
+    ctx context.Context,
+    creditNoteID shared.CreditNoteID,
+    refundAmount shared.Money,
+) (*invoice.CreditNote, error)
+```
+
+Transitions a credit note from issued to refunded (payment refund). The refund amount must not exceed the credit note total.
+
+### ReissueInvoice
+
+```go
+func (s *CreditNoteService) ReissueInvoice(
+    ctx context.Context,
+    originalInvoiceID shared.InvoiceID,
+    reason string,
+) (*invoice.Invoice, error)
+```
+
+Voids the original invoice and generates a replacement linked to it. The replacement invoice has `revisionOf` set to the original's ID, and `originalInvoiceID` set to the root of the revision chain. All writes run within a transaction. Requires a `BillingService` to be configured via `WithBillingService`. Post-commit `OnInvoiceRevisedHook` hooks are fired.
 
 ---
 

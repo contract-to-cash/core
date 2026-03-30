@@ -17,6 +17,7 @@ SaaS・サブスクリプションビジネス向けのイベントソーシン�
 - **契約更新** — `pendingPriceID`による保留価格プロモーション付き自動更新
 - **決済ゲートウェイ抽象化** — チャージ、オーソリ/キャプチャ、返金、階層型フォールバック
 - **クレジット台帳** — 日割り、解約、調整のためのFIFOベースクレジット
+- **クレジットノート・請求書再発行** — クレジットノート発行（ドラフト/発行/適用/返金）、請求書のvoid＆再発行（リビジョンチェーン追跡付き）
 - **時間旅行クエリ** — 過去の任意の時点での契約状態を再構築
 
 ## クイックスタート
@@ -118,16 +119,18 @@ domain/           # エンティティ、値オブジェクト、集約（依存
 ├── invoice/      # 請求書エンティティ
 ├── payment/      # 支払いエンティティ
 ├── balance/       # クレジット台帳
+├── billing/      # 請求計算インターフェース、日割り計算
 ├── usage/        # 使用量レコード
 ├── pricing/      # 不変Priceエンティティ、価格モデル
 ├── product/      # Productエンティティ
 └── shared/       # Money, DateRange, ID, Clock, エラー
 
 application/      # サービス、ポート、クエリ
-├── service/      # BillingService, PaymentService, SnapshotService
+├── service/      # BillingService, PaymentService, SnapshotService, CreditNoteService
 ├── port/         # PaymentGatewayインターフェース
 ├── query/        # TemporalQueryService
-└── projection/   # イベントプロジェクション
+├── projection/   # イベントプロジェクション
+└── tx/           # トランザクション管理（TxManager, Saga）
 
 plugin/           # フックインターフェースとレジストリ
 plugins/          # 公式プラグイン（税、クーポン、請求書クリーンアップ）
@@ -145,6 +148,7 @@ batch/            # バッチプロセッサ（契約更新）
 | **課金計算** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引、税計算、計算前後処理 |
 | **契約** | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | ライフサイクル反応 |
 | **決済** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | 決済フロー |
+| **クレジットノート** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | クレジットノート発行、請求書再発行 |
 | **メトリクス** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI収集 |
 | **請求書生成** | `InvoiceGenerationHook` | PDFレンダリング、配信 |
 

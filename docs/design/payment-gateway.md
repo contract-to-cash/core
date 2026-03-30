@@ -173,14 +173,14 @@ type PaymentGateway interface {
 type PaymentMethodType string
 
 const (
-    PaymentMethodCreditCard     PaymentMethodType = "credit_card"
-    PaymentMethodDebitCard      PaymentMethodType = "debit_card"
-    PaymentMethodBankTransfer   PaymentMethodType = "bank_transfer"
-    PaymentMethodConvenienceStore PaymentMethodType = "convenience_store"
-    PaymentMethodQRCode         PaymentMethodType = "qr_code"
-    PaymentMethodCarrier        PaymentMethodType = "carrier"        // キャリア決済
-    PaymentMethodPostpay        PaymentMethodType = "postpay"        // 後払い
-    PaymentMethodDirectDebit    PaymentMethodType = "direct_debit"   // 口座振替
+    PaymentMethodTypeCreditCard       PaymentMethodType = "credit_card"
+    PaymentMethodTypeDebitCard        PaymentMethodType = "debit_card"
+    PaymentMethodTypeBankTransfer     PaymentMethodType = "bank_transfer"
+    PaymentMethodTypeConvenienceStore PaymentMethodType = "convenience_store"
+    PaymentMethodTypeQRCode           PaymentMethodType = "qr_code"
+    PaymentMethodTypeCarrier          PaymentMethodType = "carrier"        // キャリア決済
+    PaymentMethodTypePostpay          PaymentMethodType = "postpay"        // 後払い
+    PaymentMethodTypeDirectDebit      PaymentMethodType = "direct_debit"   // 口座振替
 )
 ```
 
@@ -614,6 +614,7 @@ package port
 
 import (
     "context"
+    "encoding/json"
     "time"
 
     "github.com/contract-to-cash/core/domain/shared"
@@ -642,7 +643,7 @@ type WebhookEvent struct {
     ID        string           // イベント一意ID（重複検出に使用）
     Type      WebhookEventType
     CreatedAt time.Time        // イベント発生時刻（UTC必須、タイムスタンプ検証対象）
-    Data      WebhookEventData
+    Data      json.RawMessage
     RawData   []byte
 }
 
@@ -804,7 +805,7 @@ func (p *WebhookProcessor) ProcessWebhook(
     // 1. パースと署名検証（ゲートウェイ固有）
     event, err := p.handler.ParseAndVerify(ctx, req)
     if err != nil {
-        return &WebhookError{Code: WebhookErrVerification, Err: err}
+        return &WebhookError{Code: WebhookErrorCodeInvalidSignature, Cause: err}
     }
 
     // 2. タイムスタンプ双方向検証（Standard Webhooks仕様準拠）
@@ -818,14 +819,14 @@ func (p *WebhookProcessor) ProcessWebhook(
     diff := now.Sub(event.CreatedAt)
     if diff > tolerance {
         return &WebhookError{
-            Code: WebhookErrTimestampTooOld,
-            Err:  fmt.Errorf("event %s is %v old (tolerance: %v)", event.ID, diff, tolerance),
+            Code: WebhookErrorCodeInvalidPayload,
+            Cause:  fmt.Errorf("event %s is %v old (tolerance: %v)", event.ID, diff, tolerance),
         }
     }
     if diff < -tolerance {
         return &WebhookError{
-            Code: WebhookErrTimestampTooNew,
-            Err:  fmt.Errorf("event %s is %v in the future (tolerance: %v)", event.ID, -diff, tolerance),
+            Code: WebhookErrorCodeInvalidPayload,
+            Cause:  fmt.Errorf("event %s is %v in the future (tolerance: %v)", event.ID, -diff, tolerance),
         }
     }
 
@@ -836,7 +837,7 @@ func (p *WebhookProcessor) ProcessWebhook(
     }
     isDup, err := p.deduplicator.IsDuplicate(ctx, event.ID, ttl)
     if err != nil {
-        return &WebhookError{Code: WebhookErrDeduplicationStorage, Err: err}
+        return &WebhookError{Code: WebhookErrorCodeDuplicate, Cause: err}
     }
     if isDup {
         return nil // 重複イベントは正常応答（HTTP 200）で無視
@@ -895,8 +896,8 @@ func (p *WebhookProcessor) ProcessWebhook(
         }
     }
     return &WebhookError{
-        Code: WebhookErrProcessingFailed,
-        Err:  fmt.Errorf("after %d attempts: %w", maxRetries+1, lastErr),
+        Code: WebhookErrorCodeProcessingFailed,
+        Cause:  fmt.Errorf("after %d attempts: %w", maxRetries+1, lastErr),
     }
 }
 
@@ -908,21 +909,27 @@ func (p *WebhookProcessor) ProcessWebhook(
 type WebhookErrorCode string
 
 const (
-    WebhookErrVerification    WebhookErrorCode = "verification_failed"
-    WebhookErrTimestampTooOld WebhookErrorCode = "timestamp_too_old"
-    WebhookErrTimestampTooNew WebhookErrorCode = "timestamp_too_new"
-    WebhookErrDeduplicationStorage   WebhookErrorCode = "deduplication_failed"
-    WebhookErrProcessingFailed WebhookErrorCode = "processing_failed"
+    WebhookErrorCodeInvalidSignature WebhookErrorCode = "invalid_signature"
+    WebhookErrorCodeInvalidPayload   WebhookErrorCode = "invalid_payload"
+    WebhookErrorCodeUnsupportedEvent WebhookErrorCode = "unsupported_event"
+    WebhookErrorCodeDuplicate        WebhookErrorCode = "duplicate_event"
+    WebhookErrorCodeProcessingFailed WebhookErrorCode = "processing_failed"
 )
 
 // WebhookError Webhook処理エラー
 type WebhookError struct {
-    Code WebhookErrorCode
-    Err  error
+    Code    WebhookErrorCode
+    Message string
+    Cause   error
 }
 
-func (e *WebhookError) Error() string { return fmt.Sprintf("[%s] %s", e.Code, e.Err) }
-func (e *WebhookError) Unwrap() error { return e.Err }
+func (e *WebhookError) Error() string {
+    if e.Cause != nil {
+        return fmt.Sprintf("[%s] %s: %v", e.Code, e.Message, e.Cause)
+    }
+    return fmt.Sprintf("[%s] %s", e.Code, e.Message)
+}
+func (e *WebhookError) Unwrap() error { return e.Cause }
 
 // MapWebhookErrorToHTTP WebhookエラーをHTTPステータスコードに変換する
 //
@@ -948,13 +955,13 @@ func MapWebhookErrorToHTTP(err error) int {
         return 500 // 想定外エラー
     }
     switch webhookErr.Code {
-    case WebhookErrVerification:
+    case WebhookErrorCodeInvalidSignature:
         return 401
-    case WebhookErrTimestampTooOld, WebhookErrTimestampTooNew:
+    case WebhookErrorCodeInvalidPayload:
         return 400
-    case WebhookErrDeduplicationStorage:
-        return 503 // ストレージ障害 → GW側にリトライさせる
-    case WebhookErrProcessingFailed:
+    case WebhookErrorCodeDuplicate:
+        return 200 // 重複イベント → GW側のリトライは不要
+    case WebhookErrorCodeProcessingFailed:
         return 200 // DLQに送信済み → GW側のリトライは不要
     default:
         return 500
@@ -993,41 +1000,6 @@ const (
     WebhookEventPaymentReceived       WebhookEventType = "payment.received"
 )
 
-// WebhookEventData イベントデータ（型アサーションで使用）
-type WebhookEventData interface {
-    EventType() WebhookEventType
-}
-
-// 各イベントのデータ型
-type PaymentSucceededData struct {
-    TransactionID   string
-    Amount          shared.Money
-    CustomerID      string
-    PaymentMethodID string
-}
-
-func (d PaymentSucceededData) EventType() WebhookEventType {
-    return WebhookEventPaymentSucceeded
-}
-
-type ChargebackData struct {
-    ChargebackID    string
-    TransactionID   string
-    Amount          shared.Money
-    Reason          string
-    Status          string
-    Evidence        *ChargebackEvidence
-}
-
-func (d ChargebackData) EventType() WebhookEventType {
-    return WebhookEventChargebackCreated
-}
-
-type ChargebackEvidence struct {
-    DueBy           time.Time
-    SubmittedAt     *time.Time
-    HasEvidence     bool
-}
 ```
 
 ### 3.5 定期課金インターフェース（オプション）
@@ -1114,88 +1086,65 @@ const (
 ## 4. エラー定義
 
 ```go
-// domain/payment/errors.go
-package payment
+// application/port/errors.go
+package port
 
-import "errors"
+import "fmt"
 
 // 決済エラーコード
 type ErrorCode string
 
 const (
     // カード関連
-    ErrorCodeCardDeclined         ErrorCode = "card_declined"
-    ErrorCodeCardExpired          ErrorCode = "card_expired"
-    ErrorCodeCardInsufficientFunds ErrorCode = "insufficient_funds"
-    ErrorCodeCardInvalidNumber    ErrorCode = "invalid_card_number"
-    ErrorCodeCardInvalidCVC       ErrorCode = "invalid_cvc"
-    ErrorCodeCardInvalidExpiry    ErrorCode = "invalid_expiry"
-    ErrorCodeCardLost             ErrorCode = "card_lost"
-    ErrorCodeCardStolen           ErrorCode = "card_stolen"
-    
-    // 認証関連
-    ErrorCodeAuthenticationRequired ErrorCode = "authentication_required"
-    ErrorCodeAuthenticationFailed   ErrorCode = "authentication_failed"
-    
+    ErrorCodeCardDeclined           ErrorCode = "card_declined"
+    ErrorCodeCardExpired            ErrorCode = "card_expired"
+    ErrorCodeInsufficientFunds      ErrorCode = "insufficient_funds"
+    ErrorCodeInvalidCard            ErrorCode = "invalid_card"
+    ErrorCodeInvalidCVC             ErrorCode = "invalid_cvc"
+    ErrorCodeInvalidExpiryMonth     ErrorCode = "invalid_expiry_month"
+    ErrorCodeInvalidExpiryYear      ErrorCode = "invalid_expiry_year"
+
     // 処理関連
-    ErrorCodeDuplicateTransaction ErrorCode = "duplicate_transaction"
-    ErrorCodeTransactionNotFound  ErrorCode = "transaction_not_found"
-    ErrorCodeInvalidAmount        ErrorCode = "invalid_amount"
-    ErrorCodeCurrencyNotSupported ErrorCode = "currency_not_supported"
-    ErrorCodeRateLimitExceeded    ErrorCode = "rate_limit_exceeded"
-    
+    ErrorCodeProcessingError        ErrorCode = "processing_error"
+    ErrorCodeRateLimitExceeded      ErrorCode = "rate_limit_exceeded"
+    ErrorCodeAuthenticationRequired ErrorCode = "authentication_required"
+    ErrorCodeDuplicateTransaction   ErrorCode = "duplicate_transaction"
+    ErrorCodeAmountTooSmall         ErrorCode = "amount_too_small"
+    ErrorCodeAmountTooLarge         ErrorCode = "amount_too_large"
+    ErrorCodeCurrencyNotSupported   ErrorCode = "currency_not_supported"
+    ErrorCodeMethodNotSupported     ErrorCode = "method_not_supported"
+    ErrorCodeCustomerNotFound       ErrorCode = "customer_not_found"
+
     // ゲートウェイ関連
-    ErrorCodeGatewayError         ErrorCode = "gateway_error"
-    ErrorCodeGatewayTimeout       ErrorCode = "gateway_timeout"
-    ErrorCodeGatewayUnavailable   ErrorCode = "gateway_unavailable"
-    
+    ErrorCodeGatewayUnavailable     ErrorCode = "gateway_unavailable"
+    ErrorCodeGatewayTimeout         ErrorCode = "gateway_timeout"
+    ErrorCodeFraudSuspected         ErrorCode = "fraud_suspected"
+    ErrorCodeTestModeTransaction    ErrorCode = "test_mode_transaction"
+
     // その他
-    ErrorCodeUnknown              ErrorCode = "unknown"
+    ErrorCodeUnknown                ErrorCode = "unknown"
 )
 
 // GatewayError 決済ゲートウェイエラー
 type GatewayError struct {
-    Code           ErrorCode
-    Message        string
-    DeclineCode    *string           // ゲートウェイ固有の拒否コード
-    Param          *string           // エラーの原因となったパラメータ
-    Retryable      bool              // リトライ可能か
-    RawError       error             // 元のエラー
+    Code        ErrorCode
+    Message     string
+    DeclineCode string            // ゲートウェイ固有の拒否コード
+    Param       string            // エラーの原因となったパラメータ
+    Retryable   bool              // リトライ可能か
+    RawError    error             // 元のエラー
 }
 
 func (e *GatewayError) Error() string {
-    return e.Message
+    if e.RawError != nil {
+        return fmt.Sprintf("[%s] %s: %v", e.Code, e.Message, e.RawError)
+    }
+    return fmt.Sprintf("[%s] %s", e.Code, e.Message)
 }
 
 func (e *GatewayError) Unwrap() error {
     return e.RawError
 }
-
-// NewGatewayError ゲートウェイエラー生成
-func NewGatewayError(code ErrorCode, message string) *GatewayError {
-    return &GatewayError{
-        Code:      code,
-        Message:   message,
-        Retryable: isRetryableCode(code),
-    }
-}
-
-func isRetryableCode(code ErrorCode) bool {
-    switch code {
-    case ErrorCodeGatewayError, ErrorCodeGatewayTimeout, ErrorCodeRateLimitExceeded:
-        return true
-    default:
-        return false
-    }
-}
-
-// よく使うエラー
-var (
-    ErrCardDeclined         = NewGatewayError(ErrorCodeCardDeclined, "card was declined")
-    ErrInsufficientFunds    = NewGatewayError(ErrorCodeCardInsufficientFunds, "insufficient funds")
-    ErrAuthenticationRequired = NewGatewayError(ErrorCodeAuthenticationRequired, "authentication required")
-    ErrTransactionNotFound  = NewGatewayError(ErrorCodeTransactionNotFound, "transaction not found")
-)
 ```
 
 ---
@@ -1221,31 +1170,26 @@ import (
 // 旧 domain/payment/router.go から application/port/ に移動
 type GatewayRouter interface {
     // 条件に基づいてゲートウェイを選択
-    Route(ctx context.Context, criteria *RoutingCriteria) (PaymentGateway, error)
-
-    // ゲートウェイ登録
-    Register(gateway PaymentGateway, rules []RoutingRule)
-
-    // フォールバック設定
-    SetFallback(gateway PaymentGateway)
+    Route(ctx context.Context, criteria RoutingCriteria) (PaymentGateway, error)
 }
 
 type RoutingCriteria struct {
-    PaymentMethodType PaymentMethodType
-    Amount            shared.Money
-    CustomerCountry   string
-    Metadata          map[string]string
+    Amount        shared.Money
+    Currency      shared.Currency
+    PaymentMethod PaymentMethodType
+    CustomerID    string
+    Country       string
+    Metadata      map[string]string
 }
 
 type RoutingRule struct {
-    // マッチ条件（nilは任意）
-    PaymentMethodTypes []PaymentMethodType
-    MinAmount          *shared.Money
-    MaxAmount          *shared.Money
-    Countries          []string
-
-    // 優先度（高いほど優先）
-    Priority           int
+    GatewayID      string
+    Priority       int
+    PaymentMethods []PaymentMethodType
+    Currencies     []shared.Currency
+    Countries      []string
+    MinAmount      *shared.Money
+    MaxAmount      *shared.Money
 }
 ```
 
@@ -1291,7 +1235,7 @@ func (r *DefaultGatewayRouter) SetFallback(gw port.PaymentGateway) {
     r.fallback = gw
 }
 
-func (r *DefaultGatewayRouter) Route(ctx context.Context, criteria *port.RoutingCriteria) (port.PaymentGateway, error) {
+func (r *DefaultGatewayRouter) Route(ctx context.Context, criteria port.RoutingCriteria) (port.PaymentGateway, error) {
     var bestMatch port.PaymentGateway
     var bestPriority int = -1
 
@@ -1315,12 +1259,12 @@ func (r *DefaultGatewayRouter) Route(ctx context.Context, criteria *port.Routing
     return nil, errors.New("no gateway available for criteria")
 }
 
-func (r *DefaultGatewayRouter) matches(rule port.RoutingRule, criteria *port.RoutingCriteria) bool {
-    // PaymentMethodType チェック
-    if len(rule.PaymentMethodTypes) > 0 {
+func (r *DefaultGatewayRouter) matches(rule port.RoutingRule, criteria port.RoutingCriteria) bool {
+    // PaymentMethod チェック
+    if len(rule.PaymentMethods) > 0 {
         found := false
-        for _, t := range rule.PaymentMethodTypes {
-            if t == criteria.PaymentMethodType {
+        for _, t := range rule.PaymentMethods {
+            if t == criteria.PaymentMethod {
                 found = true
                 break
             }
@@ -1342,7 +1286,7 @@ func (r *DefaultGatewayRouter) matches(rule port.RoutingRule, criteria *port.Rou
     if len(rule.Countries) > 0 {
         found := false
         for _, c := range rule.Countries {
-            if c == criteria.CustomerCountry {
+            if c == criteria.Country {
                 found = true
                 break
             }
@@ -1653,8 +1597,8 @@ func (g *Gateway) ID() string { return "stripe" }
 
 func (g *Gateway) SupportedMethods() []payment.PaymentMethodType {
     return []payment.PaymentMethodType{
-        payment.PaymentMethodCreditCard,
-        payment.PaymentMethodDebitCard,
+        payment.PaymentMethodTypeCreditCard,
+        payment.PaymentMethodTypeDebitCard,
     }
 }
 
@@ -1735,7 +1679,7 @@ func (g *Gateway) convertError(err error) error {
     case stripe.ErrorCodeExpiredCard:
         code = payment.ErrorCodeCardExpired
     case stripe.ErrorCodeInsufficientFunds:
-        code = payment.ErrorCodeCardInsufficientFunds
+        code = payment.ErrorCodeInsufficientFunds
     default:
         code = payment.ErrorCodeUnknown
     }
@@ -1743,7 +1687,7 @@ func (g *Gateway) convertError(err error) error {
     return &payment.GatewayError{
         Code:        code,
         Message:     stripeErr.Msg,
-        DeclineCode: &stripeErr.DeclineCode,
+        DeclineCode: stripeErr.DeclineCode,
         RawError:    err,
     }
 }
@@ -1777,12 +1721,12 @@ func main() {
     // または複数ゲートウェイをルーティング
     router := gateway.NewGatewayRouter()
     router.Register(stripeGateway, []port.RoutingRule{
-        {PaymentMethodTypes: []port.PaymentMethodType{port.PaymentMethodCreditCard}, Priority: 10},
+        {PaymentMethods: []port.PaymentMethodType{port.PaymentMethodTypeCreditCard}, Priority: 10},
     })
 
     paypayGateway := paypay.NewGateway(...)
     router.Register(paypayGateway, []port.RoutingRule{
-        {PaymentMethodTypes: []port.PaymentMethodType{port.PaymentMethodQRCode}, Priority: 10},
+        {PaymentMethods: []port.PaymentMethodType{port.PaymentMethodTypeQRCode}, Priority: 10},
     })
     
     router.SetFallback(stripeGateway)

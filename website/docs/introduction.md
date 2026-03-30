@@ -21,6 +21,7 @@ Contract Billing Core provides these building blocks as a composable library, no
 - **Multiple Billing Models** — One-time purchases, recurring subscriptions, and usage-based billing. Supports flat pricing, tiered pricing, volume pricing, and per-contract overrides.
 - **Contract Renewal** — Automatic renewal with pending price promotion. Schedule price changes for end-of-term with `pendingPriceID`, or apply immediately with proration.
 - **Payment Gateway Abstraction** — Pluggable interface for charge, authorize/capture, void, refund, and payment method management. Hierarchical fallback resolution (Invoice → Contract → Customer).
+- **Credit Notes & Invoice Revision** — Issue credit notes against invoices (for duplicates, order changes, cancellations, etc.), apply as account credit or process refunds. Void-and-recreate invoices with full revision chain tracking (`originalInvoiceID` / `revisionOf`).
 - **Credit Ledger** — FIFO-based credit system for prorations, cancellation credits, and manual adjustments.
 - **Temporal Queries** — Query contract state at any past point in time using event replay or snapshot recovery.
 
@@ -31,6 +32,7 @@ graph TD
     subgraph Application Layer
         BS[BillingService]
         PS[PaymentService]
+        CNS[CreditNoteService]
         SS[SnapshotService]
         TQ[TemporalQueryService]
         PJ[ProjectionService]
@@ -38,6 +40,7 @@ graph TD
     subgraph Domain Layer
         C[Contract Aggregate]
         I[Invoice]
+        CN[CreditNote]
         P[Payment]
         CR[Credit]
         U[Usage]
@@ -50,6 +53,7 @@ graph TD
         CLH[ContractLifecycleHooks]
         PH[PaymentHooks]
         MH[MetricsHooks]
+        CNH[CreditNoteHooks]
     end
     subgraph Infrastructure Layer
         ES[EventStore]

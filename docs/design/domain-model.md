@@ -9,11 +9,13 @@
 package shared
 
 import (
-    "errors"
+    "encoding/json"
+    "fmt"
     "math/big"
 )
 
 // Money は通貨と金額を表現する値オブジェクト
+// big.Rat を使用し、浮動小数点誤差を回避する
 type Money struct {
     amount   *big.Rat
     currency Currency
@@ -27,73 +29,21 @@ const (
     CurrencyEUR Currency = "EUR"
 )
 
-func NewMoney(amount *big.Rat, currency Currency) Money {
-    return Money{amount: amount, currency: currency}
-}
+func NewMoney(amount *big.Rat, currency Currency) Money
+func Zero(currency Currency) Money
 
-func (m Money) Add(other Money) (Money, error) {
-    if m.currency != other.currency {
-        return Money{}, errors.New("currency mismatch")
-    }
-    result := new(big.Rat).Add(m.amount, other.amount)
-    return NewMoney(result, m.currency), nil
-}
-
-func (m Money) Subtract(other Money) (Money, error) {
-    if m.currency != other.currency {
-        return Money{}, errors.New("currency mismatch")
-    }
-    result := new(big.Rat).Sub(m.amount, other.amount)
-    return NewMoney(result, m.currency), nil
-}
-
-func (m Money) Multiply(factor *big.Rat) Money {
-    result := new(big.Rat).Mul(m.amount, factor)
-    return NewMoney(result, m.currency)
-}
-
-func (m Money) IsNegative() bool {
-    return m.amount != nil && m.amount.Sign() < 0
-}
-
-func (m Money) IsZero() bool {
-    return m.amount == nil || m.amount.Sign() == 0
-}
-
-func (m Money) GreaterThan(other Money) bool {
-    if m.amount == nil || other.amount == nil {
-        return false
-    }
-    return m.amount.Cmp(other.amount) > 0
-}
-
-// Min 2つの金額のうち小さい方を返す（同一通貨のみ）
-func (m Money) Min(other Money) (Money, error) {
-    if m.currency != other.currency {
-        return Money{}, errors.New("currency mismatch")
-    }
-    if m.Amount().Cmp(other.Amount()) <= 0 {
-        return m, nil
-    }
-    return other, nil
-}
-
-func (m Money) Amount() *big.Rat {
-    if m.amount == nil {
-        return new(big.Rat)
-    }
-    return m.amount
-}
-
-func (m Money) Currency() Currency {
-    return m.currency
-}
-
-// Zero 指定通貨のゼロ金額を生成する
-// var totalDiscount shared.Money の代わりに使用し、nilポインタを回避する
-func Zero(currency Currency) Money {
-    return NewMoney(new(big.Rat), currency)
-}
+func (m Money) Amount() *big.Rat
+func (m Money) Currency() Currency
+func (m Money) Add(other Money) (Money, error)
+func (m Money) Subtract(other Money) (Money, error)
+func (m Money) Multiply(factor *big.Rat) Money
+func (m Money) Negate() Money
+func (m Money) IsNegative() bool
+func (m Money) IsZero() bool
+func (m Money) GreaterThan(other Money) bool
+func (m Money) Min(other Money) (Money, error)
+func (m Money) MarshalJSON() ([]byte, error)
+func (m *Money) UnmarshalJSON(data []byte) error
 ```
 
 ### 1.2 DateRange（期間）
@@ -102,7 +52,10 @@ func Zero(currency Currency) Money {
 // domain/shared/datetime.go
 package shared
 
-import "time"
+import (
+    "fmt"
+    "time"
+)
 
 // DateRange は期間を表す値オブジェクト
 // 半開区間 [start, end) を採用。endは含まない。連続する期間の隣接判定に適している。
@@ -111,20 +64,23 @@ type DateRange struct {
     end   time.Time
 }
 
-func NewDateRange(start, end time.Time) (DateRange, error) {
-    if !start.Before(end) {
-        return DateRange{}, errors.New("start must be before end")
-    }
-    return DateRange{start: start.UTC(), end: end.UTC()}, nil
-}
+func NewDateRange(start, end time.Time) (DateRange, error)
 
-func (r DateRange) Contains(t time.Time) bool {
-    return !t.Before(r.start) && t.Before(r.end)
-}
+func (r DateRange) Start() time.Time
+func (r DateRange) End() time.Time
+func (r DateRange) Contains(t time.Time) bool
+func (r DateRange) Duration() time.Duration
+func (r DateRange) Equals(other DateRange) bool
+func (r DateRange) IsZero() bool
+func (r DateRange) String() string
+func (r DateRange) Next(cycle string) DateRange
+func (r DateRange) MarshalJSON() ([]byte, error)
+func (r *DateRange) UnmarshalJSON(data []byte) error
 
-func (r DateRange) Duration() time.Duration {
-    return r.end.Sub(r.start)
-}
+// AddBillingCycleDuration は請求サイクル1周期分を加算するユーティリティ関数。
+// DateRange.Next() とContractAggregate両方から参照される唯一の変換ロジック。
+// cycle: "monthly" | "yearly" | "weekly" | "daily"
+func AddBillingCycleDuration(t time.Time, cycle string) time.Time
 ```
 
 ### 1.3 共有ID型
@@ -142,14 +98,87 @@ type ContractID string
 type InvoiceID string
 type PaymentID string
 type UsageRecordID string
-type PlanID string
+type PlanID string         // Deprecated: ProductID を使用すること。既存イベントとの後方互換のために残す。
+type ProductID string
+type PriceID string
 type BalanceEntryID string
+type CreditNoteID string
 
 // ID生成ヘルパー
-func NewAccountID() AccountID     { return AccountID(generateULID()) }
-func NewContractID() ContractID   { return ContractID(generateULID()) }
-func NewInvoiceID() InvoiceID     { return InvoiceID(generateULID()) }
-func NewPaymentID() PaymentID     { return PaymentID(generateULID()) }
+func NewAccountID() AccountID           { return AccountID(generateULID()) }
+func NewContractID() ContractID         { return ContractID(generateULID()) }
+func NewInvoiceID() InvoiceID           { return InvoiceID(generateULID()) }
+func NewPaymentID() PaymentID           { return PaymentID(generateULID()) }
+func NewUsageRecordID() UsageRecordID   { return UsageRecordID(generateULID()) }
+func NewPlanID() PlanID                 { return PlanID(generateULID()) }   // Deprecated
+func NewProductID() ProductID           { return ProductID(generateULID()) }
+func NewPriceID() PriceID               { return PriceID(generateULID()) }
+func NewBalanceEntryID() BalanceEntryID { return BalanceEntryID(generateULID()) }
+func NewCreditNoteID() CreditNoteID     { return CreditNoteID(generateULID()) }
+
+// GenerateID はイベントID等の汎用ID文字列を生成する
+func GenerateID() string { return fmt.Sprintf("evt_%s", generateULID()) }
+```
+
+### 1.4 DomainError（ドメインエラー）
+
+```go
+// domain/shared/errors.go
+package shared
+
+import "fmt"
+
+type ErrorCode string
+
+const (
+    ErrCodeInvalidStateTransition ErrorCode = "invalid_state_transition"
+    ErrCodeValidation             ErrorCode = "validation_error"
+    ErrCodeCurrencyMismatch       ErrorCode = "currency_mismatch"
+    ErrCodeInvalidDateRange       ErrorCode = "invalid_date_range"
+    ErrCodeNotFound               ErrorCode = "not_found"
+    ErrCodeConflict               ErrorCode = "conflict"
+    ErrCodeDuplicateRequest       ErrorCode = "duplicate_request"
+    ErrCodeUnknownEvent           ErrorCode = "unknown_event"
+    ErrCodeVersionConflict        ErrorCode = "version_conflict"
+    ErrCodeBusinessRule           ErrorCode = "business_rule_violation"
+)
+
+// DomainError 構造化ドメインエラー
+type DomainError struct {
+    Code    ErrorCode
+    Message string
+    Cause   error
+}
+
+func NewDomainError(code ErrorCode, message string) *DomainError
+func NewDomainErrorWithCause(code ErrorCode, message string, cause error) *DomainError
+func (e *DomainError) Error() string   // "[code] message" 形式
+func (e *DomainError) Unwrap() error
+```
+
+### 1.5 Clock（時刻抽象）
+
+```go
+// domain/shared/clock.go
+package shared
+
+import "time"
+
+// Clock は時刻取得を抽象化するインターフェース。
+// 全てのドメイン・アプリケーションコードは time.Now() ではなく Clock を使用すること。
+type Clock interface {
+    Now() time.Time
+}
+
+// SystemClock は本番用の Clock 実装。UTC で現在時刻を返す。
+type SystemClock struct{}
+func (c SystemClock) Now() time.Time { return time.Now().UTC() }
+
+// FixedClock はテスト用の Clock 実装。固定時刻を返す。
+type FixedClock struct {
+    FixedTime time.Time
+}
+func (c FixedClock) Now() time.Time { return c.FixedTime }
 ```
 
 ## 2. Account（アカウント）
@@ -206,6 +235,7 @@ import (
     "time"
 
     "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/domain/pricing"
 )
 
 // ContractID は shared/identifier.go で定義
@@ -239,37 +269,302 @@ const (
     ContractTypeUsageBased ContractType = "usage_based"
 )
 
+// BillingCycle は pricing.BillingCycle のエイリアス。
+// 新規コードでは pricing.BillingCycle を直接使用すること。
+type BillingCycle = pricing.BillingCycle
+
+// 後方互換のため pricing パッケージの定数を再エクスポート
+const (
+    BillingCycleDaily   = pricing.BillingCycleDaily
+    BillingCycleWeekly  = pricing.BillingCycleWeekly
+    BillingCycleMonthly = pricing.BillingCycleMonthly
+    BillingCycleYearly  = pricing.BillingCycleYearly
+)
+
 type Contract struct {
-    id              shared.ContractID
-    accountID       shared.AccountID
-    planID          shared.PlanID
-    status          ContractStatus
-    contractType    ContractType
-    billingCycle    BillingCycle
-    currentPeriod   shared.DateRange
-    trialConfig     *TrialConfiguration  // トライアル設定（オプショナル）
+    id               shared.ContractID
+    accountID        shared.AccountID
+    planID           shared.PlanID
+    status           ContractStatus
+    contractType     ContractType
+    billingCycle     BillingCycle
+    currentPeriod    shared.DateRange
+    trialConfig      *TrialConfiguration
     suspensionConfig *SuspensionConfiguration
-    price           shared.Money         // サブスクリプション/買い切りの固定料金
-    basePrice       shared.Money         // ハイブリッド課金の固定部分（従量課金のみの場合はゼロ）
-    plan            *pricing.Plan        // 料金プラン（UsageMetric含む）
-    metadata        map[string]string
-    createdAt       time.Time
-    updatedAt       time.Time
-    version         int
+    paymentMethodID  *string           // 契約レベルの決済手段ID（nil = アカウントデフォルト）
+    price            shared.Money      // サブスクリプション/買い切りの固定料金
+    basePrice        shared.Money      // ハイブリッド課金の固定部分
+    metadata         map[string]string
+    createdAt        time.Time
+    updatedAt        time.Time
+    version          int
+}
+```
+
+### 3.2 ContractAggregate（イベントソーシング対応）
+
+```go
+// domain/contract/aggregate.go
+package contract
+
+import (
+    "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/eventstore"
+)
+
+// CreateContractCommand はContract作成時のパラメータを保持する
+type CreateContractCommand struct {
+    IdempotencyKey string
+    AccountID      shared.AccountID
+    PlanID         shared.PlanID
+    PriceID        shared.PriceID
+    ContractType   ContractType
+    BillingCycle   BillingCycle
+    Price          shared.Money
+    BasePrice      shared.Money
+    AutoRenew      bool
 }
 
-// BillingCycle 請求サイクル
-type BillingCycle string
+// ContractAggregate はイベントソーシングに対応した契約集約
+type ContractAggregate struct {
+    eventstore.BaseAggregate
+
+    contractID        shared.ContractID
+    accountID         shared.AccountID
+    planID            shared.PlanID
+    status            ContractStatus
+    contractType      ContractType
+    billingCycle      BillingCycle
+    currentPeriod     shared.DateRange
+    trialConfig       *TrialConfiguration
+    suspensionConfig  *SuspensionConfiguration
+    paymentMethodID   *string
+    priceID           shared.PriceID
+    price             shared.Money
+    basePrice         shared.Money
+    autoRenew         bool
+    cancelAtPeriodEnd bool
+    pendingPriceID    *shared.PriceID
+    metadata          map[string]string
+    createdAt         time.Time
+    updatedAt         time.Time
+}
+
+func NewContractAggregate(id shared.ContractID, clock shared.Clock) *ContractAggregate
+
+// コマンドメソッド（各メソッドはイベントを生成し Apply で状態を更新する）
+func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) Activate(metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) Suspend(config SuspensionConfiguration, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) Resume(metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) Cancel(reason string, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) ChangePrice(newPriceID shared.PriceID, policy ChangePolicy, proration *PlanChangeProration, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) UnscheduleChange(reason string, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) ChangePaymentMethod(paymentMethodID *string, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) StartTrial(config TrialConfiguration, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) Renew(newBillingCycle BillingCycle, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) ScheduleCancellation(reason string, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) UnscheduleCancellation(metadata eventstore.EventMetadata) error
+
+// イベント適用・リプレイ
+func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error
+func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error
+func (a *ContractAggregate) MarshalSnapshot() ([]byte, error)
+func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
+
+// Getters
+func (a *ContractAggregate) ContractID() shared.ContractID
+func (a *ContractAggregate) AccountID() shared.AccountID
+func (a *ContractAggregate) PlanID() shared.PlanID
+func (a *ContractAggregate) Status() ContractStatus
+func (a *ContractAggregate) GetContractType() ContractType
+func (a *ContractAggregate) GetBillingCycle() BillingCycle
+func (a *ContractAggregate) CurrentPeriod() shared.DateRange
+func (a *ContractAggregate) TrialConfig() *TrialConfiguration
+func (a *ContractAggregate) SuspensionConfig() *SuspensionConfiguration
+func (a *ContractAggregate) PaymentMethodID() *string
+func (a *ContractAggregate) Price() shared.Money
+func (a *ContractAggregate) BasePrice() shared.Money
+func (a *ContractAggregate) PriceID() shared.PriceID
+func (a *ContractAggregate) AutoRenew() bool
+func (a *ContractAggregate) CancelAtPeriodEnd() bool
+func (a *ContractAggregate) PendingPriceID() *shared.PriceID
+func (a *ContractAggregate) HasPendingChange() bool
+func (a *ContractAggregate) GetMetadata() map[string]string
+func (a *ContractAggregate) CreatedAt() time.Time
+func (a *ContractAggregate) UpdatedAt() time.Time
+```
+
+### 3.3 イベント型一覧
+
+```go
+// domain/contract/events.go
+package contract
+
+// 全16種のドメインイベント
+const (
+    EventTypeContractCreated         eventstore.EventType = "contract.created"
+    EventTypeContractActivated       eventstore.EventType = "contract.activated"
+    EventTypeContractSuspended       eventstore.EventType = "contract.suspended"
+    EventTypeContractResumed         eventstore.EventType = "contract.resumed"
+    EventTypeContractCancelled       eventstore.EventType = "contract.cancelled"
+    EventTypePriceChanged            eventstore.EventType = "contract.price_changed"
+    EventTypePlanChanged             eventstore.EventType = "contract.plan_changed"
+    EventTypeTrialStarted            eventstore.EventType = "contract.trial_started"
+    EventTypeTrialEnded              eventstore.EventType = "contract.trial_ended"
+    EventTypePaymentMethodChanged    eventstore.EventType = "contract.payment_method_changed"
+    EventTypeContractRenewed         eventstore.EventType = "contract.renewed"
+    EventTypeContractExpired         eventstore.EventType = "contract.expired"
+    EventTypeCancellationScheduled   eventstore.EventType = "contract.cancellation_scheduled"
+    EventTypeCancellationUnscheduled eventstore.EventType = "contract.cancellation_unscheduled"
+    EventTypePriceChangeScheduled    eventstore.EventType = "contract.price_change_scheduled"
+    EventTypePriceChangeUnscheduled  eventstore.EventType = "contract.price_change_unscheduled"
+)
+
+type ContractCreatedEvent struct {
+    ContractID   shared.ContractID
+    AccountID    shared.AccountID
+    PlanID       shared.PlanID
+    PriceID      shared.PriceID
+    Price        shared.Money
+    BasePrice    shared.Money
+    BillingCycle BillingCycle
+    ContractType ContractType
+    AutoRenew    bool
+    CreatedAt    time.Time
+}
+
+type ContractActivatedEvent struct {
+    ContractID    shared.ContractID
+    ActivatedAt   time.Time
+    CurrentPeriod shared.DateRange
+}
+
+type ContractSuspendedEvent struct {
+    ContractID      shared.ContractID
+    SuspendedAt     time.Time
+    BillingBehavior SuspensionBillingBehavior
+    ResumeDate      *time.Time
+    Reason          string
+}
+
+type ContractResumedEvent struct {
+    ContractID shared.ContractID
+    ResumedAt  time.Time
+}
+
+type ContractCancelledEvent struct {
+    ContractID  shared.ContractID
+    CancelledAt time.Time
+    Reason      string
+}
+
+type PriceChangedEvent struct {
+    ContractID shared.ContractID
+    OldPriceID shared.PriceID
+    NewPriceID shared.PriceID
+    Policy     ChangePolicy
+    Proration  *PlanChangeProration
+    ChangedAt  time.Time
+    // レガシーフィールド（後方互換）
+    OldPrice    shared.Money
+    NewPrice    shared.Money
+    EffectiveAt time.Time
+}
+
+type PriceChangeScheduledEvent struct {
+    ContractID     shared.ContractID
+    CurrentPriceID shared.PriceID
+    NewPriceID     shared.PriceID
+    Policy         ChangePolicy
+    ScheduledAt    time.Time
+}
+
+type PriceChangeUnscheduledEvent struct {
+    ContractID       shared.ContractID
+    CancelledPriceID shared.PriceID
+    Reason           string
+    UnscheduledAt    time.Time
+}
+
+type PlanChangedEvent struct {
+    ContractID shared.ContractID
+    OldPlanID  shared.PlanID
+    NewPlanID  shared.PlanID
+    Proration  *PlanChangeProration
+    ChangedAt  time.Time
+}
+
+type TrialStartedEvent struct {
+    ContractID  shared.ContractID
+    TrialConfig TrialConfiguration
+    StartedAt   time.Time
+}
+
+type TrialEndedEvent struct {
+    ContractID shared.ContractID
+    EndedAt    time.Time
+    Converted  bool
+}
+
+type PaymentMethodChangedEvent struct {
+    ContractID         shared.ContractID
+    OldPaymentMethodID *string
+    NewPaymentMethodID *string
+    ChangedAt          time.Time
+}
+
+type ContractRenewedEvent struct {
+    ContractID      shared.ContractID
+    OldPeriod       shared.DateRange
+    NewPeriod       shared.DateRange
+    OldPriceID      shared.PriceID
+    NewPriceID      shared.PriceID
+    PriceChanged    bool
+    OldBillingCycle BillingCycle
+    NewBillingCycle BillingCycle
+    RenewedAt       time.Time
+}
+
+type ContractExpiredEvent struct {
+    ContractID  shared.ContractID
+    ExpiredAt   time.Time
+    FinalPeriod shared.DateRange
+}
+
+type CancellationScheduledEvent struct {
+    ContractID  shared.ContractID
+    Reason      string
+    ScheduledAt time.Time
+}
+
+type CancellationUnscheduledEvent struct {
+    ContractID    shared.ContractID
+    UnscheduledAt time.Time
+}
+```
+
+### 3.4 変更ポリシー
+
+```go
+// domain/contract/policy.go
+package contract
+
+// ChangePolicy は価格/プラン変更の適用タイミングを定義する
+type ChangePolicy string
 
 const (
-    BillingCycleDaily   BillingCycle = "daily"
-    BillingCycleWeekly  BillingCycle = "weekly"
-    BillingCycleMonthly BillingCycle = "monthly"
-    BillingCycleYearly  BillingCycle = "yearly"
+    // ChangePolicyImmediate は即座に変更を適用する。日割り計算が発生しうる。
+    ChangePolicyImmediate ChangePolicy = "immediate"
+
+    // ChangePolicyEndOfTerm は次回更新時に変更を適用する。
+    // 現在の期間は現行価格のまま継続する。
+    ChangePolicyEndOfTerm ChangePolicy = "end_of_term"
 )
 ```
 
-### 3.2 トライアル設定
+### 3.5 トライアル設定
 
 ```go
 // domain/contract/trial.go
@@ -286,7 +581,7 @@ type TrialConfiguration struct {
 }
 ```
 
-### 3.3 一時停止設定
+### 3.6 一時停止設定
 
 ```go
 // domain/contract/suspension.go
@@ -316,11 +611,17 @@ const (
 )
 ```
 
-### 3.4 日割り計算設定
+### 3.7 日割り計算設定
 
 ```go
 // domain/contract/proration.go
 package contract
+
+import (
+    "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
 
 // ProrationBehavior 日割り計算動作
 type ProrationBehavior string
@@ -334,22 +635,32 @@ const (
     ProrationImmediateFull ProrationBehavior = "immediate_full"
 )
 
-// ProrationConfig 日割り計算設定
-type ProrationConfig struct {
-    Behavior       ProrationBehavior
-    RoundingMode   RoundingMode
-}
-
+// RoundingMode 端数処理モード
 type RoundingMode string
 
 const (
-    RoundingModeUp   RoundingMode = "up"
-    RoundingModeDown RoundingMode = "down"
-    RoundingModeHalfUp RoundingMode = "half_up"
+    RoundingUp     RoundingMode = "up"
+    RoundingDown   RoundingMode = "down"
+    RoundingHalfUp RoundingMode = "half_up"
 )
+
+// ProrationConfig 日割り計算設定
+type ProrationConfig struct {
+    Behavior     ProrationBehavior
+    RoundingMode RoundingMode
+}
+
+// PlanChangeProration はプラン変更時の日割り計算結果を保持する。
+// billing.ProrationResult と同等だが、循環依存回避のため contract ドメイン内で定義。
+type PlanChangeProration struct {
+    CreditAmount     shared.Money
+    ChargeAmount     shared.Money
+    AdjustmentAmount shared.Money
+    EffectiveDate    time.Time
+}
 ```
 
-### 3.5 リポジトリインターフェース
+### 3.8 リポジトリインターフェース
 
 ```go
 // domain/contract/repository.go
@@ -358,22 +669,25 @@ package contract
 import (
     "context"
     "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // Repository 契約リポジトリインターフェース
 type Repository interface {
     // 基本CRUD
-    Save(ctx context.Context, contract *Contract) error
-    FindByID(ctx context.Context, id shared.ContractID) (*Contract, error)
-    FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*Contract, error)
-    
+    Save(ctx context.Context, aggregate *ContractAggregate) error
+    FindByID(ctx context.Context, id shared.ContractID) (*ContractAggregate, error)
+    FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*ContractAggregate, error)
+
     // クエリ
-    FindActiveByPlanID(ctx context.Context, planID shared.PlanID) ([]*Contract, error)
-    FindExpiring(ctx context.Context, before time.Time) ([]*Contract, error)
-    FindTrialsEndingSoon(ctx context.Context, within time.Duration) ([]*Contract, error)
-    
+    FindActiveByPlanID(ctx context.Context, planID shared.PlanID) ([]*ContractAggregate, error)
+    FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
+    FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
+    FindDueForRenewal(ctx context.Context, asOf time.Time) ([]*ContractAggregate, error)
+
     // 時点指定（イベントソーシング）
-    FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*Contract, error)
+    FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)
 }
 ```
 
@@ -386,8 +700,9 @@ type Repository interface {
 package invoice
 
 import (
+    "math/big"
     "time"
-    
+
     "github.com/contract-to-cash/core/domain/shared"
 )
 
@@ -407,9 +722,26 @@ const (
     InvoiceStatusRefunded   InvoiceStatus = "refunded"
 )
 
+type LineItem struct {
+    id          string
+    description string
+    quantity    int64            // UsageRecord.quantity と型統一
+    unitPrice   shared.Money
+    amount      shared.Money
+    taxRate     *big.Rat
+    priceID     shared.PriceID   // 料金体系トレーサビリティ用
+    metadata    map[string]string
+}
+
+// NewLineItem creates a new LineItem.
+func NewLineItem(id, description string, quantity int64, unitPrice, amount shared.Money, taxRate *big.Rat, opts ...LineItemOption) LineItem
+
+type LineItemOption func(*LineItem)
+func WithPriceID(id shared.PriceID) LineItemOption
+
 type Invoice struct {
-    id                InvoiceID
-    invoiceNumber     string                    // 請求書番号
+    id                shared.InvoiceID
+    invoiceNumber     string
     accountID         shared.AccountID
     contractID        shared.ContractID
     lineItems         []LineItem
@@ -417,7 +749,7 @@ type Invoice struct {
     taxAmount         shared.Money
     discountAmount    shared.Money
     total             shared.Money              // 割引・税込み合計
-    appliedBalance     shared.Money              // クレジット台帳から充当された金額
+    appliedBalance    shared.Money              // クレジット台帳から充当された金額
     amountDue         shared.Money              // 実請求額（total - appliedBalance）
     paidAmount        shared.Money              // 入金済み金額
     balance           shared.Money              // 未払い残高（amountDue - paidAmount）
@@ -426,24 +758,153 @@ type Invoice struct {
     issueDate         time.Time
     dueDate           time.Time
     paidAt            *time.Time
+    paymentMethodID   *string                   // 請求書レベルの決済手段ID上書き
     metadata          map[string]string
     allowPartialPay   bool                      // 部分入金許可
+
+    // リビジョンサポート: void-and-recreate ワークフロー用の2レベルリンク
+    // originalInvoiceID はリビジョンチェーンのルート（最初の請求書）を指す
+    // revisionOf は直接の親（チェーン内の前バージョン）を指す
+    originalInvoiceID *shared.InvoiceID
+    revisionOf        *shared.InvoiceID
+    voidReason        string
 }
 
-type LineItem struct {
-    id          string
-    description string
-    quantity    int64            // UsageRecord.quantity と型統一
-    unitPrice   shared.Money
-    amount      shared.Money
-    taxRate     *big.Rat
-    metadata    map[string]string
-}
+// コンストラクタ
+func NewInvoice(
+    id shared.InvoiceID,
+    accountID shared.AccountID,
+    contractID shared.ContractID,
+    subtotal shared.Money,
+    discountAmount shared.Money,
+    taxAmount shared.Money,
+    opts ...InvoiceOption,
+) *Invoice
+
+// Functional Options
+type InvoiceOption func(*Invoice)
+func WithStatus(s InvoiceStatus) InvoiceOption
+func WithBillingPeriod(p shared.DateRange) InvoiceOption
+func WithDueDate(t time.Time) InvoiceOption
+func WithIssueDate(t time.Time) InvoiceOption
+func WithAppliedBalance(c shared.Money) InvoiceOption
+func WithAmountDue(a shared.Money) InvoiceOption
+func WithAllowPartialPayment(allow bool) InvoiceOption
+func WithLineItems(items []LineItem) InvoiceOption
+func WithInvoiceNumber(n string) InvoiceOption
+func WithPaymentMethodID(id *string) InvoiceOption
+func WithOriginalInvoiceID(id shared.InvoiceID) InvoiceOption
+func WithRevisionOf(id shared.InvoiceID) InvoiceOption
+
+// 状態遷移メソッド
+func (inv *Invoice) Finalize() error
+func (inv *Invoice) RecordPayment(amount shared.Money, paidAt time.Time) error
+func (inv *Invoice) ValidatePayment(amount shared.Money) error
+func (inv *Invoice) Void() error
+func (inv *Invoice) VoidWithReason(reason string) error
+
+// リビジョンリンク設定
+func (inv *Invoice) SetRevisionOf(id shared.InvoiceID)
+func (inv *Invoice) SetOriginalInvoiceID(id shared.InvoiceID)
+
+// Getters
+func (inv *Invoice) OriginalInvoiceID() *shared.InvoiceID
+func (inv *Invoice) RevisionOf() *shared.InvoiceID
+func (inv *Invoice) VoidReason() string
+func (inv *Invoice) PaymentMethodID() *string
+```
 // NOTE: metrics-invoicegen の InvoiceLineItem.Quantity は float64（小数量=0.5時間等の表現用）。
 // ドメインモデル → 請求書ドキュメントの変換時に int64→float64 キャストを行う。
+
+### 4.2 CreditNote（クレジットノート）
+
+```go
+// domain/invoice/credit_note.go
+package invoice
+
+import (
+    "math/big"
+    "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
+// CreditNoteStatus クレジットノートのライフサイクルステータス
+type CreditNoteStatus string
+
+const (
+    CreditNoteStatusDraft    CreditNoteStatus = "draft"
+    CreditNoteStatusIssued   CreditNoteStatus = "issued"
+    CreditNoteStatusApplied  CreditNoteStatus = "applied"
+    CreditNoteStatusRefunded CreditNoteStatus = "refunded"
+    CreditNoteStatusVoided   CreditNoteStatus = "voided"
+)
+
+// CreditNoteReason クレジットノートの発行理由
+type CreditNoteReason string
+
+const (
+    CreditNoteReasonDuplicate             CreditNoteReason = "duplicate"
+    CreditNoteReasonOrderChange           CreditNoteReason = "order_change"
+    CreditNoteReasonCancellation          CreditNoteReason = "cancellation"
+    CreditNoteReasonProductUnsatisfactory CreditNoteReason = "product_unsatisfactory"
+    CreditNoteReasonOther                 CreditNoteReason = "other"
+)
+
+// CreditNoteItem は請求書明細単位の調整を表す
+type CreditNoteItem struct {
+    invoiceLineItemID string
+    description       string
+    amount            shared.Money
+    taxRate           *big.Rat
+    taxAmount         shared.Money
+}
+
+func NewCreditNoteItem(invoiceLineItemID, description string, amount shared.Money, taxRate *big.Rat, taxAmount shared.Money) CreditNoteItem
+
+// CreditNote は発行済み請求書に対する調整を表すエンティティ
+type CreditNote struct {
+    id           shared.CreditNoteID
+    number       string
+    invoiceID    shared.InvoiceID
+    accountID    shared.AccountID
+    contractID   shared.ContractID
+    status       CreditNoteStatus
+    reason       CreditNoteReason
+    memo         string
+    items        []CreditNoteItem
+    subtotal     shared.Money
+    taxAmount    shared.Money
+    total        shared.Money
+    creditAmount shared.Money
+    refundAmount shared.Money
+    issuedAt     *time.Time
+    createdAt    time.Time
+}
+
+// コンストラクタ
+func NewCreditNote(
+    id shared.CreditNoteID,
+    invoiceID shared.InvoiceID,
+    accountID shared.AccountID,
+    contractID shared.ContractID,
+    reason CreditNoteReason,
+    items []CreditNoteItem,
+    opts ...CreditNoteOption,
+) *CreditNote
+
+type CreditNoteOption func(*CreditNote)
+func WithCreditNoteMemo(memo string) CreditNoteOption
+func WithCreditNoteNumber(number string) CreditNoteOption
+
+// 状態遷移メソッド
+func (cn *CreditNote) Issue(issuedAt time.Time) error
+func (cn *CreditNote) Apply(creditAmount shared.Money) error
+func (cn *CreditNote) Refund(refundAmount shared.Money) error
+func (cn *CreditNote) Void() error
 ```
 
-### 4.2 リポジトリインターフェース
+### 4.3 Invoice リポジトリインターフェース
 
 ```go
 // domain/invoice/repository.go
@@ -452,6 +913,8 @@ package invoice
 import (
     "context"
     "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 type Repository interface {
@@ -461,9 +924,34 @@ type Repository interface {
     FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*Invoice, error)
     FindOverdue(ctx context.Context) ([]*Invoice, error)
     FindByStatus(ctx context.Context, status InvoiceStatus) ([]*Invoice, error)
+    FindByContractAndStatus(ctx context.Context, contractID shared.ContractID, status InvoiceStatus) ([]*Invoice, error)
+    FindByContractAndPeriod(ctx context.Context, contractID shared.ContractID, period shared.DateRange) ([]*Invoice, error)
+    FindUnpaidByContract(ctx context.Context, contractID shared.ContractID) ([]*Invoice, error)
 
     // 時点指定
     FindByIDAsOf(ctx context.Context, id shared.InvoiceID, asOf time.Time) (*Invoice, error)
+}
+```
+
+### 4.4 CreditNote リポジトリインターフェース
+
+```go
+// domain/invoice/credit_note_repository.go
+package invoice
+
+import (
+    "context"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
+type CreditNoteRepository interface {
+    Save(ctx context.Context, cn *CreditNote) error
+    FindByID(ctx context.Context, id shared.CreditNoteID) (*CreditNote, error)
+    FindByInvoiceID(ctx context.Context, invoiceID shared.InvoiceID) ([]*CreditNote, error)
+    FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*CreditNote, error)
+    FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*CreditNote, error)
+    FindByStatus(ctx context.Context, status CreditNoteStatus) ([]*CreditNote, error)
 }
 ```
 
@@ -477,7 +965,7 @@ package payment
 
 import (
     "time"
-    
+
     "github.com/contract-to-cash/core/domain/shared"
 )
 
@@ -486,12 +974,12 @@ import (
 type PaymentStatus string
 
 const (
-    PaymentStatusPending          PaymentStatus = "pending"           // 処理中
-    PaymentStatusCompleted        PaymentStatus = "completed"         // 支払い完了
-    PaymentStatusFailed           PaymentStatus = "failed"            // 支払い失敗
+    PaymentStatusPending           PaymentStatus = "pending"            // 処理中
+    PaymentStatusCompleted         PaymentStatus = "completed"          // 支払い完了
+    PaymentStatusFailed            PaymentStatus = "failed"             // 支払い失敗
     PaymentStatusPartiallyRefunded PaymentStatus = "partially_refunded" // 一部返金済み
-    PaymentStatusRefunded         PaymentStatus = "refunded"          // 全額返金済み
-    PaymentStatusChargedBack      PaymentStatus = "charged_back"      // チャージバック
+    PaymentStatusRefunded          PaymentStatus = "refunded"           // 全額返金済み
+    PaymentStatusChargedBack       PaymentStatus = "charged_back"       // チャージバック
 )
 
 // PaymentStatus 状態遷移ルール:
@@ -512,19 +1000,65 @@ const (
 )
 
 type Payment struct {
-    id                PaymentID
-    invoiceID         shared.InvoiceID
-    amount            shared.Money
-    method            PaymentMethod
-    status            PaymentStatus
-    gatewayTransactionID string  // 外部決済サービスのトランザクションID
-    failureReason     *string
-    processedAt       time.Time
-    metadata          map[string]string
+    id                   shared.PaymentID
+    invoiceID            shared.InvoiceID
+    amount               shared.Money
+    refundedAmount       shared.Money      // 返金累計額
+    method               PaymentMethod
+    status               PaymentStatus
+    gatewayTransactionID string            // 外部決済サービスのトランザクションID
+    idempotencyKey       string            // リトライ時の重複防止キー
+    failureReason        *string
+    processedAt          time.Time
+    metadata             map[string]string
+}
+
+// コンストラクタ
+func NewPayment(
+    id shared.PaymentID,
+    invoiceID shared.InvoiceID,
+    amount shared.Money,
+    method PaymentMethod,
+    gatewayTransactionID string,
+    processedAt time.Time,
+) *Payment
+
+// 状態遷移メソッド
+func (p *Payment) Complete() error
+func (p *Payment) Fail(reason string) error
+func (p *Payment) MarkRefunded() error
+func (p *Payment) MarkPartiallyRefunded() error
+func (p *Payment) MarkChargedBack() error
+
+// RecordRefund は返金額を記録し、累計に基づいてステータスを自動更新する。
+// MarkRefunded/MarkPartiallyRefunded の代替として推奨。
+func (p *Payment) RecordRefund(amount shared.Money) error
+
+func (p *Payment) SetIdempotencyKey(key string)
+```
+
+### 5.2 Payment リポジトリインターフェース
+
+```go
+// domain/payment/repository.go
+package payment
+
+import (
+    "context"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
+type Repository interface {
+    Save(ctx context.Context, payment *Payment) error
+    FindByID(ctx context.Context, id shared.PaymentID) (*Payment, error)
+    FindByInvoiceID(ctx context.Context, invoiceID shared.InvoiceID) ([]*Payment, error)
+    // FindByIdempotencyKey はリトライ時の重複防止に使用。見つからない場合は nil を返す。
+    FindByIdempotencyKey(ctx context.Context, key string) (*Payment, error)
 }
 ```
 
-### 5.2 支払い失敗時のリトライ（Dunning）
+### 5.3 支払い失敗時のリトライ（Dunning）
 
 ```go
 // domain/payment/dunning.go
@@ -569,28 +1103,47 @@ package usage
 
 import (
     "time"
-    
+
     "github.com/contract-to-cash/core/domain/shared"
 )
 
 // UsageRecordID は shared/identifier.go で定義
 
 type UsageRecord struct {
-    id          shared.UsageRecordID
-    contractID  shared.ContractID
-    metricName  string       // 例: "api_calls", "storage_gb", "active_users"
-    quantity    int64
-    timestamp   time.Time
-    metadata    map[string]string
-    idempotencyKey string   // 重複登録防止
+    id             shared.UsageRecordID
+    contractID     shared.ContractID
+    metricName     string       // 例: "api_calls", "storage_gb", "active_users"
+    quantity       int64
+    timestamp      time.Time
+    metadata       map[string]string
+    idempotencyKey string       // 重複登録防止
 }
+
+// NewUsageRecord creates a new UsageRecord. Returns an error if quantity is negative.
+func NewUsageRecord(
+    id shared.UsageRecordID,
+    contractID shared.ContractID,
+    metricName string,
+    quantity int64,
+    timestamp time.Time,
+    idempotencyKey string,
+) (*UsageRecord, error)
+
+// Getters
+func (r *UsageRecord) ID() shared.UsageRecordID
+func (r *UsageRecord) ContractID() shared.ContractID
+func (r *UsageRecord) MetricName() string
+func (r *UsageRecord) Quantity() int64
+func (r *UsageRecord) Timestamp() time.Time
+func (r *UsageRecord) Metadata() map[string]string
+func (r *UsageRecord) IdempotencyKey() string
 
 // UsageSummary 集計結果
 type UsageSummary struct {
-    ContractID  shared.ContractID
-    MetricName  string
-    Period      shared.DateRange
-    TotalUsage  int64
+    ContractID shared.ContractID
+    MetricName string
+    Period     shared.DateRange
+    TotalUsage int64
 }
 ```
 
@@ -603,6 +1156,8 @@ package usage
 import (
     "context"
     "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
 )
 
 type Repository interface {
@@ -612,7 +1167,93 @@ type Repository interface {
 }
 ```
 
-## 7. PricingModel（料金モデル）
+## 7. Pricing（料金モデル）
+
+### 7.1 BillingCycle
+
+```go
+// domain/pricing/price.go
+package pricing
+
+// BillingCycle は請求サイクルを表す。pricing パッケージで定義され、
+// contract パッケージからはエイリアスとして参照される。
+type BillingCycle string
+
+const (
+    BillingCycleDaily   BillingCycle = "daily"
+    BillingCycleWeekly  BillingCycle = "weekly"
+    BillingCycleMonthly BillingCycle = "monthly"
+    BillingCycleYearly  BillingCycle = "yearly"
+)
+```
+
+### 7.2 Price（価格）
+
+```go
+// domain/pricing/price.go
+package pricing
+
+import (
+    "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
+type PriceStatus string
+
+const (
+    PriceStatusActive   PriceStatus = "active"
+    PriceStatusArchived PriceStatus = "archived"
+)
+
+// Price は「どう課金するか」を表すイミュータブルなエンティティ。
+// 作成後は amount, currency, billingCycle, pricingModel を変更できない。
+// 価格改定時は新しい Price を作成する。
+type Price struct {
+    id           shared.PriceID
+    productID    shared.ProductID
+    amount       shared.Money
+    currency     shared.Currency
+    billingCycle BillingCycle
+    pricingModel PricingModel
+    status       PriceStatus
+    createdAt    time.Time
+}
+
+func NewPrice(
+    productID shared.ProductID,
+    amount shared.Money,
+    currency shared.Currency,
+    billingCycle BillingCycle,
+    pricingModel PricingModel,
+) *Price
+
+func (p *Price) ID() shared.PriceID
+func (p *Price) ProductID() shared.ProductID
+func (p *Price) Amount() shared.Money
+func (p *Price) Currency() shared.Currency
+func (p *Price) BillingCycle() BillingCycle
+func (p *Price) PricingModel() PricingModel
+func (p *Price) Status() PriceStatus
+func (p *Price) CreatedAt() time.Time
+func (p *Price) Archive() error
+```
+
+### 7.3 PriceRepository
+
+```go
+// domain/pricing/price.go
+package pricing
+
+type PriceRepository interface {
+    FindByID(ctx context.Context, id shared.PriceID) (*Price, error)
+    FindByProductID(ctx context.Context, productID shared.ProductID) ([]*Price, error)
+    FindActiveByProductID(ctx context.Context, productID shared.ProductID) ([]*Price, error)
+    Save(ctx context.Context, price *Price) error
+}
+```
+
+### 7.4 PricingModel と Plan
 
 ```go
 // domain/pricing/model.go
@@ -622,29 +1263,44 @@ import (
     "github.com/contract-to-cash/core/domain/shared"
 )
 
-// PlanID は shared/identifier.go で定義
-
-type Plan struct {
-    id           PlanID
-    name         string
-    description  string
-    pricingModel PricingModel     // 固定料金部分（FlatPrice等）
-    usageMetrics []UsageMetric    // 従量課金メトリクス（ハイブリッド対応）
-    features     []Feature
-    metadata     map[string]string
-}
-
-// UsageMetric 従量課金メトリクス定義
-type UsageMetric struct {
-    Name             string       // メトリクス名（例: "api_calls", "storage_gb"）
-    PricingModel     PricingModel // 料金モデル（TieredPrice, UsagePrice等）
-    IncludedQuantity int64        // 含有枠（基本料金に含まれる無料枠。0 = 枠なし）
-}
-
 type PricingModel interface {
     CalculatePrice(usage int64) shared.Money
 }
 
+// Plan 料金プラン（Feature, UsageMetric を含む）
+// Deprecated: product.Product と pricing.Price を使用すること。
+type Plan struct {
+    id           shared.PlanID
+    name         string
+    description  string
+    pricingModel PricingModel
+    usageMetrics []UsageMetric
+    features     []Feature
+    metadata     map[string]string
+}
+
+// Deprecated: product.NewProduct と pricing.NewPrice を使用すること。
+func NewPlan(name string, description string, pricingModel PricingModel) *Plan
+
+// UsageMetric 従量課金メトリクス定義
+// Deprecated: プロダクト定義には product.UsageMetric を使用すること。
+// 従量料金計算で PricingModel を保持するためこの型は残存する。
+type UsageMetric struct {
+    Name             string
+    PricingModel     PricingModel
+    IncludedQuantity int64
+}
+
+// Feature プラン機能定義
+// Deprecated: product.Feature を使用すること。
+type Feature struct {
+    Name     string
+    Included bool
+    Limit    *int64
+}
+```
+
+```go
 // FlatPrice 固定料金
 type FlatPrice struct {
     Price shared.Money
@@ -681,22 +1337,7 @@ type PriceTier struct {
     FlatFee   shared.Money // この段階の固定料金
 }
 
-func (p TieredPrice) CalculatePrice(usage int64) shared.Money {
-    if p.Mode == TieredPricingVolume {
-        return p.calculateVolume(usage)
-    }
-    return p.calculateGraduated(usage)
-}
-
-func (p TieredPrice) calculateGraduated(usage int64) shared.Money {
-    // 段階ごとに該当する使用量 × 単価を合算
-    // ...
-}
-
-func (p TieredPrice) calculateVolume(usage int64) shared.Money {
-    // 到達段階の単価 × 全使用量
-    // ...
-}
+func (p TieredPrice) CalculatePrice(usage int64) shared.Money
 
 // UsagePrice 従量料金
 type UsagePrice struct {
@@ -705,21 +1346,93 @@ type UsagePrice struct {
     Maximum   *shared.Money // 最大料金（上限）
 }
 
-func (p UsagePrice) CalculatePrice(usage int64) shared.Money {
-    // 従量料金計算ロジック
-    // ...
-}
+func (p UsagePrice) CalculatePrice(usage int64) shared.Money
+```
 
+## 8. Product（プロダクト）
+
+```go
+// domain/product/entity.go
+package product
+
+import (
+    "time"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
+// ProductStatus プロダクトのライフサイクルステータス
+type ProductStatus string
+
+const (
+    ProductStatusActive   ProductStatus = "active"
+    ProductStatusArchived ProductStatus = "archived"
+)
+
+// Feature プロダクト機能定義
 type Feature struct {
     Name     string
     Included bool
-    Limit    *int64 // nil = 無制限
+    Limit    *int64
+}
+
+// UsageMetric プロダクト従量課金メトリクス定義
+type UsageMetric struct {
+    Name             string
+    IncludedQuantity int64
+}
+
+// Product は「何を売るか」を表すエンティティ。
+// 「どう課金するか」は pricing.Price で定義する。
+type Product struct {
+    id           shared.ProductID
+    name         string
+    description  string
+    features     []Feature
+    usageMetrics []UsageMetric
+    status       ProductStatus
+    metadata     map[string]string
+    createdAt    time.Time
+}
+
+func NewProduct(name string, description string) *Product
+
+func (p *Product) ID() shared.ProductID
+func (p *Product) Name() string
+func (p *Product) Description() string
+func (p *Product) Status() ProductStatus
+func (p *Product) CreatedAt() time.Time
+func (p *Product) Features() []Feature
+func (p *Product) UsageMetrics() []UsageMetric
+func (p *Product) Metadata() map[string]string
+
+func (p *Product) AddFeature(f Feature)
+func (p *Product) AddUsageMetric(m UsageMetric)
+func (p *Product) SetMetadata(key, value string)
+func (p *Product) Archive() error
+```
+
+### 8.1 Product リポジトリインターフェース
+
+```go
+// domain/product/repository.go
+package product
+
+import (
+    "context"
+
+    "github.com/contract-to-cash/core/domain/shared"
+)
+
+type Repository interface {
+    FindByID(ctx context.Context, id shared.ProductID) (*Product, error)
+    Save(ctx context.Context, product *Product) error
 }
 ```
 
-## 8. ドメインサービス
+## 9. ドメインサービス
 
-### 8.1 請求計算サービス
+### 9.1 請求計算サービス
 
 ```go
 // domain/billing/service.go
@@ -727,6 +1440,7 @@ package billing
 
 import (
     "context"
+    "time"
 
     "github.com/contract-to-cash/core/domain/shared"
 )
@@ -743,8 +1457,8 @@ type Calculator interface {
 }
 
 type ProrationResult struct {
-    CreditAmount  shared.Money // 旧プラン残日数分（内訳記録用）
-    ChargeAmount  shared.Money // 新プラン残日数分（内訳記録用）
+    CreditAmount     shared.Money // 旧プラン残日数分（内訳記録用）
+    ChargeAmount     shared.Money // 新プラン残日数分（内訳記録用）
     AdjustmentAmount shared.Money // 日割り調整額（ChargeAmount - CreditAmount）
     // AdjustmentAmount > 0: 追加請求（アップグレード）
     // AdjustmentAmount < 0: 次回請求からクレジット差引（ダウングレード）
@@ -753,18 +1467,7 @@ type ProrationResult struct {
 }
 
 // NewProrationResult CreditとChargeからAdjustmentAmountを自動算出
-func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*ProrationResult, error) {
-    adjustment, err := charge.Subtract(credit) // 差額のみ精算
-    if err != nil {
-        return nil, err // 通貨不一致の場合
-    }
-    return &ProrationResult{
-        CreditAmount:     credit,
-        ChargeAmount:     charge,
-        AdjustmentAmount: adjustment,
-        EffectiveDate:    effectiveDate,
-    }, nil
-}
+func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*ProrationResult, error)
 // 決済時の動作:
 //   アップグレード（Adjustment > 0）→ AdjustmentAmount のみ1回請求
 //   ダウングレード（Adjustment < 0）→ BalancePolicy に従って処理（後述）
@@ -775,12 +1478,12 @@ func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*
 > 削除済み。契約タイプ別の処理ロジックは `application/service/billing_service.go` の
 > `calculateSubtotal()` に移動している（`plugin-system.md` セクション8参照）。
 
-## 9. クレジット台帳（Credit Ledger）
+## 10. クレジット台帳（Credit Ledger）
 
 プラン変更（ダウングレード）、手動調整、返金のクレジット変換等で発生する
 預かり金（クレジット残高）を管理する。
 
-### 9.1 クレジットポリシー
+### 10.1 クレジットポリシー
 
 利用者がクレジットの扱いを設定できる。
 
@@ -805,26 +1508,14 @@ const (
 // BalanceConfig クレジット設定
 // Account.BillingInfo に含める。未設定の場合はグローバルデフォルトを使用。
 type BalanceConfig struct {
-    // DowngradePolicy ダウングレード時のクレジットポリシー
-    // デフォルト: BalancePolicyLedger
-    DowngradePolicy BalancePolicy
-
-    // CancellationPolicy 解約時の未使用期間分のクレジットポリシー
-    // デフォルト: BalancePolicyNone
+    DowngradePolicy    BalancePolicy
     CancellationPolicy BalancePolicy
-
-    // AllowManualRefund クレジット残高からの手動返金を許可するか
-    // true: オペレーターがクレジット残高を返金に変換できる
-    // false: クレジットは請求書差引のみ
-    AllowManualRefund bool
-
-    // ExpirationDays クレジットの有効期限（日数）
-    // 0 = 無期限
-    ExpirationDays int
+    AllowManualRefund  bool
+    ExpirationDays     int
 }
 ```
 
-### 9.2 クレジットエントリ
+### 10.2 クレジットエントリ
 
 ```go
 // domain/balance/entity.go
@@ -850,6 +1541,8 @@ type BalanceEntry struct {
     description     string            // 説明（「Proプラン→Basicプランへの日割り調整」等）
     expiresAt       *time.Time        // 有効期限（nil = 無期限）
     createdAt       time.Time
+    version         int               // Consume() のたびにインクリメント。楽観的ロック用。
+    loadedVersion   int               // ロード時のバージョン。Save時に比較してコンフリクト検出。
 }
 
 type BalanceReason string
@@ -862,18 +1555,23 @@ const (
     BalanceReasonGoodwill         BalanceReason = "goodwill"           // お詫び・補填
 )
 
-// IsExpired 有効期限切れか判定
-func (e *BalanceEntry) IsExpired(now time.Time) bool {
-    return e.expiresAt != nil && now.After(*e.expiresAt)
-}
+// NewBalanceEntry creates a new BalanceEntry.
+// createdAt は Clock.Now() 経由で呼び出し元が提供すること。
+func NewBalanceEntry(accountID shared.AccountID, amount shared.Money, reason BalanceReason, createdAt time.Time) *BalanceEntry
 
-// IsFullyConsumed 全額消費済みか判定
-func (e *BalanceEntry) IsFullyConsumed() bool {
-    return e.remainingAmount.IsZero()
-}
+// Consume は残高を消費し、実際に消費された金額を返す。
+// 残高不足の場合は残高分のみ消費する（min(remainingAmount, amount)）。
+// 消費が発生した場合は version をインクリメントする。
+func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error)
+
+func (e *BalanceEntry) IsExpired(now time.Time) bool
+func (e *BalanceEntry) IsFullyConsumed() bool
+func (e *BalanceEntry) Version() int
+func (e *BalanceEntry) SetVersion(v int)        // リポジトリ実装がロード後に呼び出す
+func (e *BalanceEntry) LoadedVersion() int
 ```
 
-### 9.3 クレジット適用記録
+### 10.3 クレジット適用記録
 
 ```go
 // domain/balance/application.go
@@ -888,26 +1586,25 @@ import (
 // BalanceApplication クレジットの消費記録
 // どのクレジットが、どの請求書で、いくら使われたかを追跡
 type BalanceApplication struct {
-    id            string
-    creditEntryID shared.BalanceEntryID     // 消費元のクレジット
-    invoiceID     shared.InvoiceID  // 適用先の請求書
-    amount        shared.Money      // 適用額
-    appliedAt     time.Time
+    ID             string
+    BalanceEntryID shared.BalanceEntryID     // 消費元のクレジット
+    InvoiceID      shared.InvoiceID          // 適用先の請求書
+    Amount         shared.Money              // 適用額
+    AppliedAt      time.Time
 }
 
 // BalanceRefund クレジット残高からの返金記録
 // BalanceConfig.AllowManualRefund = true の場合のみ作成可能
-// AllowManualRefund = false の場合、返金は BalanceEntry の作成元（決済トランザクション）経由で行う
 type BalanceRefund struct {
-    id            string
-    creditEntryID shared.BalanceEntryID
-    accountID     shared.AccountID
-    amount        shared.Money
-    refundedAt    time.Time
+    ID             string
+    BalanceEntryID shared.BalanceEntryID
+    AccountID      shared.AccountID
+    Amount         shared.Money
+    RefundedAt     time.Time
 }
 ```
 
-### 9.4 リポジトリインターフェース
+### 10.4 リポジトリインターフェース
 
 ```go
 // domain/balance/repository.go
@@ -930,7 +1627,6 @@ type Repository interface {
     // GetBalance アカウントのクレジット残高合計
     // 有効期限内（expiresAt が nil または now より後）かつ
     // remainingAmount > 0 のエントリのみを集計する。
-    // 有効期限切れエントリは残高に含めない。
     GetBalance(ctx context.Context, accountID shared.AccountID, currency shared.Currency) (shared.Money, error)
 
     // 適用記録
@@ -942,26 +1638,25 @@ type Repository interface {
 }
 ```
 
-### 9.5 請求書生成時のクレジット適用フロー
+### 10.5 請求書生成時のクレジット適用フロー
 
 ```
 請求計算（BillingService.GenerateInvoice）:
-  ① 基本料金計算
-  ② DiscountHook（クーポン等）
-  ③ TaxHook（税計算）
-  ④ 合計算出
-  ⑤ ★ クレジット適用 ← 新規ステップ
-  │   - FindAvailable(accountID, invoice.Currency()) で
-  │     同一通貨かつ有効期限内のクレジットをFIFO取得
-  │   - 古いクレジットから順に消費（有効期限切れはスキップ）
-  │   - Invoice.appliedBalance に適用額を記録
-  │   - BalanceApplication レコード作成
-  │   - 適用額は min(entry.remainingAmount, 残り充当必要額) で算出
-  │     （remainingAmount がマイナスになることを防止）
-  │   - BalanceEntry.remainingAmount を減算
-  ⑥ 実請求額 = 合計 - クレジット適用額
-  │   - 実請求額 > 0: 決済実行
-  │   - 実請求額 = 0: 決済不要（全額クレジットで充当）
+  1. 基本料金計算
+  2. DiscountHook（クーポン等）
+  3. TaxHook（税計算）
+  4. 合計算出
+  5. クレジット適用
+  |   - FindAvailable(accountID, invoice.Currency()) で
+  |     同一通貨かつ有効期限内のクレジットをFIFO取得
+  |   - 古いクレジットから順に消費（有効期限切れはスキップ）
+  |   - Invoice.appliedBalance に適用額を記録
+  |   - BalanceApplication レコード作成
+  |   - 適用額は min(entry.remainingAmount, 残り充当必要額) で算出
+  |   - BalanceEntry.remainingAmount を減算
+  6. 実請求額 = 合計 - クレジット適用額
+  |   - 実請求額 > 0: 決済実行
+  |   - 実請求額 = 0: 決済不要（全額クレジットで充当）
 ```
 
 #### トランザクション戦略
@@ -998,19 +1693,19 @@ func (s *BillingService) applyCredits(ctx context.Context, tx *sql.Tx, invoice *
 
 現時点では簡易CQRS前提のため、DBトランザクション方式で十分である。
 
-### 9.6 ダウングレード時のフロー（BalancePolicy別）
+### 10.6 ダウングレード時のフロー（BalancePolicy別）
 
 ```
 ProrationResult.AdjustmentAmount < 0（ダウングレード）
-  │
-  ├─ BalancePolicyLedger（デフォルト）
-  │   → BalanceEntry 作成（reason: proration）
-  │   → 次回以降の請求書で自動差引
-  │
-  ├─ BalancePolicyRefund
-  │   → PaymentGateway.Refund() で即時返金
-  │   → 元の決済手段に返金
-  │
-  └─ BalancePolicyNone
-      → 何もしない（差額は切り捨て）
+  |
+  +-- BalancePolicyLedger（デフォルト）
+  |   -> BalanceEntry 作成（reason: proration）
+  |   -> 次回以降の請求書で自動差引
+  |
+  +-- BalancePolicyRefund
+  |   -> PaymentGateway.Refund() で即時返金
+  |   -> 元の決済手段に返金
+  |
+  +-- BalancePolicyNone
+      -> 何もしない（差額は切り捨て）
 ```

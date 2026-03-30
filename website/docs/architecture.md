@@ -20,8 +20,9 @@ github.com/contract-to-cash/core/
 │   ├── product/         # Product entity
 │   └── shared/          # Shared value objects (Money, DateRange, IDs, Clock)
 ├── application/         # Application layer — services, ports, queries
-│   ├── service/         # BillingService, PaymentService, SnapshotService
+│   ├── service/         # BillingService, PaymentService, CreditNoteService, SnapshotService
 │   ├── port/            # PaymentGateway interface (hexagonal port)
+│   ├── tx/              # Transaction manager abstraction (TxManager, Saga, NoopTxManager)
 │   ├── query/           # TemporalQueryService
 │   └── projection/      # Projection service for read models
 ├── eventstore/          # Event sourcing infrastructure
@@ -37,7 +38,8 @@ github.com/contract-to-cash/core/
 │   ├── hooks_contract.go # Contract lifecycle hooks
 │   ├── hooks_payment.go  # Payment hooks
 │   ├── hooks_metrics.go  # Metrics collection hooks
-│   └── hooks_invoicegen.go # Invoice generation hooks
+│   ├── hooks_invoicegen.go # Invoice generation hooks
+│   └── hooks_creditnote.go # Credit note and invoice revision hooks
 ├── plugins/             # Official plugin implementations
 │   ├── tax/             # Tax calculation (Japanese consumption tax)
 │   ├── coupon/          # Coupon/discount management

@@ -70,7 +70,7 @@ import (
 // metadata は使用せず、型付きフィールドでデータを共有する
 type CalculationContext struct {
     ctx                   context.Context
-    contract              *contract.Contract
+    contract              *contract.ContractAggregate
     invoice               *invoice.Invoice
     subtotal              shared.Money           // 基本料金
     subtotalAfterDiscount shared.Money           // 割引後小計（TaxHookが参照）
@@ -84,18 +84,24 @@ type AppliedDiscount struct {
     Amount     shared.Money // 割引額
 }
 
-func NewCalculationContext(ctx context.Context, c *contract.Contract) *CalculationContext {
+func NewCalculationContext(ctx context.Context, c *contract.ContractAggregate, subtotal shared.Money) *CalculationContext {
     return &CalculationContext{
-        ctx:      ctx,
-        contract: c,
+        ctx:                   ctx,
+        contract:              c,
+        subtotal:              subtotal,
+        subtotalAfterDiscount: subtotal,
     }
 }
 
-func (c *CalculationContext) Context() context.Context        { return c.ctx }
-func (c *CalculationContext) Contract() *contract.Contract    { return c.contract }
-func (c *CalculationContext) Subtotal() shared.Money          { return c.subtotal }
-func (c *CalculationContext) SubtotalAfterDiscount() shared.Money { return c.subtotalAfterDiscount }
-func (c *CalculationContext) AppliedDiscounts() []AppliedDiscount { return c.appliedDiscounts }
+func (c *CalculationContext) Context() context.Context                    { return c.ctx }
+func (c *CalculationContext) Contract() *contract.ContractAggregate       { return c.contract }
+func (c *CalculationContext) ContractID() shared.ContractID              {
+    if c.contract == nil { return "" }
+    return c.contract.ContractID()
+}
+func (c *CalculationContext) Subtotal() shared.Money                     { return c.subtotal }
+func (c *CalculationContext) SubtotalAfterDiscount() shared.Money        { return c.subtotalAfterDiscount }
+func (c *CalculationContext) AppliedDiscounts() []AppliedDiscount        { /* コピーを返す */ }
 
 // SetSubtotal コアが基本料金算出後に設定する
 func (c *CalculationContext) SetSubtotal(s shared.Money) { c.subtotal = s }
@@ -205,43 +211,43 @@ DiscountHook/TaxHookと同じ設計方針で、契約ライフサイクルの各
 // OnContractCreateHook 契約作成時
 type OnContractCreateHook interface {
     Plugin
-    OnContractCreate(ctx *Context, contract *contract.Contract) error
+    OnContractCreate(ctx *Context, contract *contract.ContractAggregate) error
 }
 
 // OnContractActivateHook 契約有効化時
 type OnContractActivateHook interface {
     Plugin
-    OnContractActivate(ctx *Context, contract *contract.Contract) error
+    OnContractActivate(ctx *Context, contract *contract.ContractAggregate) error
 }
 
 // OnContractSuspendHook 契約一時停止時
 type OnContractSuspendHook interface {
     Plugin
-    OnContractSuspend(ctx *Context, contract *contract.Contract) error
+    OnContractSuspend(ctx *Context, contract *contract.ContractAggregate) error
 }
 
 // OnContractResumeHook 契約再開時
 type OnContractResumeHook interface {
     Plugin
-    OnContractResume(ctx *Context, contract *contract.Contract) error
+    OnContractResume(ctx *Context, contract *contract.ContractAggregate) error
 }
 
 // OnContractCancelHook 契約解約時
 type OnContractCancelHook interface {
     Plugin
-    OnContractCancel(ctx *Context, contract *contract.Contract) error
+    OnContractCancel(ctx *Context, contract *contract.ContractAggregate) error
 }
 
 // OnContractRenewHook 契約更新時
 type OnContractRenewHook interface {
     Plugin
-    OnContractRenew(ctx *Context, contract *contract.Contract) error
+    OnContractRenew(ctx *Context, contract *contract.ContractAggregate) error
 }
 
 // OnContractTrialEndHook トライアル終了時
 type OnContractTrialEndHook interface {
     Plugin
-    OnContractTrialEnd(ctx *Context, contract *contract.Contract, converted bool) error
+    OnContractTrialEnd(ctx *Context, contract *contract.ContractAggregate, converted bool) error
 }
 
 // 複数イベントを監視したいプラグインは複数IFを実装する:
@@ -249,7 +255,42 @@ type OnContractTrialEndHook interface {
 //   var _ plugin.OnContractCancelHook = (*NotifyPlugin)(nil)
 ```
 
-### 3.6 支払いフック（ISP準拠・個別分離）
+### 3.6 支払いコンテキスト
+
+支払いフック専用の型安全コンテキスト。`CalculationContext` と同じパターンで、
+PaymentService が既にロード済みの payment, invoice, contract を保持する。
+
+```go
+// plugin/context_payment.go
+
+// PaymentContext 支払いフック用の型安全コンテキスト
+type PaymentContext struct {
+    ctx      context.Context
+    payment  *payment.Payment
+    invoice  *invoice.Invoice
+    contract *contract.ContractAggregate
+}
+
+func NewPaymentContext(ctx context.Context, p *payment.Payment, inv *invoice.Invoice) *PaymentContext {
+    return &PaymentContext{ctx: ctx, payment: p, invoice: inv}
+}
+
+func (pc *PaymentContext) Context() context.Context                    { return pc.ctx }
+func (pc *PaymentContext) Payment() *payment.Payment                   { return pc.payment }
+func (pc *PaymentContext) Invoice() *invoice.Invoice                   { return pc.invoice }
+func (pc *PaymentContext) Contract() *contract.ContractAggregate       { return pc.contract }
+func (pc *PaymentContext) SetContract(c *contract.ContractAggregate)   { pc.contract = c }
+func (pc *PaymentContext) ContractID() shared.ContractID              {
+    if pc.invoice == nil { return "" }
+    return pc.invoice.ContractID()
+}
+func (pc *PaymentContext) AccountID() shared.AccountID                {
+    if pc.invoice == nil { return "" }
+    return pc.invoice.AccountID()
+}
+```
+
+### 3.7 支払いフック（ISP準拠・個別分離）
 
 ```go
 // plugin/hooks_payment.go
@@ -257,29 +298,29 @@ type OnContractTrialEndHook interface {
 // BeforeChargeHook 課金前処理
 type BeforeChargeHook interface {
     Plugin
-    BeforeCharge(ctx *Context, amount shared.Money) error
+    BeforeCharge(ctx *PaymentContext, amount shared.Money) error
 }
 
 // AfterChargeHook 課金後処理
 type AfterChargeHook interface {
     Plugin
-    AfterCharge(ctx *Context, payment *payment.Payment) error
+    AfterCharge(ctx *PaymentContext) error
 }
 
 // OnPaymentFailedHook 支払い失敗時
 type OnPaymentFailedHook interface {
     Plugin
-    OnPaymentFailed(ctx *Context, payment *payment.Payment, err error) error
+    OnPaymentFailed(ctx *PaymentContext, err error) error
 }
 
 // OnRefundHook 返金時
 type OnRefundHook interface {
     Plugin
-    OnRefund(ctx *Context, payment *payment.Payment, amount shared.Money) error
+    OnRefund(ctx *PaymentContext, refundAmount shared.Money) error
 }
 ```
 
-### 3.7 メトリクスフック（ISP準拠・個別分離）
+### 3.8 メトリクスフック（ISP準拠・個別分離）
 
 ```go
 // plugin/hooks_metrics.go
@@ -311,15 +352,15 @@ const (
     ContractChangeSuspended  ContractChangeType = "suspended"
     ContractChangeResumed    ContractChangeType = "resumed"
     ContractChangeCancelled  ContractChangeType = "cancelled"
-    ContractChangeRenewed    ContractChangeType = "renewed"
-    ContractChangePlanChanged ContractChangeType = "plan_changed"
+    ContractChangeRenewed   ContractChangeType = "renewed"
+    ContractChangeTrialEnd  ContractChangeType = "trial_end"
 )
 
 type ContractChangeEvent struct {
     ContractID  shared.ContractID
     ChangeType  ContractChangeType    // 型安全な変更種別
-    OldStatus   *ContractStatus       // ステータス変更の場合の旧値（nilは該当なし）
-    NewStatus   *ContractStatus       // ステータス変更の場合の新値
+    OldStatus   *contract.ContractStatus // ステータス変更の場合の旧値（nilは該当なし）
+    NewStatus   *contract.ContractStatus // ステータス変更の場合の新値
     OldPlanID   *shared.PlanID        // プラン変更の場合の旧プランID
     NewPlanID   *shared.PlanID        // プラン変更の場合の新プランID
     MRRChange   *shared.Money         // MRR変動額（メトリクス用）
@@ -327,39 +368,56 @@ type ContractChangeEvent struct {
 }
 ```
 
-### 3.8 請求書生成フック
+### 3.9 請求書生成フック
 
 ```go
-// plugin/hooks.go (続き)
+// plugin/hooks_invoicegen.go
 
 // InvoiceGenerationHook 請求書生成フック
 type InvoiceGenerationHook interface {
     Plugin
-    
+
     // BuildDocument 請求書ドキュメント構築時
     BuildDocument(ctx *Context, invoice *invoice.Invoice, doc *InvoiceDocument) error
-    
+
     // AfterRender レンダリング後
     AfterRender(ctx *Context, doc *InvoiceDocument, rendered []byte) error
-    
+
     // AfterDelivery 送付後
     AfterDelivery(ctx *Context, doc *InvoiceDocument, result *DeliveryResult) error
 }
 
+// InvoiceDocument レンダリング対象の請求書ドキュメント
+// Phase 4で詳細フィールド（IssuerInfo, LineItems, TaxAmount等）を拡張予定
 type InvoiceDocument struct {
     InvoiceID     string
     InvoiceNumber string
-    IssuerInfo    CompanyInfo
-    CustomerInfo  CustomerInfo
-    LineItems     []DocumentLineItem
-    Subtotal      shared.Money
-    TaxAmount     shared.Money
-    Total         shared.Money
-    Notes         string
-    
-    // 電子帳簿保存法対応フィールド
-    QualifiedInvoiceNumber string // 適格請求書番号
-    TaxRegistrationNumber  string // 登録番号
+}
+
+// DeliveryResult 請求書送付結果
+type DeliveryResult struct {
+    DeliveryID string
+    Status     string
+    SentAt     *time.Time
+    Error      *string
+}
+```
+
+### 3.10 クレジットノートフック
+
+```go
+// plugin/hooks_creditnote.go
+
+// OnCreditNoteIssuedHook クレジットノート発行時
+type OnCreditNoteIssuedHook interface {
+    Plugin
+    OnCreditNoteIssued(ctx *Context, creditNote *invoice.CreditNote) error
+}
+
+// OnInvoiceRevisedHook 請求書の無効化・差替時
+type OnInvoiceRevisedHook interface {
+    Plugin
+    OnInvoiceRevised(ctx *Context, original *invoice.Invoice, replacement *invoice.Invoice) error
 }
 ```
 
@@ -409,6 +467,10 @@ type Registry struct {
 
     // 請求書生成フック
     invoiceGenerationHooks []InvoiceGenerationHook
+
+    // クレジットノートフック
+    onCreditNoteIssuedHooks []OnCreditNoteIssuedHook
+    onInvoiceRevisedHooks   []OnInvoiceRevisedHook
 }
 
 func NewRegistry() *Registry {
@@ -458,7 +520,11 @@ func (r *Registry) Register(plugin Plugin) error {
 
     // 請求書生成フック
     if h, ok := plugin.(InvoiceGenerationHook); ok { r.invoiceGenerationHooks = append(r.invoiceGenerationHooks, h) }
-    
+
+    // クレジットノートフック
+    if h, ok := plugin.(OnCreditNoteIssuedHook); ok { r.onCreditNoteIssuedHooks = append(r.onCreditNoteIssuedHooks, h) }
+    if h, ok := plugin.(OnInvoiceRevisedHook); ok { r.onInvoiceRevisedHooks = append(r.onInvoiceRevisedHooks, h) }
+
     return nil
 }
 
@@ -537,6 +603,10 @@ func (r *Registry) GetOnPaymentProcessedHooks() []OnPaymentProcessedHook { ... }
 
 // 請求書生成
 func (r *Registry) GetInvoiceGenerationHooks() []InvoiceGenerationHook { ... }
+
+// クレジットノート
+func (r *Registry) GetOnCreditNoteIssuedHooks() []OnCreditNoteIssuedHook { ... }
+func (r *Registry) GetOnInvoiceRevisedHooks() []OnInvoiceRevisedHook { ... }
 ```
 
 ## 5. プラグイン実行順序
@@ -954,7 +1024,13 @@ func (s *BillingService) GenerateInvoice(
         return nil, err
     }
 
-    calcCtx := plugin.NewCalculationContext(ctx, c)
+    // 2. 料金計算（契約タイプに応じて分岐）
+    subtotal, err := s.calculateSubtotal(ctx, c, billingPeriod)
+    if err != nil {
+        return nil, fmt.Errorf("subtotal calculation failed: %w", err)
+    }
+
+    calcCtx := plugin.NewCalculationContext(ctx, c, subtotal)
 
     // 1. BeforeCalculation（InvoiceLifecycleHook）
     for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
@@ -962,13 +1038,6 @@ func (s *BillingService) GenerateInvoice(
             return nil, fmt.Errorf("before calculation hook failed: %w", err)
         }
     }
-
-    // 2. 料金計算（契約タイプに応じて分岐）
-    subtotal, err := s.calculateSubtotal(ctx, c, billingPeriod)
-    if err != nil {
-        return nil, fmt.Errorf("subtotal calculation failed: %w", err)
-    }
-    calcCtx.SetSubtotal(subtotal)
 
     // 3. 割引計算（DiscountHook のみ）
     totalDiscount := shared.Zero(subtotal.Currency())

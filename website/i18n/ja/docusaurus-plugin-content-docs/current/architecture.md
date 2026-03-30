@@ -20,13 +20,13 @@ github.com/contract-to-cash/core/
 │   ├── product/         # Productエンティティ
 │   └── shared/          # 共有値オブジェクト（Money, DateRange, ID, Clock）
 ├── application/         # アプリケーション層 — サービス、ポート、クエリ
-│   ├── service/         # BillingService, PaymentService, SnapshotService
+│   ├── service/         # BillingService, PaymentService, CreditNoteService, SnapshotService
 │   ├── port/            # PaymentGatewayインターフェース（ヘキサゴナルポート）
 │   ├── query/           # TemporalQueryService
 │   ├── projection/      # プロジェクションサービス（読み取りモデル）
 │   └── tx/              # トランザクション管理
 ├── eventstore/          # イベントソーシング基盤
-├── plugin/              # プラグインシステム
+├── plugin/              # プラグインシステム（hooks_creditnote.go含む）
 ├── plugins/             # 公式プラグイン実装（tax, coupon, invoicecleanup）
 ├── infrastructure/      # インフラ実装
 │   └── inmemory/        # インメモリ実装（テスト・デモ用）

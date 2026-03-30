@@ -65,6 +65,8 @@ paymentService := service.NewPaymentService(
     registry,      // *plugin.Registry
     clock,         // shared.Clock
     service.WithCustomerGateway(customerGateway), // オプション: フォールバック解決用
+    service.WithPaymentLogger(logger),            // オプション: 構造化ロガー
+    service.WithPaymentTxManager(txManager),      // オプション: トランザクション管理
 )
 ```
 
@@ -87,6 +89,114 @@ func (s *PaymentService) ProcessPayment(
 ```
 
 フロー: BeforeChargeHook → Gateway.Charge → AfterChargeHook（成功） / OnPaymentFailedHook（失敗）
+
+### Refund
+
+```go
+type RefundInput struct {
+    Amount *shared.Money   // nil の場合、未返金残額を全額返金
+    Reason port.RefundReason
+}
+
+func (s *PaymentService) Refund(
+    ctx context.Context,
+    paymentID shared.PaymentID,
+    input RefundInput,
+) error
+```
+
+フロー: Gateway.Refund → 支払い記録更新 → OnRefundHook
+
+### ResolvePaymentMethod
+
+```go
+func (s *PaymentService) ResolvePaymentMethod(
+    ctx context.Context,
+    inv *invoice.Invoice,
+) (string, error)
+```
+
+階層型フォールバックチェーン: Invoice.PaymentMethodID → Contract.PaymentMethodID → Customer.DefaultPaymentMethodID
+
+---
+
+## CreditNoteService
+
+クレジットノートの作成、発行、請求書リビジョンをオーケストレーション。
+
+```go
+creditNoteService := service.NewCreditNoteService(
+    invoiceRepo,    // invoice.Repository
+    creditNoteRepo, // invoice.CreditNoteRepository
+    registry,       // *plugin.Registry
+    clock,          // shared.Clock
+    // オプション:
+    service.WithBillingService(billingService),     // 請求書再発行ワークフロー用
+    service.WithCreditNoteTxManager(txManager),     // トランザクション管理
+    service.WithCreditNoteLogger(logger),           // 構造化ロガー
+)
+```
+
+### CreateCreditNote
+
+```go
+func (s *CreditNoteService) CreateCreditNote(
+    ctx context.Context,
+    invoiceID shared.InvoiceID,
+    reason invoice.CreditNoteReason,
+    items []invoice.CreditNoteItem,
+    memo string,
+) (*invoice.CreditNote, error)
+```
+
+対象請求書のステータスが `issued`, `paid`, `partial_paid`, `overdue` の場合のみ作成可能。クレジットノートの合計が元請求書の合計を超えることはできない。
+
+### IssueCreditNote
+
+```go
+func (s *CreditNoteService) IssueCreditNote(
+    ctx context.Context,
+    creditNoteID shared.CreditNoteID,
+) (*invoice.CreditNote, error)
+```
+
+draft → issued に遷移。発行後に `OnCreditNoteIssuedHook` を実行。
+
+### ApplyCreditNote
+
+```go
+func (s *CreditNoteService) ApplyCreditNote(
+    ctx context.Context,
+    creditNoteID shared.CreditNoteID,
+    creditAmount shared.Money,
+) (*invoice.CreditNote, error)
+```
+
+issued → applied に遷移（アカウントクレジットとして適用）。
+
+### RefundCreditNote
+
+```go
+func (s *CreditNoteService) RefundCreditNote(
+    ctx context.Context,
+    creditNoteID shared.CreditNoteID,
+    refundAmount shared.Money,
+) (*invoice.CreditNote, error)
+```
+
+issued → refunded に遷移（決済返金として処理）。
+
+### ReissueInvoice
+
+```go
+func (s *CreditNoteService) ReissueInvoice(
+    ctx context.Context,
+    originalInvoiceID shared.InvoiceID,
+    reason string,
+) (*invoice.Invoice, error)
+```
+
+元の請求書を無効化（VoidWithReason）し、BillingServiceで代替請求書を生成。代替請求書には `revisionOf`（直接の親）と `originalInvoiceID`（チェーンのルート）が設定される。全ての書き込みはTxManager内のトランザクションで実行。完了後に `OnInvoiceRevisedHook` を実行。
 
 ---
 
