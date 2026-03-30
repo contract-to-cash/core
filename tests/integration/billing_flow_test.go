@@ -46,7 +46,7 @@ func createActiveContractWithPrice(
 	// Create Price entity
 	priceEntity := pricing.NewPrice(
 		shared.NewProductID(), price, price.Currency(),
-		pricing.BillingCycleMonthly, nil,
+		pricing.BillingCycleMonthly, nil, clock.Now(),
 	)
 	if err := priceRepo.Save(ctx, priceEntity); err != nil {
 		t.Fatalf("failed to save price: %v", err)

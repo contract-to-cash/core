@@ -3,6 +3,7 @@ package pricing
 import (
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/contract-to-cash/core/domain/shared"
 )
@@ -11,9 +12,19 @@ func jpy(amount int64) shared.Money {
 	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyJPY)
 }
 
+func TestNewPrice_CreatedAtIsSetFromParameter(t *testing.T) {
+	fixedTime := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, fixedTime)
+
+	if !p.CreatedAt().Equal(fixedTime) {
+		t.Errorf("expected createdAt %v, got %v", fixedTime, p.CreatedAt())
+	}
+}
+
 func TestNewPrice(t *testing.T) {
 	productID := shared.NewProductID()
-	p := NewPrice(productID, jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil)
+	createdAt := time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC)
+	p := NewPrice(productID, jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, createdAt)
 
 	if p.ID() == "" {
 		t.Error("expected non-empty price ID")
@@ -41,7 +52,7 @@ func TestNewPrice(t *testing.T) {
 func TestPrice_WithPricingModel(t *testing.T) {
 	productID := shared.NewProductID()
 	model := FlatPrice{Price: jpy(500)}
-	p := NewPrice(productID, jpy(0), shared.CurrencyJPY, BillingCycleMonthly, model)
+	p := NewPrice(productID, jpy(0), shared.CurrencyJPY, BillingCycleMonthly, model, time.Now())
 
 	if p.PricingModel() == nil {
 		t.Error("expected non-nil pricing model")
@@ -53,7 +64,7 @@ func TestPrice_WithPricingModel(t *testing.T) {
 }
 
 func TestPrice_Archive(t *testing.T) {
-	p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil)
+	p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, time.Now())
 
 	if err := p.Archive(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -64,7 +75,7 @@ func TestPrice_Archive(t *testing.T) {
 }
 
 func TestPrice_Archive_AlreadyArchived(t *testing.T) {
-	p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil)
+	p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, time.Now())
 	_ = p.Archive()
 
 	err := p.Archive()
@@ -76,7 +87,7 @@ func TestPrice_Archive_AlreadyArchived(t *testing.T) {
 func TestPrice_Immutability(t *testing.T) {
 	productID := shared.NewProductID()
 	amount := jpy(1000)
-	p := NewPrice(productID, amount, shared.CurrencyJPY, BillingCycleMonthly, nil)
+	p := NewPrice(productID, amount, shared.CurrencyJPY, BillingCycleMonthly, nil, time.Now())
 
 	originalID := p.ID()
 	originalProductID := p.ProductID()
@@ -107,7 +118,7 @@ func TestPrice_Immutability(t *testing.T) {
 func TestPrice_DifferentBillingCycles(t *testing.T) {
 	cycles := []BillingCycle{BillingCycleDaily, BillingCycleWeekly, BillingCycleMonthly, BillingCycleYearly}
 	for _, cycle := range cycles {
-		p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, cycle, nil)
+		p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, cycle, nil, time.Now())
 		if p.BillingCycle() != cycle {
 			t.Errorf("expected billing cycle %s, got %s", cycle, p.BillingCycle())
 		}

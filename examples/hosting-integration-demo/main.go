@@ -78,7 +78,7 @@ func main() {
 	// ── 3. Customer signs up for a hosting plan ──
 	printSection("Phase 1: Customer Sign-up")
 
-	priceEntity := pricing.NewPrice(shared.NewProductID(), moneyJPY(5000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+	priceEntity := pricing.NewPrice(shared.NewProductID(), moneyJPY(5000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
 	must("save price", priceRepo.Save(ctx, priceEntity))
 
 	agg := contract.NewContractAggregate(contractID, clock)

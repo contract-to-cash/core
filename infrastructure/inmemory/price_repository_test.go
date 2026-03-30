@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
@@ -18,7 +19,7 @@ func TestInMemoryPriceRepository_SaveAndFindByID(t *testing.T) {
 	ctx := context.Background()
 
 	productID := shared.NewProductID()
-	p := pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+	p := pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
 	if err := repo.Save(ctx, p); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -47,10 +48,10 @@ func TestInMemoryPriceRepository_FindByProductID(t *testing.T) {
 	ctx := context.Background()
 
 	productID := shared.NewProductID()
-	p1 := pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
-	p2 := pricing.NewPrice(productID, jpy(10000), shared.CurrencyJPY, pricing.BillingCycleYearly, nil)
+	p1 := pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
+	p2 := pricing.NewPrice(productID, jpy(10000), shared.CurrencyJPY, pricing.BillingCycleYearly, nil, time.Now())
 	otherProduct := shared.NewProductID()
-	p3 := pricing.NewPrice(otherProduct, jpy(500), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+	p3 := pricing.NewPrice(otherProduct, jpy(500), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
 
 	_ = repo.Save(ctx, p1)
 	_ = repo.Save(ctx, p2)
@@ -70,8 +71,8 @@ func TestInMemoryPriceRepository_FindActiveByProductID(t *testing.T) {
 	ctx := context.Background()
 
 	productID := shared.NewProductID()
-	active := pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
-	archived := pricing.NewPrice(productID, jpy(2000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+	active := pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
+	archived := pricing.NewPrice(productID, jpy(2000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
 	_ = archived.Archive()
 
 	_ = repo.Save(ctx, active)

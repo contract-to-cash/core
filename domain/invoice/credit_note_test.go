@@ -18,22 +18,43 @@ func newTestCreditNote() *CreditNote {
 		[]CreditNoteItem{
 			NewCreditNoteItem("li-1", "Plan adjustment", jpy(5000), big.NewRat(10, 100), jpy(500)),
 		},
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
 	)
 }
 
 // --- Constructor tests ---
+
+func TestNewCreditNote_CreatedAtIsSetFromParameter(t *testing.T) {
+	fixedTime := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	cn := NewCreditNote(
+		shared.NewCreditNoteID(),
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		CreditNoteReasonOrderChange,
+		[]CreditNoteItem{
+			NewCreditNoteItem("li-1", "Adjustment", jpy(3000), big.NewRat(10, 100), jpy(300)),
+		},
+		fixedTime,
+	)
+
+	if !cn.CreatedAt().Equal(fixedTime) {
+		t.Errorf("expected createdAt %v, got %v", fixedTime, cn.CreatedAt())
+	}
+}
 
 func TestNewCreditNote_Defaults(t *testing.T) {
 	id := shared.NewCreditNoteID()
 	invoiceID := shared.NewInvoiceID()
 	accountID := shared.NewAccountID()
 	contractID := shared.NewContractID()
+	createdAt := time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC)
 	items := []CreditNoteItem{
 		NewCreditNoteItem("li-1", "Adjustment", jpy(3000), big.NewRat(10, 100), jpy(300)),
 		NewCreditNoteItem("li-2", "Proration", jpy(2000), big.NewRat(10, 100), jpy(200)),
 	}
 
-	cn := NewCreditNote(id, invoiceID, accountID, contractID, CreditNoteReasonOrderChange, items)
+	cn := NewCreditNote(id, invoiceID, accountID, contractID, CreditNoteReasonOrderChange, items, createdAt)
 
 	if cn.ID() != id {
 		t.Errorf("expected id %s, got %s", id, cn.ID())
@@ -87,6 +108,7 @@ func TestNewCreditNote_WithOptions(t *testing.T) {
 		[]CreditNoteItem{
 			NewCreditNoteItem("li-1", "Full refund", jpy(10000), big.NewRat(10, 100), jpy(1000)),
 		},
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
 		WithCreditNoteMemo("Duplicate charge"),
 		WithCreditNoteNumber("CN-00001"),
 	)
@@ -113,6 +135,7 @@ func TestNewCreditNote_EmptyItems_Panics(t *testing.T) {
 		shared.NewContractID(),
 		CreditNoteReasonOther,
 		[]CreditNoteItem{},
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
 	)
 }
 

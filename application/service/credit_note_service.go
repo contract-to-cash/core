@@ -138,6 +138,7 @@ func (s *CreditNoteService) CreateCreditNote(
 		inv.ContractID(),
 		reason,
 		items,
+		s.clock.Now(),
 		opts...,
 	)
 

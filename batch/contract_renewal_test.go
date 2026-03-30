@@ -421,6 +421,7 @@ func TestContractRenewalProcessor_BillingCycleChange(t *testing.T) {
 		shared.CurrencyJPY,
 		pricing.BillingCycleYearly,
 		nil,
+		clock.Now(),
 	)
 
 	priceRepo := &mockPriceRepo{
