@@ -1,5 +1,15 @@
-// billing-demo demonstrates the full contract-to-cash flow:
-// Contract creation -> Activation -> Invoice generation -> Payment processing.
+// billing-demo demonstrates the recommended contract-to-cash flow
+// with payment-gated provisioning:
+//
+//	Draft → Invoice → Activate → Suspend (awaiting payment) → Pay → Resume (service starts)
+//
+// This flow ensures that services are only provisioned after payment clears.
+// The Suspended state serves as a unified "service not active" state for both
+// initial payment pending and non-payment suspension scenarios.
+//
+// NOTE: This is the recommended flow, but not the only option.
+// You can skip the Suspend/Resume steps for simpler use cases
+// (e.g., Draft → Activate → Invoice → Pay).
 package main
 
 import (
@@ -50,7 +60,7 @@ func main() {
 	defer registry.ShutdownAll(ctx)
 
 	// ── 3. Create a subscription contract (¥3,000/month) ──
-	fmt.Println("=== Contract-to-Cash Demo ===")
+	fmt.Println("=== Contract-to-Cash Demo (Payment-Gated Provisioning) ===")
 	fmt.Println()
 
 	contractID := shared.NewContractID()
@@ -73,15 +83,11 @@ func main() {
 		Price:        price,
 		BasePrice:    price,
 	}, metadata))
-	printStep("1. Contract created", "ID=%s, Status=%s, Price=¥%s/month",
+	must("save contract", contractRepo.Save(ctx, agg))
+	printStep("1. Contract created (Draft)", "ID=%s, Status=%s, Price=¥%s/month",
 		contractID, agg.Status(), agg.Price().Amount().RatString())
 
-	// ── 4. Activate the contract ──
-	must("activate contract", agg.Activate(metadata))
-	must("save contract", contractRepo.Save(ctx, agg))
-	printStep("2. Contract activated", "Status=%s", agg.Status())
-
-	// ── 5. Generate an invoice via BillingService ──
+	// ── 4. Generate draft invoice for user confirmation ──
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo,
 		balance.BalanceConfig{
@@ -99,21 +105,36 @@ func main() {
 	if err != nil {
 		fatal("generate invoice", err)
 	}
-	printStep("3. Invoice generated",
-		"ID=%s\n     Status=%s\n     Subtotal=¥%s, Tax(10%%)=¥%s, Total=¥%s\n     DueDate=%s",
+	printStep("2. Draft invoice generated",
+		"ID=%s, Status=%s\n     Subtotal=¥%s, Tax(10%%)=¥%s, Total=¥%s",
 		inv.ID(), inv.Status(),
 		inv.Subtotal().Amount().RatString(),
 		inv.TaxAmount().Amount().RatString(),
-		inv.Total().Amount().RatString(),
-		inv.DueDate().Format("2006-01-02"))
+		inv.Total().Amount().RatString())
 
-	// ── 6. Finalize the invoice ──
+	// ── 5. User reviews and confirms → Activate contract + Finalize invoice ──
+	agg, _ = contractRepo.FindByID(ctx, contractID)
+	must("activate contract", agg.Activate(metadata))
+	must("save contract", contractRepo.Save(ctx, agg))
+
 	must("finalize invoice", inv.Finalize())
-	must("save finalized invoice", invoiceRepo.Save(ctx, inv))
-	printStep("4. Invoice finalized", "Status=%s, AmountDue=¥%s",
-		inv.Status(), inv.AmountDue().Amount().RatString())
+	must("save invoice", invoiceRepo.Save(ctx, inv))
+	printStep("3. User confirmed → Activate + Finalize",
+		"Contract=%s, Invoice=%s, AmountDue=¥%s",
+		agg.Status(), inv.Status(), inv.AmountDue().Amount().RatString())
 
-	// ── 7. Process payment via PaymentService ──
+	// ── 6. Immediately suspend (awaiting payment) ──
+	agg, _ = contractRepo.FindByID(ctx, contractID)
+	must("suspend", agg.Suspend(contract.SuspensionConfiguration{
+		BillingBehavior: contract.SuspensionBillingSkip,
+		Reason:          "awaiting_initial_payment",
+	}, metadata))
+	must("save contract", contractRepo.Save(ctx, agg))
+	printStep("4. Contract suspended (awaiting payment)",
+		"Status=%s, Reason=%s",
+		agg.Status(), "awaiting_initial_payment")
+
+	// ── 7. Process payment ──
 	gateway := &mockPaymentGateway{}
 	paymentService := service.NewPaymentService(
 		gateway, paymentRepo, invoiceRepo, contractRepo, eventStore, registry, clock,
@@ -133,20 +154,26 @@ func main() {
 		payment.ID(), payment.Status(), payment.Amount().Amount().RatString(),
 		payment.GatewayTransactionID())
 
-	// ── 8. Verify final invoice status ──
+	// ── 8. Payment confirmed → Resume contract (service starts) ──
+	agg, _ = contractRepo.FindByID(ctx, contractID)
+	must("resume", agg.Resume(metadata))
+	must("save contract", contractRepo.Save(ctx, agg))
+	printStep("6. Payment confirmed → Contract resumed",
+		"Status=%s — service is now active!", agg.Status())
+
+	// ── 9. Verify final state ──
 	finalInv, _ := invoiceRepo.FindByID(ctx, inv.ID())
-	printStep("6. Invoice updated",
-		"Status=%s, PaidAmount=¥%s, Balance=¥%s",
+	printStep("7. Final state",
+		"Invoice: Status=%s, PaidAmount=¥%s, Balance=¥%s",
 		finalInv.Status(),
 		finalInv.PaidAmount().Amount().RatString(),
 		finalInv.Balance().Amount().RatString())
 
-	// ── 9. Show event history ──
-	fmt.Println()
+	// ── 10. Show event history ──
 	fmt.Println("--- Event History ---")
 	events, _ := eventStore.Load(ctx, string(contractID))
 	for i, e := range events {
-		fmt.Printf("  [%d] %s (v%d) at %s\n",
+		fmt.Printf("  [%d] %-25s (v%d) at %s\n",
 			i+1, e.Type, e.Version, e.OccurredAt.Format("2006-01-02T15:04:05Z"))
 	}
 
