@@ -162,7 +162,7 @@ func (r *ContractRepository) Save(ctx context.Context, c *contract.ContractAggre
         ON CONFLICT (id) DO UPDATE SET ...
     `
     _, err := r.db.ExecContext(ctx, query, 
-        c.ID().String(),
+        c.ContractID().String(),
         c.AccountID().String(),
         // ...
     )
@@ -399,7 +399,7 @@ func main() {
 
     // クーポンプラグイン（OSS提供、DiscountHook を実装）
     couponRepo := postgres.NewCouponRepository(db)
-    cp := couponPlugin.NewCouponPlugin(couponRepo)
+    cp := couponPlugin.NewCouponPlugin(couponRepo, clock)
     registry.Register(cp)
 
     // 請求通知プラグイン（サービスA独自、InvoiceLifecycleHook を実装）
