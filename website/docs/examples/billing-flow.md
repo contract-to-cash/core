@@ -4,13 +4,14 @@ sidebar_position: 1
 
 # Basic Billing Flow
 
-This example demonstrates the simplest contract-to-cash pattern:
+This example demonstrates the **recommended Payment-Gated Provisioning** flow — the contract-to-cash pattern where service starts only after payment confirmation:
 1. Create a subscription contract (Draft)
 2. Register a tax plugin
-3. Activate the contract
-4. Generate and finalize an invoice
-5. Process payment
-6. View event history
+3. Generate a draft invoice
+4. Activate and finalize both contract and invoice
+5. Suspend the contract (awaiting payment)
+6. Process payment and resume the contract
+7. View event history
 
 ## Running the Example
 
@@ -51,18 +52,9 @@ agg.Create(contract.CreateContractCommand{
 contractRepo.Save(ctx, agg)
 ```
 
-### Activate
+### Invoice Generation (Draft)
 
-The contract is activated, transitioning from Draft to Active:
-
-```go
-agg.Activate(metadata)  // Contract: Draft → Active
-contractRepo.Save(ctx, agg)
-```
-
-### Invoice Generation
-
-`BillingService` generates an invoice with tax automatically applied by the registered plugin:
+`BillingService` generates a draft invoice with tax automatically applied while the contract is still in Draft:
 
 ```
 Subtotal:  ¥3,000
@@ -70,42 +62,55 @@ Tax (10%): ¥300
 Total:     ¥3,300
 ```
 
-### Payment Processing
+### Activate and Finalize
 
-Payment is processed via a mock gateway, and the invoice transitions to Paid:
+After user confirmation, the contract is activated and the invoice is finalized:
 
 ```go
-paymentService.ProcessPayment(ctx, inv.ID(), service.ProcessPaymentInput{
-    PaymentMethodID: "pm-visa-1234",
-    Amount:          inv.AmountDue(),
-    Currency:        shared.CurrencyJPY,
-    IdempotencyKey:  "demo-pay-001",
-})
+agg.Activate(metadata)  // Contract: Draft → Active
+inv.Finalize()           // Invoice: Draft → Finalized
+```
+
+### Suspend (Awaiting Payment)
+
+The contract is immediately suspended to prevent service access until payment is confirmed:
+
+```go
+agg.Suspend(contract.SuspensionConfiguration{
+    BillingBehavior: contract.SuspensionBillingSkip,
+    Reason:          "awaiting_initial_payment",
+}, metadata)  // Contract: Active → Suspended
+```
+
+### Payment Processing and Resume
+
+Payment is processed via a mock gateway. Once confirmed, the contract is resumed and service starts:
+
+```go
+paymentService.ProcessPayment(ctx, inv.ID(), service.ProcessPaymentInput{...})
 // Invoice: Finalized → Paid
+
+agg.Resume(metadata)   // Contract: Suspended → Active (service starts)
 ```
 
 ### Event History
 
-The event store records every contract operation:
+The event store records every operation:
 
 ```
 [1] contract.created   (v1) at 2026-04-01
 [2] contract.activated (v2) at 2026-04-01
+[3] contract.suspended (v3) at 2026-04-01
+[4] contract.resumed   (v4) at 2026-04-01
 ```
 
 ## Key Takeaways
 
+- **Payment-Gated Provisioning** ensures service starts only after payment is confirmed
+- The `Suspended` status serves as a unified "service inactive" state for both initial payment and non-payment scenarios
 - The billing pipeline automatically applies registered plugins (tax, discounts)
 - All operations are recorded as immutable events
 - The invoice tracks subtotal, discount, tax, and credit breakdown
 - Payment processing is decoupled from billing via the gateway interface
 
-## Payment-Gated Provisioning
-
-For use cases where services should only be provisioned after payment clears (e.g., hosting), add Suspend/Resume steps:
-
-```
-Draft → Invoice(draft) → Activate + Finalize → Suspend(awaiting payment) → Pay → Resume → Active
-```
-
-The `Suspended` state serves as a unified "service inactive" state for both initial payment pending and non-payment suspension. See [Architecture: Payment-Gated Provisioning](../architecture.md) and [Issue #5](https://github.com/contract-to-cash/core/issues/5) for the full design discussion.
+> **Note:** This is the recommended flow. A simpler `Draft → Activate → Generate Invoice → Pay` flow is also supported if payment gating is not needed.
