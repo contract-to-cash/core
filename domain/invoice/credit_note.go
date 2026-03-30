@@ -98,6 +98,7 @@ func NewCreditNote(
 	contractID shared.ContractID,
 	reason CreditNoteReason,
 	items []CreditNoteItem,
+	createdAt time.Time,
 	opts ...CreditNoteOption,
 ) *CreditNote {
 	if len(items) == 0 {
@@ -130,7 +131,7 @@ func NewCreditNote(
 		total:        total,
 		creditAmount: shared.Zero(currency),
 		refundAmount: shared.Zero(currency),
-		createdAt:    time.Now().UTC(),
+		createdAt:    createdAt,
 	}
 
 	for _, opt := range opts {

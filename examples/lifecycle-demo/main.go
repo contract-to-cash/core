@@ -60,7 +60,7 @@ func main() {
 	}
 
 	// ── 1. Create contract (Draft) ──
-	priceEntity := pricing.NewPrice(shared.NewProductID(), moneyJPY(3000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+	priceEntity := pricing.NewPrice(shared.NewProductID(), moneyJPY(3000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
 	must("save price", priceRepo.Save(ctx, priceEntity))
 
 	agg := contract.NewContractAggregate(contractID, clock)

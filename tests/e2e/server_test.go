@@ -307,6 +307,7 @@ func handleCreateContract(env *testEnv) http.HandlerFunc {
 			shared.CurrencyJPY,
 			pricing.BillingCycle(req.BillingCycle),
 			nil, // no usage-based pricing model
+			env.clock.Now(),
 		)
 		if err := env.priceRepo.Save(r.Context(), price); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -957,6 +958,7 @@ func handleChangePrice(env *testEnv) http.HandlerFunc {
 			shared.CurrencyJPY,
 			pricing.BillingCycle(agg.GetBillingCycle()),
 			nil,
+			env.clock.Now(),
 		)
 		if err := env.priceRepo.Save(r.Context(), newPrice); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())

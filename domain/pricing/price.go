@@ -47,6 +47,7 @@ func NewPrice(
 	currency shared.Currency,
 	billingCycle BillingCycle,
 	pricingModel PricingModel,
+	createdAt time.Time,
 ) *Price {
 	return &Price{
 		id:           shared.NewPriceID(),
@@ -56,7 +57,7 @@ func NewPrice(
 		billingCycle: billingCycle,
 		pricingModel: pricingModel,
 		status:       PriceStatusActive,
-		createdAt:    time.Now(),
+		createdAt:    createdAt,
 	}
 }
 

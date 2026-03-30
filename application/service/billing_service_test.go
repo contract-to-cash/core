@@ -152,7 +152,7 @@ func newTestClock() shared.FixedClock {
 }
 
 func newTestPrice(productID shared.ProductID, amount shared.Money, pricingModel pricing.PricingModel) *pricing.Price {
-	return pricing.NewPrice(productID, amount, amount.Currency(), pricing.BillingCycleMonthly, pricingModel)
+	return pricing.NewPrice(productID, amount, amount.Currency(), pricing.BillingCycleMonthly, pricingModel, time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC))
 }
 
 func newTestContractAggregate(clock shared.Clock, contractType contract.ContractType, price shared.Money) *contract.ContractAggregate {
@@ -679,7 +679,7 @@ func TestCalculateSubtotal_UsageBased_ViaProductAndPrice(t *testing.T) {
 	clock := newTestClock()
 
 	// Create product with usage metrics
-	prod := product.NewProduct("API Access", "API usage product")
+	prod := product.NewProduct("API Access", "API usage product", clock.Now())
 	prod.AddUsageMetric(product.UsageMetric{Name: "api_calls", IncludedQuantity: 50})
 
 	// Create price with usage pricing model (10 JPY per unit)
@@ -725,7 +725,7 @@ func TestCalculateSubtotal_UsageBased_ViaProductAndPrice(t *testing.T) {
 func TestCalculateSubtotal_UsageBased_IncludedQuantityCoversAll(t *testing.T) {
 	clock := newTestClock()
 
-	prod := product.NewProduct("API Access", "API usage product")
+	prod := product.NewProduct("API Access", "API usage product", clock.Now())
 	prod.AddUsageMetric(product.UsageMetric{Name: "api_calls", IncludedQuantity: 200})
 
 	usagePricing := pricing.UsagePrice{UnitPrice: jpy(10)}

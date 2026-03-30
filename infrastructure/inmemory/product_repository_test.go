@@ -3,6 +3,7 @@ package inmemory
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/contract-to-cash/core/domain/product"
 	"github.com/contract-to-cash/core/domain/shared"
@@ -12,7 +13,7 @@ func TestInMemoryProductRepository_SaveAndFindByID(t *testing.T) {
 	repo := NewInMemoryProductRepository()
 	ctx := context.Background()
 
-	p := product.NewProduct("Pro Plan", "Professional tier")
+	p := product.NewProduct("Pro Plan", "Professional tier", time.Now())
 	if err := repo.Save(ctx, p); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

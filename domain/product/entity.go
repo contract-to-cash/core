@@ -40,14 +40,14 @@ type Product struct {
 }
 
 // NewProduct creates a new active Product.
-func NewProduct(name string, description string) *Product {
+func NewProduct(name string, description string, createdAt time.Time) *Product {
 	return &Product{
 		id:          shared.NewProductID(),
 		name:        name,
 		description: description,
 		status:      ProductStatusActive,
 		metadata:    make(map[string]string),
-		createdAt:   time.Now(),
+		createdAt:   createdAt,
 	}
 }
 

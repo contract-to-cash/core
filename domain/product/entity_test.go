@@ -2,10 +2,21 @@ package product
 
 import (
 	"testing"
+	"time"
 )
 
+func TestNewProduct_CreatedAtIsSetFromParameter(t *testing.T) {
+	fixedTime := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	p := NewProduct("Test", "", fixedTime)
+
+	if !p.CreatedAt().Equal(fixedTime) {
+		t.Errorf("expected createdAt %v, got %v", fixedTime, p.CreatedAt())
+	}
+}
+
 func TestNewProduct(t *testing.T) {
-	p := NewProduct("Pro Plan", "Professional tier")
+	createdAt := time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC)
+	p := NewProduct("Pro Plan", "Professional tier", createdAt)
 
 	if p.ID() == "" {
 		t.Error("expected non-empty product ID")
@@ -25,7 +36,7 @@ func TestNewProduct(t *testing.T) {
 }
 
 func TestProduct_AddFeature(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 	p.AddFeature(Feature{Name: "SSO", Included: true})
 	p.AddFeature(Feature{Name: "API Access", Included: false})
 
@@ -39,7 +50,7 @@ func TestProduct_AddFeature(t *testing.T) {
 }
 
 func TestProduct_AddUsageMetric(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 	p.AddUsageMetric(UsageMetric{Name: "api_calls", IncludedQuantity: 1000})
 
 	metrics := p.UsageMetrics()
@@ -52,7 +63,7 @@ func TestProduct_AddUsageMetric(t *testing.T) {
 }
 
 func TestProduct_AddFeature_Dedup(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 	p.AddFeature(Feature{Name: "SSO", Included: false})
 	p.AddFeature(Feature{Name: "SSO", Included: true})
 
@@ -66,7 +77,7 @@ func TestProduct_AddFeature_Dedup(t *testing.T) {
 }
 
 func TestProduct_AddUsageMetric_Dedup(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 	p.AddUsageMetric(UsageMetric{Name: "api_calls", IncludedQuantity: 1000})
 	p.AddUsageMetric(UsageMetric{Name: "api_calls", IncludedQuantity: 5000})
 
@@ -80,7 +91,7 @@ func TestProduct_AddUsageMetric_Dedup(t *testing.T) {
 }
 
 func TestProduct_SetMetadata(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 	p.SetMetadata("tier", "enterprise")
 
 	meta := p.Metadata()
@@ -90,7 +101,7 @@ func TestProduct_SetMetadata(t *testing.T) {
 }
 
 func TestProduct_Archive(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 
 	if err := p.Archive(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -101,7 +112,7 @@ func TestProduct_Archive(t *testing.T) {
 }
 
 func TestProduct_Archive_AlreadyArchived(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 	_ = p.Archive()
 
 	err := p.Archive()
@@ -111,7 +122,7 @@ func TestProduct_Archive_AlreadyArchived(t *testing.T) {
 }
 
 func TestProduct_Features_ReturnsCopy(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 	p.AddFeature(Feature{Name: "SSO", Included: true})
 
 	features := p.Features()
@@ -123,7 +134,7 @@ func TestProduct_Features_ReturnsCopy(t *testing.T) {
 }
 
 func TestProduct_UsageMetrics_ReturnsCopy(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 	p.AddUsageMetric(UsageMetric{Name: "api_calls", IncludedQuantity: 1000})
 
 	metrics := p.UsageMetrics()
@@ -135,7 +146,7 @@ func TestProduct_UsageMetrics_ReturnsCopy(t *testing.T) {
 }
 
 func TestProduct_Metadata_ReturnsCopy(t *testing.T) {
-	p := NewProduct("Test", "")
+	p := NewProduct("Test", "", time.Now())
 	p.SetMetadata("key", "value")
 
 	meta := p.Metadata()
