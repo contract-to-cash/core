@@ -90,6 +90,8 @@ type DomainEvent interface {
 イベントソース集約の基本実装：
 
 ```go
+type BaseAggregate struct { ... }
+
 agg := eventstore.NewBaseAggregate(id, clock)
 
 agg.ID() string

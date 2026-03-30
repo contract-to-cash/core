@@ -244,6 +244,7 @@ projService := projection.NewProjectionService(eventStore, projection.Projection
     BatchSize:  100,
     MaxRetries: 3,
     RetryDelay: time.Second,
+    Logger:     logger, // *slog.Logger (defaults to slog.Default())
 })
 
 projService.RegisterProjector(myProjector)

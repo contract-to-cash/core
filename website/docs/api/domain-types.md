@@ -95,7 +95,7 @@ const (
     ErrCodeUnknownEvent           ErrorCode = "unknown_event"
 )
 
-shared.NewDomainError(code ErrorCode, message string) error
+shared.NewDomainError(code ErrorCode, message string) *DomainError
 ```
 
 ---
@@ -127,7 +127,7 @@ agg := contract.NewContractAggregate(contractID, clock)
 | `Suspend(config, metadata)` | active, past_due | suspended |
 | `Resume(metadata)` | suspended | active |
 | `Cancel(reason, metadata)` | draft, trialing, active, suspended, past_due | cancelled |
-| `Renew(metadata)` | active | active (new period) |
+| `Renew(newBillingCycle BillingCycle, metadata)` | active | active (new period) |
 | `ChangePrice(priceID, policy, proration, metadata)` | active | active |
 | `UnscheduleChange(reason, metadata)` | active (has pending) | active |
 
@@ -151,11 +151,11 @@ type CreateContractCommand struct {
 
 ```go
 type SuspensionConfiguration struct {
-    BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
-    ResumeDate      *time.Time
-    Reason          string
     SuspendedAt     time.Time
+    ResumeDate      *time.Time
+    BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
     ExtendContract  bool
+    Reason          string
 }
 ```
 
@@ -173,14 +173,24 @@ const (
 ```go
 agg.ContractID() shared.ContractID
 agg.AccountID() shared.AccountID
+agg.PlanID() shared.PlanID
 agg.Status() ContractStatus
+agg.GetContractType() ContractType
+agg.GetBillingCycle() BillingCycle
+agg.CurrentPeriod() shared.DateRange
+agg.TrialConfig() *TrialConfiguration
+agg.SuspensionConfig() *SuspensionConfiguration
+agg.PaymentMethodID() *string
 agg.PriceID() shared.PriceID
+agg.Price() shared.Money
+agg.BasePrice() shared.Money
+agg.AutoRenew() bool
+agg.CancelAtPeriodEnd() bool
 agg.PendingPriceID() *shared.PriceID
 agg.HasPendingChange() bool
-agg.Price() shared.Money
-agg.CurrentPeriod() shared.DateRange
-agg.GetContractType() ContractType
-agg.AutoRenew() bool
+agg.GetMetadata() map[string]string
+agg.CreatedAt() time.Time
+agg.UpdatedAt() time.Time
 ```
 
 #### Event Sourcing
@@ -378,7 +388,7 @@ import "github.com/contract-to-cash/core/domain/payment"
 ```go
 payment.Complete() error                         // pending → completed
 payment.Fail(reason string) error                // pending → failed
-payment.MarkRefunded() error                     // completed → refunded
+payment.MarkRefunded() error                     // completed|partially_refunded → refunded
 payment.MarkPartiallyRefunded() error
 
 payment.ID() shared.PaymentID

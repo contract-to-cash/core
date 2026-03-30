@@ -543,7 +543,7 @@ type Address struct {
 ### 3.3 顧客管理インターフェース
 
 ```go
-// application/port/customer_gateway.go
+// application/port/customer.go
 package port
 
 import (
@@ -1156,7 +1156,7 @@ func (e *GatewayError) Unwrap() error {
 ### 5.1 GatewayRouter インターフェース（ポート層）
 
 ```go
-// application/port/gateway_router.go
+// application/port/router.go
 package port
 
 import (
@@ -1532,9 +1532,9 @@ github.com/contract-to-cash/core/
 │   ├── port/                   # ★ 外部サービスとの統合境界
 │   │   ├── gateway.go          # PaymentGateway IF（13メソッド）
 │   │   ├── gateway_types.go    # リクエスト/レスポンス型
-│   │   ├── customer_gateway.go # CustomerGateway IF
+│   │   ├── customer.go         # CustomerGateway IF
 │   │   ├── webhook.go          # WebhookHandler IF
-│   │   └── gateway_router.go   # GatewayRouter IF
+│   │   └── router.go           # GatewayRouter IF
 │   ├── query/
 │   ├── projection/
 │   ├── tx/

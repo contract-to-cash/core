@@ -22,7 +22,9 @@ billingService := service.NewBillingService(
     billingConfig, // service.BillingConfig
     clock,         // shared.Clock
     // オプション:
-    service.WithBalanceRepo(balanceRepo), // balance.Repository
+    service.WithBalanceRepo(balanceRepo),       // balance.Repository（オプション）
+    service.WithBillingTxManager(txManager),    // tx.TxManager（オプション、デフォルト: NoopTxManager）
+    service.WithBillingLogger(logger),          // *slog.Logger（オプション、デフォルト: slog.Default()）
 )
 ```
 
@@ -64,9 +66,10 @@ paymentService := service.NewPaymentService(
     eventStore,    // eventstore.Store
     registry,      // *plugin.Registry
     clock,         // shared.Clock
-    service.WithCustomerGateway(customerGateway), // オプション: フォールバック解決用
-    service.WithPaymentLogger(logger),            // オプション: 構造化ロガー
-    service.WithPaymentTxManager(txManager),      // オプション: トランザクション管理
+    // オプション:
+    service.WithCustomerGateway(customerGateway),  // port.CustomerGateway — フォールバック解決用
+    service.WithPaymentTxManager(txManager),       // tx.TxManager（デフォルト: NoopTxManager）
+    service.WithPaymentLogger(logger),             // *slog.Logger（デフォルト: slog.Default()）
 )
 ```
 
@@ -105,18 +108,7 @@ func (s *PaymentService) Refund(
 ) error
 ```
 
-フロー: Gateway.Refund → 支払い記録更新 → OnRefundHook
-
-### ResolvePaymentMethod
-
-```go
-func (s *PaymentService) ResolvePaymentMethod(
-    ctx context.Context,
-    inv *invoice.Invoice,
-) (string, error)
-```
-
-階層型フォールバックチェーン: Invoice.PaymentMethodID → Contract.PaymentMethodID → Customer.DefaultPaymentMethodID
+支払いの返金を処理します。`Amount`がnilの場合、未返金残額を全額返金します。返金は決済ゲートウェイを通じて発行され、トランザクション内で支払いエンティティに記録されます。コミット後に`OnRefundHook`フックが実行されます。
 
 ---
 
@@ -131,9 +123,9 @@ creditNoteService := service.NewCreditNoteService(
     registry,       // *plugin.Registry
     clock,          // shared.Clock
     // オプション:
-    service.WithBillingService(billingService),     // 請求書再発行ワークフロー用
-    service.WithCreditNoteTxManager(txManager),     // トランザクション管理
-    service.WithCreditNoteLogger(logger),           // 構造化ロガー
+    service.WithBillingService(billingService),     // *BillingService — ReissueInvoiceに必要
+    service.WithCreditNoteTxManager(txManager),     // tx.TxManager（デフォルト: NoopTxManager）
+    service.WithCreditNoteLogger(logger),           // *slog.Logger（デフォルト: slog.Default()）
 )
 ```
 
@@ -252,6 +244,7 @@ projService := projection.NewProjectionService(eventStore, projection.Projection
     BatchSize:  100,
     MaxRetries: 3,
     RetryDelay: time.Second,
+    Logger:     logger, // *slog.Logger（デフォルト: slog.Default()）
 })
 
 projService.RegisterProjector(myProjector)

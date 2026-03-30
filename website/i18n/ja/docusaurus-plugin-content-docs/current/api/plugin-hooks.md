@@ -69,6 +69,8 @@ type InvoiceLifecycleHook interface {
 ## CalculationContext
 
 ```go
+type CalculationContext struct { ... }
+
 ctx.Context() context.Context
 ctx.Contract() *contract.ContractAggregate
 ctx.ContractID() shared.ContractID
@@ -136,6 +138,16 @@ type OnContractTrialEndHook interface {
 }
 ```
 
+### plugin.Context
+
+```go
+type Context struct { ... }
+
+ctx.Context() context.Context
+ctx.SetMetadata(key string, value interface{})
+ctx.GetMetadata(key string) (interface{}, bool)
+```
+
 ---
 
 ## 決済フック
@@ -165,6 +177,8 @@ type OnRefundHook interface {
 ### PaymentContext
 
 ```go
+type PaymentContext struct { ... }
+
 ctx.Context() context.Context
 ctx.Payment() *payment.Payment
 ctx.Invoice() *invoice.Invoice

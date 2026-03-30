@@ -85,17 +85,17 @@ type ErrorCode string
 const (
     ErrCodeInvalidStateTransition ErrorCode = "invalid_state_transition"
     ErrCodeBusinessRule           ErrorCode = "business_rule_violation"
-    ErrCodeCurrencyMismatch       ErrorCode = "currency_mismatch"
-    ErrCodeInvalidDateRange       ErrorCode = "invalid_date_range"
-    ErrCodeUnknownEvent           ErrorCode = "unknown_event"
     ErrCodeValidation             ErrorCode = "validation_error"
     ErrCodeNotFound               ErrorCode = "not_found"
     ErrCodeConflict               ErrorCode = "conflict"
     ErrCodeDuplicateRequest       ErrorCode = "duplicate_request"
     ErrCodeVersionConflict        ErrorCode = "version_conflict"
+    ErrCodeCurrencyMismatch       ErrorCode = "currency_mismatch"
+    ErrCodeInvalidDateRange       ErrorCode = "invalid_date_range"
+    ErrCodeUnknownEvent           ErrorCode = "unknown_event"
 )
 
-shared.NewDomainError(code ErrorCode, message string) error
+shared.NewDomainError(code ErrorCode, message string) *DomainError
 ```
 
 ---
@@ -127,7 +127,7 @@ agg := contract.NewContractAggregate(contractID, clock)
 | `Suspend(config, metadata)` | active, past_due | suspended |
 | `Resume(metadata)` | suspended | active |
 | `Cancel(reason, metadata)` | draft, trialing, active, suspended, past_due | cancelled |
-| `Renew(metadata)` | active | active（新期間） |
+| `Renew(newBillingCycle BillingCycle, metadata)` | active | active（新期間） |
 | `ChangePrice(priceID, policy, proration, metadata)` | active | active |
 | `UnscheduleChange(reason, metadata)` | active（保留あり） | active |
 
@@ -151,11 +151,11 @@ type CreateContractCommand struct {
 
 ```go
 type SuspensionConfiguration struct {
-    BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
-    ResumeDate      *time.Time
-    Reason          string
     SuspendedAt     time.Time
+    ResumeDate      *time.Time
+    BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
     ExtendContract  bool
+    Reason          string
 }
 ```
 
@@ -173,14 +173,24 @@ const (
 ```go
 agg.ContractID() shared.ContractID
 agg.AccountID() shared.AccountID
+agg.PlanID() shared.PlanID
 agg.Status() ContractStatus
+agg.GetContractType() ContractType
+agg.GetBillingCycle() BillingCycle
+agg.CurrentPeriod() shared.DateRange
+agg.TrialConfig() *TrialConfiguration
+agg.SuspensionConfig() *SuspensionConfiguration
+agg.PaymentMethodID() *string
 agg.PriceID() shared.PriceID
+agg.Price() shared.Money
+agg.BasePrice() shared.Money
+agg.AutoRenew() bool
+agg.CancelAtPeriodEnd() bool
 agg.PendingPriceID() *shared.PriceID
 agg.HasPendingChange() bool
-agg.Price() shared.Money
-agg.CurrentPeriod() shared.DateRange
-agg.GetContractType() ContractType
-agg.AutoRenew() bool
+agg.GetMetadata() map[string]string
+agg.CreatedAt() time.Time
+agg.UpdatedAt() time.Time
 ```
 
 #### イベントソーシング
@@ -242,8 +252,8 @@ inv := invoice.NewInvoice(id, accountID, contractID, subtotal, discountAmount, t
 ```go
 inv.Finalize() error           // draft → finalized
 inv.Void() error               // draft/finalized → voided
-inv.VoidWithReason(reason string) error  // issued/paid/partial_paid/overdue → voided（理由付き）
-inv.ValidatePayment(amount shared.Money) error    // finalized → （決済バリデーション）
+inv.VoidWithReason(reason string) error  // any except voided|refunded → voided（理由付き）
+inv.ValidatePayment(amount shared.Money) error    // finalized|issued|partial_paid|overdue → （決済バリデーション）
 inv.RecordPayment(amount shared.Money, paidAt time.Time) error  // 決済を記録
 
 // リビジョンサポート（void-and-recreate ワークフロー）
@@ -276,13 +286,16 @@ inv.AllowPartialPay() bool
 inv.Metadata() map[string]string
 ```
 
-### 請求書オプション（追加）
+### リビジョンサポート
 
-```go
-invoice.WithOriginalInvoiceID(id shared.InvoiceID)  // リビジョン元を設定
-invoice.WithRevisionOf(id shared.InvoiceID)          // 直接の親を設定
-invoice.WithPaymentMethodID(id *string)              // 決済手段IDを設定
-```
+請求書は void-and-recreate ワークフローのための2レベルリンクモデルをサポートします：
+
+- **`originalInvoiceID`** — リビジョン回数に関わらず、常にリビジョンチェーンの最初の請求書（ルート）を指します。
+- **`revisionOf`** — 直接の親（チェーン内の直前の請求書）を指します。
+
+例: `Inv-1 -> Inv-2 -> Inv-3`
+- `Inv-2`: `originalInvoiceID=Inv-1`, `revisionOf=Inv-1`
+- `Inv-3`: `originalInvoiceID=Inv-1`, `revisionOf=Inv-2`
 
 ---
 
@@ -387,8 +400,8 @@ import "github.com/contract-to-cash/core/domain/payment"
 ```go
 payment.Complete() error                         // pending → completed
 payment.Fail(reason string) error                // pending → failed
-payment.MarkRefunded() error                     // completed → refunded
-payment.MarkPartiallyRefunded() error
+payment.MarkRefunded() error                     // completed|partially_refunded → refunded
+payment.MarkPartiallyRefunded() error            // completed → partially_refunded
 
 payment.ID() shared.PaymentID
 payment.InvoiceID() shared.InvoiceID
