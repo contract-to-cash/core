@@ -111,8 +111,8 @@ github.com/contract-to-cash/core/
 │   ├── port/                    # 外部連携IF（PaymentGateway等）
 │   ├── query/
 │   ├── projection/
-│   ├── tx/
-│   └── service/
+│   ├── tx/                      # トランザクション管理（TxManager, Saga）
+│   └── service/                 # BillingService, PaymentService, SnapshotService, CreditNoteService
 │
 ├── plugin/                      # プラグインシステム
 │   ├── registry.go
@@ -145,6 +145,7 @@ github.com/contract-to-cash/core/
 |---------|------|
 | **Contract** | 契約のライフサイクル管理（作成、有効化、一時停止、解約、更新） |
 | **Invoice** | 請求書の生成、発行、支払い記録 |
+| **CreditNote** | クレジットノートの作成・発行・適用・返金、請求書再発行（リビジョンチェーン） |
 | **Payment** | 決済処理、返金 |
 | **Usage** | 従量課金のメトリクス記録・集計 |
 
@@ -183,6 +184,7 @@ const (
 | **請求計算** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引・税計算、計算前後処理 |
 | **契約ライフサイクル** | `OnContractCreateHook`, `OnContractCancelHook` 等 | 契約の各イベントに個別対応 |
 | **支払い** | `BeforeChargeHook`, `AfterChargeHook` 等 | 課金前後、失敗時、返金時 |
+| **クレジットノート** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | クレジットノート発行、請求書再発行 |
 | **メトリクス** | `OnContractChangeHook`, `OnInvoiceIssuedHook` 等 | KPI収集 |
 | **請求書生成** | `InvoiceGenerationHook` | PDF生成、送付 |
 

@@ -63,6 +63,7 @@ ULIDベースの識別子：
 | `PlanID` | `NewPlanID()` |
 | `UsageRecordID` | `NewUsageRecordID()` |
 | `BalanceEntryID` | `NewBalanceEntryID()` |
+| `CreditNoteID` | `NewCreditNoteID()` |
 
 ### Clock
 
@@ -84,17 +85,17 @@ type ErrorCode string
 const (
     ErrCodeInvalidStateTransition ErrorCode = "invalid_state_transition"
     ErrCodeBusinessRule           ErrorCode = "business_rule_violation"
-    ErrCodeCurrencyMismatch       ErrorCode = "currency_mismatch"
-    ErrCodeInvalidDateRange       ErrorCode = "invalid_date_range"
-    ErrCodeUnknownEvent           ErrorCode = "unknown_event"
     ErrCodeValidation             ErrorCode = "validation_error"
     ErrCodeNotFound               ErrorCode = "not_found"
     ErrCodeConflict               ErrorCode = "conflict"
     ErrCodeDuplicateRequest       ErrorCode = "duplicate_request"
     ErrCodeVersionConflict        ErrorCode = "version_conflict"
+    ErrCodeCurrencyMismatch       ErrorCode = "currency_mismatch"
+    ErrCodeInvalidDateRange       ErrorCode = "invalid_date_range"
+    ErrCodeUnknownEvent           ErrorCode = "unknown_event"
 )
 
-shared.NewDomainError(code ErrorCode, message string) error
+shared.NewDomainError(code ErrorCode, message string) *DomainError
 ```
 
 ---
@@ -126,7 +127,7 @@ agg := contract.NewContractAggregate(contractID, clock)
 | `Suspend(config, metadata)` | active, past_due | suspended |
 | `Resume(metadata)` | suspended | active |
 | `Cancel(reason, metadata)` | draft, trialing, active, suspended, past_due | cancelled |
-| `Renew(metadata)` | active | active（新期間） |
+| `Renew(newBillingCycle BillingCycle, metadata)` | active | active（新期間） |
 | `ChangePrice(priceID, policy, proration, metadata)` | active | active |
 | `UnscheduleChange(reason, metadata)` | active（保留あり） | active |
 
@@ -150,11 +151,11 @@ type CreateContractCommand struct {
 
 ```go
 type SuspensionConfiguration struct {
-    BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
-    ResumeDate      *time.Time
-    Reason          string
     SuspendedAt     time.Time
+    ResumeDate      *time.Time
+    BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
     ExtendContract  bool
+    Reason          string
 }
 ```
 
@@ -172,14 +173,24 @@ const (
 ```go
 agg.ContractID() shared.ContractID
 agg.AccountID() shared.AccountID
+agg.PlanID() shared.PlanID
 agg.Status() ContractStatus
+agg.GetContractType() ContractType
+agg.GetBillingCycle() BillingCycle
+agg.CurrentPeriod() shared.DateRange
+agg.TrialConfig() *TrialConfiguration
+agg.SuspensionConfig() *SuspensionConfiguration
+agg.PaymentMethodID() *string
 agg.PriceID() shared.PriceID
+agg.Price() shared.Money
+agg.BasePrice() shared.Money
+agg.AutoRenew() bool
+agg.CancelAtPeriodEnd() bool
 agg.PendingPriceID() *shared.PriceID
 agg.HasPendingChange() bool
-agg.Price() shared.Money
-agg.CurrentPeriod() shared.DateRange
-agg.GetContractType() ContractType
-agg.AutoRenew() bool
+agg.GetMetadata() map[string]string
+agg.CreatedAt() time.Time
+agg.UpdatedAt() time.Time
 ```
 
 #### イベントソーシング
@@ -230,6 +241,9 @@ inv := invoice.NewInvoice(id, accountID, contractID, subtotal, discountAmount, t
     invoice.WithAmountDue(amountDue),
     invoice.WithAllowPartialPayment(false),
     invoice.WithInvoiceNumber("INV-2026-001"),
+    invoice.WithOriginalInvoiceID(originalID),   // 再発行請求書用
+    invoice.WithRevisionOf(parentID),             // リビジョンチェーンリンク用
+    invoice.WithPaymentMethodID(&pmID),           // 請求書レベルの支払い方法オーバーライド
 )
 ```
 
@@ -237,8 +251,23 @@ inv := invoice.NewInvoice(id, accountID, contractID, subtotal, discountAmount, t
 
 ```go
 inv.Finalize() error           // draft → finalized
-inv.ValidatePayment(amount shared.Money) error    // finalized → （決済バリデーション）
+inv.Void() error               // draft/finalized → voided
+inv.VoidWithReason(reason string) error  // any except voided|refunded → voided（理由付き）
+inv.ValidatePayment(amount shared.Money) error    // finalized|issued|partial_paid|overdue → （決済バリデーション）
+inv.RecordPayment(amount shared.Money, paidAt time.Time) error  // 決済を記録
+
+// リビジョンサポート（void-and-recreate ワークフロー）
+inv.SetRevisionOf(id shared.InvoiceID)         // 直接の親請求書を設定
+inv.SetOriginalInvoiceID(id shared.InvoiceID)  // リビジョンチェーンのルートを設定
+inv.OriginalInvoiceID() *shared.InvoiceID      // チェーンのルート請求書ID
+inv.RevisionOf() *shared.InvoiceID             // 直接の親請求書ID
+inv.VoidReason() string                        // 無効化理由
+
 inv.ID() shared.InvoiceID
+inv.InvoiceNumber() string
+inv.AccountID() shared.AccountID
+inv.ContractID() shared.ContractID
+inv.LineItems() []LineItem
 inv.Subtotal() shared.Money
 inv.DiscountAmount() shared.Money
 inv.TaxAmount() shared.Money
@@ -249,7 +278,109 @@ inv.PaidAmount() shared.Money
 inv.Balance() shared.Money
 inv.Status() InvoiceStatus
 inv.BillingPeriod() shared.DateRange
+inv.IssueDate() time.Time
 inv.DueDate() time.Time
+inv.PaidAt() *time.Time
+inv.PaymentMethodID() *string
+inv.AllowPartialPay() bool
+inv.Metadata() map[string]string
+```
+
+### リビジョンサポート
+
+請求書は void-and-recreate ワークフローのための2レベルリンクモデルをサポートします：
+
+- **`originalInvoiceID`** — リビジョン回数に関わらず、常にリビジョンチェーンの最初の請求書（ルート）を指します。
+- **`revisionOf`** — 直接の親（チェーン内の直前の請求書）を指します。
+
+例: `Inv-1 -> Inv-2 -> Inv-3`
+- `Inv-2`: `originalInvoiceID=Inv-1`, `revisionOf=Inv-1`
+- `Inv-3`: `originalInvoiceID=Inv-1`, `revisionOf=Inv-2`
+
+---
+
+## クレジットノート（CreditNote）
+
+```go
+import "github.com/contract-to-cash/core/domain/invoice"
+```
+
+クレジットノートは、発行済み請求書に対する調整（返金やクレジット適用）を表すエンティティです。
+
+**ステータス定数**: `CreditNoteStatusDraft`, `CreditNoteStatusIssued`, `CreditNoteStatusApplied`, `CreditNoteStatusRefunded`, `CreditNoteStatusVoided`
+
+**理由定数**: `CreditNoteReasonDuplicate`, `CreditNoteReasonOrderChange`, `CreditNoteReasonCancellation`, `CreditNoteReasonProductUnsatisfactory`, `CreditNoteReasonOther`
+
+### 生成
+
+```go
+cn := invoice.NewCreditNote(
+    id,          // shared.CreditNoteID
+    invoiceID,   // shared.InvoiceID
+    accountID,   // shared.AccountID
+    contractID,  // shared.ContractID
+    reason,      // CreditNoteReason
+    items,       // []CreditNoteItem（1件以上必須）
+    invoice.WithCreditNoteMemo("メモ"),
+    invoice.WithCreditNoteNumber("CN-2026-001"),
+)
+```
+
+### CreditNoteItem
+
+```go
+item := invoice.NewCreditNoteItem(
+    invoiceLineItemID, // 対象の請求書明細ID
+    description,       // 説明
+    amount,            // shared.Money（調整額）
+    taxRate,           // *big.Rat（税率）
+    taxAmount,         // shared.Money（税額）
+)
+
+item.InvoiceLineItemID() string
+item.Description() string
+item.Amount() shared.Money
+item.TaxRate() *big.Rat
+item.TaxAmount() shared.Money
+```
+
+### メソッド
+
+```go
+cn.Issue(issuedAt time.Time) error              // draft → issued
+cn.Apply(creditAmount shared.Money) error        // issued → applied（クレジット適用）
+cn.Refund(refundAmount shared.Money) error       // issued → refunded（返金処理）
+cn.Void() error                                  // draft/issued → voided
+
+cn.ID() shared.CreditNoteID
+cn.Number() string
+cn.InvoiceID() shared.InvoiceID
+cn.AccountID() shared.AccountID
+cn.ContractID() shared.ContractID
+cn.Status() CreditNoteStatus
+cn.Reason() CreditNoteReason
+cn.Memo() string
+cn.Items() []CreditNoteItem
+cn.Subtotal() shared.Money
+cn.TaxAmount() shared.Money
+cn.Total() shared.Money
+cn.CreditAmount() shared.Money
+cn.RefundAmount() shared.Money
+cn.IssuedAt() *time.Time
+cn.CreatedAt() time.Time
+```
+
+### リポジトリ
+
+```go
+type CreditNoteRepository interface {
+    Save(ctx context.Context, cn *CreditNote) error
+    FindByID(ctx context.Context, id shared.CreditNoteID) (*CreditNote, error)
+    FindByInvoiceID(ctx context.Context, invoiceID shared.InvoiceID) ([]*CreditNote, error)
+    FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*CreditNote, error)
+    FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*CreditNote, error)
+    FindByStatus(ctx context.Context, status CreditNoteStatus) ([]*CreditNote, error)
+}
 ```
 
 ---
@@ -262,13 +393,15 @@ import "github.com/contract-to-cash/core/domain/payment"
 
 **ステータス定数**: `PaymentStatusPending`, `PaymentStatusCompleted`, `PaymentStatusFailed`, `PaymentStatusPartiallyRefunded`, `PaymentStatusRefunded`, `PaymentStatusChargedBack`
 
+**メソッド定数**: `PaymentMethodCreditCard`, `PaymentMethodBankTransfer`, `PaymentMethodDirectDebit`, `PaymentMethodConvenience`, `PaymentMethodCarrier`
+
 ### メソッド
 
 ```go
 payment.Complete() error                         // pending → completed
 payment.Fail(reason string) error                // pending → failed
-payment.MarkRefunded() error                     // completed → refunded
-payment.MarkPartiallyRefunded() error
+payment.MarkRefunded() error                     // completed|partially_refunded → refunded
+payment.MarkPartiallyRefunded() error            // completed → partially_refunded
 
 payment.ID() shared.PaymentID
 payment.InvoiceID() shared.InvoiceID

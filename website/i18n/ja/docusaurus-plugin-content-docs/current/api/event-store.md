@@ -75,15 +75,29 @@ type Snapshot struct {
 }
 ```
 
+## DomainEventインターフェース
+
+イベントはこのインターフェースを実装することでシリアライズ/デシリアライズ可能になります：
+
+```go
+type DomainEvent interface {
+    EventType() EventType
+}
+```
+
 ## BaseAggregate
 
 イベントソース集約の基本実装：
 
 ```go
+type BaseAggregate struct { ... }
+
 agg := eventstore.NewBaseAggregate(id, clock)
 
 agg.ID() string
 agg.Version() int
+agg.SetVersion(v int)
+agg.IncrementVersion()
 agg.UncommittedEvents() []Event
 agg.ClearUncommittedEvents()
 agg.RaiseEvent(event DomainEvent, metadata EventMetadata) error
@@ -99,6 +113,17 @@ registry := eventstore.NewEventRegistry()
 
 registry.Register(event DomainEvent)
 registry.Deserialize(eventType EventType, data json.RawMessage) (DomainEvent, error)
+```
+
+## Upcaster
+
+イベントスキーマの進化に対応：
+
+```go
+type Upcaster interface {
+    CanUpcast(eventType EventType, fromVersion int) bool
+    Upcast(event Event) (Event, error)
+}
 ```
 
 ## 契約イベントタイプ

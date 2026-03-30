@@ -63,6 +63,7 @@ ULID-based identifiers:
 | `PlanID` | `NewPlanID()` |
 | `UsageRecordID` | `NewUsageRecordID()` |
 | `BalanceEntryID` | `NewBalanceEntryID()` |
+| `CreditNoteID` | `NewCreditNoteID()` |
 
 ### Clock
 
@@ -94,7 +95,7 @@ const (
     ErrCodeUnknownEvent           ErrorCode = "unknown_event"
 )
 
-shared.NewDomainError(code ErrorCode, message string) error
+shared.NewDomainError(code ErrorCode, message string) *DomainError
 ```
 
 ---
@@ -126,7 +127,7 @@ agg := contract.NewContractAggregate(contractID, clock)
 | `Suspend(config, metadata)` | active, past_due | suspended |
 | `Resume(metadata)` | suspended | active |
 | `Cancel(reason, metadata)` | draft, trialing, active, suspended, past_due | cancelled |
-| `Renew(metadata)` | active | active (new period) |
+| `Renew(newBillingCycle BillingCycle, metadata)` | active | active (new period) |
 | `ChangePrice(priceID, policy, proration, metadata)` | active | active |
 | `UnscheduleChange(reason, metadata)` | active (has pending) | active |
 
@@ -150,11 +151,11 @@ type CreateContractCommand struct {
 
 ```go
 type SuspensionConfiguration struct {
-    BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
-    ResumeDate      *time.Time
-    Reason          string
     SuspendedAt     time.Time
+    ResumeDate      *time.Time
+    BillingBehavior SuspensionBillingBehavior // Skip, Defer, Continue
     ExtendContract  bool
+    Reason          string
 }
 ```
 
@@ -172,14 +173,24 @@ const (
 ```go
 agg.ContractID() shared.ContractID
 agg.AccountID() shared.AccountID
+agg.PlanID() shared.PlanID
 agg.Status() ContractStatus
+agg.GetContractType() ContractType
+agg.GetBillingCycle() BillingCycle
+agg.CurrentPeriod() shared.DateRange
+agg.TrialConfig() *TrialConfiguration
+agg.SuspensionConfig() *SuspensionConfiguration
+agg.PaymentMethodID() *string
 agg.PriceID() shared.PriceID
+agg.Price() shared.Money
+agg.BasePrice() shared.Money
+agg.AutoRenew() bool
+agg.CancelAtPeriodEnd() bool
 agg.PendingPriceID() *shared.PriceID
 agg.HasPendingChange() bool
-agg.Price() shared.Money
-agg.CurrentPeriod() shared.DateRange
-agg.GetContractType() ContractType
-agg.AutoRenew() bool
+agg.GetMetadata() map[string]string
+agg.CreatedAt() time.Time
+agg.UpdatedAt() time.Time
 ```
 
 #### Event Sourcing
@@ -230,6 +241,9 @@ inv := invoice.NewInvoice(id, accountID, contractID, subtotal, discountAmount, t
     invoice.WithAmountDue(amountDue),
     invoice.WithAllowPartialPayment(false),
     invoice.WithInvoiceNumber("INV-2026-001"),
+    invoice.WithOriginalInvoiceID(originalID),   // for reissued invoices
+    invoice.WithRevisionOf(parentID),             // for revision chain linking
+    invoice.WithPaymentMethodID(&pmID),           // invoice-level payment method override
 )
 ```
 
@@ -237,8 +251,18 @@ inv := invoice.NewInvoice(id, accountID, contractID, subtotal, discountAmount, t
 
 ```go
 inv.Finalize() error           // draft → finalized
-inv.ValidatePayment(amount shared.Money) error    // finalized → (validates payment amount)
+inv.Void() error               // draft|finalized → voided
+inv.VoidWithReason(reason string) error  // any except voided|refunded → voided (with reason)
+inv.ValidatePayment(amount shared.Money) error    // finalized|issued|partial_paid|overdue → (validates payment amount)
+inv.RecordPayment(amount shared.Money, paidAt time.Time) error // records payment, updates balance and status
+inv.SetRevisionOf(id shared.InvoiceID)            // sets direct parent in revision chain
+inv.SetOriginalInvoiceID(id shared.InvoiceID)     // sets root of revision chain
+
 inv.ID() shared.InvoiceID
+inv.InvoiceNumber() string
+inv.AccountID() shared.AccountID
+inv.ContractID() shared.ContractID
+inv.LineItems() []LineItem
 inv.Subtotal() shared.Money
 inv.DiscountAmount() shared.Money
 inv.TaxAmount() shared.Money
@@ -249,7 +273,102 @@ inv.PaidAmount() shared.Money
 inv.Balance() shared.Money
 inv.Status() InvoiceStatus
 inv.BillingPeriod() shared.DateRange
+inv.IssueDate() time.Time
 inv.DueDate() time.Time
+inv.PaidAt() *time.Time
+inv.AllowPartialPay() bool
+inv.PaymentMethodID() *string
+inv.OriginalInvoiceID() *shared.InvoiceID  // root of the revision chain
+inv.RevisionOf() *shared.InvoiceID         // direct parent in the revision chain
+inv.VoidReason() string
+inv.Metadata() map[string]string
+```
+
+### Revision Support
+
+Invoices support a two-level linking model for void-and-recreate workflows:
+
+- **`originalInvoiceID`** — always points to the first invoice in the revision chain (the root), regardless of how many revisions have occurred.
+- **`revisionOf`** — points to the direct parent (the immediate predecessor in the chain).
+
+Example: `Inv-1 -> Inv-2 -> Inv-3`
+- `Inv-2`: `originalInvoiceID=Inv-1`, `revisionOf=Inv-1`
+- `Inv-3`: `originalInvoiceID=Inv-1`, `revisionOf=Inv-2`
+
+---
+
+## CreditNote
+
+```go
+import "github.com/contract-to-cash/core/domain/invoice"
+```
+
+A credit note adjusts a previously issued invoice. It follows a lifecycle from draft through issuance to resolution (applied, refunded, or voided).
+
+**Status constants**: `CreditNoteStatusDraft`, `CreditNoteStatusIssued`, `CreditNoteStatusApplied`, `CreditNoteStatusRefunded`, `CreditNoteStatusVoided`
+
+**Reason constants**: `CreditNoteReasonDuplicate`, `CreditNoteReasonOrderChange`, `CreditNoteReasonCancellation`, `CreditNoteReasonProductUnsatisfactory`, `CreditNoteReasonOther`
+
+### CreditNoteItem
+
+```go
+item := invoice.NewCreditNoteItem(invoiceLineItemID, description, amount, taxRate, taxAmount)
+
+item.InvoiceLineItemID() string
+item.Description() string
+item.Amount() shared.Money
+item.TaxRate() *big.Rat
+item.TaxAmount() shared.Money
+```
+
+### Construction
+
+```go
+cn := invoice.NewCreditNote(id, invoiceID, accountID, contractID, reason, items,
+    invoice.WithCreditNoteMemo("Adjustment for duplicate charge"),
+    invoice.WithCreditNoteNumber("CN-2026-001"),
+)
+```
+
+Panics if `items` is empty, as a credit note without items is a programming error.
+
+### Methods
+
+```go
+cn.Issue(issuedAt time.Time) error              // draft → issued
+cn.Apply(creditAmount shared.Money) error       // issued → applied
+cn.Refund(refundAmount shared.Money) error      // issued → refunded
+cn.Void() error                                 // draft|issued → voided
+
+cn.ID() shared.CreditNoteID
+cn.Number() string
+cn.InvoiceID() shared.InvoiceID
+cn.AccountID() shared.AccountID
+cn.ContractID() shared.ContractID
+cn.Status() CreditNoteStatus
+cn.Reason() CreditNoteReason
+cn.Memo() string
+cn.Items() []CreditNoteItem
+cn.Subtotal() shared.Money
+cn.TaxAmount() shared.Money
+cn.Total() shared.Money        // subtotal + taxAmount
+cn.CreditAmount() shared.Money // amount applied as account credit
+cn.RefundAmount() shared.Money // amount refunded via payment gateway
+cn.IssuedAt() *time.Time
+cn.CreatedAt() time.Time
+```
+
+### CreditNoteRepository
+
+```go
+type CreditNoteRepository interface {
+    Save(ctx context.Context, cn *CreditNote) error
+    FindByID(ctx context.Context, id shared.CreditNoteID) (*CreditNote, error)
+    FindByInvoiceID(ctx context.Context, invoiceID shared.InvoiceID) ([]*CreditNote, error)
+    FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*CreditNote, error)
+    FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*CreditNote, error)
+    FindByStatus(ctx context.Context, status CreditNoteStatus) ([]*CreditNote, error)
+}
 ```
 
 ---
@@ -269,7 +388,7 @@ import "github.com/contract-to-cash/core/domain/payment"
 ```go
 payment.Complete() error                         // pending → completed
 payment.Fail(reason string) error                // pending → failed
-payment.MarkRefunded() error                     // completed → refunded
+payment.MarkRefunded() error                     // completed|partially_refunded → refunded
 payment.MarkPartiallyRefunded() error
 
 payment.ID() shared.PaymentID

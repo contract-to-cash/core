@@ -250,6 +250,32 @@ type InvoiceGenerationHook interface {
 
 ---
 
+## CreditNote Hooks
+
+### OnCreditNoteIssuedHook
+
+```go
+type OnCreditNoteIssuedHook interface {
+    Plugin
+    OnCreditNoteIssued(ctx *Context, creditNote *invoice.CreditNote) error
+}
+```
+
+Called after a credit note transitions from draft to issued (post-save, outside transaction). Hook failures are logged but do not fail the operation.
+
+### OnInvoiceRevisedHook
+
+```go
+type OnInvoiceRevisedHook interface {
+    Plugin
+    OnInvoiceRevised(ctx *Context, original *invoice.Invoice, replacement *invoice.Invoice) error
+}
+```
+
+Called after an invoice is voided and a replacement is created via `CreditNoteService.ReissueInvoice` (post-commit, outside transaction). Receives both the voided original and the new replacement invoice. Hook failures are logged but do not fail the operation.
+
+---
+
 ## Plugin Registry
 
 ```go
@@ -278,4 +304,6 @@ registry.GetOnContractChangeHooks() []OnContractChangeHook
 registry.GetOnInvoiceIssuedHooks() []OnInvoiceIssuedHook
 registry.GetOnPaymentProcessedHooks() []OnPaymentProcessedHook
 registry.GetInvoiceGenerationHooks() []InvoiceGenerationHook
+registry.GetOnCreditNoteIssuedHooks() []OnCreditNoteIssuedHook
+registry.GetOnInvoiceRevisedHooks() []OnInvoiceRevisedHook
 ```

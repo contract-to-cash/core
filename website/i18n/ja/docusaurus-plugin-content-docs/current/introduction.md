@@ -21,6 +21,7 @@ Contract Billing Coreは、これらの構成要素をコンポーザブルな�
 - **複数の課金モデル** — 買い切り、サブスクリプション、従量課金。定額、段階制、ボリューム、契約別オーバーライドに対応。
 - **契約更新** — pendingPriceIDによる保留価格のプロモーション付き自動更新。期末適用（END_OF_TERM）または即時適用（IMMEDIATE）の価格変更。
 - **決済ゲートウェイ抽象化** — チャージ、オーソリ/キャプチャ、ボイド、返金、決済手段管理のプラグインインターフェース。階層型フォールバック解決（Invoice → Contract → Customer）。
+- **クレジットノート** — 発行済み請求書に対するクレジットノートの作成・発行・適用・返金。請求書のvoid-and-recreateによるリビジョンチェーン管理。
 - **クレジット台帳** — 日割り計算、解約クレジット、手動調整のためのFIFOベースクレジットシステム。
 - **時間旅行クエリ** — イベントリプレイやスナップショット復元による過去任意時点の契約状態クエリ。
 
@@ -31,6 +32,7 @@ graph TD
     subgraph アプリケーション層
         BS[BillingService]
         PS[PaymentService]
+        CNS[CreditNoteService]
         SS[SnapshotService]
         TQ[TemporalQueryService]
         PJ[ProjectionService]
@@ -38,6 +40,7 @@ graph TD
     subgraph ドメイン層
         C[Contract 集約]
         I[Invoice]
+        CN[CreditNote]
         P[Payment]
         CR[Credit]
         U[Usage]
@@ -50,6 +53,7 @@ graph TD
         CLH[ContractLifecycleHooks]
         PH[PaymentHooks]
         MH[MetricsHooks]
+        CNH[CreditNoteHooks]
     end
     subgraph インフラストラクチャ層
         ES[EventStore]

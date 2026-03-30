@@ -17,6 +17,7 @@ An event-sourced billing engine with a plugin architecture for SaaS and subscrip
 - **Contract Renewal** — Auto-renewal with pending price promotion (`pendingPriceID`)
 - **Payment Gateway Abstraction** — Charge, authorize/capture, refund, hierarchical method fallback
 - **Credit Ledger** — FIFO-based credits for prorations, cancellations, and adjustments
+- **Credit Notes & Invoice Revision** — Issue credit notes (draft/issue/apply/refund), void-and-reissue invoices with full revision chain tracking
 - **Temporal Queries** — Reconstruct contract state at any past point in time
 
 ## Quick Start
@@ -118,16 +119,18 @@ domain/           # Entities, value objects, aggregates (zero dependencies)
 ├── invoice/      # Invoice entity
 ├── payment/      # Payment entity
 ├── balance/       # Credit ledger
+├── billing/      # Billing calculation interface, proration
 ├── usage/        # Usage records
 ├── pricing/      # Immutable Price entity, pricing models
 ├── product/      # Product entity
 └── shared/       # Money, DateRange, IDs, Clock, errors
 
 application/      # Services, ports, queries
-├── service/      # BillingService, PaymentService, SnapshotService
+├── service/      # BillingService, PaymentService, SnapshotService, CreditNoteService
 ├── port/         # PaymentGateway interface
 ├── query/        # TemporalQueryService
-└── projection/   # Event projections
+├── projection/   # Event projections
+└── tx/           # Transaction management (TxManager, Saga)
 
 plugin/           # Hook interfaces and registry
 plugins/          # Official plugins (tax, coupon, invoicecleanup)
@@ -145,6 +148,7 @@ Implement only the hooks you need:
 | **Billing** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | Discounts, tax, pre/post calculation |
 | **Contract** | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | Lifecycle reactions |
 | **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | Payment flow |
+| **Credit Note** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | Credit note issuance, invoice revision |
 | **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |
 | **Invoice Gen** | `InvoiceGenerationHook` | PDF rendering, delivery |
 

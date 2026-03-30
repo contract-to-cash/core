@@ -155,7 +155,7 @@ func NewContractRepository(db *sql.DB) contract.Repository {
 }
 
 // OSSのインターフェースを実装
-func (r *ContractRepository) Save(ctx context.Context, c *contract.Contract) error {
+func (r *ContractRepository) Save(ctx context.Context, c *contract.ContractAggregate) error {
     query := `
         INSERT INTO billing_contracts (id, account_id, type, status, ...)
         VALUES ($1, $2, $3, $4, ...)
@@ -169,11 +169,11 @@ func (r *ContractRepository) Save(ctx context.Context, c *contract.Contract) err
     return err
 }
 
-func (r *ContractRepository) FindByID(ctx context.Context, id shared.ContractID) (*contract.Contract, error) {
+func (r *ContractRepository) FindByID(ctx context.Context, id shared.ContractID) (*contract.ContractAggregate, error) {
     // 実装
 }
 
-func (r *ContractRepository) FindByAccountID(ctx context.Context, accountID shared.AccountID, opts ...contract.QueryOption) ([]*contract.Contract, error) {
+func (r *ContractRepository) FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*contract.ContractAggregate, error) {
     // 実装
 }
 
@@ -221,6 +221,7 @@ import (
     // OSSのドメイン
     "github.com/contract-to-cash/core/domain/contract"
     "github.com/contract-to-cash/core/domain/shared"
+    "github.com/contract-to-cash/core/eventstore"
 
     // サービスA固有ドメイン
     "github.com/yourcompany/service-a/internal/domain/user"
@@ -263,37 +264,42 @@ func (uc *SubscribeUseCase) Execute(ctx context.Context, input SubscribeInput) (
         return nil, err
     }
 
-    // 2. 契約作成（OSSのドメインモデルを使用）
-    // NOTE: NewContract は OSS が提供するファサード関数。
-    //       引数の詳細は実装フェーズで確定する。
-    //       ここではサービスAでの利用パターンを概念的に示す。
+    // 2. 契約アグリゲート作成（OSSのドメインモデルを使用）
+    clock := shared.SystemClock{}
+    contractID := shared.NewContractID()
+    agg := contract.NewContractAggregate(contractID, clock)
+
     price := shared.NewMoney(new(big.Rat).SetInt64(980), shared.CurrencyJPY)
 
-    c, err := contract.NewContract(
-        shared.AccountID(u.ID),              // サービスAのUserIDをAccountIDにマッピング
-        contract.ContractTypeSubscription,
-        shared.PlanID(input.PlanID),
-        price,
-        contract.BillingCycleMonthly,
-        input.StartDate,
-    )
-    if err != nil {
+    // 3. Createコマンドで契約を初期化
+    cmd := contract.CreateContractCommand{
+        AccountID:    shared.AccountID(u.ID),        // サービスAのUserIDをAccountIDにマッピング
+        PlanID:       shared.PlanID(input.PlanID),
+        PriceID:      shared.PriceID("price_xxx"),   // Price集約のID
+        ContractType: contract.ContractTypeSubscription,
+        BillingCycle: contract.BillingCycleMonthly,
+        Price:        price,
+        BasePrice:    price,
+        AutoRenew:    true,
+    }
+    metadata := eventstore.EventMetadata{} // 必要に応じてメタデータを設定
+    if err := agg.Create(cmd, metadata); err != nil {
         return nil, err
     }
 
     // 4. 契約を有効化
-    if err := c.Activate(); err != nil {
+    if err := agg.Activate(metadata); err != nil {
         return nil, err
     }
 
     // 5. 保存（OSSのリポジトリインターフェース経由）
-    if err := uc.contractRepo.Save(ctx, c); err != nil {
+    if err := uc.contractRepo.Save(ctx, agg); err != nil {
         return nil, err
     }
 
     return &SubscribeOutput{
-        ContractID: c.ID().String(),
-        Status:     string(c.Status()),
+        ContractID: string(agg.ContractID()),
+        Status:     string(agg.Status()),
     }, nil
 }
 ```
@@ -309,7 +315,6 @@ import (
 
     // OSSのアプリケーションサービス
     "github.com/contract-to-cash/core/application/service"
-    "github.com/contract-to-cash/core/domain/shared"
 )
 
 // BillingUseCase 請求ユースケース
@@ -328,19 +333,11 @@ func (uc *BillingUseCase) GenerateMonthlyInvoices(ctx context.Context) error {
     return nil
 }
 
-// ApplyCoupon クーポン適用
-func (uc *BillingUseCase) ApplyCoupon(
-    ctx context.Context,
-    invoiceID string,
-    couponCode string,
-) error {
-    _, err := uc.billingService.ApplyCoupon(
-        ctx,
-        shared.InvoiceID(invoiceID),
-        couponCode,
-    )
-    return err
-}
+// NOTE: クーポン適用はBillingServiceの直接メソッドではなく、
+// プラグインシステム経由で行われる。クーポンプラグインを
+// plugin.Registry に登録すると、GenerateInvoice の計算フロー内で
+// DiscountHook.CalculateDiscount() が自動的に呼び出される。
+// 詳細は「4. サービスA固有プラグインの作成」を参照。
 ```
 
 ### 3.4 DI（依存性注入）の組み立て
@@ -394,7 +391,7 @@ func main() {
     // ============================================================
     // 3. プラグイン設定
     // ============================================================
-    clock := shared.NewSystemClock()  // shared.Clock 実装
+    clock := shared.SystemClock{}  // shared.Clock 実装
     eventBus := NewEventBus()
     logger := NewLogger()
     
@@ -435,7 +432,7 @@ func main() {
         billingService.BillingConfig{
             GracePeriod:      1 * time.Hour,   // 請求書確定までの猶予期間
             DaysUntilDue:     30,               // 支払い期限（日数）
-            CollectionMethod: "charge_automatically",
+            CollectionMethod: "auto_charge",
         },
         clock,
         billingService.WithBalanceRepo(balanceRepo), // balanceRepoはオプションで注入

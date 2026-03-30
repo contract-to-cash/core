@@ -22,7 +22,9 @@ billingService := service.NewBillingService(
     billingConfig, // service.BillingConfig
     clock,         // shared.Clock
     // オプション:
-    service.WithBalanceRepo(balanceRepo), // balance.Repository
+    service.WithBalanceRepo(balanceRepo),       // balance.Repository（オプション）
+    service.WithBillingTxManager(txManager),    // tx.TxManager（オプション、デフォルト: NoopTxManager）
+    service.WithBillingLogger(logger),          // *slog.Logger（オプション、デフォルト: slog.Default()）
 )
 ```
 
@@ -64,7 +66,10 @@ paymentService := service.NewPaymentService(
     eventStore,    // eventstore.Store
     registry,      // *plugin.Registry
     clock,         // shared.Clock
-    service.WithCustomerGateway(customerGateway), // オプション: フォールバック解決用
+    // オプション:
+    service.WithCustomerGateway(customerGateway),  // port.CustomerGateway — フォールバック解決用
+    service.WithPaymentTxManager(txManager),       // tx.TxManager（デフォルト: NoopTxManager）
+    service.WithPaymentLogger(logger),             // *slog.Logger（デフォルト: slog.Default()）
 )
 ```
 
@@ -87,6 +92,103 @@ func (s *PaymentService) ProcessPayment(
 ```
 
 フロー: BeforeChargeHook → Gateway.Charge → AfterChargeHook（成功） / OnPaymentFailedHook（失敗）
+
+### Refund
+
+```go
+type RefundInput struct {
+    Amount *shared.Money   // nil の場合、未返金残額を全額返金
+    Reason port.RefundReason
+}
+
+func (s *PaymentService) Refund(
+    ctx context.Context,
+    paymentID shared.PaymentID,
+    input RefundInput,
+) error
+```
+
+支払いの返金を処理します。`Amount`がnilの場合、未返金残額を全額返金します。返金は決済ゲートウェイを通じて発行され、トランザクション内で支払いエンティティに記録されます。コミット後に`OnRefundHook`フックが実行されます。
+
+---
+
+## CreditNoteService
+
+クレジットノートの作成、発行、請求書リビジョンをオーケストレーション。
+
+```go
+creditNoteService := service.NewCreditNoteService(
+    invoiceRepo,    // invoice.Repository
+    creditNoteRepo, // invoice.CreditNoteRepository
+    registry,       // *plugin.Registry
+    clock,          // shared.Clock
+    // オプション:
+    service.WithBillingService(billingService),     // *BillingService — ReissueInvoiceに必要
+    service.WithCreditNoteTxManager(txManager),     // tx.TxManager（デフォルト: NoopTxManager）
+    service.WithCreditNoteLogger(logger),           // *slog.Logger（デフォルト: slog.Default()）
+)
+```
+
+### CreateCreditNote
+
+```go
+func (s *CreditNoteService) CreateCreditNote(
+    ctx context.Context,
+    invoiceID shared.InvoiceID,
+    reason invoice.CreditNoteReason,
+    items []invoice.CreditNoteItem,
+    memo string,
+) (*invoice.CreditNote, error)
+```
+
+対象請求書のステータスが `issued`, `paid`, `partial_paid`, `overdue` の場合のみ作成可能。クレジットノートの合計が元請求書の合計を超えることはできない。
+
+### IssueCreditNote
+
+```go
+func (s *CreditNoteService) IssueCreditNote(
+    ctx context.Context,
+    creditNoteID shared.CreditNoteID,
+) (*invoice.CreditNote, error)
+```
+
+draft → issued に遷移。発行後に `OnCreditNoteIssuedHook` を実行。
+
+### ApplyCreditNote
+
+```go
+func (s *CreditNoteService) ApplyCreditNote(
+    ctx context.Context,
+    creditNoteID shared.CreditNoteID,
+    creditAmount shared.Money,
+) (*invoice.CreditNote, error)
+```
+
+issued → applied に遷移（アカウントクレジットとして適用）。
+
+### RefundCreditNote
+
+```go
+func (s *CreditNoteService) RefundCreditNote(
+    ctx context.Context,
+    creditNoteID shared.CreditNoteID,
+    refundAmount shared.Money,
+) (*invoice.CreditNote, error)
+```
+
+issued → refunded に遷移（決済返金として処理）。
+
+### ReissueInvoice
+
+```go
+func (s *CreditNoteService) ReissueInvoice(
+    ctx context.Context,
+    originalInvoiceID shared.InvoiceID,
+    reason string,
+) (*invoice.Invoice, error)
+```
+
+元の請求書を無効化（VoidWithReason）し、BillingServiceで代替請求書を生成。代替請求書には `revisionOf`（直接の親）と `originalInvoiceID`（チェーンのルート）が設定される。全ての書き込みはTxManager内のトランザクションで実行。完了後に `OnInvoiceRevisedHook` を実行。
 
 ---
 
@@ -142,6 +244,7 @@ projService := projection.NewProjectionService(eventStore, projection.Projection
     BatchSize:  100,
     MaxRetries: 3,
     RetryDelay: time.Second,
+    Logger:     logger, // *slog.Logger（デフォルト: slog.Default()）
 })
 
 projService.RegisterProjector(myProjector)
