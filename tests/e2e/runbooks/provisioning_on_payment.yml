@@ -71,14 +71,14 @@ steps:
     test: |
       current.res.status == 200
       && current.res.body.status == "suspended"
-  - desc: Server should still be "none" while suspended
+  - desc: Server should be "stopped" while suspended (OnContractSuspendHook fires)
     req:
       /servers/{{ steps[1].res.body.id }}:
         get:
           body: null
     test: |
       current.res.status == 200
-      && current.res.body.state == "none"
+      && current.res.body.state == "stopped"
   - desc: Pay invoice (triggers AfterCharge hook)
     req:
       /invoices/{{ steps[3].res.body.id }}/pay:
