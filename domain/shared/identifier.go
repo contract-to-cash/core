@@ -48,7 +48,7 @@ func (id PlanID) String() string         { return string(id) }
 func (id ProductID) String() string      { return string(id) }
 func (id PriceID) String() string        { return string(id) }
 func (id BalanceEntryID) String() string { return string(id) }
-func (id CreditNoteID) String() string  { return string(id) }
+func (id CreditNoteID) String() string   { return string(id) }
 
 func generateULID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()

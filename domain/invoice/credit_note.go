@@ -196,7 +196,7 @@ func (cn *CreditNote) Void() error {
 
 // --- Getters ---
 
-func (cn *CreditNote) ID() shared.CreditNoteID      { return cn.id }
+func (cn *CreditNote) ID() shared.CreditNoteID       { return cn.id }
 func (cn *CreditNote) Number() string                { return cn.number }
 func (cn *CreditNote) InvoiceID() shared.InvoiceID   { return cn.invoiceID }
 func (cn *CreditNote) AccountID() shared.AccountID   { return cn.accountID }
