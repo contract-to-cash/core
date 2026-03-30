@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test
+  test-unit:
+    name: Unit & Integration Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,8 +27,8 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Run tests with race detector
-        run: go test ./... -race -count=1 -coverprofile=coverage.out
+      - name: Run unit and integration tests
+        run: go test $(go list ./... | grep -v /tests/e2e) -race -count=1 -coverprofile=coverage.out
 
       - name: Print coverage summary
         run: go tool cover -func=coverage.out | tail -1
@@ -38,6 +38,23 @@ jobs:
         with:
           name: coverage
           path: coverage.out
+
+  test-e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run E2E tests
+        run: go test ./tests/e2e/... -race -count=1 -v
 
   lint:
     name: Lint
