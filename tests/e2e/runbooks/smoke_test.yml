@@ -1,4 +1,4 @@
-desc: "Smoke test: basic contract creation, billing, and state transitions"
+desc: "Smoke test: recommended payment-gated provisioning flow"
 runners:
   req: "{{ env.BASE_URL }}"
 steps:
@@ -9,7 +9,7 @@ steps:
           body: null
     test: |
       current.res.status == 200
-  - desc: Create contract
+  - desc: Create contract (Draft)
     req:
       /contracts:
         post:
@@ -23,16 +23,7 @@ steps:
     test: |
       current.res.status == 201
       && current.res.body.status == "draft"
-  - desc: Activate
-    req:
-      /contracts/{{ steps[1].res.body.id }}/activate:
-        post:
-          body:
-            application/json: {}
-    test: |
-      current.res.status == 200
-      && current.res.body.status == "active"
-  - desc: Generate invoice
+  - desc: Generate draft invoice on Draft contract
     req:
       /invoices/generate:
         post:
@@ -45,7 +36,55 @@ steps:
       current.res.status == 201
       && current.res.body.subtotal == 1000
       && current.res.body.total == 1000
-  - desc: GET contract returns same data
+  - desc: Activate contract (user confirmed)
+    req:
+      /contracts/{{ steps[1].res.body.id }}/activate:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Finalize invoice
+    req:
+      /invoices/{{ steps[2].res.body.id }}/finalize:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Suspend contract (awaiting payment)
+    req:
+      /contracts/{{ steps[1].res.body.id }}/suspend:
+        post:
+          body:
+            application/json:
+              reason: "awaiting_initial_payment"
+              billing_behavior: "skip"
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "suspended"
+  - desc: Pay invoice
+    req:
+      /invoices/{{ steps[2].res.body.id }}/pay:
+        post:
+          body:
+            application/json:
+              amount: 1000
+              payment_method_id: "pm-001"
+    test: |
+      current.res.status == 201
+      && current.res.body.status == "completed"
+  - desc: Resume contract (payment confirmed, service starts)
+    req:
+      /contracts/{{ steps[1].res.body.id }}/resume:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: GET contract returns active state
     req:
       /contracts/{{ steps[1].res.body.id }}:
         get:
@@ -53,14 +92,15 @@ steps:
     test: |
       current.res.status == 200
       && current.res.body.id == steps[1].res.body.id
-  - desc: GET invoice returns same data
+      && current.res.body.status == "active"
+  - desc: GET invoice returns paid state
     req:
-      /invoices/{{ steps[3].res.body.id }}:
+      /invoices/{{ steps[2].res.body.id }}:
         get:
           body: null
     test: |
       current.res.status == 200
-      && current.res.body.id == steps[3].res.body.id
+      && current.res.body.id == steps[2].res.body.id
   - desc: Cannot suspend draft contract (create a new one)
     req:
       /contracts:
@@ -76,7 +116,7 @@ steps:
       current.res.status == 201
   - desc: Suspend draft should fail
     req:
-      /contracts/{{ steps[6].res.body.id }}/suspend:
+      /contracts/{{ steps[10].res.body.id }}/suspend:
         post:
           body:
             application/json:

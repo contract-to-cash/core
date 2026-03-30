@@ -73,6 +73,22 @@ graph TD
 4. **Immutable Events** — Once recorded, events cannot be modified. Schema evolution is handled through upcasters.
 5. **Immutable Prices** — Price entities cannot be modified after creation. Price changes create new Price objects, preserving history.
 
+## Recommended Flow: Payment-Gated Provisioning
+
+For services that should not start until the first payment is confirmed, we recommend the **Payment-Gated Provisioning** pattern. This uses the existing `Suspended` status as a unified "service not active" state — no new statuses are required.
+
+| Step | Contract | Invoice | Description |
+|------|----------|---------|-------------|
+| 1 | Draft | — | Create contract |
+| 2 | Draft | Draft | Generate invoice (status guard allows Draft) |
+| 3 | Active | Finalized | User confirms, both finalized |
+| 4 | Suspended | Finalized | Immediately suspend (awaiting payment) |
+| 5 | Active | Paid | Payment confirmed → Resume → Service starts |
+
+The `Suspended` status is reused for both "awaiting initial payment" and "suspended for non-payment," providing a consistent "service inactive" state.
+
+> **Note:** This is a recommended pattern, not a requirement. You can also use a simpler flow: `Draft → Activate → Generate Invoice → Process Payment`.
+
 ## Who Is This For?
 
 - **SaaS/Subscription Platforms** building billing from scratch or replacing a monolithic billing system

@@ -721,7 +721,7 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
     contract := ctx.Contract()
     subtotal := ctx.Subtotal()
 
-    coupons, err := p.repo.FindApplicable(ctx.Context(), contract.ID(), p.clock.Now())
+    coupons, err := p.repo.FindApplicable(ctx.Context(), contract.ContractID(), p.clock.Now())
     if err != nil {
         return shared.Money{}, err
     }
