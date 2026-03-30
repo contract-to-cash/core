@@ -1,4 +1,4 @@
-desc: "Provisioning: payment triggers server setup, server state tracks contract"
+desc: "Provisioning: payment-gated flow — server provisioned only after payment clears"
 runners:
   req: "{{ env.BASE_URL }}"
 steps:
@@ -10,7 +10,7 @@ steps:
             application/json: {}
     test: |
       current.res.status == 200
-  - desc: Create contract
+  - desc: Create contract (Draft)
     req:
       /contracts:
         post:
@@ -23,6 +23,7 @@ steps:
               price: 5000
     test: |
       current.res.status == 201
+      && current.res.body.status == "draft"
   - desc: Server should be "none" before payment
     req:
       /servers/{{ steps[1].res.body.id }}:
@@ -31,15 +32,7 @@ steps:
     test: |
       current.res.status == 200
       && current.res.body.state == "none"
-  - desc: Activate contract
-    req:
-      /contracts/{{ steps[1].res.body.id }}/activate:
-        post:
-          body:
-            application/json: {}
-    test: |
-      current.res.status == 200
-  - desc: Generate and finalize invoice
+  - desc: Generate draft invoice on Draft contract
     req:
       /invoices/generate:
         post:
@@ -50,17 +43,45 @@ steps:
               period_end: "2026-04-01"
     test: |
       current.res.status == 201
-  - desc: Finalize
+  - desc: Activate contract (user confirmed)
     req:
-      /invoices/{{ steps[4].res.body.id }}/finalize:
+      /contracts/{{ steps[1].res.body.id }}/activate:
         post:
           body:
             application/json: {}
     test: |
       current.res.status == 200
-  - desc: Pay invoice (triggers AfterCharge -> server provisioned)
+      && current.res.body.status == "active"
+  - desc: Finalize invoice
     req:
-      /invoices/{{ steps[4].res.body.id }}/pay:
+      /invoices/{{ steps[3].res.body.id }}/finalize:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+  - desc: Suspend contract (awaiting initial payment)
+    req:
+      /contracts/{{ steps[1].res.body.id }}/suspend:
+        post:
+          body:
+            application/json:
+              reason: "awaiting_initial_payment"
+              billing_behavior: "skip"
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "suspended"
+  - desc: Server should still be "none" while suspended
+    req:
+      /servers/{{ steps[1].res.body.id }}:
+        get:
+          body: null
+    test: |
+      current.res.status == 200
+      && current.res.body.state == "none"
+  - desc: Pay invoice (triggers AfterCharge hook)
+    req:
+      /invoices/{{ steps[3].res.body.id }}/pay:
         post:
           body:
             application/json:
@@ -69,7 +90,16 @@ steps:
     test: |
       current.res.status == 201
       && current.res.body.status == "completed"
-  - desc: Server should now be "running"
+  - desc: Resume contract (payment confirmed)
+    req:
+      /contracts/{{ steps[1].res.body.id }}/resume:
+        post:
+          body:
+            application/json: {}
+    test: |
+      current.res.status == 200
+      && current.res.body.status == "active"
+  - desc: Server should now be "running" (provisioned on Resume)
     req:
       /servers/{{ steps[1].res.body.id }}:
         get:
