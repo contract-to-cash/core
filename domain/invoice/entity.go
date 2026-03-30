@@ -104,7 +104,12 @@ type Invoice struct {
 	metadata        map[string]string
 	allowPartialPay bool
 
-	// Revision support
+	// Revision support: two-level linking for void-and-recreate workflows.
+	// originalInvoiceID points to the root of the revision chain (first invoice).
+	// revisionOf points to the direct parent (previous version in the chain).
+	// Example: Inv-1 → Inv-2 → Inv-3
+	//   Inv-2: originalInvoiceID=Inv-1, revisionOf=Inv-1
+	//   Inv-3: originalInvoiceID=Inv-1, revisionOf=Inv-2
 	originalInvoiceID *shared.InvoiceID
 	revisionOf        *shared.InvoiceID
 	voidReason        string
@@ -353,10 +358,19 @@ func (inv *Invoice) RevisionOf() *shared.InvoiceID { return inv.revisionOf }
 // VoidReason returns the reason this invoice was voided.
 func (inv *Invoice) VoidReason() string { return inv.voidReason }
 
-// SetRevisionOf sets the revision link to the original invoice.
-// This is used after invoice creation to link a replacement to its original.
+// SetRevisionOf sets the revision link to the direct parent invoice.
+// revisionOf points to the immediate predecessor in the revision chain.
+// This is used after invoice creation to link a replacement to its direct parent.
 func (inv *Invoice) SetRevisionOf(id shared.InvoiceID) {
 	inv.revisionOf = &id
+}
+
+// SetOriginalInvoiceID sets the root invoice ID of the revision chain.
+// originalInvoiceID always points to the first invoice in the chain,
+// regardless of how many revisions have occurred.
+// This is used after invoice creation to link a replacement to the chain root.
+func (inv *Invoice) SetOriginalInvoiceID(id shared.InvoiceID) {
+	inv.originalInvoiceID = &id
 }
 
 // PaymentMethodID returns the invoice-level payment method ID override.

@@ -2,10 +2,13 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"math/big"
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
@@ -422,19 +425,350 @@ func TestReissueInvoice_Hook_Called(t *testing.T) {
 
 func TestReissueInvoice_VoidedInvoice_Rejected(t *testing.T) {
 	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+
 	voidedInv := invoice.NewInvoice(
-		shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(0),
 		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(currentPeriodOf(agg)),
 	)
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{voidedInv.ID(): voidedInv}}
 	cnRepo := &mockCreditNoteRepo{}
-	svc := newCreditNoteService(invRepo, cnRepo, nil, clock)
+
+	// BillingService must be configured so we actually reach VoidWithReason
+	billingSvc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	svc := NewCreditNoteService(invRepo, cnRepo, plugin.NewRegistry(), clock, WithBillingService(billingSvc))
 
 	_, err := svc.ReissueInvoice(context.Background(), voidedInv.ID(), "test")
 	if err == nil {
 		t.Fatal("expected error reissuing voided invoice")
+	}
+}
+
+func TestReissueInvoice_EmptyReason_Rejected(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	period := currentPeriodOf(agg)
+
+	inv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(10000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+		invoice.WithBillingPeriod(period),
+	)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{inv.ID(): inv}}
+	cnRepo := &mockCreditNoteRepo{}
+
+	billingSvc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	svc := NewCreditNoteService(invRepo, cnRepo, plugin.NewRegistry(), clock, WithBillingService(billingSvc))
+
+	_, err := svc.ReissueInvoice(context.Background(), inv.ID(), "")
+	if err == nil {
+		t.Fatal("expected error for empty void reason")
+	}
+}
+
+// --- Task 1: ReissueInvoice uses TxManager ---
+
+func TestReissueInvoice_UsesTransaction(t *testing.T) {
+	// Verify that ReissueInvoice runs all writes within a transaction
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	period := currentPeriodOf(agg)
+
+	originalInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(10000), jpy(0), jpy(1000),
+		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+		invoice.WithBillingPeriod(period),
+	)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
+	cnRepo := &mockCreditNoteRepo{}
+
+	// Use a tracking TxManager to verify RunInTx is called
+	trackingTx := &trackingTxManager{
+		inner: tx.NewNoopTxManager(tx.Repos{Invoices: invRepo}),
+	}
+
+	billingSvc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	svc := NewCreditNoteService(invRepo, cnRepo, plugin.NewRegistry(), clock,
+		WithBillingService(billingSvc),
+		WithCreditNoteTxManager(trackingTx),
+	)
+
+	_, err := svc.ReissueInvoice(context.Background(), originalInv.ID(), "billing error")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !trackingTx.called {
+		t.Error("expected ReissueInvoice to use RunInTx")
+	}
+}
+
+func TestReissueInvoice_TransactionFailure_ReturnsError(t *testing.T) {
+	// If the transaction fails, the error should propagate and no replacement is returned.
+	// In a real DB implementation, the void Save would be rolled back.
+	// With failingTxManager, the closure is never executed so no writes occur.
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	period := currentPeriodOf(agg)
+
+	originalInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(10000), jpy(0), jpy(1000),
+		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+		invoice.WithBillingPeriod(period),
+	)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
+	cnRepo := &mockCreditNoteRepo{}
+
+	// failingTxManager never executes the closure — simulates transaction open failure
+	failingTx := &failingTxManager{}
+
+	billingSvc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	svc := NewCreditNoteService(invRepo, cnRepo, plugin.NewRegistry(), clock,
+		WithBillingService(billingSvc),
+		WithCreditNoteTxManager(failingTx),
+	)
+
+	replacement, err := svc.ReissueInvoice(context.Background(), originalInv.ID(), "billing error")
+	if err == nil {
+		t.Fatal("expected error from failing TxManager")
+	}
+	if replacement != nil {
+		t.Error("expected nil replacement when transaction fails")
+	}
+
+	// Verify the repo was NOT written to (closure never ran)
+	if invRepo.saved != nil {
+		t.Error("expected no writes when transaction fails")
+	}
+}
+
+// --- Task 2: Post-save hooks should be non-fatal ---
+
+func TestIssueCreditNote_HookFailure_NonFatal(t *testing.T) {
+	// When OnCreditNoteIssued hook fails, the operation should still succeed
+	accountID := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	paidInv := newPaidInvoice(accountID, contractID)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{paidInv.ID(): paidInv}}
+	cnRepo := &mockCreditNoteRepo{}
+
+	registry := plugin.NewRegistry()
+	failingHook := &failingCreditNoteHook{}
+	_ = registry.Register(failingHook)
+
+	svc := newCreditNoteService(invRepo, cnRepo, registry, nil)
+
+	items := []invoice.CreditNoteItem{
+		invoice.NewCreditNoteItem("li-1", "Refund", jpy(5000), big.NewRat(10, 100), jpy(500)),
+	}
+	cn, _ := svc.CreateCreditNote(context.Background(), paidInv.ID(), invoice.CreditNoteReasonOrderChange, items, "")
+
+	issued, err := svc.IssueCreditNote(context.Background(), cn.ID())
+	if err != nil {
+		t.Fatalf("expected hook failure to be non-fatal, got error: %v", err)
+	}
+	if issued.Status() != invoice.CreditNoteStatusIssued {
+		t.Errorf("expected issued, got %s", issued.Status())
+	}
+}
+
+func TestReissueInvoice_HookFailure_NonFatal(t *testing.T) {
+	// When OnInvoiceRevised hook fails, the operation should still succeed
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	period := currentPeriodOf(agg)
+
+	originalInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(10000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+		invoice.WithBillingPeriod(period),
+	)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
+	cnRepo := &mockCreditNoteRepo{}
+
+	registry := plugin.NewRegistry()
+	failingHook := &failingInvoiceRevisedHook{}
+	_ = registry.Register(failingHook)
+
+	billingSvc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	svc := NewCreditNoteService(invRepo, cnRepo, registry, clock,
+		WithBillingService(billingSvc),
+		WithCreditNoteLogger(slog.Default()),
+	)
+
+	replacement, err := svc.ReissueInvoice(context.Background(), originalInv.ID(), "correction")
+	if err != nil {
+		t.Fatalf("expected hook failure to be non-fatal, got error: %v", err)
+	}
+	if replacement == nil {
+		t.Fatal("expected replacement invoice")
+	}
+}
+
+// --- Task 3: ReissueInvoice sets originalInvoiceID ---
+
+func TestReissueInvoice_SetsOriginalInvoiceID(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	period := currentPeriodOf(agg)
+
+	originalInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(10000), jpy(0), jpy(1000),
+		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+		invoice.WithBillingPeriod(period),
+	)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
+	cnRepo := &mockCreditNoteRepo{}
+
+	billingSvc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	svc := NewCreditNoteService(invRepo, cnRepo, plugin.NewRegistry(), clock, WithBillingService(billingSvc))
+
+	replacement, err := svc.ReissueInvoice(context.Background(), originalInv.ID(), "billing error")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// originalInvoiceID should point to the root invoice
+	if replacement.OriginalInvoiceID() == nil {
+		t.Fatal("expected originalInvoiceID to be set on replacement")
+	}
+	if *replacement.OriginalInvoiceID() != originalInv.ID() {
+		t.Errorf("expected originalInvoiceID %s, got %s", originalInv.ID(), *replacement.OriginalInvoiceID())
+	}
+}
+
+func TestReissueInvoice_ChainedRevision_PreservesOriginalInvoiceID(t *testing.T) {
+	// When reissuing an already-revised invoice, originalInvoiceID should point to the root
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	period := currentPeriodOf(agg)
+
+	rootID := shared.NewInvoiceID()
+	// This invoice was itself a revision of rootID
+	revisedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(10000), jpy(0), jpy(1000),
+		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+		invoice.WithBillingPeriod(period),
+		invoice.WithOriginalInvoiceID(rootID),
+		invoice.WithRevisionOf(rootID),
+	)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{revisedInv.ID(): revisedInv}}
+	cnRepo := &mockCreditNoteRepo{}
+
+	billingSvc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	svc := NewCreditNoteService(invRepo, cnRepo, plugin.NewRegistry(), clock, WithBillingService(billingSvc))
+
+	replacement, err := svc.ReissueInvoice(context.Background(), revisedInv.ID(), "second correction")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// originalInvoiceID should point to the ROOT, not the intermediate revision
+	if replacement.OriginalInvoiceID() == nil {
+		t.Fatal("expected originalInvoiceID to be set")
+	}
+	if *replacement.OriginalInvoiceID() != rootID {
+		t.Errorf("expected originalInvoiceID to be root %s, got %s", rootID, *replacement.OriginalInvoiceID())
+	}
+
+	// revisionOf should point to the DIRECT parent
+	if replacement.RevisionOf() == nil {
+		t.Fatal("expected revisionOf to be set")
+	}
+	if *replacement.RevisionOf() != revisedInv.ID() {
+		t.Errorf("expected revisionOf %s, got %s", revisedInv.ID(), *replacement.RevisionOf())
 	}
 }
 
@@ -466,4 +800,46 @@ func (p *testInvoiceRevisedHook) Priority() int                                 
 func (p *testInvoiceRevisedHook) OnInvoiceRevised(_ *plugin.Context, _ *invoice.Invoice, _ *invoice.Invoice) error {
 	p.called = true
 	return nil
+}
+
+// --- Failing hook plugins (for non-fatal tests) ---
+
+type failingCreditNoteHook struct{}
+
+func (p *failingCreditNoteHook) Name() string                                        { return "failing-cn-hook" }
+func (p *failingCreditNoteHook) Version() string                                     { return "1.0.0" }
+func (p *failingCreditNoteHook) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *failingCreditNoteHook) Shutdown(_ context.Context) error                    { return nil }
+func (p *failingCreditNoteHook) Priority() int                                       { return 500 }
+func (p *failingCreditNoteHook) OnCreditNoteIssued(_ *plugin.Context, _ *invoice.CreditNote) error {
+	return fmt.Errorf("hook intentionally failed")
+}
+
+type failingInvoiceRevisedHook struct{}
+
+func (p *failingInvoiceRevisedHook) Name() string                                        { return "failing-rev-hook" }
+func (p *failingInvoiceRevisedHook) Version() string                                     { return "1.0.0" }
+func (p *failingInvoiceRevisedHook) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *failingInvoiceRevisedHook) Shutdown(_ context.Context) error                    { return nil }
+func (p *failingInvoiceRevisedHook) Priority() int                                       { return 500 }
+func (p *failingInvoiceRevisedHook) OnInvoiceRevised(_ *plugin.Context, _ *invoice.Invoice, _ *invoice.Invoice) error {
+	return fmt.Errorf("hook intentionally failed")
+}
+
+// --- TxManager test doubles ---
+
+type trackingTxManager struct {
+	inner  tx.TxManager
+	called bool
+}
+
+func (m *trackingTxManager) RunInTx(ctx context.Context, fn func(context.Context, tx.Repos) error) error {
+	m.called = true
+	return m.inner.RunInTx(ctx, fn)
+}
+
+type failingTxManager struct{}
+
+func (m *failingTxManager) RunInTx(_ context.Context, _ func(context.Context, tx.Repos) error) error {
+	return fmt.Errorf("transaction failed")
 }

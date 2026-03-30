@@ -203,6 +203,20 @@ func TestInvoice_SetRevisionOf(t *testing.T) {
 	}
 }
 
+func TestInvoice_SetOriginalInvoiceID(t *testing.T) {
+	inv := newDraftInvoice()
+	rootID := shared.NewInvoiceID()
+
+	inv.SetOriginalInvoiceID(rootID)
+
+	if inv.OriginalInvoiceID() == nil {
+		t.Fatal("expected originalInvoiceID to be set")
+	}
+	if *inv.OriginalInvoiceID() != rootID {
+		t.Errorf("expected originalInvoiceID %s, got %s", rootID, *inv.OriginalInvoiceID())
+	}
+}
+
 func TestInvoice_RevisionFields_DefaultNil(t *testing.T) {
 	inv := newDraftInvoice()
 

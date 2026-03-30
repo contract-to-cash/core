@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/plugin"
@@ -19,6 +21,22 @@ func WithBillingService(bs *BillingService) CreditNoteServiceOption {
 	}
 }
 
+// WithCreditNoteTxManager sets the transaction manager for the CreditNoteService.
+// If not provided, a NoopTxManager is used (no transaction wrapping).
+func WithCreditNoteTxManager(tm tx.TxManager) CreditNoteServiceOption {
+	return func(s *CreditNoteService) {
+		s.txManager = tm
+	}
+}
+
+// WithCreditNoteLogger sets a structured logger for the CreditNoteService.
+// If not provided, slog.Default() is used.
+func WithCreditNoteLogger(l *slog.Logger) CreditNoteServiceOption {
+	return func(s *CreditNoteService) {
+		s.logger = l
+	}
+}
+
 // CreditNoteService orchestrates credit note creation, issuance, and invoice revision.
 type CreditNoteService struct {
 	invoiceRepo    invoice.Repository
@@ -26,6 +44,8 @@ type CreditNoteService struct {
 	registry       *plugin.Registry
 	clock          shared.Clock
 	billingSvc     *BillingService
+	txManager      tx.TxManager
+	logger         *slog.Logger
 }
 
 // NewCreditNoteService creates a new CreditNoteService.
@@ -44,6 +64,14 @@ func NewCreditNoteService(
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.logger == nil {
+		s.logger = slog.Default()
+	}
+	if s.txManager == nil {
+		s.txManager = tx.NewNoopTxManager(tx.Repos{
+			Invoices: invoiceRepo,
+		})
 	}
 	return s
 }
@@ -130,11 +158,14 @@ func (s *CreditNoteService) IssueCreditNote(ctx context.Context, creditNoteID sh
 		return nil, fmt.Errorf("failed to save credit note: %w", err)
 	}
 
-	// Fire OnCreditNoteIssued hooks
+	// Post-save hooks (non-fatal, outside transaction)
 	pluginCtx := plugin.NewContext(ctx)
 	for _, hook := range s.registry.GetOnCreditNoteIssuedHooks() {
-		if err := hook.OnCreditNoteIssued(pluginCtx, cn); err != nil {
-			return nil, fmt.Errorf("OnCreditNoteIssued hook error: %w", err)
+		if hookErr := hook.OnCreditNoteIssued(pluginCtx, cn); hookErr != nil {
+			s.logger.Warn("OnCreditNoteIssued hook failed",
+				"creditNoteID", cn.ID(),
+				"error", hookErr,
+			)
 		}
 	}
 
@@ -178,8 +209,10 @@ func (s *CreditNoteService) RefundCreditNote(ctx context.Context, creditNoteID s
 }
 
 // ReissueInvoice voids the original invoice and generates a replacement linked to it.
-// The replacement invoice has revisionOf set to the original's ID.
+// The replacement invoice has revisionOf set to the original's ID, and originalInvoiceID
+// set to the root of the revision chain.
 // Requires a BillingService to be configured via WithBillingService.
+// All writes run within a transaction via TxManager.
 func (s *CreditNoteService) ReissueInvoice(ctx context.Context, originalInvoiceID shared.InvoiceID, reason string) (*invoice.Invoice, error) {
 	// Pre-flight: ensure BillingService is available before mutating state
 	if s.billingSvc == nil {
@@ -191,32 +224,60 @@ func (s *CreditNoteService) ReissueInvoice(ctx context.Context, originalInvoiceI
 		return nil, fmt.Errorf("failed to find invoice: %w", err)
 	}
 
-	// Void the original
-	if err := original.VoidWithReason(reason); err != nil {
-		return nil, fmt.Errorf("failed to void original invoice: %w", err)
-	}
-	if err := s.invoiceRepo.Save(ctx, original); err != nil {
-		return nil, fmt.Errorf("failed to save voided invoice: %w", err)
+	// Determine the root of the revision chain before entering transaction.
+	// If the original already has an originalInvoiceID (it's itself a revision),
+	// propagate that root. Otherwise, the original IS the root.
+	rootID := originalInvoiceID
+	if original.OriginalInvoiceID() != nil {
+		rootID = *original.OriginalInvoiceID()
 	}
 
-	// Generate replacement via BillingService
-	replacement, err := s.billingSvc.GenerateInvoice(ctx, original.ContractID(), original.BillingPeriod())
+	// All writes are atomic within a transaction.
+	// Note: BillingService.GenerateInvoice uses its own RunInTx internally.
+	// With NoopTxManager this nests transparently. Real DB implementations
+	// must support savepoints or reuse the outer transaction.
+	var replacement *invoice.Invoice
+	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+		// Void the original inside the transaction so in-memory state
+		// is only mutated when the transaction will persist it.
+		if voidErr := original.VoidWithReason(reason); voidErr != nil {
+			return fmt.Errorf("failed to void original invoice: %w", voidErr)
+		}
+
+		if saveErr := repos.Invoices.Save(txCtx, original); saveErr != nil {
+			return fmt.Errorf("failed to save voided invoice: %w", saveErr)
+		}
+
+		// Generate replacement via BillingService
+		var genErr error
+		replacement, genErr = s.billingSvc.GenerateInvoice(txCtx, original.ContractID(), original.BillingPeriod())
+		if genErr != nil {
+			return fmt.Errorf("failed to generate replacement invoice: %w", genErr)
+		}
+
+		// Set revision links on the replacement
+		replacement.SetRevisionOf(originalInvoiceID)
+		replacement.SetOriginalInvoiceID(rootID)
+
+		if saveErr := repos.Invoices.Save(txCtx, replacement); saveErr != nil {
+			return fmt.Errorf("failed to save linked replacement invoice: %w", saveErr)
+		}
+
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate replacement invoice: %w", err)
+		return nil, err
 	}
 
-	// Set revisionOf link on the replacement
-	replacement.SetRevisionOf(originalInvoiceID)
-
-	if err := s.invoiceRepo.Save(ctx, replacement); err != nil {
-		return nil, fmt.Errorf("failed to save linked replacement invoice: %w", err)
-	}
-
-	// Fire OnInvoiceRevised hooks
+	// Post-commit hooks (non-fatal, outside transaction)
 	pluginCtx := plugin.NewContext(ctx)
 	for _, hook := range s.registry.GetOnInvoiceRevisedHooks() {
-		if err := hook.OnInvoiceRevised(pluginCtx, original, replacement); err != nil {
-			return nil, fmt.Errorf("OnInvoiceRevised hook error: %w", err)
+		if hookErr := hook.OnInvoiceRevised(pluginCtx, original, replacement); hookErr != nil {
+			s.logger.Warn("OnInvoiceRevised hook failed",
+				"originalInvoiceID", originalInvoiceID,
+				"replacementInvoiceID", replacement.ID(),
+				"error", hookErr,
+			)
 		}
 	}
 
