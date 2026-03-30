@@ -41,6 +41,10 @@ type Registry struct {
 
 	// Invoice generation hooks
 	invoiceGenerationHooks []InvoiceGenerationHook
+
+	// Credit note hooks
+	onCreditNoteIssuedHooks []OnCreditNoteIssuedHook
+	onInvoiceRevisedHooks   []OnInvoiceRevisedHook
 }
 
 // NewRegistry creates a new empty Registry.
@@ -124,6 +128,14 @@ func (r *Registry) Register(p Plugin) error {
 	// Invoice generation hooks
 	if h, ok := p.(InvoiceGenerationHook); ok {
 		r.invoiceGenerationHooks = append(r.invoiceGenerationHooks, h)
+	}
+
+	// Credit note hooks
+	if h, ok := p.(OnCreditNoteIssuedHook); ok {
+		r.onCreditNoteIssuedHooks = append(r.onCreditNoteIssuedHooks, h)
+	}
+	if h, ok := p.(OnInvoiceRevisedHook); ok {
+		r.onInvoiceRevisedHooks = append(r.onInvoiceRevisedHooks, h)
 	}
 
 	return nil
@@ -299,6 +311,20 @@ func (r *Registry) GetInvoiceGenerationHooks() []InvoiceGenerationHook {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return sortedCopy(r.invoiceGenerationHooks)
+}
+
+// GetOnCreditNoteIssuedHooks returns credit note issued hooks sorted by priority.
+func (r *Registry) GetOnCreditNoteIssuedHooks() []OnCreditNoteIssuedHook {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return sortedCopy(r.onCreditNoteIssuedHooks)
+}
+
+// GetOnInvoiceRevisedHooks returns invoice revised hooks sorted by priority.
+func (r *Registry) GetOnInvoiceRevisedHooks() []OnInvoiceRevisedHook {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return sortedCopy(r.onInvoiceRevisedHooks)
 }
 
 // sortByPriority sorts a slice of Plugin by Priority() in ascending order.
