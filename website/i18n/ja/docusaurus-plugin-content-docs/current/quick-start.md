@@ -165,6 +165,6 @@ go run ./examples/pricing-models-demo/
 
 ## 次のステップ
 
-- [アーキテクチャ](./architecture) — システム設計を理解する
-- [統合ガイド](./guides/integration) — あなたのサービスへの組み込み方法
-- [カスタムプラグインガイド](./guides/custom-plugin) — 独自プラグインの構築
+- [アーキテクチャ](./guides/architecture) — システム設計を理解する
+- [システム統合](./guides/system-integration) — あなたのサービスへの組み込み方法
+- [プラグインシステム](./guides/plugin-system) — 独自プラグインの構築

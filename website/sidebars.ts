@@ -4,36 +4,17 @@ const sidebars: SidebarsConfig = {
   docsSidebar: [
     'introduction',
     'quick-start',
-    'architecture',
-    {
-      type: 'category',
-      label: 'Core Concepts',
-      items: [
-        'concepts/domain-model',
-        'concepts/event-sourcing',
-        'concepts/plugin-system',
-        'concepts/payment-gateway',
-      ],
-    },
     {
       type: 'category',
       label: 'Guides',
       items: [
-        'guides/integration',
-        'guides/custom-plugin',
-        'guides/temporal-queries',
+        'guides/architecture',
+        'guides/domain-model',
+        'guides/billing-and-pricing',
+        'guides/event-sourcing',
+        'guides/plugin-system',
         'guides/payment-integration',
-      ],
-    },
-    {
-      type: 'category',
-      label: 'Examples',
-      items: [
-        'examples/billing-flow',
-        'examples/event-sourcing-demo',
-        'examples/plugin-pipeline',
-        'examples/lifecycle',
-        'examples/pricing-models',
+        'guides/system-integration',
       ],
     },
   ],

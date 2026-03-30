@@ -1,38 +1,22 @@
 ---
-sidebar_position: 1
+sidebar_position: 7
 ---
 
-# Integration Guide
+# システム統合
 
-This guide explains how to integrate Contract Billing Core into your service.
+このガイドでは、Contract Billing Coreをあなたのサービスに統合する方法を説明します。
 
-## Prerequisites
+## 前提条件
 
-- Go 1.25+
-- A database for event store and repositories (PostgreSQL, MySQL, DynamoDB, etc.)
-- A payment gateway implementation
+- Go 1.25以上
+- イベントストアとリポジトリ用のデータベース（PostgreSQL、MySQL、DynamoDBなど）
+- 決済ゲートウェイの実装（[決済統合](./payment-integration)を参照）
 
-## Step 1: Implement Repository Interfaces
+## ステップ 1: リポジトリインターフェースの実装
 
-Contract Billing Core defines repository interfaces in the domain layer. You implement them for your database:
+Contract Billing Coreはドメイン層でリポジトリインターフェースを定義しています。あなたのデータベース向けに実装してください。完全なインターフェース定義は[ドメイン型APIリファレンス](../api/domain-types)を参照。
 
-```go
-// domain/contract/repository.go
-type Repository interface {
-    Save(ctx context.Context, aggregate *ContractAggregate) error
-    FindByID(ctx context.Context, id shared.ContractID) (*ContractAggregate, error)
-    FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*ContractAggregate, error)
-    FindActiveByPlanID(ctx context.Context, planID shared.PlanID) ([]*ContractAggregate, error)
-    FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
-    FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
-    FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)
-    FindDueForRenewal(ctx context.Context, asOf time.Time) ([]*ContractAggregate, error)
-}
-```
-
-Similarly for `invoice.Repository`, `payment.Repository`, `balance.Repository`, `usage.Repository`, `pricing.PriceRepository`, and `product.Repository`.
-
-### Example: PostgreSQL Contract Repository
+### 例: PostgreSQLの契約リポジトリ
 
 ```go
 type PostgresContractRepository struct {
@@ -50,15 +34,15 @@ func (r *PostgresContractRepository) Save(ctx context.Context, agg *contract.Con
 }
 
 func (r *PostgresContractRepository) FindByID(ctx context.Context, id shared.ContractID) (*contract.ContractAggregate, error) {
-    // Try loading from snapshot first
+    // まずスナップショットからロードを試行
     snap, _ := r.eventStore.LoadSnapshot(ctx, string(id))
 
     agg := contract.NewContractAggregate(id, r.clock)
     if snap != nil {
         agg.LoadFromSnapshot(*snap)
-        // Load only events after snapshot
+        // スナップショット以降のイベントのみロード
         events, _ := r.eventStore.LoadUntilVersion(ctx, string(id), snap.Version)
-        // ... replay remaining events
+        // ... 残りのイベントをリプレイ
     } else {
         events, _ := r.eventStore.Load(ctx, string(id))
         agg.LoadFromHistory(events)
@@ -67,9 +51,11 @@ func (r *PostgresContractRepository) FindByID(ctx context.Context, id shared.Con
 }
 ```
 
-## Step 2: Implement Event Store
+同様に`invoice.Repository`, `payment.Repository`, `balance.Repository`, `usage.Repository`, `pricing.PriceRepository`, `product.Repository`も実装します。
 
-Implement the `eventstore.Store` interface for your database:
+## ステップ 2: Event Storeの実装
+
+`eventstore.Store`インターフェースをデータベース向けに実装。完全なインターフェースは[Event Store APIリファレンス](../api/event-store)を参照。
 
 ```go
 type PostgresEventStore struct {
@@ -81,17 +67,17 @@ func (s *PostgresEventStore) Append(ctx context.Context, streamID string, events
     tx, _ := s.db.BeginTx(ctx, nil)
     defer tx.Rollback()
 
-    // Check current version (optimistic locking)
+    // 現在のバージョンを確認（楽観的ロック）
     var currentVersion int
     tx.QueryRowContext(ctx,
         "SELECT COALESCE(MAX(version), 0) FROM events WHERE stream_id = $1", streamID,
     ).Scan(&currentVersion)
 
     if currentVersion != expectedVersion {
-        return fmt.Errorf("optimistic locking: expected version %d, got %d", expectedVersion, currentVersion)
+        return fmt.Errorf("楽観的ロック: 期待バージョン %d, 実際 %d", expectedVersion, currentVersion)
     }
 
-    // Insert events
+    // イベントを挿入
     for _, e := range events {
         tx.ExecContext(ctx,
             "INSERT INTO events (id, stream_id, type, version, data, metadata, occurred_at, recorded_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
@@ -103,24 +89,7 @@ func (s *PostgresEventStore) Append(ctx context.Context, streamID string, events
 }
 ```
 
-## Step 3: Implement Payment Gateway
-
-Implement `application/port.PaymentGateway` for your payment provider:
-
-```go
-type MyGateway struct { /* ... */ }
-
-func (g *MyGateway) ID() string { return "my-gateway" }
-func (g *MyGateway) SupportedMethods() []port.PaymentMethodType {
-    return []port.PaymentMethodType{port.PaymentMethodTypeCreditCard}
-}
-func (g *MyGateway) Charge(ctx context.Context, req *port.ChargeRequest) (*port.ChargeResponse, error) {
-    // Call your payment provider API
-}
-// ... implement remaining methods
-```
-
-## Step 4: Wire Everything Together
+## ステップ 3: 全体の結線
 
 ```go
 func NewBillingModule(db *sql.DB, gateway port.PaymentGateway) *BillingModule {
@@ -135,10 +104,10 @@ func NewBillingModule(db *sql.DB, gateway port.PaymentGateway) *BillingModule {
     priceRepo := NewPostgresPriceRepository(db)
     productRepo := NewPostgresProductRepository(db)
 
-    // Plugins
+    // プラグイン
     registry := plugin.NewRegistry()
     registry.Register(tax.NewTaxPlugin(&tax.JapaneseTaxCalculator{}))
-    // ... register your custom plugins
+    // ... カスタมプラグインを登録
     registry.InitializeAll(ctx, configs)
 
     billingService := service.NewBillingService(
@@ -165,25 +134,25 @@ func NewBillingModule(db *sql.DB, gateway port.PaymentGateway) *BillingModule {
 }
 ```
 
-## Step 5: Set Up Batch Jobs
+## ステップ 4: バッチジョブの設定
 
-Schedule batch processors for recurring operations:
+定期実行するバッチプロセッサを設定：
 
 ```go
-// Contract renewal (run daily)
+// 契約更新（毎日実行）
 renewalProcessor := batch.NewContractRenewalProcessor(contractRepo, registry, clock)
 renewalProcessor.Process(ctx, batch.BatchOptions{
     ContinueOnError: true,
     Concurrency:     4,
 })
 
-// Snapshot creation (run periodically for performance)
-snapshotService := service.NewSnapshotService(eventStore, clock, 50) // every 50 events
+// スナップショット作成（定期的に実行してパフォーマンス向上）
+snapshotService := service.NewSnapshotService(eventStore, clock, 50) // 50イベントごと
 ```
 
-## Directory Structure
+## ディレクトリ構成
 
-A typical service using Contract Billing Core:
+Contract Billing Coreを使用するサービスの典型的な構成：
 
 ```
 your-service/
@@ -191,10 +160,10 @@ your-service/
 │   └── server/main.go
 ├── internal/
 │   ├── billing/
-│   │   ├── module.go           # Wiring
-│   │   ├── gateway_stripe.go   # PaymentGateway implementation
+│   │   ├── module.go           # 結線
+│   │   ├── gateway_stripe.go   # PaymentGateway実装
 │   │   └── plugins/
-│   │       └── my_discount.go  # Custom plugins
+│   │       └── my_discount.go  # カスタムプラグイン
 │   ├── infrastructure/
 │   │   ├── postgres/
 │   │   │   ├── event_store.go
@@ -203,6 +172,6 @@ your-service/
 │   │   │   └── ...
 │   │   └── migrations/
 │   └── api/
-│       └── billing_handler.go  # HTTP/gRPC handlers
+│       └── billing_handler.go  # HTTP/gRPCハンドラ
 └── go.mod
 ```

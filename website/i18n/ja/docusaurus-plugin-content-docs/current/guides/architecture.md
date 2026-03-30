@@ -1,5 +1,5 @@
 ---
-sidebar_position: 3
+sidebar_position: 1
 ---
 
 # アーキテクチャ
@@ -66,30 +66,6 @@ graph LR
 - **Infrastructure** はドメインインターフェース（リポジトリ、イベントストア）を実装。
 - **Plugin** はフックを通じてアプリケーション動作を拡張。
 
-## 集約ルートとしてのContract
-
-`ContractAggregate`は中心的なイベントソースエンティティです。すべての状態変更がドメインイベントを生成します：
-
-```
-ContractCreatedEvent → ContractActivatedEvent → ContractRenewedEvent → ...
-```
-
-状態遷移は厳格な状態機械に従います：
-
-```mermaid
-stateDiagram-v2
-    [*] --> draft
-    draft --> trialing
-    draft --> active
-    trialing --> active
-    trialing --> cancelled
-    active --> suspended
-    suspended --> active
-    active --> cancelled
-    active --> expired
-    suspended --> cancelled
-```
-
 ## 請求書生成パイプライン
 
 `BillingService.GenerateInvoice()`は14ステップのパイプラインを実行します：
@@ -108,30 +84,6 @@ stateDiagram-v2
 12. 請求書の保存
 13. **AfterCalculation**フック（InvoiceLifecycleHook）
 14. 請求書を返却
-
-## Product/Priceモデル
-
-Stripeパターン（2020年にモノリシックPlanを廃止）に準拠：
-
-- **Product** — 何を売るか（名前、機能、使用量メトリクス）
-- **Price** — どう課金するか（金額、通貨、課金サイクル、価格モデル）。**作成後は不変。**
-
-この分離により以下が可能：
-- 既存サブスクライバーに影響を与えない価格改定（グランドファザリング）
-- 同一プロダクトに複数価格（月額/年額、マルチ通貨）
-- `pendingPriceID`によるクリーンな価格移行
-
-## Event Store
-
-Event Storeは以下の機能を提供します：
-
-- **Append** — 楽観的ロック（`expectedVersion`）によるイベント保存
-- **Load** — ストリームの全イベント取得
-- **LoadUntil** — 特定時点までのイベント取得（時間旅行クエリ）
-- **Subscribe** — プロジェクション向けイベント購読
-- **Snapshots** — 高速リカバリのための集約スナップショット保存/読み込み
-
-データベースに対して`eventstore.Store`インターフェースを実装します。テスト用のインメモリ実装が提供されています。
 
 ## 決済処理
 

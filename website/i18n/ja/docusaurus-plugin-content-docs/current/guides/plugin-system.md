@@ -1,14 +1,35 @@
 ---
-sidebar_position: 2
+sidebar_position: 5
 ---
 
-# カスタムプラグインガイド
+# プラグインシステム
 
-課金動作を拡張するカスタムプラグインの構築方法を学びます。
+プラグインシステムにより、明確に定義されたフックを通じて課金ロジックを拡張できます。各フックタイプは特定の目的を持ち、必要なインターフェースだけを実装します。完全なフックインターフェースの定義については[プラグインフックAPIリファレンス](../api/plugin-hooks)を参照してください。
 
-## 基本構造
+## 概要
 
-すべてのプラグインは`Plugin`インターフェースに加え、1つ以上のフックインターフェースを実装します：
+すべてのプラグインは基本`Plugin`インターフェース（Name、Version、Initialize、Shutdown、Priority）に加え、1つ以上のフックインターフェースを実装します。プラグインは優先度順に実行されます（小さい数値 = 高い優先度）。
+
+| 優先度定数 | 値 | ユースケース |
+|----------|------|----------|
+| `PriorityHighest` | 0 | 監査ログ、バリデーション |
+| `PriorityHigh` | 100 | 前処理、コアビジネスロジック |
+| `PriorityNormal` | 500 | デフォルトプラグイン |
+| `PriorityLow` | 900 | 後処理（税） |
+| `PriorityLowest` | 1000 | 最終手段、クリーンアップ |
+
+## フックカテゴリ
+
+- **課金計算** — `DiscountHook`、`TaxHook`、`InvoiceLifecycleHook` — 請求書生成パイプラインに参加
+- **契約ライフサイクル** — `OnContractCreateHook`、`OnContractActivateHook`、`OnContractSuspendHook`、`OnContractResumeHook`、`OnContractCancelHook`、`OnContractRenewHook`、`OnContractTrialEndHook` — 契約の状態変更に反応
+- **決済** — `BeforeChargeHook`、`AfterChargeHook`、`OnPaymentFailedHook`、`OnRefundHook` — 決済処理フローへのフック
+- **メトリクス** — `OnContractChangeHook`、`OnInvoiceIssuedHook`、`OnPaymentProcessedHook` — KPIやビジネスメトリクスの収集
+- **請求書生成** — `InvoiceGenerationHook` — カスタム請求書レンダリングと配信
+- **クレジットノート** — `OnCreditNoteIssuedHook`、`OnInvoiceRevisedHook` — クレジットノートと請求書リビジョンイベントに反応
+
+## カスタムプラグインの構築
+
+### 基本構造
 
 ```go
 package myplugin
@@ -38,7 +59,7 @@ func (p *MyPlugin) Initialize(_ context.Context, config plugin.Config) error {
 func (p *MyPlugin) Shutdown(_ context.Context) error { return nil }
 ```
 
-## 例: ロイヤリティ割引プラグイン
+### 例: ロイヤリティ割引プラグイン
 
 全請求書に5%割引を適用するプラグイン：
 
@@ -54,6 +75,21 @@ func NewLoyaltyDiscountPlugin(discountPercent int) *LoyaltyDiscountPlugin {
     }
 }
 
+func (p *LoyaltyDiscountPlugin) Name() string    { return "loyalty-discount" }
+func (p *LoyaltyDiscountPlugin) Version() string { return "1.0.0" }
+func (p *LoyaltyDiscountPlugin) Priority() int   { return p.priority }
+
+func (p *LoyaltyDiscountPlugin) Initialize(_ context.Context, config plugin.Config) error {
+    if v, ok := config["priority"]; ok {
+        if n, ok := v.(int); ok {
+            p.priority = n
+        }
+    }
+    return nil
+}
+
+func (p *LoyaltyDiscountPlugin) Shutdown(_ context.Context) error { return nil }
+
 // DiscountHookを実装
 func (p *LoyaltyDiscountPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) {
     discount := ctx.Subtotal().Multiply(p.rate)
@@ -66,7 +102,7 @@ func (p *LoyaltyDiscountPlugin) CalculateDiscount(ctx *plugin.CalculationContext
 }
 ```
 
-## 例: 監査ログプラグイン
+### 例: 監査ログプラグイン
 
 請求書計算ライフサイクルをログするプラグイン：
 
@@ -95,7 +131,7 @@ func (p *AuditLogPlugin) AfterCalculation(ctx *plugin.CalculationContext, inv *i
 }
 ```
 
-## 例: ホスティングプロビジョニングプラグイン
+### 例: ホスティングプロビジョニングプラグイン
 
 契約ライフサイクルイベントでホスティングリソースをプロビジョニング/デプロビジョニング：
 
@@ -137,27 +173,11 @@ func (p *HostingPlugin) OnContractResume(ctx *plugin.Context, c *contract.Contra
     return p.provisioningClient.CreateServer(ctx.Context(), c.ContractID(), c.PlanID())
 }
 ```
+
+詳細は[Issue #5](https://github.com/contract-to-cash/core/issues/5)を参照。
 :::
 
-## カスタムプラグインの登録
-
-```go
-registry := plugin.NewRegistry()
-
-// レジストリはインターフェースによりプラグインを自動分類
-registry.Register(&LoyaltyDiscountPlugin{})   // → DiscountHook
-registry.Register(&AuditLogPlugin{})          // → InvoiceLifecycleHook
-registry.Register(&HostingPlugin{})           // → 複数の契約フック
-
-configs := map[string]plugin.Config{
-    "loyalty-discount": {"priority": plugin.PriorityNormal},
-    "audit-log":        {"priority": plugin.PriorityHighest},
-    "hosting":          {"priority": plugin.PriorityHigh},
-}
-registry.InitializeAll(ctx, configs)
-```
-
-## マルチフックプラグイン
+### マルチフックプラグイン
 
 1つのプラグインで複数のフックインターフェースを実装できます：
 
@@ -184,6 +204,61 @@ func (p *MetricsPlugin) OnPaymentProcessed(ctx *plugin.Context, pay *payment.Pay
 }
 ```
 
+## プラグインの登録
+
+```go
+registry := plugin.NewRegistry()
+
+// レジストリはインターフェースによりプラグインを自動分類
+registry.Register(&LoyaltyDiscountPlugin{})   // → DiscountHook
+registry.Register(&AuditLogPlugin{})          // → InvoiceLifecycleHook
+registry.Register(&HostingPlugin{})           // → 複数の契約フック
+
+configs := map[string]plugin.Config{
+    "loyalty-discount": {"priority": plugin.PriorityNormal},
+    "audit-log":        {"priority": plugin.PriorityHighest},
+    "hosting":          {"priority": plugin.PriorityHigh},
+}
+registry.InitializeAll(ctx, configs)
+```
+
+## 公式プラグイン
+
+### 税プラグイン
+
+プラグインの`TaxCalculator`インターフェースで税計算：
+
+```go
+taxPlugin := tax.NewTaxPlugin(&tax.JapaneseTaxCalculator{}) // 10%
+```
+
+他の税制度向けにカスタム`TaxCalculator`を実装可能。
+
+### クーポンプラグイン
+
+クーポンベースの割引を管理：
+- パーセンテージおよび固定金額割引
+- 使用回数制限（グローバルおよびアカウント別）
+- 最小購入金額 / 最大割引キャップ
+- `applicableTo`によるプラン別制限
+- スタッキング制御
+
+:::note
+`applicableTo`によるプラン別制限は現在`PlanID`ベースで照合しています。Product/Price分離の一環として、将来のリリースで`ProductID`ベースの照合に移行予定です。
+:::
+
+```go
+couponPlugin := coupon.NewCouponPlugin(couponRepo, clock)
+```
+
+### InvoiceCleanupプラグイン
+
+古い請求書データのクリーンアップを管理：
+
+```go
+cleanupPlugin := invoicecleanup.NewInvoiceCleanupPlugin(invoiceRepo, clock)
+```
+
 ## プラグイン実行順序
 
 請求書生成時のプラグイン実行順序：
@@ -195,3 +270,7 @@ func (p *MetricsPlugin) OnPaymentProcessed(ctx *plugin.Context, pay *payment.Pay
 5. **TaxHook.CalculateTax**（優先度順）
 6. 請求書作成
 7. **InvoiceLifecycleHook.AfterCalculation**（優先度順）
+
+```bash
+go run ./examples/plugin-pipeline-demo/
+```

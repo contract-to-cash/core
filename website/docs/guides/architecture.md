@@ -1,5 +1,5 @@
 ---
-sidebar_position: 3
+sidebar_position: 1
 ---
 
 # Architecture
@@ -66,30 +66,6 @@ graph LR
 - **Infrastructure** implements domain interfaces (repositories, event store).
 - **Plugin** extends application behavior through hooks, depending on domain types.
 
-## Contract as Aggregate Root
-
-The `ContractAggregate` is the central event-sourced entity. All state changes produce domain events:
-
-```
-ContractCreatedEvent → ContractActivatedEvent → ContractRenewedEvent → ...
-```
-
-State transitions follow a strict state machine:
-
-```mermaid
-stateDiagram-v2
-    [*] --> draft
-    draft --> trialing
-    draft --> active
-    trialing --> active
-    trialing --> cancelled
-    active --> suspended
-    suspended --> active
-    active --> cancelled
-    active --> expired
-    suspended --> cancelled
-```
-
 ## Invoice Generation Pipeline
 
 `BillingService.GenerateInvoice()` executes a 14-step pipeline:
@@ -108,30 +84,6 @@ stateDiagram-v2
 12. Save invoice
 13. **AfterCalculation** hook (InvoiceLifecycleHook)
 14. Return invoice
-
-## Product/Price Model
-
-Following the Stripe pattern (deprecated monolithic Plan in 2020):
-
-- **Product** — What you sell (name, features, usage metrics)
-- **Price** — How you charge (amount, currency, billing cycle, pricing model). **Immutable after creation.**
-
-This separation enables:
-- Price revisions without affecting existing subscribers (grandfathering)
-- Multiple prices per product (monthly vs yearly, multi-currency)
-- Clean price migration with `pendingPriceID`
-
-## Event Store
-
-The event store provides:
-
-- **Append** — Store events with optimistic locking (`expectedVersion`)
-- **Load** — Retrieve all events for a stream
-- **LoadUntil** — Retrieve events up to a point in time (temporal queries)
-- **Subscribe** — Event subscription for projections
-- **Snapshots** — Save/load aggregate snapshots for fast recovery
-
-You implement the `eventstore.Store` interface for your database. An in-memory implementation is provided for testing.
 
 ## Payment Processing
 

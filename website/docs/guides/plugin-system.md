@@ -1,14 +1,35 @@
 ---
-sidebar_position: 2
+sidebar_position: 5
 ---
 
-# Custom Plugin Guide
+# Plugin System
 
-Learn how to build custom plugins to extend billing behavior.
+The plugin system lets you extend billing logic through well-defined hooks. Each hook type serves a specific purpose, and you only implement the interfaces you need. For the complete hook interface definitions, see the [Plugin Hooks API Reference](../api/plugin-hooks).
 
-## Basic Structure
+## Overview
 
-Every plugin implements the `Plugin` interface, plus one or more hook interfaces:
+Every plugin implements the base `Plugin` interface (Name, Version, Initialize, Shutdown, Priority), plus one or more hook interfaces. Plugins are executed in priority order (lower number = higher priority).
+
+| Priority Constant | Value | Use Case |
+|----------|-------|----------|
+| `PriorityHighest` | 0 | Audit logging, validation |
+| `PriorityHigh` | 100 | Pre-processing, core business logic |
+| `PriorityNormal` | 500 | Default plugins |
+| `PriorityLow` | 900 | Post-processing (tax) |
+| `PriorityLowest` | 1000 | Last resort, cleanup |
+
+## Hook Categories
+
+- **Billing Calculation** — `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` — participate in the invoice generation pipeline
+- **Contract Lifecycle** — `OnContractCreateHook`, `OnContractActivateHook`, `OnContractSuspendHook`, `OnContractResumeHook`, `OnContractCancelHook`, `OnContractRenewHook`, `OnContractTrialEndHook` — react to contract state changes
+- **Payment** — `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` — hook into payment processing
+- **Metrics** — `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` — collect KPIs and business metrics
+- **Invoice Generation** — `InvoiceGenerationHook` — custom invoice rendering and delivery
+- **Credit Note** — `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` — react to credit note and invoice revision events
+
+## Building a Custom Plugin
+
+### Basic Structure
 
 ```go
 package myplugin
@@ -38,7 +59,7 @@ func (p *MyPlugin) Initialize(_ context.Context, config plugin.Config) error {
 func (p *MyPlugin) Shutdown(_ context.Context) error { return nil }
 ```
 
-## Example: Loyalty Discount Plugin
+### Example: Loyalty Discount Plugin
 
 A plugin that gives a 5% discount to all invoices:
 
@@ -81,7 +102,7 @@ func (p *LoyaltyDiscountPlugin) CalculateDiscount(ctx *plugin.CalculationContext
 }
 ```
 
-## Example: Audit Log Plugin
+### Example: Audit Log Plugin
 
 A plugin that logs the invoice calculation lifecycle:
 
@@ -110,7 +131,7 @@ func (p *AuditLogPlugin) AfterCalculation(ctx *plugin.CalculationContext, inv *i
 }
 ```
 
-## Example: Hosting Provisioning Plugin
+### Example: Hosting Provisioning Plugin
 
 A plugin that provisions/deprovisions hosting resources on contract lifecycle events:
 
@@ -142,7 +163,7 @@ func (p *HostingPlugin) OnContractCancel(ctx *plugin.Context, c *contract.Contra
 ```
 
 :::caution
-The `OnContractResume` hook cannot distinguish between initial provisioning (first payment) and re-activation (payment after suspension). Consider tracking provisioning state externally and checking it in `OnContractResume`:
+The `OnContractResume` hook cannot distinguish between initial provisioning (first payment) and re-activation (payment after suspension). Consider tracking provisioning state externally:
 
 ```go
 func (p *HostingPlugin) OnContractResume(ctx *plugin.Context, c *contract.ContractAggregate) error {
@@ -152,27 +173,11 @@ func (p *HostingPlugin) OnContractResume(ctx *plugin.Context, c *contract.Contra
     return p.provisioningClient.CreateServer(ctx.Context(), c.ContractID(), c.PlanID())
 }
 ```
+
+See [Issue #5](https://github.com/contract-to-cash/core/issues/5) for details.
 :::
 
-## Registering Custom Plugins
-
-```go
-registry := plugin.NewRegistry()
-
-// The registry auto-classifies plugins by their interfaces
-registry.Register(&LoyaltyDiscountPlugin{})   // → DiscountHook
-registry.Register(&AuditLogPlugin{})          // → InvoiceLifecycleHook
-registry.Register(&HostingPlugin{})           // → Multiple contract hooks
-
-configs := map[string]plugin.Config{
-    "loyalty-discount": {"priority": plugin.PriorityNormal},
-    "audit-log":        {"priority": plugin.PriorityHighest},
-    "hosting":          {"priority": plugin.PriorityHigh},
-}
-registry.InitializeAll(ctx, configs)
-```
-
-## Multi-Hook Plugins
+### Multi-Hook Plugins
 
 A single plugin can implement multiple hook interfaces:
 
@@ -199,6 +204,61 @@ func (p *MetricsPlugin) OnPaymentProcessed(ctx *plugin.Context, pay *payment.Pay
 }
 ```
 
+## Registering Plugins
+
+```go
+registry := plugin.NewRegistry()
+
+// The registry auto-classifies plugins by their interfaces
+registry.Register(&LoyaltyDiscountPlugin{})   // → DiscountHook
+registry.Register(&AuditLogPlugin{})          // → InvoiceLifecycleHook
+registry.Register(&HostingPlugin{})           // → Multiple contract hooks
+
+configs := map[string]plugin.Config{
+    "loyalty-discount": {"priority": plugin.PriorityNormal},
+    "audit-log":        {"priority": plugin.PriorityHighest},
+    "hosting":          {"priority": plugin.PriorityHigh},
+}
+registry.InitializeAll(ctx, configs)
+```
+
+## Official Plugins
+
+### Tax Plugin
+
+Calculates tax using a pluggable `TaxCalculator` interface:
+
+```go
+taxPlugin := tax.NewTaxPlugin(&tax.JapaneseTaxCalculator{}) // 10%
+```
+
+You can implement custom `TaxCalculator` for other tax regimes.
+
+### Coupon Plugin
+
+Manages coupon-based discounts with:
+- Percentage and fixed amount discounts
+- Usage limits (global and per-account)
+- Min purchase / max discount caps
+- Plan-level restrictions via `applicableTo`
+- Stacking control
+
+:::note
+Plan-level restrictions via `applicableTo` currently use `PlanID` for matching. This will be migrated to `ProductID`-based matching in a future release as part of the Product/Price separation.
+:::
+
+```go
+couponPlugin := coupon.NewCouponPlugin(couponRepo, clock)
+```
+
+### InvoiceCleanup Plugin
+
+Handles cleanup of draft and stale invoices:
+
+```go
+cleanupPlugin := invoicecleanup.NewInvoiceCleanupPlugin(invoiceRepo, clock)
+```
+
 ## Plugin Execution Order
 
 During invoice generation, plugins execute in this order:
@@ -210,3 +270,7 @@ During invoice generation, plugins execute in this order:
 5. **TaxHook.CalculateTax** (priority-ordered)
 6. Create invoice
 7. **InvoiceLifecycleHook.AfterCalculation** (priority-ordered)
+
+```bash
+go run ./examples/plugin-pipeline-demo/
+```

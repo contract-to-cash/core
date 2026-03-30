@@ -1,10 +1,10 @@
 ---
-sidebar_position: 4
+sidebar_position: 6
 ---
 
-# Payment Integration Guide
+# Payment Integration
 
-This guide covers integrating a real payment gateway and implementing payment-gated provisioning.
+This guide covers implementing a payment gateway and the payment-gated provisioning pattern. For the full `PaymentGateway` interface definition, see the [Services API Reference](../api/services#paymentservice).
 
 ## Implementing PaymentGateway
 
@@ -25,17 +25,18 @@ func (g *MyStripeGateway) SupportedMethods() []port.PaymentMethodType {
 }
 
 func (g *MyStripeGateway) Charge(ctx context.Context, req *port.ChargeRequest) (*port.ChargeResponse, error) {
-    // 1. Create a PaymentIntent
-    // 2. Confirm with the payment method
-    // 3. Map response to ChargeResponse
-    return &port.ChargeResponse{
-        TransactionID: stripePaymentIntent.ID,
-        Status:        mapStripeStatus(stripePaymentIntent.Status),
-        Amount:        req.Amount,
-        CreatedAt:     time.Now(),
-    }, nil
+    // Map to Stripe API call
+    pi, err := g.client.PaymentIntents.New(&stripe.PaymentIntentParams{
+        Amount:        stripe.Int64(req.Amount.Amount().Num().Int64()),
+        Currency:      stripe.String(string(req.Currency)),
+        PaymentMethod: stripe.String(req.PaymentMethodID),
+        Confirm:       stripe.Bool(true),
+    })
+    // Map response back...
 }
 ```
+
+Supported payment method types: `credit_card`, `debit_card`, `bank_transfer`, `convenience_store`, `qr_code`, `carrier`, `postpay`, `direct_debit`.
 
 ## Payment Processing Flow
 
@@ -60,9 +61,40 @@ The payment flow:
 3. **AfterChargeHook** (success) or **OnPaymentFailedHook** (failure)
 4. Update invoice status
 
+### Authorize/Capture Flow
+
+For payment-gated provisioning where you need to confirm the charge before providing service:
+
+```go
+// 1. Authorize (reserve funds)
+pmID := "pm-visa-1234"
+authResp, _ := gateway.Authorize(ctx, &port.AuthorizeRequest{
+    CustomerID:      "cust-001",
+    Amount:          invoiceTotal,
+    PaymentMethodID: &pmID,
+    IdempotencyKey:  "auth-inv-001",
+})
+
+// 2. Provision service...
+
+// 3. Capture (finalize the charge)
+captureResp, _ := gateway.Capture(ctx, &port.CaptureRequest{
+    AuthorizationID: authResp.AuthorizationID,
+    Amount:          &invoiceTotal, // Can be less for partial capture
+})
+```
+
 ## Payment-Gated Provisioning
 
-For services where access should only be granted after payment (e.g., hosting, cloud resources):
+For services where access should only be granted after payment (e.g., hosting, cloud resources), the contract's `Suspended` state serves as a unified "service inactive" state:
+
+| Step | Contract | Invoice | Description |
+|------|----------|---------|-------------|
+| 1 | Draft | — | Create contract |
+| 2 | Draft | Draft | Generate invoice (status guard allows Draft) |
+| 3 | Active | Finalized | User confirms, both finalized |
+| 4 | Suspended | Finalized | Immediately suspend (awaiting payment) |
+| 5 | Active | Paid | Payment confirmed → Resume → Service starts |
 
 ```go
 // 1. Create contract (draft)
@@ -92,11 +124,9 @@ if payment.Status() == "completed" {
 }
 ```
 
-This pattern reuses the `Suspended` state for both:
-- **Initial activation**: new contract awaiting first payment
-- **Non-payment suspension**: existing contract with overdue payment
+This pattern reuses the `Suspended` state for both initial activation (awaiting first payment) and non-payment suspension. Both resolve the same way: payment → resume → service activated.
 
-Both resolve the same way: payment completes → Resume → service activated.
+> **Note:** This is a recommended pattern, not a requirement. You can also use a simpler flow: `Draft → Activate → Generate Invoice → Process Payment`.
 
 :::caution
 In this pattern, your application code must determine whether to **provision a new service** or **re-activate an existing one**. The `OnContractResumeHook` cannot distinguish between these cases because the suspension reason is cleared before the hook fires.
@@ -104,7 +134,6 @@ In this pattern, your application code must determine whether to **provision a n
 A common approach is to track provisioning state separately:
 
 ```go
-// After successful payment and resume
 if !provisioningStore.IsProvisioned(contractID) {
     provisioningService.CreateServer(ctx, contractID)
     provisioningStore.MarkProvisioned(contractID)
@@ -112,6 +141,8 @@ if !provisioningStore.IsProvisioned(contractID) {
     provisioningService.StartServer(ctx, contractID)
 }
 ```
+
+See [Issue #5](https://github.com/contract-to-cash/core/issues/5) for details.
 :::
 
 ## Idempotency

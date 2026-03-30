@@ -165,6 +165,6 @@ All examples use in-memory implementations and require no external dependencies.
 
 ## Next Steps
 
-- [Architecture](./architecture) — Understand the system design
-- [Integration Guide](./guides/integration) — How to integrate into your service
-- [Custom Plugin Guide](./guides/custom-plugin) — Build your own plugins
+- [Architecture](./guides/architecture) — Understand the system design
+- [System Integration](./guides/system-integration) — How to integrate into your service
+- [Plugin System](./guides/plugin-system) — Build your own plugins
