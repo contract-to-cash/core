@@ -36,6 +36,9 @@ type PriceID string
 // BalanceEntryID identifies a balance entry (account credit/debit).
 type BalanceEntryID string
 
+// CreditNoteID identifies a credit note.
+type CreditNoteID string
+
 func (id AccountID) String() string      { return string(id) }
 func (id ContractID) String() string     { return string(id) }
 func (id InvoiceID) String() string      { return string(id) }
@@ -45,6 +48,7 @@ func (id PlanID) String() string         { return string(id) }
 func (id ProductID) String() string      { return string(id) }
 func (id PriceID) String() string        { return string(id) }
 func (id BalanceEntryID) String() string { return string(id) }
+func (id CreditNoteID) String() string  { return string(id) }
 
 func generateULID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
@@ -77,6 +81,9 @@ func NewPriceID() PriceID { return PriceID(generateULID()) }
 
 // NewBalanceEntryID generates a new unique BalanceEntryID.
 func NewBalanceEntryID() BalanceEntryID { return BalanceEntryID(generateULID()) }
+
+// NewCreditNoteID generates a new unique CreditNoteID.
+func NewCreditNoteID() CreditNoteID { return CreditNoteID(generateULID()) }
 
 // GenerateID generates a new unique ID string (for event IDs etc.).
 func GenerateID() string {
