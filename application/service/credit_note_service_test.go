@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -211,6 +212,50 @@ func TestCreateCreditNote_FinalizedInvoice_Rejected(t *testing.T) {
 	_, err := svc.CreateCreditNote(context.Background(), finalizedInv.ID(), invoice.CreditNoteReasonOther, items, "")
 	if err == nil {
 		t.Fatal("expected error for finalized invoice (should use Void instead)")
+	}
+}
+
+func TestCreateCreditNote_EmptyItems_Rejected(t *testing.T) {
+	accountID := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	paidInv := newPaidInvoice(accountID, contractID)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{paidInv.ID(): paidInv}}
+	cnRepo := &mockCreditNoteRepo{}
+	svc := newCreditNoteService(invRepo, cnRepo, nil, nil)
+
+	_, err := svc.CreateCreditNote(context.Background(), paidInv.ID(), invoice.CreditNoteReasonOther, []invoice.CreditNoteItem{}, "")
+	if err == nil {
+		t.Fatal("expected error for empty items")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if domErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected validation error code, got %s", domErr.Code)
+	}
+}
+
+func TestCreateCreditNote_NilItems_Rejected(t *testing.T) {
+	accountID := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	paidInv := newPaidInvoice(accountID, contractID)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{paidInv.ID(): paidInv}}
+	cnRepo := &mockCreditNoteRepo{}
+	svc := newCreditNoteService(invRepo, cnRepo, nil, nil)
+
+	_, err := svc.CreateCreditNote(context.Background(), paidInv.ID(), invoice.CreditNoteReasonOther, nil, "")
+	if err == nil {
+		t.Fatal("expected error for nil items")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if domErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected validation error code, got %s", domErr.Code)
 	}
 }
 

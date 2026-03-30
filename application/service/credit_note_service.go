@@ -103,6 +103,11 @@ func (s *CreditNoteService) CreateCreditNote(
 			fmt.Sprintf("cannot create credit note for invoice in status %s", inv.Status()))
 	}
 
+	if len(items) == 0 {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			"credit note must have at least one item")
+	}
+
 	// Validate that credit note total does not exceed original invoice total
 	var itemSubtotal, itemTax shared.Money
 	currency := items[0].Amount().Currency()
