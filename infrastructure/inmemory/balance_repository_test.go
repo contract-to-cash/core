@@ -94,7 +94,7 @@ func TestGetBalance(t *testing.T) {
 	}
 }
 
-func TestFindByAccountID_ReturnsAllIncludingConsumed(t *testing.T) {
+func TestFindByAccountID_ReturnsAllIncludingConsumedAndExpired(t *testing.T) {
 	now := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	clock := shared.FixedClock{FixedTime: now}
 	repo := NewInMemoryBalanceRepository(clock)
@@ -114,13 +114,18 @@ func TestFindByAccountID_ReturnsAllIncludingConsumed(t *testing.T) {
 	// Entry with later createdAt.
 	entry3 := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(2000), jpy), balance.BalanceReasonProration, time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC))
 
+	// Expired entry — should still be returned.
+	pastExpiry := time.Date(2025, 4, 1, 0, 0, 0, 0, time.UTC) // before now (June 1)
+	entryExpired := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(300), jpy), balance.BalanceReasonCancellation, time.Date(2025, 4, 1, 0, 0, 0, 0, time.UTC))
+	entryExpired.SetExpiresAt(&pastExpiry)
+
 	// Different account — should NOT be returned.
 	entryOther := balance.NewBalanceEntry(otherAccountID, shared.NewMoney(new(big.Rat).SetInt64(100), jpy), balance.BalanceReasonGoodwill, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	// Different currency — should NOT be returned.
 	entryUSD := balance.NewBalanceEntry(accountID, shared.NewMoney(new(big.Rat).SetInt64(100), usd), balance.BalanceReasonGoodwill, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
-	for _, e := range []*balance.BalanceEntry{entry1, entryConsumed, entry3, entryOther, entryUSD} {
+	for _, e := range []*balance.BalanceEntry{entry1, entryConsumed, entry3, entryExpired, entryOther, entryUSD} {
 		if err := repo.Save(ctx, e); err != nil {
 			t.Fatalf("Save failed: %v", err)
 		}
@@ -131,9 +136,9 @@ func TestFindByAccountID_ReturnsAllIncludingConsumed(t *testing.T) {
 		t.Fatalf("FindByAccountID failed: %v", err)
 	}
 
-	// Should return all 3 JPY entries for this account (including consumed).
-	if len(entries) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(entries))
+	// Should return all 4 JPY entries for this account (including consumed and expired).
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(entries))
 	}
 
 	// Verify CreatedAt ascending order.
@@ -145,6 +150,9 @@ func TestFindByAccountID_ReturnsAllIncludingConsumed(t *testing.T) {
 	}
 	if entries[2].ID() != entry3.ID() {
 		t.Errorf("expected third entry to be entry3 (Mar), got %s", entries[2].ID())
+	}
+	if entries[3].ID() != entryExpired.ID() {
+		t.Errorf("expected fourth entry to be entryExpired (Apr), got %s", entries[3].ID())
 	}
 }
 
