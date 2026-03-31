@@ -158,3 +158,27 @@ func (r *InMemoryBalanceRepository) SaveRefund(_ context.Context, refund *balanc
 	r.refunds = append(r.refunds, refund)
 	return nil
 }
+
+// FindByAccountID returns all balance entries for an account and currency,
+// including fully consumed and expired entries, ordered by creation time ascending.
+func (r *InMemoryBalanceRepository) FindByAccountID(_ context.Context, accountID shared.AccountID, currency shared.Currency) ([]*balance.BalanceEntry, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var result []*balance.BalanceEntry
+	for _, entry := range r.entries {
+		if entry.AccountID() != accountID {
+			continue
+		}
+		if entry.OriginalAmount().Currency() != currency {
+			continue
+		}
+		result = append(result, entry)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt().Before(result[j].CreatedAt())
+	})
+
+	return result, nil
+}

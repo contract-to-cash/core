@@ -73,6 +73,10 @@ func (e *BalanceEntry) Description() string { return e.description }
 // ExpiresAt returns the expiration time, or nil if no expiration.
 func (e *BalanceEntry) ExpiresAt() *time.Time { return e.expiresAt }
 
+// SetExpiresAt sets the expiration time.
+// Called by repository implementations after loading from persistence.
+func (e *BalanceEntry) SetExpiresAt(t *time.Time) { e.expiresAt = t }
+
 // CreatedAt returns the creation time.
 func (e *BalanceEntry) CreatedAt() time.Time { return e.createdAt }
 
