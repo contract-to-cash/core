@@ -15,4 +15,8 @@ type Repository interface {
 	SaveApplication(ctx context.Context, app *BalanceApplication) error
 	FindApplicationsByInvoice(ctx context.Context, invoiceID shared.InvoiceID) ([]*BalanceApplication, error)
 	SaveRefund(ctx context.Context, refund *BalanceRefund) error
+
+	// FindByAccountID returns all balance entries for an account and currency,
+	// including fully consumed and expired entries, ordered by creation time.
+	FindByAccountID(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*BalanceEntry, error)
 }
