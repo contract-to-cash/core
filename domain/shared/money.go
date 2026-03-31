@@ -119,6 +119,24 @@ func (m Money) Min(other Money) (Money, error) {
 	return NewMoney(other.safeAmount(), m.currency), nil
 }
 
+// Int64 returns the amount as int64, truncating any fractional part.
+// Useful for zero-decimal currencies like JPY, KRW, etc.
+func (m Money) Int64() int64 {
+	if m.amount == nil {
+		return 0
+	}
+	return new(big.Int).Div(m.amount.Num(), m.amount.Denom()).Int64()
+}
+
+// Float64 returns the amount as float64.
+func (m Money) Float64() float64 {
+	if m.amount == nil {
+		return 0
+	}
+	f, _ := m.amount.Float64()
+	return f
+}
+
 func (m Money) safeAmount() *big.Rat {
 	if m.amount == nil {
 		return new(big.Rat)

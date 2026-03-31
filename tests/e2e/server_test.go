@@ -287,7 +287,7 @@ func contractToResponse(agg *contract.ContractAggregate) contractResponse {
 		Status:            string(agg.Status()),
 		ContractType:      string(agg.GetContractType()),
 		BillingCycle:      string(agg.GetBillingCycle()),
-		Price:             moneyToInt64(agg.Price()),
+		Price:             agg.Price().Int64(),
 		CancelAtPeriodEnd: agg.CancelAtPeriodEnd(),
 	}
 }
@@ -566,27 +566,19 @@ type invoiceResponse struct {
 	PaidAmount     int64  `json:"paid_amount"`
 }
 
-func moneyToInt64(m shared.Money) int64 {
-	if m.Amount() == nil {
-		return 0
-	}
-	// big.Rat stores as Num/Denom; for integer currencies like JPY, Denom is 1.
-	return new(big.Int).Div(m.Amount().Num(), m.Amount().Denom()).Int64()
-}
-
 func invoiceToResponse(inv *invoice.Invoice) invoiceResponse {
 	return invoiceResponse{
 		ID:             string(inv.ID()),
 		AccountID:      string(inv.AccountID()),
 		ContractID:     string(inv.ContractID()),
 		Status:         string(inv.Status()),
-		Subtotal:       moneyToInt64(inv.Subtotal()),
-		DiscountAmount: moneyToInt64(inv.DiscountAmount()),
-		TaxAmount:      moneyToInt64(inv.TaxAmount()),
-		Total:          moneyToInt64(inv.Total()),
-		AppliedBalance: moneyToInt64(inv.AppliedBalance()),
-		AmountDue:      moneyToInt64(inv.AmountDue()),
-		PaidAmount:     moneyToInt64(inv.PaidAmount()),
+		Subtotal:       inv.Subtotal().Int64(),
+		DiscountAmount: inv.DiscountAmount().Int64(),
+		TaxAmount:      inv.TaxAmount().Int64(),
+		Total:          inv.Total().Int64(),
+		AppliedBalance: inv.AppliedBalance().Int64(),
+		AmountDue:      inv.AmountDue().Int64(),
+		PaidAmount:     inv.PaidAmount().Int64(),
 	}
 }
 
@@ -695,7 +687,7 @@ func paymentToResponse(p *payment.Payment) paymentResponse {
 	return paymentResponse{
 		ID:            string(p.ID()),
 		InvoiceID:     string(p.InvoiceID()),
-		Amount:        moneyToInt64(p.Amount()),
+		Amount:        p.Amount().Int64(),
 		Status:        string(p.Status()),
 		Method:        string(p.Method()),
 		FailureReason: p.FailureReason(),

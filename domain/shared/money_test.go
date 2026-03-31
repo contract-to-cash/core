@@ -127,6 +127,50 @@ func TestMoney_JSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMoney_Int64(t *testing.T) {
+	tests := []struct {
+		name  string
+		money Money
+		want  int64
+	}{
+		{"integer amount", NewMoney(big.NewRat(1000, 1), CurrencyJPY), 1000},
+		{"zero", Zero(CurrencyJPY), 0},
+		{"negative", NewMoney(big.NewRat(-500, 1), CurrencyJPY), -500},
+		{"fractional truncates", NewMoney(big.NewRat(1999, 100), CurrencyUSD), 19}, // 19.99 -> 19
+		{"nil amount (zero value)", Money{}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.money.Int64()
+			if got != tt.want {
+				t.Errorf("Int64() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMoney_Float64(t *testing.T) {
+	tests := []struct {
+		name  string
+		money Money
+		want  float64
+	}{
+		{"integer amount", NewMoney(big.NewRat(1000, 1), CurrencyJPY), 1000.0},
+		{"zero", Zero(CurrencyJPY), 0.0},
+		{"negative", NewMoney(big.NewRat(-500, 1), CurrencyJPY), -500.0},
+		{"fractional", NewMoney(big.NewRat(1999, 100), CurrencyUSD), 19.99},
+		{"nil amount (zero value)", Money{}, 0.0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.money.Float64()
+			if got != tt.want {
+				t.Errorf("Float64() = %f, want %f", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestZeroMoney_JSONRoundTrip(t *testing.T) {
 	original := Zero(CurrencyJPY)
 	data, err := json.Marshal(original)
