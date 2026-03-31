@@ -129,9 +129,9 @@ func TestMoney_JSONRoundTrip(t *testing.T) {
 
 func TestMoney_Int64(t *testing.T) {
 	tests := []struct {
-		name   string
-		money  Money
-		want   int64
+		name  string
+		money Money
+		want  int64
 	}{
 		{"integer amount", NewMoney(big.NewRat(1000, 1), CurrencyJPY), 1000},
 		{"zero", Zero(CurrencyJPY), 0},
