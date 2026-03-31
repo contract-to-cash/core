@@ -258,6 +258,128 @@ func TestCoupon_CodeType(t *testing.T) {
 	}
 }
 
+func TestCoupon_Getters(t *testing.T) {
+	minAmount := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
+	maxDiscount := shared.NewMoney(big.NewRat(500, 1), shared.CurrencyJPY)
+	usageLimit := 10
+	value := big.NewRat(15, 100)
+	validFrom := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	validUntil := time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC)
+
+	c := NewCoupon(
+		"c1", "CODE15", CouponTypePercentage,
+		value, shared.CurrencyJPY,
+		&minAmount, &maxDiscount,
+		validFrom, validUntil,
+		&usageLimit, 3, []string{"plan-a"},
+	)
+
+	t.Run("CouponType", func(t *testing.T) {
+		if got := c.CouponType(); got != CouponTypePercentage {
+			t.Errorf("CouponType() = %v, want %v", got, CouponTypePercentage)
+		}
+	})
+
+	t.Run("Value returns correct value", func(t *testing.T) {
+		got := c.Value()
+		if got.Cmp(big.NewRat(15, 100)) != 0 {
+			t.Errorf("Value() = %s, want 15/100", got.RatString())
+		}
+	})
+
+	t.Run("Value returns defensive copy", func(t *testing.T) {
+		got := c.Value()
+		got.SetInt64(999) // mutate the returned value
+		// Original should be unchanged
+		if c.Value().Cmp(big.NewRat(15, 100)) != 0 {
+			t.Errorf("Value() was mutated by caller, got %s", c.Value().RatString())
+		}
+	})
+
+	t.Run("ValidFrom", func(t *testing.T) {
+		if got := c.ValidFrom(); !got.Equal(validFrom) {
+			t.Errorf("ValidFrom() = %v, want %v", got, validFrom)
+		}
+	})
+
+	t.Run("ValidUntil", func(t *testing.T) {
+		if got := c.ValidUntil(); !got.Equal(validUntil) {
+			t.Errorf("ValidUntil() = %v, want %v", got, validUntil)
+		}
+	})
+
+	t.Run("MinAmount", func(t *testing.T) {
+		got := c.MinAmount()
+		if got == nil {
+			t.Fatal("MinAmount() = nil, want non-nil")
+		}
+		if got.Amount().Cmp(big.NewRat(1000, 1)) != 0 {
+			t.Errorf("MinAmount().Amount() = %s, want 1000", got.Amount().RatString())
+		}
+	})
+
+	t.Run("MaxDiscount", func(t *testing.T) {
+		got := c.MaxDiscount()
+		if got == nil {
+			t.Fatal("MaxDiscount() = nil, want non-nil")
+		}
+		if got.Amount().Cmp(big.NewRat(500, 1)) != 0 {
+			t.Errorf("MaxDiscount().Amount() = %s, want 500", got.Amount().RatString())
+		}
+	})
+
+	t.Run("UsageLimit", func(t *testing.T) {
+		got := c.UsageLimit()
+		if got == nil {
+			t.Fatal("UsageLimit() = nil, want non-nil")
+		}
+		if *got != 10 {
+			t.Errorf("UsageLimit() = %d, want 10", *got)
+		}
+	})
+
+	t.Run("UsedCount", func(t *testing.T) {
+		if got := c.UsedCount(); got != 3 {
+			t.Errorf("UsedCount() = %d, want 3", got)
+		}
+	})
+}
+
+func TestCoupon_Getters_NilOptionalFields(t *testing.T) {
+	c := NewCoupon(
+		"c2", "CODE20", CouponTypeFixed,
+		big.NewRat(500, 1), shared.CurrencyJPY,
+		nil, nil,
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+		nil, 0, nil,
+	)
+
+	t.Run("MinAmount nil", func(t *testing.T) {
+		if got := c.MinAmount(); got != nil {
+			t.Errorf("MinAmount() = %v, want nil", got)
+		}
+	})
+
+	t.Run("MaxDiscount nil", func(t *testing.T) {
+		if got := c.MaxDiscount(); got != nil {
+			t.Errorf("MaxDiscount() = %v, want nil", got)
+		}
+	})
+
+	t.Run("UsageLimit nil", func(t *testing.T) {
+		if got := c.UsageLimit(); got != nil {
+			t.Errorf("UsageLimit() = %v, want nil", got)
+		}
+	})
+
+	t.Run("CouponType fixed", func(t *testing.T) {
+		if got := c.CouponType(); got != CouponTypeFixed {
+			t.Errorf("CouponType() = %v, want %v", got, CouponTypeFixed)
+		}
+	})
+}
+
 func TestCoupon_IsApplicableToContractType(t *testing.T) {
 	tests := []struct {
 		name          string

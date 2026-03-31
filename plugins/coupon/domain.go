@@ -181,6 +181,31 @@ func (c *Coupon) CodeType() CodeType { return c.codeType }
 // ApplicableTo returns the applicable plan IDs.
 func (c *Coupon) ApplicableTo() []string { return c.applicableTo }
 
+// CouponType returns the coupon type (percentage or fixed).
+func (c *Coupon) CouponType() CouponType { return c.couponType }
+
+// Value returns the discount value (percentage rate or fixed amount).
+// Returns a defensive copy to protect internal state.
+func (c *Coupon) Value() *big.Rat { return new(big.Rat).Set(c.value) }
+
+// ValidFrom returns the start of the validity period.
+func (c *Coupon) ValidFrom() time.Time { return c.validFrom }
+
+// ValidUntil returns the end of the validity period.
+func (c *Coupon) ValidUntil() time.Time { return c.validUntil }
+
+// MinAmount returns the minimum purchase amount, or nil if no minimum.
+func (c *Coupon) MinAmount() *shared.Money { return c.minAmount }
+
+// MaxDiscount returns the maximum discount cap, or nil if uncapped.
+func (c *Coupon) MaxDiscount() *shared.Money { return c.maxDiscount }
+
+// UsageLimit returns the global usage limit, or nil if unlimited.
+func (c *Coupon) UsageLimit() *int { return c.usageLimit }
+
+// UsedCount returns the current usage count.
+func (c *Coupon) UsedCount() int { return c.usedCount }
+
 // PerAccountUsageLimit returns the per-account usage limit, or nil if unlimited.
 func (c *Coupon) PerAccountUsageLimit() *int { return c.perAccountUsageLimit }
 
