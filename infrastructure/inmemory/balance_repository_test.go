@@ -94,7 +94,7 @@ func TestGetBalance(t *testing.T) {
 	}
 }
 
-func TestFindByAccountID_ReturnsAllIncludingConsumedAndExpired(t *testing.T) {
+func TestFindByAccountID_ReturnsAllIncludingConsumed(t *testing.T) {
 	now := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	clock := shared.FixedClock{FixedTime: now}
 	repo := NewInMemoryBalanceRepository(clock)
@@ -145,5 +145,19 @@ func TestFindByAccountID_ReturnsAllIncludingConsumedAndExpired(t *testing.T) {
 	}
 	if entries[2].ID() != entry3.ID() {
 		t.Errorf("expected third entry to be entry3 (Mar), got %s", entries[2].ID())
+	}
+}
+
+func TestFindByAccountID_ReturnsEmptyForNoMatch(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)}
+	repo := NewInMemoryBalanceRepository(clock)
+	ctx := context.Background()
+
+	entries, err := repo.FindByAccountID(ctx, shared.NewAccountID(), shared.CurrencyJPY)
+	if err != nil {
+		t.Fatalf("FindByAccountID failed: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(entries))
 	}
 }
