@@ -215,16 +215,17 @@ func TestCouponPlugin_NoApplicable(t *testing.T) {
 	}
 }
 
-func TestCouponPlugin_ApplicableToPlan_Match(t *testing.T) {
-	// Coupon restricted to plan "plan-gold"
-	coupon := newTestCoupon("c1", "GOLD10", CouponTypePercentage, big.NewRat(10, 100), []string{"plan-gold"})
+func TestCouponPlugin_ApplicableToProduct_Match(t *testing.T) {
+	// Coupon restricted to product "product-gold"
+	coupon := newTestCoupon("c1", "GOLD10", CouponTypePercentage, big.NewRat(10, 100), []string{"product-gold"})
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 
-	// Create a contract with matching planID
-	agg := createTestAggregate(t, "acc-1", "plan-gold")
+	// Create a contract and set matching productID on context
+	agg := createTestAggregate(t, "acc-1")
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContextWithContract(subtotal, agg)
+	ctx.SetProductID("product-gold")
 
 	discount, err := p.CalculateDiscount(ctx)
 	if err != nil {
@@ -237,15 +238,16 @@ func TestCouponPlugin_ApplicableToPlan_Match(t *testing.T) {
 	}
 }
 
-func TestCouponPlugin_ApplicableToPlan_NoMatch(t *testing.T) {
-	// Coupon restricted to plan "plan-gold", but contract has "plan-silver"
-	coupon := newTestCoupon("c1", "GOLD10", CouponTypePercentage, big.NewRat(10, 100), []string{"plan-gold"})
+func TestCouponPlugin_ApplicableToProduct_NoMatch(t *testing.T) {
+	// Coupon restricted to product "product-gold", but context has "product-silver"
+	coupon := newTestCoupon("c1", "GOLD10", CouponTypePercentage, big.NewRat(10, 100), []string{"product-gold"})
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 
-	agg := createTestAggregate(t, "acc-1", "plan-silver")
+	agg := createTestAggregate(t, "acc-1")
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContextWithContract(subtotal, agg)
+	ctx.SetProductID("product-silver")
 
 	discount, err := p.CalculateDiscount(ctx)
 	if err != nil {
@@ -253,7 +255,7 @@ func TestCouponPlugin_ApplicableToPlan_NoMatch(t *testing.T) {
 	}
 
 	if !discount.IsZero() {
-		t.Errorf("expected zero discount for non-matching plan, got %s", discount.Amount().RatString())
+		t.Errorf("expected zero discount for non-matching product, got %s", discount.Amount().RatString())
 	}
 }
 
@@ -263,7 +265,7 @@ func TestCouponPlugin_AccountBlocklist(t *testing.T) {
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 
-	agg := createTestAggregate(t, "blocked-acc", "plan-1")
+	agg := createTestAggregate(t, "blocked-acc")
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContextWithContract(subtotal, agg)
 
@@ -284,7 +286,7 @@ func TestCouponPlugin_AccountAllowlist(t *testing.T) {
 	p := NewCouponPlugin(repo, testClock)
 
 	// Non-VIP account should get zero discount
-	agg := createTestAggregate(t, "regular-acc", "plan-1")
+	agg := createTestAggregate(t, "regular-acc")
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContextWithContract(subtotal, agg)
 
@@ -298,7 +300,7 @@ func TestCouponPlugin_AccountAllowlist(t *testing.T) {
 	}
 
 	// VIP account should get discount
-	vipAgg := createTestAggregate(t, "vip-acc", "plan-1")
+	vipAgg := createTestAggregate(t, "vip-acc")
 	ctx2 := newTestContextWithContract(subtotal, vipAgg)
 
 	discount2, err := p.CalculateDiscount(ctx2)
@@ -319,7 +321,7 @@ func TestCouponPlugin_PerAccountUsageLimit(t *testing.T) {
 	repo.accountUsage["c1:acc-1"] = 1 // already used once
 	p := NewCouponPlugin(repo, testClock)
 
-	agg := createTestAggregate(t, "acc-1", "plan-1")
+	agg := createTestAggregate(t, "acc-1")
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContextWithContract(subtotal, agg)
 
@@ -338,7 +340,7 @@ func TestCouponPlugin_RedemptionRecorded(t *testing.T) {
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 
-	agg := createTestAggregate(t, "acc-1", "plan-1")
+	agg := createTestAggregate(t, "acc-1")
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContextWithContract(subtotal, agg)
 
@@ -413,7 +415,7 @@ func TestCouponPlugin_UniqueCodeType(t *testing.T) {
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 
-	agg := createTestAggregate(t, "acc-1", "plan-1")
+	agg := createTestAggregate(t, "acc-1")
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContextWithContract(subtotal, agg)
 
@@ -445,7 +447,7 @@ func TestCouponPlugin_ContractType_Match(t *testing.T) {
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 
-	agg := createTestAggregate(t, "acc-1", "plan-1") // subscription type
+	agg := createTestAggregate(t, "acc-1") // subscription type
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContextWithContract(subtotal, agg)
 
@@ -467,7 +469,7 @@ func TestCouponPlugin_ContractType_NoMatch(t *testing.T) {
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 
-	agg := createTestAggregateWithType(t, "acc-1", "plan-1", contract.ContractTypeOneTime)
+	agg := createTestAggregateWithType(t, "acc-1", contract.ContractTypeOneTime)
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContextWithContract(subtotal, agg)
 
@@ -568,20 +570,19 @@ func TestCouponPlugin_SubtotalAfterDiscountUpdated(t *testing.T) {
 }
 
 // createTestAggregate creates a ContractAggregate via the Create command for testing.
-func createTestAggregate(t *testing.T, accountID shared.AccountID, planID shared.PlanID) *contract.ContractAggregate {
+func createTestAggregate(t *testing.T, accountID shared.AccountID) *contract.ContractAggregate {
 	t.Helper()
-	return createTestAggregateWithType(t, accountID, planID, contract.ContractTypeSubscription)
+	return createTestAggregateWithType(t, accountID, contract.ContractTypeSubscription)
 }
 
 // createTestAggregateWithType creates a ContractAggregate with a specific contract type.
-func createTestAggregateWithType(t *testing.T, accountID shared.AccountID, planID shared.PlanID, ct contract.ContractType) *contract.ContractAggregate {
+func createTestAggregateWithType(t *testing.T, accountID shared.AccountID, ct contract.ContractType) *contract.ContractAggregate {
 	t.Helper()
 	contractID := shared.NewContractID()
 	agg := contract.NewContractAggregate(contractID, testClock)
 	cmd := contract.CreateContractCommand{
 		IdempotencyKey: shared.GenerateID(),
 		AccountID:      accountID,
-		PlanID:         planID,
 		ContractType:   ct,
 		BillingCycle:   contract.BillingCycleMonthly,
 		Price:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),

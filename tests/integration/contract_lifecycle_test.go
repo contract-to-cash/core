@@ -24,7 +24,6 @@ func TestContractFullLifecycle(t *testing.T) {
 	// Step 1: Create → draft
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-lifecycle"),
-		PlanID:       shared.PlanID("plan-001"),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        moneyJPY(3000),
@@ -88,7 +87,6 @@ func TestTrialLifecycle(t *testing.T) {
 	// Create → draft
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-trial"),
-		PlanID:       shared.PlanID("plan-trial"),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        moneyJPY(1000),
@@ -127,7 +125,6 @@ func TestTrialLifecycleNotConverted(t *testing.T) {
 
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-trial-no"),
-		PlanID:       shared.PlanID("plan-trial"),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        moneyJPY(1000),
@@ -167,7 +164,6 @@ func TestEventReplayReconstructsState(t *testing.T) {
 	// Build up history: create → activate → suspend
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-replay"),
-		PlanID:       shared.PlanID("plan-replay"),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        moneyJPY(7500),
@@ -232,8 +228,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 		_ = agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID("acc-x"),
-			PlanID:       shared.PlanID("plan-x"),
-			ContractType: contract.ContractTypeSubscription,
+				ContractType: contract.ContractTypeSubscription,
 			BillingCycle: contract.BillingCycleMonthly,
 			Price:        moneyJPY(1000),
 			BasePrice:    moneyJPY(1000),
@@ -251,8 +246,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 		_ = agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID("acc-x"),
-			PlanID:       shared.PlanID("plan-x"),
-			ContractType: contract.ContractTypeSubscription,
+				ContractType: contract.ContractTypeSubscription,
 			BillingCycle: contract.BillingCycleMonthly,
 			Price:        moneyJPY(1000),
 			BasePrice:    moneyJPY(1000),
@@ -271,8 +265,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 		_ = agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID("acc-x"),
-			PlanID:       shared.PlanID("plan-x"),
-			ContractType: contract.ContractTypeSubscription,
+				ContractType: contract.ContractTypeSubscription,
 			BillingCycle: contract.BillingCycleMonthly,
 			Price:        moneyJPY(1000),
 			BasePrice:    moneyJPY(1000),

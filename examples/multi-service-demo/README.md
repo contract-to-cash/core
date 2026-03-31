@@ -1,16 +1,16 @@
 # Multi-Service Demo
 
-Shows how multiple independent service plugins coexist in a single billing system, each reacting only to its own contract types via PlanID-based filtering.
+Shows how multiple independent service plugins coexist in a single billing system, each reacting only to its own contract types via PriceID-based filtering.
 
 ## Scenario
 
 A hosting company selling 3 products:
 
-| Product | PlanID prefix | Plugin | Actions |
+| Product | PriceID prefix | Plugin | Actions |
 |---------|--------------|--------|---------|
-| VPS Server | `plan-vps-*` | ServerPlugin | Provision/stop/restart/terminate VM |
-| SSL Certificate | `plan-ssl-*` | SSLPlugin | Issue/suspend/reactivate/revoke cert |
-| Domain Name | `plan-domain-*` | DomainPlugin | Register/suspend/restore/release domain |
+| VPS Server | `price-vps-*` | ServerPlugin | Provision/stop/restart/terminate VM |
+| SSL Certificate | `price-ssl-*` | SSLPlugin | Issue/suspend/reactivate/revoke cert |
+| Domain Name | `price-domain-*` | DomainPlugin | Register/suspend/restore/release domain |
 
 ## What You'll See
 
@@ -39,11 +39,11 @@ Final:
 
 ## How It Works
 
-All three plugins are registered simultaneously. Every contract event is delivered to every plugin, but each plugin filters by PlanID prefix:
+All three plugins are registered simultaneously. Every contract event is delivered to every plugin, but each plugin filters by PriceID prefix:
 
 ```go
 func (p *ServerPlugin) handles(c *contract.ContractAggregate) bool {
-    return strings.HasPrefix(string(c.PlanID()), "plan-vps-")
+    return strings.HasPrefix(string(c.PriceID()), "price-vps-")
 }
 
 func (p *ServerPlugin) OnContractSuspend(ctx *plugin.Context, c *contract.ContractAggregate) error {
@@ -58,7 +58,7 @@ func (p *ServerPlugin) OnContractSuspend(ctx *plugin.Context, c *contract.Contra
 
 | Concept | Description |
 |---------|-------------|
-| **PlanID-based routing** | Each plugin filters events by PlanID prefix -- simple and explicit |
+| **PriceID-based routing** | Each plugin filters events by PriceID prefix -- simple and explicit |
 | **Single responsibility** | Each plugin handles exactly one service type |
 | **Zero coupling** | Plugins don't know about each other; billing core doesn't know about services |
 | **Additive extensibility** | New product = new plugin. No changes to existing code |

@@ -25,7 +25,7 @@ steps:
           body:
             application/json:
               account_id: "acc-coupon-001"
-              plan_id: "plan-premium"
+              product_id: "plan-premium"
               contract_type: "subscription"
               billing_cycle: "monthly"
               price: 10000
@@ -61,7 +61,7 @@ steps:
           body:
             application/json:
               account_id: "acc-coupon-002"
-              plan_id: "plan-basic"
+              product_id: "plan-basic"
               contract_type: "subscription"
               billing_cycle: "monthly"
               price: 5000

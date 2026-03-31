@@ -11,7 +11,7 @@ import (
 type CouponQuery struct {
 	ContractID shared.ContractID
 	AccountID  shared.AccountID
-	PlanID     shared.PlanID
+	ProductID  shared.ProductID
 	At         time.Time
 }
 

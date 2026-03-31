@@ -18,7 +18,6 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 	r.Register(&ContractResumedEvent{})
 	r.Register(&ContractCancelledEvent{})
 	r.Register(&PriceChangedEvent{})
-	r.Register(&PlanChangedEvent{})
 	r.Register(&TrialStartedEvent{})
 	r.Register(&TrialEndedEvent{})
 	r.Register(&PaymentMethodChangedEvent{})
@@ -35,7 +34,6 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 type CreateContractCommand struct {
 	IdempotencyKey string
 	AccountID      shared.AccountID
-	PlanID         shared.PlanID
 	PriceID        shared.PriceID
 	ContractType   ContractType
 	BillingCycle   BillingCycle
@@ -50,7 +48,6 @@ type ContractAggregate struct {
 
 	contractID        shared.ContractID
 	accountID         shared.AccountID
-	planID            shared.PlanID
 	status            ContractStatus
 	contractType      ContractType
 	billingCycle      BillingCycle
@@ -82,9 +79,6 @@ func (a *ContractAggregate) ContractID() shared.ContractID { return a.contractID
 
 // AccountID returns the account ID.
 func (a *ContractAggregate) AccountID() shared.AccountID { return a.accountID }
-
-// PlanID returns the plan ID.
-func (a *ContractAggregate) PlanID() shared.PlanID { return a.planID }
 
 // Status returns the current status.
 func (a *ContractAggregate) Status() ContractStatus { return a.status }
@@ -157,7 +151,6 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 	event := &ContractCreatedEvent{
 		ContractID:   a.contractID,
 		AccountID:    cmd.AccountID,
-		PlanID:       cmd.PlanID,
 		PriceID:      cmd.PriceID,
 		Price:        cmd.Price,
 		BasePrice:    cmd.BasePrice,
@@ -499,7 +492,6 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *ContractCreatedEvent:
 		a.contractID = e.ContractID
 		a.accountID = e.AccountID
-		a.planID = e.PlanID
 		a.priceID = e.PriceID
 		a.price = e.Price
 		a.basePrice = e.BasePrice
@@ -550,10 +542,6 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *PriceChangeUnscheduledEvent:
 		a.pendingPriceID = nil
 		a.updatedAt = e.UnscheduledAt
-
-	case *PlanChangedEvent:
-		a.planID = e.NewPlanID
-		a.updatedAt = e.ChangedAt
 
 	case *TrialStartedEvent:
 		a.status = ContractStatusTrialing
@@ -607,7 +595,6 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 	state := contractSnapshotState{
 		ContractID:        a.contractID,
 		AccountID:         a.accountID,
-		PlanID:            a.planID,
 		Status:            a.status,
 		ContractType:      a.contractType,
 		BillingCycle:      a.billingCycle,
@@ -655,7 +642,6 @@ func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error {
 type contractSnapshotState struct {
 	ContractID        shared.ContractID        `json:"contract_id"`
 	AccountID         shared.AccountID         `json:"account_id"`
-	PlanID            shared.PlanID            `json:"plan_id"`
 	Status            ContractStatus           `json:"status"`
 	ContractType      ContractType             `json:"contract_type"`
 	BillingCycle      BillingCycle             `json:"billing_cycle"`
@@ -683,7 +669,6 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 
 	a.contractID = state.ContractID
 	a.accountID = state.AccountID
-	a.planID = state.PlanID
 	a.status = state.Status
 	a.contractType = state.ContractType
 	a.billingCycle = state.BillingCycle

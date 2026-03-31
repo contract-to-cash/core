@@ -77,17 +77,17 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 
 	contr := ctx.Contract()
 	var accountID shared.AccountID
-	var planID shared.PlanID
+	var productID shared.ProductID
 	if contr != nil {
 		accountID = contr.AccountID()
-		planID = contr.PlanID()
+		productID = ctx.ProductID()
 	}
 
 	// 1. Find applicable coupons with full query context
 	coupons, err := p.repo.FindApplicable(ctx.Context(), CouponQuery{
 		ContractID: ctx.ContractID(),
 		AccountID:  accountID,
-		PlanID:     planID,
+		ProductID:  productID,
 		At:         p.clock.Now(),
 	})
 	if err != nil {
@@ -98,12 +98,12 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		return zero, nil
 	}
 
-	// 2. Filter coupons by plan, contract type, and account restrictions.
+	// 2. Filter coupons by product, contract type, and account restrictions.
 	// This is applied defensively in the plugin even though the repository may also filter,
 	// because the repository filtering is optional (depends on implementation).
 	var filtered []*Coupon
 	for _, c := range coupons {
-		if !c.IsApplicableToPlan(planID) {
+		if !c.IsApplicableToProduct(productID) {
 			continue
 		}
 		// Contract type check is skipped when contract is nil (e.g., standalone coupon validation).

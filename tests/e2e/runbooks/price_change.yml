@@ -9,7 +9,7 @@ steps:
           body:
             application/json:
               account_id: "acc-price-001"
-              plan_id: "plan-basic"
+              product_id: "plan-basic"
               contract_type: "subscription"
               billing_cycle: "monthly"
               price: 5000

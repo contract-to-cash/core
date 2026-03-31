@@ -19,8 +19,8 @@ func TestPriceChangedEventUpcaster_CanUpcast(t *testing.T) {
 	if u.CanUpcast(EventTypePriceChanged, 2) {
 		t.Error("expected CanUpcast=false for PriceChanged v2")
 	}
-	if u.CanUpcast(EventTypePlanChanged, 1) {
-		t.Error("expected CanUpcast=false for PlanChanged")
+	if u.CanUpcast(EventTypeContractCancelled, 1) {
+		t.Error("expected CanUpcast=false for ContractCancelled")
 	}
 }
 
@@ -184,7 +184,6 @@ func TestContractUpcasterChain_Integration(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        oldPrice,
 		BasePrice:    oldPrice,
 		BillingCycle: BillingCycleMonthly,
@@ -213,7 +212,6 @@ func TestLoadFromHistory_UpcastsV1PriceChangedEvent(t *testing.T) {
 	createData, _ := json.Marshal(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		PriceID:      shared.PriceID("price-001"),
 		Price:        shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY),

@@ -2,9 +2,9 @@
 // in a single billing system, each reacting only to its own contract types.
 //
 // Scenario: A hosting company that sells 3 products:
-//   - VPS servers   (plan-vps-*)     -> ServerPlugin provisions/stops VMs
-//   - SSL certs     (plan-ssl-*)     -> SSLPlugin issues/revokes certificates
-//   - Domain names  (plan-domain-*)  -> DomainPlugin registers/suspends domains
+//   - VPS servers   (price-vps-*)     -> ServerPlugin provisions/stops VMs
+//   - SSL certs     (price-ssl-*)     -> SSLPlugin issues/revokes certificates
+//   - Domain names  (price-domain-*)  -> DomainPlugin registers/suspends domains
 //
 // All three plugins are registered simultaneously. When a contract event fires,
 // every plugin receives it but only the relevant one acts -- the others skip.
@@ -57,9 +57,9 @@ func main() {
 	}))
 
 	printSection("Registered Plugins (all receive every event)")
-	fmt.Println("  - server-provision  (handles plan-vps-*)")
-	fmt.Println("  - ssl-cert          (handles plan-ssl-*)")
-	fmt.Println("  - domain-reg        (handles plan-domain-*)")
+	fmt.Println("  - server-provision  (handles price-vps-*)")
+	fmt.Println("  - ssl-cert          (handles price-ssl-*)")
+	fmt.Println("  - domain-reg        (handles price-domain-*)")
 	fmt.Println()
 
 	metadata := eventstore.EventMetadata{UserID: "customer-tanaka"}
@@ -75,7 +75,7 @@ func main() {
 	vpsID := shared.NewContractID()
 	vps := contract.NewContractAggregate(vpsID, clock)
 	must("create vps", vps.Create(contract.CreateContractCommand{
-		AccountID: accountID, PlanID: "plan-vps-standard",
+		AccountID: accountID, PriceID: "price-vps-standard",
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        moneyJPY(5000), BasePrice: moneyJPY(5000),
@@ -89,7 +89,7 @@ func main() {
 	sslID := shared.NewContractID()
 	ssl := contract.NewContractAggregate(sslID, clock)
 	must("create ssl", ssl.Create(contract.CreateContractCommand{
-		AccountID: accountID, PlanID: "plan-ssl-wildcard",
+		AccountID: accountID, PriceID: "price-ssl-wildcard",
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleYearly,
 		Price:        moneyJPY(20000), BasePrice: moneyJPY(20000),
@@ -103,7 +103,7 @@ func main() {
 	domID := shared.NewContractID()
 	dom := contract.NewContractAggregate(domID, clock)
 	must("create domain", dom.Create(contract.CreateContractCommand{
-		AccountID: accountID, PlanID: "plan-domain-jp",
+		AccountID: accountID, PriceID: "price-domain-jp",
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleYearly,
 		Price:        moneyJPY(1500), BasePrice: moneyJPY(1500),
@@ -128,7 +128,7 @@ func main() {
 	fireSuspendHooks(registry, ctx, vps)
 
 	fmt.Println()
-	fmt.Println("  Note: SSL and Domain are unaffected -- plugins filter by PlanID")
+	fmt.Println("  Note: SSL and Domain are unaffected -- plugins filter by PriceID")
 
 	// ═══════════════════════════════════════
 	// VPS payment retried -> VPS resumed
@@ -167,7 +167,7 @@ func main() {
 	ssl, _ = contractRepo.FindByID(ctx, sslID)
 	dom, _ = contractRepo.FindByID(ctx, domID)
 
-	fmt.Printf("  %-20s %-12s %s\n", "Product", "Status", "Plan")
+	fmt.Printf("  %-20s %-12s %s\n", "Product", "Status", "PriceID")
 	fmt.Printf("  %s\n", strings.Repeat("-", 50))
 	printContractStatus("VPS Server", vps)
 	printContractStatus("SSL Certificate", ssl)
@@ -179,10 +179,10 @@ func main() {
 	}
 
 	printSection("How It Works")
-	fmt.Println("  Each plugin checks PlanID prefix before acting:")
+	fmt.Println("  Each plugin checks PriceID prefix before acting:")
 	fmt.Println()
 	fmt.Println("    func (p *ServerPlugin) OnContractSuspend(ctx, c) error {")
-	fmt.Println("        if !strings.HasPrefix(c.PlanID(), \"plan-vps-\") {")
+	fmt.Println("        if !strings.HasPrefix(string(c.PriceID()), \"price-vps-\") {")
 	fmt.Println("            return nil  // not my responsibility")
 	fmt.Println("        }")
 	fmt.Println("        return p.stopServer(c)  // only VPS contracts")
@@ -197,7 +197,7 @@ func main() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Service Plugins -- each filters by PlanID prefix
+// Service Plugins -- each filters by PriceID prefix
 // ═══════════════════════════════════════════════════════════════════
 
 // ── Server Provisioning Plugin ──
@@ -221,15 +221,15 @@ func (p *serverProvisionPlugin) Initialize(_ context.Context, cfg plugin.Config)
 func (p *serverProvisionPlugin) Shutdown(_ context.Context) error { return nil }
 
 func (p *serverProvisionPlugin) handles(c *contract.ContractAggregate) bool {
-	return strings.HasPrefix(string(c.PlanID()), "plan-vps-")
+	return strings.HasPrefix(string(c.PriceID()), "price-vps-")
 }
 
 func (p *serverProvisionPlugin) OnContractActivate(ctx *plugin.Context, c *contract.ContractAggregate) error {
 	if !p.handles(c) {
 		return nil
 	}
-	msg := fmt.Sprintf("[Server] PROVISIONED VM for %s (plan: %s) -- allocating CPU/RAM/disk",
-		c.ContractID(), c.PlanID())
+	msg := fmt.Sprintf("[Server] PROVISIONED VM for %s (price: %s) -- allocating CPU/RAM/disk",
+		c.ContractID(), c.PriceID())
 	p.log.Add(c.UpdatedAt(), msg)
 	fmt.Printf("  🟢 %s\n", msg)
 	return nil
@@ -293,15 +293,15 @@ func (p *sslCertPlugin) Initialize(_ context.Context, cfg plugin.Config) error {
 func (p *sslCertPlugin) Shutdown(_ context.Context) error { return nil }
 
 func (p *sslCertPlugin) handles(c *contract.ContractAggregate) bool {
-	return strings.HasPrefix(string(c.PlanID()), "plan-ssl-")
+	return strings.HasPrefix(string(c.PriceID()), "price-ssl-")
 }
 
 func (p *sslCertPlugin) OnContractActivate(ctx *plugin.Context, c *contract.ContractAggregate) error {
 	if !p.handles(c) {
 		return nil
 	}
-	msg := fmt.Sprintf("[SSL] ISSUED certificate for %s (plan: %s) -- generating key pair, validating domain",
-		c.ContractID(), c.PlanID())
+	msg := fmt.Sprintf("[SSL] ISSUED certificate for %s (price: %s) -- generating key pair, validating domain",
+		c.ContractID(), c.PriceID())
 	p.log.Add(c.UpdatedAt(), msg)
 	fmt.Printf("  🔒 %s\n", msg)
 	return nil
@@ -361,15 +361,15 @@ func (p *domainRegPlugin) Initialize(_ context.Context, cfg plugin.Config) error
 func (p *domainRegPlugin) Shutdown(_ context.Context) error { return nil }
 
 func (p *domainRegPlugin) handles(c *contract.ContractAggregate) bool {
-	return strings.HasPrefix(string(c.PlanID()), "plan-domain-")
+	return strings.HasPrefix(string(c.PriceID()), "price-domain-")
 }
 
 func (p *domainRegPlugin) OnContractActivate(ctx *plugin.Context, c *contract.ContractAggregate) error {
 	if !p.handles(c) {
 		return nil
 	}
-	msg := fmt.Sprintf("[Domain] REGISTERED domain for %s (plan: %s) -- WHOIS updated, DNS zone created",
-		c.ContractID(), c.PlanID())
+	msg := fmt.Sprintf("[Domain] REGISTERED domain for %s (price: %s) -- WHOIS updated, DNS zone created",
+		c.ContractID(), c.PriceID())
 	p.log.Add(c.UpdatedAt(), msg)
 	fmt.Printf("  🌐 %s\n", msg)
 	return nil
@@ -487,5 +487,5 @@ func printContractStatus(name string, c *contract.ContractAggregate) {
 		contract.ContractStatusCancelled: "⚫",
 		contract.ContractStatusDraft:     "⚪",
 	}[c.Status()]
-	fmt.Printf("  %s %-20s %-12s %s\n", icon, name, c.Status(), c.PlanID())
+	fmt.Printf("  %s %-20s %-12s %s\n", icon, name, c.Status(), c.PriceID())
 }

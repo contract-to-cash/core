@@ -13,7 +13,7 @@ These examples demonstrate the library's key capabilities. Each example is a sta
 | [plugin-pipeline-demo](plugin-pipeline-demo/) | Extensible plugin system | Discount/tax hooks, priority ordering, custom plugins |
 | [lifecycle-demo](lifecycle-demo/) | Contract lifecycle & credits | Trial, suspend/resume, cancel, FIFO credit application |
 | [hosting-integration-demo](hosting-integration-demo/) | External service integration | Server provisioning/suspension via lifecycle hooks |
-| [multi-service-demo](multi-service-demo/) | Multiple service types | PlanID-based plugin routing for VPS/SSL/Domain |
+| [multi-service-demo](multi-service-demo/) | Multiple service types | PriceID-based plugin routing for VPS/SSL/Domain |
 | [pricing-models-demo](pricing-models-demo/) | Flexible pricing | Flat, graduated tiered, volume tiered, usage-based |
 
 ## Prerequisites
@@ -40,7 +40,7 @@ go run ./examples/pricing-models-demo/
 3. **plugin-pipeline-demo** -- Understand how the plugin system composes discount, tax, and lifecycle hooks with priority control.
 4. **lifecycle-demo** -- Explore the full contract lifecycle (trial periods, suspension, credit management).
 5. **hosting-integration-demo** -- See how billing events drive external service provisioning (the "so what?" of this library).
-6. **multi-service-demo** -- See how multiple service types (VPS, SSL, Domain) coexist via PlanID-based plugin routing.
+6. **multi-service-demo** -- See how multiple service types (VPS, SSL, Domain) coexist via PriceID-based plugin routing.
 7. **pricing-models-demo** -- Compare different pricing models side by side (flat, tiered, usage-based).
 
 ## Architecture Overview

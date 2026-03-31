@@ -76,7 +76,7 @@ func main() {
     cID := shared.NewContractID()
     agg := contract.NewContractAggregate(cID, clock)
     agg.Create(contract.CreateContractCommand{
-        AccountID: shared.AccountID("acct-001"), PlanID: shared.PlanID("plan-std"),
+        AccountID: shared.AccountID("acct-001"),
         PriceID: pe.ID(), ContractType: contract.ContractTypeSubscription,
         BillingCycle: contract.BillingCycleMonthly, Price: price, BasePrice: price,
     }, eventstore.EventMetadata{UserID: "system"})
