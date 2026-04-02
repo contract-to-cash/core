@@ -140,18 +140,7 @@ Payment processing follows a two-phase approach:
 1. **Charge flow**: `ProcessPayment` → BeforeChargeHook → Gateway.Charge → AfterChargeHook
 2. **Auth/Capture flow**: Authorize → Capture (for payment-gated provisioning)
 
-Payment method resolution uses a hierarchical fallback:
-
-```
-Explicit PaymentMethodID (in ProcessPaymentInput)
-  → Invoice.PaymentMethodID
-    → Contract.PaymentMethodID
-      → Customer.DefaultPaymentMethodID
-```
-
-:::note
-The Contract and Customer fallback levels require `contractRepo` to be passed to `PaymentService`. If omitted, resolution stops at Invoice level.
-:::
+Payment method resolution uses a hierarchical fallback (Explicit → Invoice → Contract → Customer). See [Payment Gateway](./concepts/payment-gateway#payment-method-fallback-resolution) for details.
 
 ## Design Decisions
 

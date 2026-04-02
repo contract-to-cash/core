@@ -17,7 +17,7 @@ Contract Billing Core provides these building blocks as a composable library, no
 
 - **Event Sourcing** — Every state change is recorded as an immutable event. Reconstruct any entity's state at any point in time. Full audit trail out of the box.
 - **Plugin Architecture** — Extend billing logic through well-defined hooks: discounts, taxes, invoice lifecycle, contract lifecycle, payment processing, and metrics collection. Implement only the interfaces you need (ISP-compliant).
-- **Product/Price Separation** — Following the Stripe model, products (what you sell) and prices (how you charge) are separate entities. Prices are immutable — price revisions create new Price objects, enabling grandfathering and clean migrations.
+- **Product/Price Separation** — Products (what you sell) and prices (how you charge) are separate, immutable entities. See [Architecture](./architecture#productprice-model) for details.
 - **Multiple Billing Models** — One-time purchases, recurring subscriptions, and usage-based billing. Supports flat pricing, tiered pricing, volume pricing, and per-contract overrides.
 - **Contract Renewal** — Automatic renewal with pending price promotion. Schedule price changes for end-of-term with `pendingPriceID`, or apply immediately with proration.
 - **Payment Gateway Abstraction** — Pluggable interface for charge, authorize/capture, void, refund, and payment method management. Hierarchical fallback resolution (Invoice → Contract → Customer).

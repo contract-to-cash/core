@@ -44,70 +44,41 @@ type Event struct {
     OccurredAt    time.Time        // Business time
     RecordedAt    time.Time        // System time
 }
-
-type EventMetadata struct {
-    UserID        string   // Who performed the action
-    CorrelationID string   // Request tracing
-    CausationID   string   // Causal event chain
-    IPAddress     *string  // Optional
-    UserAgent     *string  // Optional
-}
 ```
+
+- **OccurredAt** is the business time (when the action happened)
+- **RecordedAt** is the system time (when the event was persisted)
+- **SchemaVersion** enables event schema evolution via the Upcaster pattern
 
 ## Temporal Queries
 
-Query contract state at any past point in time:
+You can reconstruct contract state at any past point in time. This enables billing dispute investigation, regulatory audits, and debugging.
 
 ```go
 queryService := query.NewTemporalQueryService(eventStore, clock)
-
-// What was the contract state on May 15th?
 historical, _ := queryService.GetContractAsOf(ctx, contractID, may15th)
 historical.Status() // "active"
 historical.Price()  // ¥3,000 (before the price change)
-
-// Full change history
-history, _ := queryService.GetContractHistory(ctx, contractID)
-for _, entry := range history {
-    fmt.Printf("%s: %s (by %s)\n", entry.OccurredAt, entry.EventType, entry.UserID)
-}
 ```
+
+> For detailed usage and examples, see [Temporal Queries Guide](../guides/temporal-queries.md) and [Event Sourcing Demo](../examples/event-sourcing-demo.md).
 
 ## Snapshots
 
-For aggregates with many events, snapshots speed up loading:
+For aggregates with many events, snapshots avoid replaying the entire event history:
 
 ```go
-snapshotService := service.NewSnapshotService(eventStore, clock, snapshotInterval)
+snapshotService := service.NewSnapshotService(eventStore, clock, 100) // every 100 events
 
-// Save a snapshot of the current state
-snapshotService.CreateSnapshot(ctx, agg)
-
-// Load uses snapshot + recent events (instead of all events)
+// Loading uses: snapshot state + only events after the snapshot
 snap, _ := eventStore.LoadSnapshot(ctx, string(contractID))
 agg.LoadFromSnapshot(*snap)
-// Then replay only events after the snapshot version
+// Then replay only events since the snapshot
 ```
 
-## Event Store Interface
+## Optimistic Locking
 
-Implement this interface for your database:
-
-```go
-type Store interface {
-    Append(ctx context.Context, streamID string, events []Event, expectedVersion int) error
-    Load(ctx context.Context, streamID string) ([]Event, error)
-    LoadUntilVersion(ctx context.Context, streamID string, version int) ([]Event, error)
-    LoadUntil(ctx context.Context, streamID string, until time.Time) ([]Event, error)
-    LoadRange(ctx context.Context, streamID string, from, to time.Time) ([]Event, error)
-    Subscribe(ctx context.Context, fromPosition int64) (<-chan Event, error)
-    SaveSnapshot(ctx context.Context, snapshot Snapshot) error
-    LoadSnapshot(ctx context.Context, streamID string) (*Snapshot, error)
-    LoadSnapshotBefore(ctx context.Context, streamID string, before time.Time) (*Snapshot, error)
-}
-```
-
-Optimistic locking via `expectedVersion` prevents concurrent write conflicts.
+Concurrent write conflicts are detected via `expectedVersion` in the Event Store's `Append` method. If another process has written events since you loaded the aggregate, the append fails with a version conflict error.
 
 ## Contract Events
 
@@ -128,19 +99,12 @@ Optimistic locking via `expectedVersion` prevents concurrent write conflicts.
 
 ## Projections
 
-Use the projection service to build read-optimized views from events:
+Projections build read-optimized views by subscribing to the event stream. You can choose synchronous (in-process) or asynchronous (background) updates.
 
-```go
-type Projector interface {
-    Project(ctx context.Context, event eventstore.Event) error
-    Rebuild(ctx context.Context, until time.Time) error
-}
+> For the complete Event Store and Projection API, see [Event Store Reference](../api/event-store.md).
 
-projectionService := projection.NewProjectionService(eventStore, projection.ProjectionOptions{
-    SyncMode:   true,
-    BatchSize:  100,
-    MaxRetries: 3,
-})
-projectionService.RegisterProjector(myProjector)
-projectionService.Start(ctx)
-```
+## Next Steps
+
+- [Event Store Reference](../api/event-store.md) — Store interface, BaseAggregate, EventRegistry, Upcaster
+- [Temporal Queries Guide](../guides/temporal-queries.md) — Detailed usage with code examples
+- [Event Sourcing Demo](../examples/event-sourcing-demo.md) — Runnable time-travel demonstration

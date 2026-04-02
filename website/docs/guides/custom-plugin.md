@@ -201,12 +201,6 @@ func (p *MetricsPlugin) OnPaymentProcessed(ctx *plugin.Context, pay *payment.Pay
 
 ## Plugin Execution Order
 
-During invoice generation, plugins execute in this order:
+The core guarantees the invoice generation pipeline order structurally (Discount → Tax → Total). Priority only controls execution within the same hook type.
 
-1. **InvoiceLifecycleHook.BeforeCalculation** (priority-ordered)
-2. Calculate subtotal
-3. **DiscountHook.CalculateDiscount** (priority-ordered, multiple)
-4. Cap discounts
-5. **TaxHook.CalculateTax** (priority-ordered)
-6. Create invoice
-7. **InvoiceLifecycleHook.AfterCalculation** (priority-ordered)
+> For the complete pipeline diagram, see [Plugin System — Invoice Generation Pipeline](../concepts/plugin-system.md#invoice-generation-pipeline).
