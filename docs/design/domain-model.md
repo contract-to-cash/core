@@ -1,5 +1,208 @@
 # ドメインモデル設計
 
+## 論理データモデル図
+
+```mermaid
+erDiagram
+    Account ||--o{ Contract : "holds"
+    Account ||--o{ BalanceEntry : "owns"
+    Product ||--o{ Price : "priced by"
+    Product ||--o{ Feature : "includes"
+    Product ||--o{ UsageMetric : "tracks"
+    Contract ||--o{ Invoice : "generates"
+    Contract ||--o{ UsageRecord : "records"
+    Contract ||--o| TrialConfiguration : "trial config"
+    Contract ||--o| SuspensionConfiguration : "suspension config"
+    Invoice ||--o{ LineItem : "contains"
+    Invoice ||--o{ CreditNote : "adjusted by"
+    Invoice ||--o{ Payment : "paid by"
+    CreditNote ||--o{ CreditNoteItem : "contains"
+    Invoice ||--o| Invoice : "revision of"
+
+    Account {
+        AccountID id PK
+    }
+
+    Product {
+        ProductID id PK
+        string name
+        string description
+        ProductStatus status "active | archived"
+        map metadata
+        timestamp createdAt
+    }
+
+    Feature {
+        string name
+        bool included
+        int64 limit "optional"
+    }
+
+    UsageMetric {
+        string name
+        int64 includedQuantity
+    }
+
+    Price {
+        PriceID id PK
+        ProductID productID FK
+        Money amount
+        Currency currency
+        BillingCycle billingCycle "daily | weekly | monthly | yearly"
+        PricingModel pricingModel "flat | tiered | usage"
+        PriceStatus status "active | archived"
+        timestamp createdAt
+    }
+
+    Contract {
+        ContractID id PK
+        AccountID accountID FK
+        PlanID planID FK "legacy: ProductID"
+        PriceID priceID FK
+        ContractStatus status "draft | trialing | active | past_due | suspended | cancelled | expired"
+        ContractType contractType "one_time | subscription | usage_based"
+        BillingCycle billingCycle
+        DateRange currentPeriod
+        Money price
+        Money basePrice
+        bool autoRenew
+        bool cancelAtPeriodEnd
+        PriceID pendingPriceID "optional"
+        string paymentMethodID "optional"
+        map metadata
+        int version
+        timestamp createdAt
+        timestamp updatedAt
+    }
+
+    TrialConfiguration {
+        timestamp trialEndDate
+        bool autoConvert
+        bool requirePaymentMethod
+        int_array conversionReminderDays
+    }
+
+    SuspensionConfiguration {
+        timestamp suspendedAt
+        timestamp resumeDate "optional"
+        SuspensionBillingBehavior billingBehavior "skip | defer | continue"
+        bool extendContract
+        string reason
+    }
+
+    Invoice {
+        InvoiceID id PK
+        string invoiceNumber
+        AccountID accountID FK
+        ContractID contractID FK
+        InvoiceStatus status "draft | finalized | issued | paid | partial_paid | overdue | voided | refunded"
+        Money subtotal
+        Money taxAmount
+        Money discountAmount
+        Money total
+        Money appliedBalance
+        Money amountDue
+        Money paidAmount
+        Money balance
+        DateRange billingPeriod
+        bool allowPartialPay
+        string paymentMethodID "optional"
+        InvoiceID originalInvoiceID "optional: revision chain root"
+        InvoiceID revisionOf "optional: direct parent"
+        string voidReason "optional"
+        map metadata
+        timestamp issueDate "optional"
+        timestamp dueDate
+        timestamp paidAt "optional"
+    }
+
+    LineItem {
+        string id PK
+        string description
+        int64 quantity
+        Money unitPrice
+        Money amount
+        Decimal taxRate "*big.Rat"
+        PriceID priceID FK "optional"
+        map metadata
+    }
+
+    Payment {
+        PaymentID id PK
+        InvoiceID invoiceID FK
+        Money amount
+        Money refundedAmount
+        PaymentMethod method "credit_card | bank_transfer | direct_debit | convenience_store | carrier"
+        PaymentStatus status "pending | completed | failed | partially_refunded | refunded | charged_back"
+        string gatewayTransactionID
+        string idempotencyKey
+        string failureReason "optional"
+        map metadata
+        timestamp processedAt
+    }
+
+    BalanceEntry {
+        BalanceEntryID id PK
+        AccountID accountID FK
+        Money originalAmount
+        Money remainingAmount
+        BalanceReason reason "proration | cancellation | manual_adjustment | refund_conversion | goodwill"
+        string sourceType "optional"
+        string sourceID "optional"
+        string description
+        int version "optimistic lock"
+        timestamp expiresAt "optional"
+        timestamp createdAt
+    }
+
+    UsageRecord {
+        UsageRecordID id PK
+        ContractID contractID FK
+        string metricName
+        int64 quantity
+        string idempotencyKey
+        timestamp timestamp
+        map metadata
+    }
+
+    UsageSummary {
+        ContractID contractID FK
+        string metricName
+        DateRange period
+        int64 totalUsage
+    }
+
+    CreditNote {
+        CreditNoteID id PK
+        string number
+        InvoiceID invoiceID FK
+        AccountID accountID FK
+        ContractID contractID FK
+        CreditNoteStatus status "draft | issued | applied | refunded | voided"
+        CreditNoteReason reason "duplicate | order_change | cancellation | product_unsatisfactory | other"
+        string memo
+        Money subtotal
+        Money taxAmount
+        Money total
+        Money creditAmount
+        Money refundAmount
+        timestamp issuedAt "optional"
+        timestamp createdAt
+    }
+
+    CreditNoteItem {
+        string invoiceLineItemID FK
+        string description
+        Money amount
+        Decimal taxRate "*big.Rat"
+        Money taxAmount
+    }
+```
+
+> **凡例:** Account は外部境界（このドメイン外で管理）。Contract はイベントソーシング集約根（`ContractAggregate`）。
+> Money は `big.Rat` ベースの値オブジェクト、Decimal は `*big.Rat`、ID は ULID で生成。
+> TrialConfiguration / SuspensionConfiguration / UsageSummary は値オブジェクト（独立した永続化IDを持たない）。
+
 ## 1. 共通値オブジェクト
 
 ### 1.1 Money（金額）
