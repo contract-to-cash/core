@@ -14,23 +14,9 @@ This guide explains how to integrate Contract Billing Core into your service.
 
 ## Step 1: Implement Repository Interfaces
 
-Contract Billing Core defines repository interfaces in the domain layer. You implement them for your database:
+Contract Billing Core defines repository interfaces in the domain layer. You implement them for your database: `contract.Repository`, `invoice.Repository`, `payment.Repository`, `balance.Repository`, `usage.Repository`, `pricing.PriceRepository`, and `product.Repository`.
 
-```go
-// domain/contract/repository.go
-type Repository interface {
-    Save(ctx context.Context, aggregate *ContractAggregate) error
-    FindByID(ctx context.Context, id shared.ContractID) (*ContractAggregate, error)
-    FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*ContractAggregate, error)
-    FindActiveByPlanID(ctx context.Context, planID shared.PlanID) ([]*ContractAggregate, error)
-    FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
-    FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
-    FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)
-    FindDueForRenewal(ctx context.Context, asOf time.Time) ([]*ContractAggregate, error)
-}
-```
-
-Similarly for `invoice.Repository`, `payment.Repository`, `balance.Repository`, `usage.Repository`, `pricing.PriceRepository`, and `product.Repository`.
+> See [Domain Types Reference](../api/domain-types.md) for complete interface definitions.
 
 ### Example: PostgreSQL Contract Repository
 

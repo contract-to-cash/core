@@ -45,7 +45,7 @@ Snapshot + replay: 3 events (snapshot at v3 + 3 remaining)
 
 ## Key Takeaways
 
-- Every state change is recorded as an immutable event
 - `GetContractAsOf` reconstructs state at any past time
 - Snapshots dramatically reduce replay cost for long-lived aggregates
-- Full audit trail shows who changed what and when
+
+> For concepts and API details, see [Event Sourcing](../concepts/event-sourcing.md) and [Temporal Queries Guide](../guides/temporal-queries.md).
