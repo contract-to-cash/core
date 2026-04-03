@@ -181,6 +181,104 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	})
 }
 
+// RegenerateInvoice regenerates an invoice for a contract and billing period.
+// Unlike GenerateInvoice, it permits invoice generation for contracts suspended
+// with SuspensionBillingDefer, provided a voided invoice already exists for the
+// same period. This supports the void-and-recreate workflow (e.g., applying a
+// coupon during Payment-Gated Provisioning without polluting the event store
+// with spurious Resume/Suspend events).
+//
+// SuspensionBillingSkip still blocks — skip means no billing at all.
+// SuspensionBillingContinue is allowed (continue means billing proceeds normally).
+// Contracts in non-billable statuses (cancelled, expired) are also blocked.
+//
+// The regenerated invoice is linked to the voided invoice via RevisionOf/OriginalInvoiceID
+// to maintain the audit trail.
+func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) (*invoice.Invoice, error) {
+	// Load contract aggregate
+	agg, err := s.contractRepo.FindByID(ctx, contractID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load contract: %w", err)
+	}
+
+	// Status guard: same as GenerateInvoice
+	if !billableStatuses[agg.Status()] {
+		return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("cannot regenerate invoice: contract status is %s", agg.Status()))
+	}
+
+	// Suspended contracts: SuspensionBillingSkip always blocks.
+	// SuspensionBillingDefer and SuspensionBillingContinue are permitted
+	// (Defer only if a voided invoice exists, checked below; Continue always allowed).
+	if agg.Status() == contract.ContractStatusSuspended {
+		cfg := agg.SuspensionConfig()
+		if cfg == nil || cfg.BillingBehavior == contract.SuspensionBillingSkip {
+			return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+				"cannot regenerate invoice: billing is skipped during suspension")
+		}
+	}
+
+	// Fetch existing invoices for the period once — used for both voided-check
+	// and duplicate prevention (avoids a redundant FindByContractAndPeriod call).
+	existing, err := s.invoiceRepo.FindByContractAndPeriod(ctx, contractID, billingPeriod)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check existing invoices: %w", err)
+	}
+
+	// Require a voided invoice for the same period — this distinguishes regeneration
+	// from net-new invoice creation and prevents misuse as a bypass.
+	// Use the last voided invoice found so that the revision chain links to the
+	// most recently voided entry (important when void-and-recreate runs more than once).
+	var voidedInv *invoice.Invoice
+	for _, inv := range existing {
+		if inv.Status() == invoice.InvoiceStatusVoided {
+			voidedInv = inv
+		}
+	}
+	if voidedInv == nil {
+		return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"cannot regenerate invoice: no voided invoice found for this period")
+	}
+
+	// Inline duplicate check: reject if a non-voided invoice already exists for
+	// this period (same logic as checkDuplicateInvoice for subscription/usage-based,
+	// but using the already-fetched existing slice).
+	for _, inv := range existing {
+		if inv.Status() != invoice.InvoiceStatusVoided {
+			return nil, shared.NewDomainError(shared.ErrCodeConflict,
+				"invoice already exists for this billing period")
+		}
+	}
+
+	// Calculate subtotal based on contract type
+	subtotal, lineItems, err := s.calculateSubtotal(ctx, agg, billingPeriod)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate subtotal: %w", err)
+	}
+
+	// Build revision chain: link the regenerated invoice to the voided original.
+	// If the voided invoice itself was a revision, preserve the original chain root.
+	var extraOpts []invoice.InvoiceOption
+	extraOpts = append(extraOpts, invoice.WithRevisionOf(voidedInv.ID()))
+	if orig := voidedInv.OriginalInvoiceID(); orig != nil {
+		extraOpts = append(extraOpts, invoice.WithOriginalInvoiceID(*orig))
+	} else {
+		extraOpts = append(extraOpts, invoice.WithOriginalInvoiceID(voidedInv.ID()))
+	}
+	extraOpts = append(extraOpts, invoice.WithMetadata(map[string]string{
+		"invoice_type": "regeneration",
+	}))
+
+	return s.executeBillingPipeline(ctx, pipelineInput{
+		agg:        agg,
+		contractID: contractID,
+		subtotal:   subtotal,
+		lineItems:  lineItems,
+		period:     billingPeriod,
+		extraOpts:  extraOpts,
+	})
+}
+
 // GenerateProrationInvoice generates an invoice for a proration adjustment.
 // It runs the full billing pipeline (discount hooks, tax hooks, credit application,
 // lifecycle hooks) on the proration amount, unlike direct invoice.NewInvoice construction.
