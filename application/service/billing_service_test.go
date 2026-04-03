@@ -1537,6 +1537,59 @@ func assertDomainError(t *testing.T, err error, expectedCode shared.ErrorCode) {
 	}
 }
 
+func TestRegenerateInvoice_RevisionChainDepth2_PreservesOriginalID(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	// Simulate a second void-and-recreate cycle:
+	// original (voided) -> first regeneration (voided) -> second regeneration (under test)
+	originalID := shared.NewInvoiceID()
+	firstRegenID := shared.NewInvoiceID()
+
+	// The first voided invoice (the original)
+	voidedOriginal := invoice.NewInvoice(
+		originalID, agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+
+	// The second voided invoice (first regeneration, now also voided)
+	voidedRegen := invoice.NewInvoice(
+		firstRegenID, agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+		invoice.WithRevisionOf(originalID),
+		invoice.WithOriginalInvoiceID(originalID),
+	)
+
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedOriginal, voidedRegen}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	inv, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// RevisionOf should point to the latest voided invoice (voidedRegen), not the original
+	if inv.RevisionOf() == nil {
+		t.Fatal("expected RevisionOf to be set")
+	}
+	if *inv.RevisionOf() != firstRegenID {
+		t.Errorf("expected RevisionOf %s (latest voided), got %s", firstRegenID, *inv.RevisionOf())
+	}
+
+	// OriginalInvoiceID should be preserved from the voided invoice's chain root
+	if inv.OriginalInvoiceID() == nil {
+		t.Fatal("expected OriginalInvoiceID to be set")
+	}
+	if *inv.OriginalInvoiceID() != originalID {
+		t.Errorf("expected OriginalInvoiceID %s (chain root), got %s", originalID, *inv.OriginalInvoiceID())
+	}
+}
+
 // --- Mock discount plugin ---
 
 type overDiscountPlugin struct {

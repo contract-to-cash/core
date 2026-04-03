@@ -227,11 +227,12 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 
 	// Require a voided invoice for the same period — this distinguishes regeneration
 	// from net-new invoice creation and prevents misuse as a bypass.
+	// Use the last voided invoice found so that the revision chain links to the
+	// most recently voided entry (important when void-and-recreate runs more than once).
 	var voidedInv *invoice.Invoice
 	for _, inv := range existing {
 		if inv.Status() == invoice.InvoiceStatusVoided {
 			voidedInv = inv
-			break
 		}
 	}
 	if voidedInv == nil {
