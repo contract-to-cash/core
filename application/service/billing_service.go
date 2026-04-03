@@ -201,6 +201,20 @@ func (s *BillingService) GenerateProrationInvoice(ctx context.Context, contractI
 			fmt.Sprintf("cannot generate proration invoice: contract status is %s", agg.Status()))
 	}
 
+	// Only positive adjustments (upgrades) go through the billing pipeline.
+	// Downgrades (negative AdjustmentAmount) should be handled via BalancePolicy
+	// (ledger credit, immediate refund, or discard) — see domain-model.md §10.6.
+	// Zero adjustments (same-price changes) don't need an invoice.
+	if proration.AdjustmentAmount.IsZero() || proration.AdjustmentAmount.IsNegative() {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			"proration adjustment must be positive (upgrade); downgrades should use BalancePolicy")
+	}
+
+	// Note: checkDuplicateInvoice is intentionally not called here.
+	// Proration invoices coexist with period invoices for the same billing period.
+	// Callers must ensure they don't invoke this method multiple times for the
+	// same price change (the idempotency boundary is the ChangePrice command).
+
 	// Build line items from proration breakdown
 	var lineItems []invoice.LineItem
 
@@ -233,8 +247,8 @@ func (s *BillingService) GenerateProrationInvoice(ctx context.Context, contractI
 	prorationMeta := map[string]string{
 		"invoice_type":   "proration",
 		"effective_date": proration.EffectiveDate.Format(time.RFC3339),
-		"credit_amount":  proration.CreditAmount.Amount().FloatString(4),
-		"charge_amount":  proration.ChargeAmount.Amount().FloatString(4),
+		"credit_amount":  proration.CreditAmount.Amount().RatString(),
+		"charge_amount":  proration.ChargeAmount.Amount().RatString(),
 	}
 
 	return s.executeBillingPipeline(ctx, pipelineInput{

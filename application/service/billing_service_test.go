@@ -1158,6 +1158,68 @@ func TestGenerateProrationInvoice_ZeroCreditAmount(t *testing.T) {
 	}
 }
 
+func TestGenerateProrationInvoice_NegativeAdjustmentBlocked(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	// Downgrade: credit > charge → negative adjustment
+	proration := contract.PlanChangeProration{
+		CreditAmount:     jpy(5000),
+		ChargeAmount:     jpy(3000),
+		AdjustmentAmount: jpy(-2000),
+		EffectiveDate:    clock.Now(),
+	}
+
+	_, err := svc.GenerateProrationInvoice(context.Background(), agg.ContractID(), proration)
+	if err == nil {
+		t.Fatal("negative adjustment (downgrade) should be rejected")
+	}
+}
+
+func TestGenerateProrationInvoice_ZeroAdjustmentBlocked(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	// Same-price change → zero adjustment
+	proration := contract.PlanChangeProration{
+		CreditAmount:     jpy(3000),
+		ChargeAmount:     jpy(3000),
+		AdjustmentAmount: jpy(0),
+		EffectiveDate:    clock.Now(),
+	}
+
+	_, err := svc.GenerateProrationInvoice(context.Background(), agg.ContractID(), proration)
+	if err == nil {
+		t.Fatal("zero adjustment should be rejected")
+	}
+}
+
 func TestGenerateProrationInvoice_InheritsPaymentMethod(t *testing.T) {
 	clock := newTestClock()
 	price := jpy(10000)
