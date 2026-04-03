@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -1254,6 +1255,338 @@ func TestGenerateProrationInvoice_InheritsPaymentMethod(t *testing.T) {
 
 	if inv.PaymentMethodID() == nil || *inv.PaymentMethodID() != "pm-inherited" {
 		t.Errorf("expected payment method pm-inherited, got %v", inv.PaymentMethodID())
+	}
+}
+
+// --- RegenerateInvoice tests ---
+
+func TestRegenerateInvoice_DeferSuspended_VoidedExists_Success(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	_ = agg.Suspend(contract.SuspensionConfiguration{
+		BillingBehavior: contract.SuspensionBillingDefer,
+		Reason:          "payment pending",
+	}, eventstore.EventMetadata{UserID: "test"})
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	inv, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("defer suspended + voided should allow regeneration: %v", err)
+	}
+	if inv == nil {
+		t.Fatal("expected invoice")
+	}
+	if inv.Status() != invoice.InvoiceStatusDraft {
+		t.Errorf("expected draft status, got %s", inv.Status())
+	}
+	// Verify revision chain: regenerated invoice links back to the voided one
+	if inv.RevisionOf() == nil {
+		t.Fatal("expected RevisionOf to be set")
+	}
+	if *inv.RevisionOf() != voidedInv.ID() {
+		t.Errorf("expected RevisionOf %s, got %s", voidedInv.ID(), *inv.RevisionOf())
+	}
+	if inv.OriginalInvoiceID() == nil {
+		t.Fatal("expected OriginalInvoiceID to be set")
+	}
+	// Verify metadata
+	if inv.Metadata()["invoice_type"] != "regeneration" {
+		t.Errorf("expected invoice_type=regeneration, got %s", inv.Metadata()["invoice_type"])
+	}
+}
+
+func TestRegenerateInvoice_DeferSuspended_NoVoided_Error(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	_ = agg.Suspend(contract.SuspensionConfiguration{
+		BillingBehavior: contract.SuspensionBillingDefer,
+		Reason:          "payment pending",
+	}, eventstore.EventMetadata{UserID: "test"})
+
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err == nil {
+		t.Fatal("defer suspended + no voided should block regeneration")
+	}
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
+}
+
+func TestRegenerateInvoice_Active_VoidedExists_Success(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	inv, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("active + voided should allow regeneration: %v", err)
+	}
+	if inv == nil {
+		t.Fatal("expected invoice")
+	}
+	if inv.Status() != invoice.InvoiceStatusDraft {
+		t.Errorf("expected draft status, got %s", inv.Status())
+	}
+}
+
+func TestRegenerateInvoice_Active_NoVoided_Error(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err == nil {
+		t.Fatal("active + no voided should block regeneration")
+	}
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
+}
+
+func TestRegenerateInvoice_SkipSuspended_Error(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	_ = agg.Suspend(contract.SuspensionConfiguration{
+		BillingBehavior: contract.SuspensionBillingSkip,
+		Reason:          "admin hold",
+	}, eventstore.EventMetadata{UserID: "test"})
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err == nil {
+		t.Fatal("skip suspended should always block regeneration")
+	}
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
+}
+
+func TestRegenerateInvoice_ContinueSuspended_VoidedExists_Success(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	_ = agg.Suspend(contract.SuspensionConfiguration{
+		BillingBehavior: contract.SuspensionBillingContinue,
+		Reason:          "admin hold",
+	}, eventstore.EventMetadata{UserID: "test"})
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	inv, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("continue suspended + voided should allow regeneration: %v", err)
+	}
+	if inv == nil {
+		t.Fatal("expected invoice")
+	}
+}
+
+func TestRegenerateInvoice_CancelledContract_Error(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	_ = agg.Cancel("user requested", eventstore.EventMetadata{UserID: "test"})
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err == nil {
+		t.Fatal("cancelled contract should block regeneration")
+	}
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
+}
+
+func TestRegenerateInvoice_VoidedAndNonVoidedExist_DuplicateBlocked(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	draftInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusDraft),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv, draftInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err == nil {
+		t.Fatal("should block when non-voided invoice exists alongside voided")
+	}
+	assertDomainError(t, err, shared.ErrCodeConflict)
+}
+
+func TestRegenerateInvoice_PipelineHooksApplied(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	period := currentPeriodOf(agg)
+
+	_ = agg.Suspend(contract.SuspensionConfiguration{
+		BillingBehavior: contract.SuspensionBillingDefer,
+		Reason:          "payment pending",
+	}, eventstore.EventMetadata{UserID: "test"})
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(10000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv}}
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(&overDiscountPlugin{discount: jpy(2000)})
+	_ = registry.Register(&tenPercentTaxPlugin{})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		registry,
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// subtotal=10000, discount=2000, afterDiscount=8000, tax=800, total=8800
+	expectedDiscount := new(big.Rat).SetInt64(2000)
+	if inv.DiscountAmount().Amount().Cmp(expectedDiscount) != 0 {
+		t.Errorf("expected discount %v, got %v", expectedDiscount, inv.DiscountAmount().Amount())
+	}
+	expectedTax := new(big.Rat).SetInt64(800)
+	if inv.TaxAmount().Amount().Cmp(expectedTax) != 0 {
+		t.Errorf("expected tax %v, got %v", expectedTax, inv.TaxAmount().Amount())
+	}
+	expectedTotal := new(big.Rat).SetInt64(8800)
+	if inv.Total().Amount().Cmp(expectedTotal) != 0 {
+		t.Errorf("expected total %v, got %v", expectedTotal, inv.Total().Amount())
+	}
+}
+
+// --- Test helpers ---
+
+func assertDomainError(t *testing.T, err error, expectedCode shared.ErrorCode) {
+	t.Helper()
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if domainErr.Code != expectedCode {
+		t.Errorf("expected error code %s, got %s (message: %s)", expectedCode, domainErr.Code, domainErr.Message)
+	}
+}
+
+func TestRegenerateInvoice_RevisionChainDepth2_PreservesOriginalID(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	// Simulate a second void-and-recreate cycle:
+	// original (voided) -> first regeneration (voided) -> second regeneration (under test)
+	originalID := shared.NewInvoiceID()
+	firstRegenID := shared.NewInvoiceID()
+
+	// The first voided invoice (the original)
+	voidedOriginal := invoice.NewInvoice(
+		originalID, agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+
+	// The second voided invoice (first regeneration, now also voided)
+	voidedRegen := invoice.NewInvoice(
+		firstRegenID, agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+		invoice.WithRevisionOf(originalID),
+		invoice.WithOriginalInvoiceID(originalID),
+	)
+
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedOriginal, voidedRegen}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	inv, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// RevisionOf should point to the latest voided invoice (voidedRegen), not the original
+	if inv.RevisionOf() == nil {
+		t.Fatal("expected RevisionOf to be set")
+	}
+	if *inv.RevisionOf() != firstRegenID {
+		t.Errorf("expected RevisionOf %s (latest voided), got %s", firstRegenID, *inv.RevisionOf())
+	}
+
+	// OriginalInvoiceID should be preserved from the voided invoice's chain root
+	if inv.OriginalInvoiceID() == nil {
+		t.Fatal("expected OriginalInvoiceID to be set")
+	}
+	if *inv.OriginalInvoiceID() != originalID {
+		t.Errorf("expected OriginalInvoiceID %s (chain root), got %s", originalID, *inv.OriginalInvoiceID())
 	}
 }
 
