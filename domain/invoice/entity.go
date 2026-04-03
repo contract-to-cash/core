@@ -396,3 +396,12 @@ func WithRevisionOf(id shared.InvoiceID) InvoiceOption {
 		inv.revisionOf = &id
 	}
 }
+
+// WithMetadata sets metadata key-value pairs on the invoice.
+func WithMetadata(m map[string]string) InvoiceOption {
+	return func(inv *Invoice) {
+		for k, v := range m {
+			inv.metadata[k] = v
+		}
+	}
+}
