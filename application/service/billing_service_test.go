@@ -894,6 +894,307 @@ func TestCalculateUsageCharge_ProductRepoError(t *testing.T) {
 	}
 }
 
+// --- Proration invoice tests ---
+
+func TestGenerateProrationInvoice_Basic(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+	invRepo := &mockInvoiceRepo{}
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	proration := contract.PlanChangeProration{
+		CreditAmount:     jpy(3000), // unused old price
+		ChargeAmount:     jpy(5000), // new price remainder
+		AdjustmentAmount: jpy(2000), // net = 5000 - 3000
+		EffectiveDate:    clock.Now(),
+	}
+
+	inv, err := svc.GenerateProrationInvoice(context.Background(), agg.ContractID(), proration)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if inv == nil {
+		t.Fatal("expected invoice, got nil")
+	}
+
+	// Subtotal should be the adjustment amount (2000)
+	expectedSubtotal := new(big.Rat).SetInt64(2000)
+	if inv.Subtotal().Amount().Cmp(expectedSubtotal) != 0 {
+		t.Errorf("expected subtotal 2000, got %v", inv.Subtotal().Amount())
+	}
+
+	// Should be draft status
+	if inv.Status() != invoice.InvoiceStatusDraft {
+		t.Errorf("expected status draft, got %s", inv.Status())
+	}
+
+	// Should have 2 line items (credit + charge)
+	if len(inv.LineItems()) != 2 {
+		t.Errorf("expected 2 line items, got %d", len(inv.LineItems()))
+	}
+
+	// Metadata should mark it as proration
+	if inv.Metadata()["invoice_type"] != "proration" {
+		t.Errorf("expected metadata invoice_type=proration, got %v", inv.Metadata()["invoice_type"])
+	}
+
+	// Should be saved
+	if invRepo.saved == nil {
+		t.Error("expected invoice to be saved")
+	}
+}
+
+func TestGenerateProrationInvoice_WithDiscountHook(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(&overDiscountPlugin{discount: jpy(500)})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		registry,
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	proration := contract.PlanChangeProration{
+		CreditAmount:     jpy(3000),
+		ChargeAmount:     jpy(5000),
+		AdjustmentAmount: jpy(2000),
+		EffectiveDate:    clock.Now(),
+	}
+
+	inv, err := svc.GenerateProrationInvoice(context.Background(), agg.ContractID(), proration)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Discount (500) should be applied to the proration subtotal (2000)
+	expectedDiscount := new(big.Rat).SetInt64(500)
+	if inv.DiscountAmount().Amount().Cmp(expectedDiscount) != 0 {
+		t.Errorf("expected discount 500, got %v", inv.DiscountAmount().Amount())
+	}
+}
+
+func TestGenerateProrationInvoice_WithTaxHook(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(&tenPercentTaxPlugin{})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		registry,
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	proration := contract.PlanChangeProration{
+		CreditAmount:     jpy(3000),
+		ChargeAmount:     jpy(5000),
+		AdjustmentAmount: jpy(2000),
+		EffectiveDate:    clock.Now(),
+	}
+
+	inv, err := svc.GenerateProrationInvoice(context.Background(), agg.ContractID(), proration)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Tax = 10% of 2000 = 200
+	expectedTax := new(big.Rat).SetInt64(200)
+	if inv.TaxAmount().Amount().Cmp(expectedTax) != 0 {
+		t.Errorf("expected tax 200, got %v", inv.TaxAmount().Amount())
+	}
+
+	// Total = 2000 + 200 = 2200
+	expectedTotal := new(big.Rat).SetInt64(2200)
+	if inv.Total().Amount().Cmp(expectedTotal) != 0 {
+		t.Errorf("expected total 2200, got %v", inv.Total().Amount())
+	}
+}
+
+func TestGenerateProrationInvoice_WithCredits(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+
+	creditEntry := balance.NewBalanceEntry(agg.AccountID(), jpy(800), balance.BalanceReasonGoodwill, clock.Now())
+	balanceRepo := &mockBalanceRepo{credits: []*balance.BalanceEntry{creditEntry}}
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+		WithBalanceRepo(balanceRepo),
+	)
+
+	proration := contract.PlanChangeProration{
+		CreditAmount:     jpy(3000),
+		ChargeAmount:     jpy(5000),
+		AdjustmentAmount: jpy(2000),
+		EffectiveDate:    clock.Now(),
+	}
+
+	inv, err := svc.GenerateProrationInvoice(context.Background(), agg.ContractID(), proration)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Applied credit should be 800
+	expectedCredit := new(big.Rat).SetInt64(800)
+	if inv.AppliedBalance().Amount().Cmp(expectedCredit) != 0 {
+		t.Errorf("expected applied balance 800, got %v", inv.AppliedBalance().Amount())
+	}
+
+	// Amount due = 2000 - 800 = 1200
+	expectedDue := new(big.Rat).SetInt64(1200)
+	if inv.AmountDue().Amount().Cmp(expectedDue) != 0 {
+		t.Errorf("expected amount due 1200, got %v", inv.AmountDue().Amount())
+	}
+}
+
+func TestGenerateProrationInvoice_CancelledContractBlocked(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+	_ = agg.Cancel("test", eventstore.EventMetadata{UserID: "test"})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	proration := contract.PlanChangeProration{
+		CreditAmount:     jpy(3000),
+		ChargeAmount:     jpy(5000),
+		AdjustmentAmount: jpy(2000),
+		EffectiveDate:    clock.Now(),
+	}
+
+	_, err := svc.GenerateProrationInvoice(context.Background(), agg.ContractID(), proration)
+	if err == nil {
+		t.Fatal("cancelled contract should block proration invoice generation")
+	}
+}
+
+func TestGenerateProrationInvoice_ZeroCreditAmount(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	// New subscription — no credit, only charge
+	proration := contract.PlanChangeProration{
+		CreditAmount:     jpy(0),
+		ChargeAmount:     jpy(5000),
+		AdjustmentAmount: jpy(5000),
+		EffectiveDate:    clock.Now(),
+	}
+
+	inv, err := svc.GenerateProrationInvoice(context.Background(), agg.ContractID(), proration)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have only 1 line item (charge only, no credit)
+	if len(inv.LineItems()) != 1 {
+		t.Errorf("expected 1 line item (charge only), got %d", len(inv.LineItems()))
+	}
+
+	expectedSubtotal := new(big.Rat).SetInt64(5000)
+	if inv.Subtotal().Amount().Cmp(expectedSubtotal) != 0 {
+		t.Errorf("expected subtotal 5000, got %v", inv.Subtotal().Amount())
+	}
+}
+
+func TestGenerateProrationInvoice_InheritsPaymentMethod(t *testing.T) {
+	clock := newTestClock()
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+
+	pmID := "pm-inherited"
+	_ = agg.ChangePaymentMethod(&pmID, eventstore.EventMetadata{UserID: "test"})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	proration := contract.PlanChangeProration{
+		CreditAmount:     jpy(3000),
+		ChargeAmount:     jpy(5000),
+		AdjustmentAmount: jpy(2000),
+		EffectiveDate:    clock.Now(),
+	}
+
+	inv, err := svc.GenerateProrationInvoice(context.Background(), agg.ContractID(), proration)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if inv.PaymentMethodID() == nil || *inv.PaymentMethodID() != "pm-inherited" {
+		t.Errorf("expected payment method pm-inherited, got %v", inv.PaymentMethodID())
+	}
+}
+
 // --- Mock discount plugin ---
 
 type overDiscountPlugin struct {
@@ -907,4 +1208,19 @@ func (p *overDiscountPlugin) Shutdown(_ context.Context) error                  
 func (p *overDiscountPlugin) Priority() int                                       { return 100 }
 func (p *overDiscountPlugin) CalculateDiscount(_ *plugin.CalculationContext) (shared.Money, error) {
 	return p.discount, nil
+}
+
+// --- Mock tax plugin ---
+
+type tenPercentTaxPlugin struct{}
+
+func (p *tenPercentTaxPlugin) Name() string                                        { return "tax_10pct" }
+func (p *tenPercentTaxPlugin) Version() string                                     { return "1.0.0" }
+func (p *tenPercentTaxPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *tenPercentTaxPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *tenPercentTaxPlugin) Priority() int                                       { return 100 }
+func (p *tenPercentTaxPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.Money, error) {
+	afterDiscount := ctx.SubtotalAfterDiscount()
+	rate := new(big.Rat).SetFrac64(10, 100)
+	return afterDiscount.Multiply(rate), nil
 }

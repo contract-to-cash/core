@@ -121,6 +121,18 @@ var billableStatuses = map[contract.ContractStatus]bool{
 	contract.ContractStatusSuspended: true,
 }
 
+// pipelineInput holds the pre-calculated values needed by the billing pipeline.
+// This allows GenerateInvoice and GenerateProrationInvoice to share the
+// discount → tax → credit → lifecycle hook → save pipeline.
+type pipelineInput struct {
+	agg        *contract.ContractAggregate
+	contractID shared.ContractID
+	subtotal   shared.Money
+	lineItems  []invoice.LineItem
+	period     shared.DateRange // billing period for the invoice
+	extraOpts  []invoice.InvoiceOption
+}
+
 // GenerateInvoice generates an invoice for a contract and billing period.
 // It follows a 14-step calculation flow with plugin hooks.
 func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) (*invoice.Invoice, error) {
@@ -154,29 +166,108 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 		return nil, err
 	}
 
-	// Create CalculationContext with zero subtotal initially
-	currency := agg.Price().Currency()
-	calcCtx := plugin.NewCalculationContext(ctx, agg, shared.Zero(currency))
-
-	// Step 2: BeforeCalculation (InvoiceLifecycleHooks)
-	for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
-		if err = hook.BeforeCalculation(calcCtx); err != nil {
-			return nil, fmt.Errorf("BeforeCalculation hook error: %w", err)
-		}
-	}
-
-	// Step 3: Calculate subtotal based on contract type
+	// Calculate subtotal based on contract type
 	subtotal, lineItems, err := s.calculateSubtotal(ctx, agg, billingPeriod)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate subtotal: %w", err)
 	}
+
+	return s.executeBillingPipeline(ctx, pipelineInput{
+		agg:        agg,
+		contractID: contractID,
+		subtotal:   subtotal,
+		lineItems:  lineItems,
+		period:     billingPeriod,
+	})
+}
+
+// GenerateProrationInvoice generates an invoice for a proration adjustment.
+// It runs the full billing pipeline (discount hooks, tax hooks, credit application,
+// lifecycle hooks) on the proration amount, unlike direct invoice.NewInvoice construction.
+//
+// The proration parameter comes from a ChangePrice(ChangePolicyImmediate) operation.
+// Only the AdjustmentAmount (charge - credit) is billed; CreditAmount and ChargeAmount
+// are recorded in line items for traceability.
+func (s *BillingService) GenerateProrationInvoice(ctx context.Context, contractID shared.ContractID, proration contract.PlanChangeProration) (*invoice.Invoice, error) {
+	// Load contract aggregate
+	agg, err := s.contractRepo.FindByID(ctx, contractID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load contract: %w", err)
+	}
+
+	// Proration invoices are only valid for active contracts
+	if agg.Status() != contract.ContractStatusActive {
+		return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("cannot generate proration invoice: contract status is %s", agg.Status()))
+	}
+
+	// Build line items from proration breakdown
+	var lineItems []invoice.LineItem
+
+	// Credit line item (negative — what the customer overpaid on the old price)
+	if !proration.CreditAmount.IsZero() {
+		creditNeg := proration.CreditAmount.Negate()
+		lineItems = append(lineItems, invoice.NewLineItem(
+			shared.GenerateID(),
+			"Proration credit (unused period on previous price)",
+			1, creditNeg, creditNeg, nil,
+		))
+	}
+
+	// Charge line item (positive — what the customer owes on the new price)
+	if !proration.ChargeAmount.IsZero() {
+		lineItems = append(lineItems, invoice.NewLineItem(
+			shared.GenerateID(),
+			"Proration charge (remaining period on new price)",
+			1, proration.ChargeAmount, proration.ChargeAmount, nil,
+		))
+	}
+
+	// Subtotal is the net adjustment amount
+	subtotal := proration.AdjustmentAmount
+
+	// Use the contract's current period as the billing period
+	period := agg.CurrentPeriod()
+
+	// Mark the invoice as a proration invoice via metadata
+	prorationMeta := map[string]string{
+		"invoice_type":   "proration",
+		"effective_date": proration.EffectiveDate.Format(time.RFC3339),
+		"credit_amount":  proration.CreditAmount.Amount().FloatString(4),
+		"charge_amount":  proration.ChargeAmount.Amount().FloatString(4),
+	}
+
+	return s.executeBillingPipeline(ctx, pipelineInput{
+		agg:        agg,
+		contractID: contractID,
+		subtotal:   subtotal,
+		lineItems:  lineItems,
+		period:     period,
+		extraOpts:  []invoice.InvoiceOption{invoice.WithMetadata(prorationMeta)},
+	})
+}
+
+// executeBillingPipeline runs the shared billing pipeline:
+// BeforeCalculation → Discount → Tax → Credit application → Invoice creation → AfterCalculation → Save.
+func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipelineInput) (*invoice.Invoice, error) {
+	agg := input.agg
+	subtotal := input.subtotal
+	currency := subtotal.Currency()
+	calcCtx := plugin.NewCalculationContext(ctx, agg, shared.Zero(currency))
+
+	// BeforeCalculation (InvoiceLifecycleHooks)
+	for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
+		if err := hook.BeforeCalculation(calcCtx); err != nil {
+			return nil, fmt.Errorf("BeforeCalculation hook error: %w", err)
+		}
+	}
+
 	calcCtx.SetSubtotal(subtotal)
 
-	// Step 4: Execute all DiscountHooks
+	// Execute all DiscountHooks
 	totalDiscount := shared.Zero(currency)
 	for _, hook := range s.registry.GetDiscountHooks() {
-		var discount shared.Money
-		discount, err = hook.CalculateDiscount(calcCtx)
+		discount, err := hook.CalculateDiscount(calcCtx)
 		if err != nil {
 			return nil, fmt.Errorf("DiscountHook error: %w", err)
 		}
@@ -186,23 +277,22 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 		}
 	}
 
-	// Step 5: Cap discount to subtotal (discount must not exceed subtotal)
+	// Cap discount to subtotal (discount must not exceed subtotal)
 	if totalDiscount.GreaterThan(subtotal) {
 		totalDiscount = subtotal
 	}
 
-	// Step 6: Calculate subtotal after discount
+	// Calculate subtotal after discount
 	afterDiscount, err := subtotal.Subtract(totalDiscount)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate after-discount: %w", err)
 	}
 	calcCtx.SetSubtotalAfterDiscount(afterDiscount)
 
-	// Step 7: Execute all TaxHooks
+	// Execute all TaxHooks
 	totalTax := shared.Zero(currency)
 	for _, hook := range s.registry.GetTaxHooks() {
-		var tax shared.Money
-		tax, err = hook.CalculateTax(calcCtx)
+		tax, err := hook.CalculateTax(calcCtx)
 		if err != nil {
 			return nil, fmt.Errorf("TaxHook error: %w", err)
 		}
@@ -212,22 +302,19 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 		}
 	}
 
-	// Step 8: total = afterDiscount + totalTax
+	// total = afterDiscount + totalTax
 	total, err := afterDiscount.Add(totalTax)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate total: %w", err)
 	}
 
-	// Step 9: Generate invoice ID upfront (needed for CreditApplication records)
+	// Generate invoice ID upfront (needed for CreditApplication records)
 	invoiceID := shared.NewInvoiceID()
 
-	// Steps 10-14: All writes are atomic within a transaction.
-	// Credit reads (FindAvailable) must also be inside the transaction to ensure
-	// optimistic locking correctness — the read that captures the version and
-	// the conditional write (WHERE version = ?) share the same tx boundary.
+	// All writes are atomic within a transaction.
 	var inv *invoice.Invoice
 	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
-		// Step 10: Apply credits (FIFO, skip expired) - uses transactional credit repo
+		// Apply credits (FIFO, skip expired)
 		appliedBalance := shared.Zero(currency)
 		if repos.Balances != nil {
 			var balanceErr error
@@ -237,35 +324,36 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 			}
 		}
 
-		// Step 11: Calculate amount due
+		// Calculate amount due
 		amountDue, amtErr := total.Subtract(appliedBalance)
 		if amtErr != nil {
 			return fmt.Errorf("failed to calculate amount due: %w", amtErr)
 		}
 
-		// Step 12: Create invoice
+		// Create invoice
 		now := s.clock.Now()
 		dueDate := now.AddDate(0, 0, s.config.DaysUntilDue)
 
 		invOpts := []invoice.InvoiceOption{
 			invoice.WithStatus(invoice.InvoiceStatusDraft),
-			invoice.WithBillingPeriod(billingPeriod),
+			invoice.WithBillingPeriod(input.period),
 			invoice.WithDueDate(dueDate),
 			invoice.WithAppliedBalance(appliedBalance),
 			invoice.WithAmountDue(amountDue),
 			invoice.WithIssueDate(now),
 		}
-		if len(lineItems) > 0 {
-			invOpts = append(invOpts, invoice.WithLineItems(lineItems))
+		if len(input.lineItems) > 0 {
+			invOpts = append(invOpts, invoice.WithLineItems(input.lineItems))
 		}
 		if agg.PaymentMethodID() != nil {
 			invOpts = append(invOpts, invoice.WithPaymentMethodID(agg.PaymentMethodID()))
 		}
+		invOpts = append(invOpts, input.extraOpts...)
 
 		inv = invoice.NewInvoice(
 			invoiceID,
 			agg.AccountID(),
-			contractID,
+			input.contractID,
 			subtotal,
 			totalDiscount,
 			totalTax,
@@ -273,14 +361,14 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 		)
 		calcCtx.SetInvoice(inv)
 
-		// Step 13: AfterCalculation (InvoiceLifecycleHooks)
+		// AfterCalculation (InvoiceLifecycleHooks)
 		for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
 			if hookErr := hook.AfterCalculation(calcCtx, inv); hookErr != nil {
 				return fmt.Errorf("AfterCalculation hook error: %w", hookErr)
 			}
 		}
 
-		// Step 14: Save invoice (uses transactional invoice repo)
+		// Save invoice
 		if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {
 			return fmt.Errorf("failed to save invoice: %w", saveErr)
 		}
