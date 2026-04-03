@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -1288,6 +1289,20 @@ func TestRegenerateInvoice_DeferSuspended_VoidedExists_Success(t *testing.T) {
 	if inv.Status() != invoice.InvoiceStatusDraft {
 		t.Errorf("expected draft status, got %s", inv.Status())
 	}
+	// Verify revision chain: regenerated invoice links back to the voided one
+	if inv.RevisionOf() == nil {
+		t.Fatal("expected RevisionOf to be set")
+	}
+	if *inv.RevisionOf() != voidedInv.ID() {
+		t.Errorf("expected RevisionOf %s, got %s", voidedInv.ID(), *inv.RevisionOf())
+	}
+	if inv.OriginalInvoiceID() == nil {
+		t.Fatal("expected OriginalInvoiceID to be set")
+	}
+	// Verify metadata
+	if inv.Metadata()["invoice_type"] != "regeneration" {
+		t.Errorf("expected invoice_type=regeneration, got %s", inv.Metadata()["invoice_type"])
+	}
 }
 
 func TestRegenerateInvoice_DeferSuspended_NoVoided_Error(t *testing.T) {
@@ -1307,6 +1322,7 @@ func TestRegenerateInvoice_DeferSuspended_NoVoided_Error(t *testing.T) {
 	if err == nil {
 		t.Fatal("defer suspended + no voided should block regeneration")
 	}
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
 }
 
 func TestRegenerateInvoice_Active_VoidedExists_Success(t *testing.T) {
@@ -1330,6 +1346,24 @@ func TestRegenerateInvoice_Active_VoidedExists_Success(t *testing.T) {
 	if inv == nil {
 		t.Fatal("expected invoice")
 	}
+	if inv.Status() != invoice.InvoiceStatusDraft {
+		t.Errorf("expected draft status, got %s", inv.Status())
+	}
+}
+
+func TestRegenerateInvoice_Active_NoVoided_Error(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err == nil {
+		t.Fatal("active + no voided should block regeneration")
+	}
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
 }
 
 func TestRegenerateInvoice_SkipSuspended_Error(t *testing.T) {
@@ -1355,6 +1389,85 @@ func TestRegenerateInvoice_SkipSuspended_Error(t *testing.T) {
 	if err == nil {
 		t.Fatal("skip suspended should always block regeneration")
 	}
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
+}
+
+func TestRegenerateInvoice_ContinueSuspended_VoidedExists_Success(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	_ = agg.Suspend(contract.SuspensionConfiguration{
+		BillingBehavior: contract.SuspensionBillingContinue,
+		Reason:          "admin hold",
+	}, eventstore.EventMetadata{UserID: "test"})
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	inv, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("continue suspended + voided should allow regeneration: %v", err)
+	}
+	if inv == nil {
+		t.Fatal("expected invoice")
+	}
+}
+
+func TestRegenerateInvoice_CancelledContract_Error(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	_ = agg.Cancel("user requested", eventstore.EventMetadata{UserID: "test"})
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err == nil {
+		t.Fatal("cancelled contract should block regeneration")
+	}
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
+}
+
+func TestRegenerateInvoice_VoidedAndNonVoidedExist_DuplicateBlocked(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	voidedInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+		invoice.WithBillingPeriod(period),
+	)
+	draftInv := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusDraft),
+		invoice.WithBillingPeriod(period),
+	)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv, draftInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err == nil {
+		t.Fatal("should block when non-voided invoice exists alongside voided")
+	}
+	assertDomainError(t, err, shared.ErrCodeConflict)
 }
 
 func TestRegenerateInvoice_PipelineHooksApplied(t *testing.T) {
@@ -1408,6 +1521,19 @@ func TestRegenerateInvoice_PipelineHooksApplied(t *testing.T) {
 	expectedTotal := new(big.Rat).SetInt64(8800)
 	if inv.Total().Amount().Cmp(expectedTotal) != 0 {
 		t.Errorf("expected total %v, got %v", expectedTotal, inv.Total().Amount())
+	}
+}
+
+// --- Test helpers ---
+
+func assertDomainError(t *testing.T, err error, expectedCode shared.ErrorCode) {
+	t.Helper()
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if domainErr.Code != expectedCode {
+		t.Errorf("expected error code %s, got %s (message: %s)", expectedCode, domainErr.Code, domainErr.Message)
 	}
 }
 

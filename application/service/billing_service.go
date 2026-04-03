@@ -189,7 +189,11 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 // with spurious Resume/Suspend events).
 //
 // SuspensionBillingSkip still blocks — skip means no billing at all.
+// SuspensionBillingContinue is allowed (continue means billing proceeds normally).
 // Contracts in non-billable statuses (cancelled, expired) are also blocked.
+//
+// The regenerated invoice is linked to the voided invoice via RevisionOf/OriginalInvoiceID
+// to maintain the audit trail.
 func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) (*invoice.Invoice, error) {
 	// Load contract aggregate
 	agg, err := s.contractRepo.FindByID(ctx, contractID)
@@ -204,7 +208,8 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 	}
 
 	// Suspended contracts: SuspensionBillingSkip always blocks.
-	// SuspensionBillingDefer is permitted only if a voided invoice exists (checked below).
+	// SuspensionBillingDefer and SuspensionBillingContinue are permitted
+	// (Defer only if a voided invoice exists, checked below; Continue always allowed).
 	if agg.Status() == contract.ContractStatusSuspended {
 		cfg := agg.SuspensionConfig()
 		if cfg == nil || cfg.BillingBehavior == contract.SuspensionBillingSkip {
@@ -213,27 +218,35 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 		}
 	}
 
-	// Require a voided invoice for the same period — this distinguishes regeneration
-	// from net-new invoice creation and prevents misuse as a bypass.
+	// Fetch existing invoices for the period once — used for both voided-check
+	// and duplicate prevention (avoids a redundant FindByContractAndPeriod call).
 	existing, err := s.invoiceRepo.FindByContractAndPeriod(ctx, contractID, billingPeriod)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing invoices: %w", err)
 	}
-	hasVoided := false
+
+	// Require a voided invoice for the same period — this distinguishes regeneration
+	// from net-new invoice creation and prevents misuse as a bypass.
+	var voidedInv *invoice.Invoice
 	for _, inv := range existing {
 		if inv.Status() == invoice.InvoiceStatusVoided {
-			hasVoided = true
+			voidedInv = inv
 			break
 		}
 	}
-	if !hasVoided {
+	if voidedInv == nil {
 		return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
 			"cannot regenerate invoice: no voided invoice found for this period")
 	}
 
-	// Duplicate check (reuses existing logic which already skips voided invoices)
-	if err = s.checkDuplicateInvoice(ctx, agg, billingPeriod); err != nil {
-		return nil, err
+	// Inline duplicate check: reject if a non-voided invoice already exists for
+	// this period (same logic as checkDuplicateInvoice for subscription/usage-based,
+	// but using the already-fetched existing slice).
+	for _, inv := range existing {
+		if inv.Status() != invoice.InvoiceStatusVoided {
+			return nil, shared.NewDomainError(shared.ErrCodeConflict,
+				"invoice already exists for this billing period")
+		}
 	}
 
 	// Calculate subtotal based on contract type
@@ -242,12 +255,26 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 		return nil, fmt.Errorf("failed to calculate subtotal: %w", err)
 	}
 
+	// Build revision chain: link the regenerated invoice to the voided original.
+	// If the voided invoice itself was a revision, preserve the original chain root.
+	var extraOpts []invoice.InvoiceOption
+	extraOpts = append(extraOpts, invoice.WithRevisionOf(voidedInv.ID()))
+	if orig := voidedInv.OriginalInvoiceID(); orig != nil {
+		extraOpts = append(extraOpts, invoice.WithOriginalInvoiceID(*orig))
+	} else {
+		extraOpts = append(extraOpts, invoice.WithOriginalInvoiceID(voidedInv.ID()))
+	}
+	extraOpts = append(extraOpts, invoice.WithMetadata(map[string]string{
+		"invoice_type": "regeneration",
+	}))
+
 	return s.executeBillingPipeline(ctx, pipelineInput{
 		agg:        agg,
 		contractID: contractID,
 		subtotal:   subtotal,
 		lineItems:  lineItems,
 		period:     billingPeriod,
+		extraOpts:  extraOpts,
 	})
 }
 
