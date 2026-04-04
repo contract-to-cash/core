@@ -228,7 +228,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 		_ = agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID("acc-x"),
-				ContractType: contract.ContractTypeSubscription,
+			ContractType: contract.ContractTypeSubscription,
 			BillingCycle: contract.BillingCycleMonthly,
 			Price:        moneyJPY(1000),
 			BasePrice:    moneyJPY(1000),
@@ -246,7 +246,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 		_ = agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID("acc-x"),
-				ContractType: contract.ContractTypeSubscription,
+			ContractType: contract.ContractTypeSubscription,
 			BillingCycle: contract.BillingCycleMonthly,
 			Price:        moneyJPY(1000),
 			BasePrice:    moneyJPY(1000),
@@ -265,7 +265,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 		_ = agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID("acc-x"),
-				ContractType: contract.ContractTypeSubscription,
+			ContractType: contract.ContractTypeSubscription,
 			BillingCycle: contract.BillingCycleMonthly,
 			Price:        moneyJPY(1000),
 			BasePrice:    moneyJPY(1000),
