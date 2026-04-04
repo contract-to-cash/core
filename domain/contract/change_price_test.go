@@ -427,7 +427,6 @@ func TestApply_LegacyPriceChangedEvent(t *testing.T) {
 	}
 }
 
-
 // --- Snapshot round-trip tests for new fields ---
 
 func TestSnapshotRoundTrip_WithPendingPriceID(t *testing.T) {
@@ -606,4 +605,3 @@ func TestPriceChangeUnscheduledEvent_Serialization(t *testing.T) {
 		t.Errorf("expected reason 'changed mind', got %s", pcu.Reason)
 	}
 }
-

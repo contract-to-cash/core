@@ -1220,7 +1220,7 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 				ValidFrom  string   `json:"valid_from"`
 				ValidUntil string   `json:"valid_until"`
 				MaxUses    *int     `json:"max_uses"`
-				Plans      []string `json:"plans"`
+				Products   []string `json:"products"`
 			} `json:"coupons"`
 		}
 		if err := decodeJSON(r, &req); err != nil {
@@ -1258,7 +1258,7 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 				validFrom, validUntil,
 				c.MaxUses,
 				0,
-				c.Plans,
+				c.Products,
 			)
 			if err := repo.Save(r.Context(), coupon); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())

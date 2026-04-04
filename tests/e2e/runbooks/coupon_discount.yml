@@ -1,8 +1,8 @@
-desc: "Coupon plugin: apply coupon, verify plan restriction blocks non-matching plans"
+desc: "Coupon plugin: apply coupon, verify product restriction blocks non-matching products"
 runners:
   req: "{{ env.BASE_URL }}"
 steps:
-  - desc: Register coupon plugin with plan-restricted 20% coupon
+  - desc: Register coupon plugin with product-restricted 20% coupon
     req:
       /plugins/coupon/register:
         post:
@@ -14,7 +14,7 @@ steps:
                   value: 20
                   valid_from: "2026-01-01"
                   valid_until: "2026-12-31"
-                  plans:
+                  products:
                     - "plan-premium"
     test: |
       current.res.status == 200
