@@ -16,7 +16,7 @@ steps:
           body:
             application/json:
               account_id: "acc-smoke"
-              product_id: "plan-smoke"
+              product_id: "prod-smoke"
               contract_type: "subscription"
               billing_cycle: "monthly"
               price: 1000
@@ -108,7 +108,7 @@ steps:
           body:
             application/json:
               account_id: "acc-smoke-2"
-              product_id: "plan-smoke"
+              product_id: "prod-smoke"
               contract_type: "subscription"
               billing_cycle: "monthly"
               price: 1000

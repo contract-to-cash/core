@@ -322,7 +322,6 @@ type ContractAggregate struct {
     // 状態
     accountID     shared.AccountID
     status        ContractStatus
-    planID        shared.PlanID
     price         Money
     billingCycle  BillingCycle
     currentPeriod DateRange
@@ -349,7 +348,7 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
     event := &ContractCreatedEvent{
         ContractID:   a.ID(),
         AccountID:    cmd.AccountID,
-        PlanID:       cmd.PlanID,
+        PriceID:      cmd.PriceID,
         Price:        cmd.Price,
         BillingCycle: cmd.BillingCycle,
         CreatedAt:    now,
@@ -426,7 +425,6 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
     switch e := event.(type) {
     case *ContractCreatedEvent:
         a.accountID = e.AccountID
-        a.planID = e.PlanID
         a.price = e.Price
         a.billingCycle = e.BillingCycle
         a.status = ContractStatusDraft
@@ -464,7 +462,6 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
     r.Register(ContractResumedEvent{})
     r.Register(ContractCancelledEvent{})
     r.Register(PriceChangedEvent{})
-    r.Register(PlanChangedEvent{})
     r.Register(TrialStartedEvent{})
     r.Register(TrialEndedEvent{})
     return r
@@ -494,7 +491,6 @@ const (
     EventTypeContractResumed   eventstore.EventType = "contract.resumed"
     EventTypeContractCancelled eventstore.EventType = "contract.cancelled"
     EventTypePriceChanged      eventstore.EventType = "contract.price_changed"
-    EventTypePlanChanged       eventstore.EventType = "contract.plan_changed"
     EventTypeTrialStarted      eventstore.EventType = "contract.trial_started"
     EventTypeTrialEnded        eventstore.EventType = "contract.trial_ended"
 )
@@ -507,7 +503,7 @@ const (
 type ContractCreatedEvent struct {
     ContractID   shared.ContractID `json:"contract_id"`
     AccountID    shared.AccountID  `json:"account_id"`
-    PlanID       shared.PlanID     `json:"plan_id"`
+    PriceID      shared.PriceID    `json:"price_id"`
     Price        Money             `json:"price"`
     BillingCycle BillingCycle      `json:"billing_cycle"`
     CreatedAt    time.Time         `json:"created_at"`
@@ -561,17 +557,6 @@ type PriceChangedEvent struct {
 }
 
 func (e PriceChangedEvent) EventType() eventstore.EventType { return EventTypePriceChanged }
-
-// PlanChangedEvent プラン変更イベント
-type PlanChangedEvent struct {
-    ContractID   shared.ContractID `json:"contract_id"`
-    OldPlanID    shared.PlanID     `json:"old_plan_id"`
-    NewPlanID    shared.PlanID     `json:"new_plan_id"`
-    Proration    *ProrationResult  `json:"proration,omitempty"`
-    ChangedAt    time.Time         `json:"changed_at"`
-}
-
-func (e PlanChangedEvent) EventType() eventstore.EventType { return EventTypePlanChanged }
 
 // TrialStartedEvent トライアル開始イベント
 type TrialStartedEvent struct {
@@ -865,9 +850,9 @@ func (p *ContractProjector) handleContractCreated(ctx context.Context, event eve
     
     _, err := p.db.ExecContext(ctx, `
         INSERT INTO contracts_projection 
-        (id, account_id, plan_id, status, price_amount, price_currency, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-    `, e.ContractID, e.AccountID, e.PlanID, "draft", 
+        (id, account_id, status, price_amount, price_currency, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $6)
+    `, e.ContractID, e.AccountID, "draft", 
        e.Price.Amount, e.Price.Currency, e.CreatedAt)
     
     return err
@@ -937,7 +922,6 @@ CREATE INDEX idx_snapshots_stream_id_as_of ON snapshots(stream_id, as_of);
 CREATE TABLE contracts_projection (
     id VARCHAR(255) PRIMARY KEY,
     account_id VARCHAR(255) NOT NULL,
-    plan_id VARCHAR(255) NOT NULL,
     status VARCHAR(50) NOT NULL,
     contract_type VARCHAR(50) NOT NULL,
     price_amount DECIMAL(15, 4) NOT NULL,
@@ -954,7 +938,6 @@ CREATE TABLE contracts_projection (
 
 CREATE INDEX idx_contracts_proj_account ON contracts_projection(account_id);
 CREATE INDEX idx_contracts_proj_status ON contracts_projection(status);
-CREATE INDEX idx_contracts_proj_plan ON contracts_projection(plan_id);
 ```
 
 ## 9. スナップショット戦略

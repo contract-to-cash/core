@@ -127,7 +127,7 @@ func TestCoupon_CalculateDiscount_MaxDiscountCap(t *testing.T) {
 func TestCoupon_IsApplicableToProduct(t *testing.T) {
 	tests := []struct {
 		name         string
-		applicableTo []string
+		applicableTo []shared.ProductID
 		productID    shared.ProductID
 		want         bool
 	}{
@@ -139,13 +139,13 @@ func TestCoupon_IsApplicableToProduct(t *testing.T) {
 		},
 		{
 			name:         "matching product ID",
-			applicableTo: []string{"product-gold", "product-silver"},
+			applicableTo: []shared.ProductID{"product-gold", "product-silver"},
 			productID:    "product-gold",
 			want:         true,
 		},
 		{
 			name:         "non-matching product ID",
-			applicableTo: []string{"product-gold"},
+			applicableTo: []shared.ProductID{"product-gold"},
 			productID:    "product-silver",
 			want:         false,
 		},
@@ -271,7 +271,7 @@ func TestCoupon_Getters(t *testing.T) {
 		value, shared.CurrencyJPY,
 		&minAmount, &maxDiscount,
 		validFrom, validUntil,
-		&usageLimit, 3, []string{"plan-a"},
+		&usageLimit, 3, []shared.ProductID{"plan-a"},
 	)
 
 	t.Run("CouponType", func(t *testing.T) {

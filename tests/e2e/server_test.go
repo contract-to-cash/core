@@ -1248,6 +1248,10 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 				value = new(big.Rat).SetInt64(int64(c.Value))
 			}
 
+			productIDs := make([]shared.ProductID, len(c.Products))
+			for i, p := range c.Products {
+				productIDs[i] = shared.ProductID(p)
+			}
 			coupon := couponplugin.NewCoupon(
 				couponplugin.CouponID(shared.GenerateID()),
 				c.Code,
@@ -1258,7 +1262,7 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 				validFrom, validUntil,
 				c.MaxUses,
 				0,
-				c.Products,
+				productIDs,
 			)
 			if err := repo.Save(r.Context(), coupon); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())

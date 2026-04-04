@@ -94,7 +94,7 @@ func newTestContextWithContract(subtotal shared.Money, c *contract.ContractAggre
 	return plugin.NewCalculationContext(context.Background(), c, subtotal)
 }
 
-func newTestCoupon(id CouponID, code string, ct CouponType, value *big.Rat, applicableTo []string) *Coupon {
+func newTestCoupon(id CouponID, code string, ct CouponType, value *big.Rat, applicableTo []shared.ProductID) *Coupon {
 	return NewCoupon(
 		id, code, ct, value, shared.CurrencyJPY,
 		nil, nil,
@@ -217,7 +217,7 @@ func TestCouponPlugin_NoApplicable(t *testing.T) {
 
 func TestCouponPlugin_ApplicableToProduct_Match(t *testing.T) {
 	// Coupon restricted to product "product-gold"
-	coupon := newTestCoupon("c1", "GOLD10", CouponTypePercentage, big.NewRat(10, 100), []string{"product-gold"})
+	coupon := newTestCoupon("c1", "GOLD10", CouponTypePercentage, big.NewRat(10, 100), []shared.ProductID{"product-gold"})
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 
@@ -240,7 +240,7 @@ func TestCouponPlugin_ApplicableToProduct_Match(t *testing.T) {
 
 func TestCouponPlugin_ApplicableToProduct_NoMatch(t *testing.T) {
 	// Coupon restricted to product "product-gold", but context has "product-silver"
-	coupon := newTestCoupon("c1", "GOLD10", CouponTypePercentage, big.NewRat(10, 100), []string{"product-gold"})
+	coupon := newTestCoupon("c1", "GOLD10", CouponTypePercentage, big.NewRat(10, 100), []shared.ProductID{"product-gold"})
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 

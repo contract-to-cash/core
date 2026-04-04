@@ -361,8 +361,8 @@ type ContractChangeEvent struct {
     ChangeType  ContractChangeType    // 型安全な変更種別
     OldStatus   *contract.ContractStatus // ステータス変更の場合の旧値（nilは該当なし）
     NewStatus   *contract.ContractStatus // ステータス変更の場合の新値
-    OldPlanID   *shared.PlanID        // プラン変更の場合の旧プランID
-    NewPlanID   *shared.PlanID        // プラン変更の場合の新プランID
+    OldPriceID  *shared.PriceID        // 価格変更の場合の旧価格ID
+    NewPriceID  *shared.PriceID        // 価格変更の場合の新価格ID
     MRRChange   *shared.Money         // MRR変動額（メトリクス用）
     Timestamp   time.Time
 }
@@ -1243,11 +1243,11 @@ func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID string) 
     return s.invoiceRepo.Save(ctx, inv)
 }
 
-// ProcessPlanChange プラン変更時のクレジット処理
+// ProcessPriceChange 価格変更時のクレジット処理
 // ProrationResult.AdjustmentAmount < 0 の場合、BalancePolicy に従い分岐
-func (s *BillingService) ProcessPlanChange(ctx context.Context, contractID shared.ContractID, newPlanID string) error {
+func (s *BillingService) ProcessPriceChange(ctx context.Context, contractID shared.ContractID, newPriceID shared.PriceID) error {
     // 1. 日割り計算
-    proration, err := s.calculator.CalculateProration(ctx, contractID, newPlanID)
+    proration, err := s.calculator.CalculateProration(ctx, contractID, newPriceID)
     if err != nil {
         return fmt.Errorf("proration calculation failed: %w", err)
     }

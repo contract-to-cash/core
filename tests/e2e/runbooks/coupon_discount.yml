@@ -15,17 +15,17 @@ steps:
                   valid_from: "2026-01-01"
                   valid_until: "2026-12-31"
                   products:
-                    - "plan-premium"
+                    - "prod-premium"
     test: |
       current.res.status == 200
-  - desc: Create contract on plan-premium (coupon should apply)
+  - desc: Create contract on prod-premium (coupon should apply)
     req:
       /contracts:
         post:
           body:
             application/json:
               account_id: "acc-coupon-001"
-              product_id: "plan-premium"
+              product_id: "prod-premium"
               contract_type: "subscription"
               billing_cycle: "monthly"
               price: 10000
@@ -54,14 +54,14 @@ steps:
       && current.res.body.discount_amount == 2000
       && current.res.body.total == 8000
       && current.res.body.amount_due == 8000
-  - desc: Create contract on plan-basic (coupon should NOT apply)
+  - desc: Create contract on prod-basic (coupon should NOT apply)
     req:
       /contracts:
         post:
           body:
             application/json:
               account_id: "acc-coupon-002"
-              product_id: "plan-basic"
+              product_id: "prod-basic"
               contract_type: "subscription"
               billing_cycle: "monthly"
               price: 5000

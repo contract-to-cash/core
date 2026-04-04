@@ -102,7 +102,7 @@ type Coupon struct {
 	usageLimit              *int
 	usedCount               int
 	perAccountUsageLimit    *int                    // max uses per account (nil = unlimited)
-	applicableTo            []string                // applicable product IDs (empty = all products)
+	applicableTo            []shared.ProductID      // applicable product IDs (empty = all products)
 	applicableContractTypes []contract.ContractType // applicable contract types (empty = all types)
 	allowedAccountIDs       []shared.AccountID
 	blockedAccountIDs       []shared.AccountID
@@ -120,7 +120,7 @@ func NewCoupon(
 	validFrom, validUntil time.Time,
 	usageLimit *int,
 	usedCount int,
-	applicableTo []string,
+	applicableTo []shared.ProductID,
 ) *Coupon {
 	return &Coupon{
 		id:           id,
@@ -179,7 +179,7 @@ func (c *Coupon) Code() string { return c.code }
 func (c *Coupon) CodeType() CodeType { return c.codeType }
 
 // ApplicableTo returns the applicable product IDs.
-func (c *Coupon) ApplicableTo() []string { return c.applicableTo }
+func (c *Coupon) ApplicableTo() []shared.ProductID { return c.applicableTo }
 
 // CouponType returns the coupon type (percentage or fixed).
 func (c *Coupon) CouponType() CouponType { return c.couponType }
@@ -230,7 +230,7 @@ func (c *Coupon) IsApplicableToProduct(productID shared.ProductID) bool {
 		return true
 	}
 	for _, id := range c.applicableTo {
-		if id == string(productID) {
+		if id == productID {
 			return true
 		}
 	}

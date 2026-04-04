@@ -57,7 +57,6 @@ erDiagram
     Contract {
         ContractID id PK
         AccountID accountID FK
-        PlanID planID FK "legacy: ProductID"
         PriceID priceID FK
         ContractStatus status "draft | trialing | active | past_due | suspended | cancelled | expired"
         ContractType contractType "one_time | subscription | usage_based"
@@ -301,7 +300,6 @@ type ContractID string
 type InvoiceID string
 type PaymentID string
 type UsageRecordID string
-type PlanID string         // Deprecated: ProductID を使用すること。既存イベントとの後方互換のために残す。
 type ProductID string
 type PriceID string
 type BalanceEntryID string
@@ -313,7 +311,6 @@ func NewContractID() ContractID         { return ContractID(generateULID()) }
 func NewInvoiceID() InvoiceID           { return InvoiceID(generateULID()) }
 func NewPaymentID() PaymentID           { return PaymentID(generateULID()) }
 func NewUsageRecordID() UsageRecordID   { return UsageRecordID(generateULID()) }
-func NewPlanID() PlanID                 { return PlanID(generateULID()) }   // Deprecated
 func NewProductID() ProductID           { return ProductID(generateULID()) }
 func NewPriceID() PriceID               { return PriceID(generateULID()) }
 func NewBalanceEntryID() BalanceEntryID { return BalanceEntryID(generateULID()) }
@@ -487,7 +484,6 @@ const (
 type Contract struct {
     id               shared.ContractID
     accountID        shared.AccountID
-    planID           shared.PlanID
     status           ContractStatus
     contractType     ContractType
     billingCycle     BillingCycle
@@ -519,7 +515,6 @@ import (
 type CreateContractCommand struct {
     IdempotencyKey string
     AccountID      shared.AccountID
-    PlanID         shared.PlanID
     PriceID        shared.PriceID
     ContractType   ContractType
     BillingCycle   BillingCycle
@@ -534,7 +529,6 @@ type ContractAggregate struct {
 
     contractID        shared.ContractID
     accountID         shared.AccountID
-    planID            shared.PlanID
     status            ContractStatus
     contractType      ContractType
     billingCycle      BillingCycle
@@ -579,7 +573,6 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 // Getters
 func (a *ContractAggregate) ContractID() shared.ContractID
 func (a *ContractAggregate) AccountID() shared.AccountID
-func (a *ContractAggregate) PlanID() shared.PlanID
 func (a *ContractAggregate) Status() ContractStatus
 func (a *ContractAggregate) GetContractType() ContractType
 func (a *ContractAggregate) GetBillingCycle() BillingCycle
@@ -605,7 +598,7 @@ func (a *ContractAggregate) UpdatedAt() time.Time
 // domain/contract/events.go
 package contract
 
-// 全16種のドメインイベント
+// 全15種のドメインイベント
 const (
     EventTypeContractCreated         eventstore.EventType = "contract.created"
     EventTypeContractActivated       eventstore.EventType = "contract.activated"
@@ -613,7 +606,6 @@ const (
     EventTypeContractResumed         eventstore.EventType = "contract.resumed"
     EventTypeContractCancelled       eventstore.EventType = "contract.cancelled"
     EventTypePriceChanged            eventstore.EventType = "contract.price_changed"
-    EventTypePlanChanged             eventstore.EventType = "contract.plan_changed"
     EventTypeTrialStarted            eventstore.EventType = "contract.trial_started"
     EventTypeTrialEnded              eventstore.EventType = "contract.trial_ended"
     EventTypePaymentMethodChanged    eventstore.EventType = "contract.payment_method_changed"
@@ -628,7 +620,6 @@ const (
 type ContractCreatedEvent struct {
     ContractID   shared.ContractID
     AccountID    shared.AccountID
-    PlanID       shared.PlanID
     PriceID      shared.PriceID
     Price        shared.Money
     BasePrice    shared.Money
@@ -691,14 +682,6 @@ type PriceChangeUnscheduledEvent struct {
     UnscheduledAt    time.Time
 }
 
-type PlanChangedEvent struct {
-    ContractID shared.ContractID
-    OldPlanID  shared.PlanID
-    NewPlanID  shared.PlanID
-    Proration  *PlanChangeProration
-    ChangedAt  time.Time
-}
-
 type TrialStartedEvent struct {
     ContractID  shared.ContractID
     TrialConfig TrialConfiguration
@@ -754,7 +737,7 @@ type CancellationUnscheduledEvent struct {
 // domain/contract/policy.go
 package contract
 
-// ChangePolicy は価格/プラン変更の適用タイミングを定義する
+// ChangePolicy は価格変更の適用タイミングを定義する
 type ChangePolicy string
 
 const (
@@ -853,7 +836,7 @@ type ProrationConfig struct {
     RoundingMode RoundingMode
 }
 
-// PlanChangeProration はプラン変更時の日割り計算結果を保持する。
+// PlanChangeProration は価格変更時の日割り計算結果を保持する。
 // billing.ProrationResult と同等だが、循環依存回避のため contract ドメイン内で定義。
 type PlanChangeProration struct {
     CreditAmount     shared.Money
@@ -884,7 +867,6 @@ type Repository interface {
     FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*ContractAggregate, error)
 
     // クエリ
-    FindActiveByPlanID(ctx context.Context, planID shared.PlanID) ([]*ContractAggregate, error)
     FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
     FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
     FindDueForRenewal(ctx context.Context, asOf time.Time) ([]*ContractAggregate, error)
@@ -1456,7 +1438,7 @@ type PriceRepository interface {
 }
 ```
 
-### 7.4 PricingModel と Plan
+### 7.4 PricingModel
 
 ```go
 // domain/pricing/model.go
@@ -1470,21 +1452,6 @@ type PricingModel interface {
     CalculatePrice(usage int64) shared.Money
 }
 
-// Plan 料金プラン（Feature, UsageMetric を含む）
-// Deprecated: product.Product と pricing.Price を使用すること。
-type Plan struct {
-    id           shared.PlanID
-    name         string
-    description  string
-    pricingModel PricingModel
-    usageMetrics []UsageMetric
-    features     []Feature
-    metadata     map[string]string
-}
-
-// Deprecated: product.NewProduct と pricing.NewPrice を使用すること。
-func NewPlan(name string, description string, pricingModel PricingModel) *Plan
-
 // UsageMetric 従量課金メトリクス定義
 // Deprecated: プロダクト定義には product.UsageMetric を使用すること。
 // 従量料金計算で PricingModel を保持するためこの型は残存する。
@@ -1494,7 +1461,7 @@ type UsageMetric struct {
     IncludedQuantity int64
 }
 
-// Feature プラン機能定義
+// Feature 機能定義
 // Deprecated: product.Feature を使用すること。
 type Feature struct {
     Name     string
@@ -1660,8 +1627,8 @@ type Calculator interface {
 }
 
 type ProrationResult struct {
-    CreditAmount     shared.Money // 旧プラン残日数分（内訳記録用）
-    ChargeAmount     shared.Money // 新プラン残日数分（内訳記録用）
+    CreditAmount     shared.Money // 旧価格残日数分（内訳記録用）
+    ChargeAmount     shared.Money // 新価格残日数分（内訳記録用）
     AdjustmentAmount shared.Money // 日割り調整額（ChargeAmount - CreditAmount）
     // AdjustmentAmount > 0: 追加請求（アップグレード）
     // AdjustmentAmount < 0: 次回請求からクレジット差引（ダウングレード）
@@ -1674,7 +1641,7 @@ func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*
 // 決済時の動作:
 //   アップグレード（Adjustment > 0）→ AdjustmentAmount のみ1回請求
 //   ダウングレード（Adjustment < 0）→ BalancePolicy に従って処理（後述）
-//   同額プラン変更（Adjustment = 0）→ 決済なし
+//   同額価格変更（Adjustment = 0）→ 決済なし
 ```
 
 > **注**: 旧 `domain/contract/engine.go`（`Engine`, `SubscriptionEngine`, `UsageBasedEngine`）は
@@ -1683,7 +1650,7 @@ func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*
 
 ## 10. クレジット台帳（Credit Ledger）
 
-プラン変更（ダウングレード）、手動調整、返金のクレジット変換等で発生する
+価格変更（ダウングレード）、手動調整、返金のクレジット変換等で発生する
 預かり金（クレジット残高）を管理する。
 
 ### 10.1 クレジットポリシー
@@ -1741,7 +1708,7 @@ type BalanceEntry struct {
     reason          BalanceReason      // 発生理由
     sourceType      string            // 発生元の種類（"proration", "manual", "refund_conversion"）
     sourceID        string            // 発生元ID（ProrationResult ID, 管理者操作ID等）
-    description     string            // 説明（「Proプラン→Basicプランへの日割り調整」等）
+    description     string            // 説明（「Pro価格→Basic価格への日割り調整」等）
     expiresAt       *time.Time        // 有効期限（nil = 無期限）
     createdAt       time.Time
     version         int               // Consume() のたびにインクリメント。楽観的ロック用。
@@ -1751,7 +1718,7 @@ type BalanceEntry struct {
 type BalanceReason string
 
 const (
-    BalanceReasonProration        BalanceReason = "proration"          // プラン変更の日割り差額
+    BalanceReasonProration        BalanceReason = "proration"          // 価格変更の日割り差額
     BalanceReasonCancellation     BalanceReason = "cancellation"       // 解約時の未使用期間
     BalanceReasonManualAdjustment BalanceReason = "manual_adjustment"  // 手動調整（CS対応等）
     BalanceReasonRefundConversion BalanceReason = "refund_conversion"  // 返金→クレジット変換
