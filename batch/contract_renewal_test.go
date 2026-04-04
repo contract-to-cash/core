@@ -61,10 +61,6 @@ func (m *mockRenewalRepo) FindByAccountID(_ context.Context, _ shared.AccountID)
 	return nil, nil
 }
 
-func (m *mockRenewalRepo) FindActiveByPlanID(_ context.Context, _ shared.PlanID) ([]*contract.ContractAggregate, error) {
-	return nil, nil
-}
-
 func (m *mockRenewalRepo) FindExpiring(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
@@ -89,7 +85,6 @@ func newActiveContract(id string) *contract.ContractAggregate {
 
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
-		PlanID:       shared.PlanID("p1"),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
@@ -202,7 +197,6 @@ func TestContractRenewalProcessor_DryRun_AutoRenewFalse(t *testing.T) {
 	agg := contract.NewContractAggregate(shared.ContractID("c1"), clock)
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
-		PlanID:       shared.PlanID("p1"),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
@@ -260,7 +254,6 @@ func TestContractRenewalProcessor_StopOnError(t *testing.T) {
 	meta := eventstore.EventMetadata{UserID: "test"}
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
-		PlanID:       shared.PlanID("p1"),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
@@ -340,7 +333,6 @@ func TestContractRenewalProcessor_ContinueOnError(t *testing.T) {
 	meta := eventstore.EventMetadata{UserID: "test"}
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
-		PlanID:       shared.PlanID("p1"),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
@@ -393,7 +385,6 @@ func TestContractRenewalProcessor_BillingCycleChange(t *testing.T) {
 
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
-		PlanID:       shared.PlanID("p1"),
 		PriceID:      shared.PriceID("price-monthly"),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,

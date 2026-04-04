@@ -1,16 +1,16 @@
 # マルチサービスデモ
 
-単一の課金システムに複数の独立したサービスプラグインが共存し、PlanIDベースのフィルタリングで各自の契約種別にのみ反応する仕組みを示します。
+単一の課金システムに複数の独立したサービスプラグインが共存し、PriceIDベースのフィルタリングで各自の契約種別にのみ反応する仕組みを示します。
 
 ## シナリオ
 
 3つの商品を販売するホスティング会社:
 
-| 商品 | PlanIDプレフィックス | プラグイン | 操作内容 |
+| 商品 | PriceIDプレフィックス | プラグイン | 操作内容 |
 |------|---------------------|-----------|---------|
-| VPSサーバー | `plan-vps-*` | ServerPlugin | VM起動/停止/再起動/削除 |
-| SSL証明書 | `plan-ssl-*` | SSLPlugin | 証明書発行/一時停止/再有効化/失効 |
-| ドメイン名 | `plan-domain-*` | DomainPlugin | ドメイン登録/一時停止/復元/解放 |
+| VPSサーバー | `price-vps-*` | ServerPlugin | VM起動/停止/再起動/削除 |
+| SSL証明書 | `price-ssl-*` | SSLPlugin | 証明書発行/一時停止/再有効化/失効 |
+| ドメイン名 | `price-domain-*` | DomainPlugin | ドメイン登録/一時停止/復元/解放 |
 
 ## 実行結果
 
@@ -39,11 +39,11 @@ Phase 4: 顧客がドメインだけ解約
 
 ## 仕組み
 
-3つのプラグインが同時に登録されます。全契約イベントが全プラグインに配信されますが、各プラグインはPlanIDプレフィックスでフィルタします:
+3つのプラグインが同時に登録されます。全契約イベントが全プラグインに配信されますが、各プラグインはPriceIDプレフィックスでフィルタします:
 
 ```go
 func (p *ServerPlugin) handles(c *contract.ContractAggregate) bool {
-    return strings.HasPrefix(string(c.PlanID()), "plan-vps-")
+    return strings.HasPrefix(string(c.PriceID()), "price-vps-")
 }
 
 func (p *ServerPlugin) OnContractSuspend(ctx *plugin.Context, c *contract.ContractAggregate) error {
@@ -58,7 +58,7 @@ func (p *ServerPlugin) OnContractSuspend(ctx *plugin.Context, c *contract.Contra
 
 | コンセプト | 説明 |
 |-----------|------|
-| **PlanIDベースのルーティング** | 各プラグインがPlanIDプレフィックスでイベントをフィルタ -- シンプルかつ明示的 |
+| **PriceIDベースのルーティング** | 各プラグインがPriceIDプレフィックスでイベントをフィルタ -- シンプルかつ明示的 |
 | **単一責任** | 各プラグインは正確に1つのサービス種別を担当 |
 | **ゼロ結合** | プラグイン同士は互いを知らない。課金コアもサービスを知らない |
 | **追加型の拡張性** | 新商品 = 新プラグイン。既存コードの変更不要 |

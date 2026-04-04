@@ -1,7 +1,6 @@
 package contract
 
 import (
-	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
@@ -284,7 +283,6 @@ func TestApply_PriceChangedEvent_NewFormat(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -322,7 +320,6 @@ func TestApply_PriceChangeScheduledEvent(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -353,7 +350,6 @@ func TestApply_PriceChangeUnscheduledEvent(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -411,7 +407,6 @@ func TestApply_LegacyPriceChangedEvent(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -429,36 +424,6 @@ func TestApply_LegacyPriceChangedEvent(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Apply legacy PriceChangedEvent failed: %v", err)
-	}
-}
-
-func TestApply_LegacyPlanChangedEvent(t *testing.T) {
-	// Legacy PlanChangedEvent should still apply
-	agg := newTestAggregate()
-	now := agg.Clock().Now()
-
-	_ = agg.Apply(&ContractCreatedEvent{
-		ContractID:   shared.ContractID("test-contract-001"),
-		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
-		Price:        newTestMoney(),
-		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
-		ContractType: ContractTypeSubscription,
-		CreatedAt:    now,
-	})
-
-	err := agg.Apply(&PlanChangedEvent{
-		ContractID: shared.ContractID("test-contract-001"),
-		OldPlanID:  shared.PlanID("plan-001"),
-		NewPlanID:  shared.PlanID("plan-002"),
-		ChangedAt:  now,
-	})
-	if err != nil {
-		t.Fatalf("Apply legacy PlanChangedEvent failed: %v", err)
-	}
-	if agg.PlanID() != shared.PlanID("plan-002") {
-		t.Errorf("expected plan-002, got %s", agg.PlanID())
 	}
 }
 
@@ -524,7 +489,6 @@ func TestCreate_WithPriceID(t *testing.T) {
 
 	cmd := CreateContractCommand{
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		PriceID:      shared.PriceID("price-001"),
 		ContractType: ContractTypeSubscription,
 		BillingCycle: BillingCycleMonthly,
@@ -639,51 +603,5 @@ func TestPriceChangeUnscheduledEvent_Serialization(t *testing.T) {
 	}
 	if pcu.Reason != "changed mind" {
 		t.Errorf("expected reason 'changed mind', got %s", pcu.Reason)
-	}
-}
-
-// --- Legacy backward compatibility: LoadFromHistory with old PlanChangedEvent ---
-
-func TestLoadFromHistory_LegacyPlanChangedEvent(t *testing.T) {
-	// Simulate loading historical events that include the old PlanChangedEvent
-	// This should still work for backward compat
-	now := newTestClock().Now()
-
-	createData, _ := json.Marshal(&ContractCreatedEvent{
-		ContractID:   shared.ContractID("test-contract-001"),
-		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
-		Price:        newTestMoney(),
-		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
-		ContractType: ContractTypeSubscription,
-		CreatedAt:    now,
-	})
-
-	activateData, _ := json.Marshal(&ContractActivatedEvent{
-		ContractID:  shared.ContractID("test-contract-001"),
-		ActivatedAt: now,
-	})
-
-	planChangeData, _ := json.Marshal(&PlanChangedEvent{
-		ContractID: shared.ContractID("test-contract-001"),
-		OldPlanID:  shared.PlanID("plan-001"),
-		NewPlanID:  shared.PlanID("plan-002"),
-		ChangedAt:  now,
-	})
-
-	events := []eventstore.Event{
-		{Type: EventTypeContractCreated, Data: createData},
-		{Type: EventTypeContractActivated, Data: activateData},
-		{Type: EventTypePlanChanged, Data: planChangeData},
-	}
-
-	agg := NewContractAggregate(shared.ContractID("test-contract-001"), newTestClock())
-	if err := agg.LoadFromHistory(events); err != nil {
-		t.Fatalf("LoadFromHistory with legacy PlanChangedEvent failed: %v", err)
-	}
-
-	if agg.PlanID() != shared.PlanID("plan-002") {
-		t.Errorf("expected plan-002, got %s", agg.PlanID())
 	}
 }

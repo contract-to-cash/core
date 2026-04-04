@@ -45,7 +45,6 @@ const (
 type Contract struct {
 	id               shared.ContractID
 	accountID        shared.AccountID
-	planID           shared.PlanID
 	status           ContractStatus
 	contractType     ContractType
 	billingCycle     BillingCycle
@@ -66,9 +65,6 @@ func (c *Contract) ID() shared.ContractID { return c.id }
 
 // AccountID returns the account ID.
 func (c *Contract) AccountID() shared.AccountID { return c.accountID }
-
-// PlanID returns the plan ID.
-func (c *Contract) PlanID() shared.PlanID { return c.planID }
 
 // Status returns the contract status.
 func (c *Contract) Status() ContractStatus { return c.status }

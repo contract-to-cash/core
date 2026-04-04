@@ -31,7 +31,6 @@ func newTestMetadata() eventstore.EventMetadata {
 func newTestCommand() CreateContractCommand {
 	return CreateContractCommand{
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		ContractType: ContractTypeSubscription,
 		BillingCycle: BillingCycleMonthly,
 		Price:        newTestMoney(),
@@ -65,9 +64,6 @@ func TestContractLifecycle_Create_Activate_Suspend_Resume_Cancel(t *testing.T) {
 	}
 	if agg.AccountID() != shared.AccountID("acc-001") {
 		t.Errorf("expected account acc-001, got %s", agg.AccountID())
-	}
-	if agg.PlanID() != shared.PlanID("plan-001") {
-		t.Errorf("expected plan plan-001, got %s", agg.PlanID())
 	}
 
 	// Activate
@@ -230,7 +226,6 @@ func TestApplyAllEvents(t *testing.T) {
 	err := agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -269,20 +264,6 @@ func TestApplyAllEvents(t *testing.T) {
 	}
 	if agg.PriceID() != shared.PriceID("price-new-001") {
 		t.Errorf("expected priceID price-new-001, got %s", agg.PriceID())
-	}
-
-	// PlanChangedEvent (legacy — kept for backward compat)
-	err = agg.Apply(&PlanChangedEvent{
-		ContractID: shared.ContractID("test-contract-001"),
-		OldPlanID:  shared.PlanID("plan-001"),
-		NewPlanID:  shared.PlanID("plan-002"),
-		ChangedAt:  now,
-	})
-	if err != nil {
-		t.Fatalf("Apply PlanChangedEvent failed: %v", err)
-	}
-	if agg.PlanID() != shared.PlanID("plan-002") {
-		t.Errorf("expected plan-002, got %s", agg.PlanID())
 	}
 
 	// ContractSuspendedEvent
@@ -333,7 +314,6 @@ func TestApplyTrialEvents(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -387,7 +367,6 @@ func TestApplyTrialEndedNotConverted(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -472,7 +451,6 @@ func TestLoadFromSnapshot(t *testing.T) {
 	state := contractSnapshotState{
 		ContractID:   shared.ContractID("snap-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Status:       ContractStatusActive,
 		ContractType: ContractTypeSubscription,
 		BillingCycle: BillingCycleMonthly,
@@ -980,7 +958,6 @@ func TestApplyContractRenewedEvent(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -1036,7 +1013,6 @@ func TestApplyContractExpiredEvent(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -1171,7 +1147,6 @@ func TestApplyCancellationScheduledEvent(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,
@@ -1205,7 +1180,6 @@ func TestApplyCancellationUnscheduledEvent(t *testing.T) {
 	_ = agg.Apply(&ContractCreatedEvent{
 		ContractID:   shared.ContractID("test-contract-001"),
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		BillingCycle: BillingCycleMonthly,

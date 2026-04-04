@@ -28,8 +28,8 @@ type ContractChangeEvent struct {
 	ChangeType ContractChangeType
 	OldStatus  *contract.ContractStatus
 	NewStatus  *contract.ContractStatus
-	OldPlanID  *shared.PlanID
-	NewPlanID  *shared.PlanID
+	OldPriceID *shared.PriceID
+	NewPriceID *shared.PriceID
 	MRRChange  *shared.Money
 	Timestamp  time.Time
 }

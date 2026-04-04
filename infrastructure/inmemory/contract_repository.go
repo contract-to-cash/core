@@ -77,20 +77,6 @@ func (r *InMemoryContractRepository) FindByAccountID(_ context.Context, accountI
 	return result, nil
 }
 
-// FindActiveByPlanID returns active contracts using the specified plan.
-func (r *InMemoryContractRepository) FindActiveByPlanID(_ context.Context, planID shared.PlanID) ([]*contract.ContractAggregate, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	var result []*contract.ContractAggregate
-	for _, agg := range r.contracts {
-		if agg.PlanID() == planID && agg.Status() == contract.ContractStatusActive {
-			result = append(result, agg)
-		}
-	}
-	return result, nil
-}
-
 // FindExpiring returns contracts expiring before the given time.
 func (r *InMemoryContractRepository) FindExpiring(_ context.Context, before time.Time) ([]*contract.ContractAggregate, error) {
 	r.mu.RLock()

@@ -124,29 +124,29 @@ func TestCoupon_CalculateDiscount_MaxDiscountCap(t *testing.T) {
 	}
 }
 
-func TestCoupon_IsApplicableToPlan(t *testing.T) {
+func TestCoupon_IsApplicableToProduct(t *testing.T) {
 	tests := []struct {
 		name         string
 		applicableTo []string
-		planID       shared.PlanID
+		productID    shared.ProductID
 		want         bool
 	}{
 		{
-			name:         "empty applicableTo matches all plans",
+			name:         "empty applicableTo matches all products",
 			applicableTo: nil,
-			planID:       "any-plan",
+			productID:    "any-product",
 			want:         true,
 		},
 		{
-			name:         "matching plan ID",
-			applicableTo: []string{"plan-gold", "plan-silver"},
-			planID:       "plan-gold",
+			name:         "matching product ID",
+			applicableTo: []string{"product-gold", "product-silver"},
+			productID:    "product-gold",
 			want:         true,
 		},
 		{
-			name:         "non-matching plan ID",
-			applicableTo: []string{"plan-gold"},
-			planID:       "plan-silver",
+			name:         "non-matching product ID",
+			applicableTo: []string{"product-gold"},
+			productID:    "product-silver",
 			want:         false,
 		},
 	}
@@ -161,8 +161,8 @@ func TestCoupon_IsApplicableToPlan(t *testing.T) {
 				time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 				nil, 0, tt.applicableTo,
 			)
-			if got := c.IsApplicableToPlan(tt.planID); got != tt.want {
-				t.Errorf("IsApplicableToPlan(%q) = %v, want %v", tt.planID, got, tt.want)
+			if got := c.IsApplicableToProduct(tt.productID); got != tt.want {
+				t.Errorf("IsApplicableToProduct(%q) = %v, want %v", tt.productID, got, tt.want)
 			}
 		})
 	}

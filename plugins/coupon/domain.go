@@ -102,7 +102,7 @@ type Coupon struct {
 	usageLimit              *int
 	usedCount               int
 	perAccountUsageLimit    *int                    // max uses per account (nil = unlimited)
-	applicableTo            []string                // applicable plan IDs (empty = all plans)
+	applicableTo            []string                // applicable product IDs (empty = all products)
 	applicableContractTypes []contract.ContractType // applicable contract types (empty = all types)
 	allowedAccountIDs       []shared.AccountID
 	blockedAccountIDs       []shared.AccountID
@@ -178,7 +178,7 @@ func (c *Coupon) Code() string { return c.code }
 // CodeType returns the code type (shared or unique).
 func (c *Coupon) CodeType() CodeType { return c.codeType }
 
-// ApplicableTo returns the applicable plan IDs.
+// ApplicableTo returns the applicable product IDs.
 func (c *Coupon) ApplicableTo() []string { return c.applicableTo }
 
 // CouponType returns the coupon type (percentage or fixed).
@@ -223,17 +223,14 @@ func (c *Coupon) IsValid(at time.Time) bool {
 	return true
 }
 
-// IsApplicableToPlan returns true if the coupon is applicable to the given plan.
-// If applicableTo is empty, the coupon applies to all plans.
-//
-// TODO(#7): Once Product/Price separation is implemented, this should check against
-// ProductID instead of PlanID. See #4 comment: "applicableTo should filter by ProductID".
-func (c *Coupon) IsApplicableToPlan(planID shared.PlanID) bool {
+// IsApplicableToProduct returns true if the coupon is applicable to the given product.
+// If applicableTo is empty, the coupon applies to all products.
+func (c *Coupon) IsApplicableToProduct(productID shared.ProductID) bool {
 	if len(c.applicableTo) == 0 {
 		return true
 	}
 	for _, id := range c.applicableTo {
-		if id == string(planID) {
+		if id == string(productID) {
 			return true
 		}
 	}

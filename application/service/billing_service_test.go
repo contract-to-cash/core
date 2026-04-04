@@ -33,9 +33,6 @@ func (m *mockContractRepo) FindByID(_ context.Context, _ shared.ContractID) (*co
 func (m *mockContractRepo) FindByAccountID(_ context.Context, _ shared.AccountID) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
-func (m *mockContractRepo) FindActiveByPlanID(_ context.Context, _ shared.PlanID) ([]*contract.ContractAggregate, error) {
-	return nil, nil
-}
 func (m *mockContractRepo) FindExpiring(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
@@ -168,7 +165,6 @@ func newTestContractAggregateWithPriceID(clock shared.Clock, contractType contra
 	agg := contract.NewContractAggregate(cid, clock)
 	_ = agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
-		PlanID:       shared.NewPlanID(),
 		PriceID:      priceID,
 		ContractType: contractType,
 		BillingCycle: contract.BillingCycleMonthly,
@@ -417,7 +413,6 @@ func newDraftContractAggregateWithPrice(clock shared.Clock, price shared.Money) 
 	agg := contract.NewContractAggregate(cid, clock)
 	_ = agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
-		PlanID:       shared.NewPlanID(),
 		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,

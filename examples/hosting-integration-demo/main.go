@@ -84,7 +84,6 @@ func main() {
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create", agg.Create(contract.CreateContractCommand{
 		AccountID:    accountID,
-		PlanID:       shared.PlanID("plan-vps-standard"),
 		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
@@ -288,12 +287,12 @@ func newServerManager() *serverManager {
 	}
 }
 
-func (m *serverManager) Provision(contractID string, planID string, at time.Time) {
+func (m *serverManager) Provision(contractID string, at time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.servers[contractID] = serverStateRunning
-	msg := fmt.Sprintf("SERVER PROVISIONED: contract=%s plan=%s -> allocating CPU/RAM/disk, installing OS, configuring network",
-		contractID[:12]+"...", planID)
+	msg := fmt.Sprintf("SERVER PROVISIONED: contract=%s -> allocating CPU/RAM/disk, installing OS, configuring network",
+		contractID[:12]+"...")
 	m.log = append(m.log, logEntry{at: at, message: msg})
 	fmt.Printf("  >> [ServerManager] %s\n", msg)
 }
@@ -389,8 +388,8 @@ func (p *serverProvisioningPlugin) Shutdown(_ context.Context) error { return ni
 // OnContractCreateHook - prepare (but don't provision yet)
 func (p *serverProvisioningPlugin) OnContractCreate(_ *plugin.Context, c *contract.ContractAggregate) error {
 	p.activeContractID = c.ContractID()
-	fmt.Printf("  >> [Provisioning] Contract created: %s (plan: %s) - awaiting payment\n",
-		c.ContractID(), c.PlanID())
+	fmt.Printf("  >> [Provisioning] Contract created: %s (price: %s) - awaiting payment\n",
+		c.ContractID(), c.PriceID())
 	return nil
 }
 
@@ -407,7 +406,7 @@ func (p *serverProvisioningPlugin) AfterCharge(ctx *plugin.PaymentContext) error
 	cid := string(p.activeContractID)
 	state := p.mgr.GetState(cid)
 	if state == serverStateNone || state == serverStatePending {
-		p.mgr.Provision(cid, "vps-standard", time.Now())
+		p.mgr.Provision(cid, time.Now())
 	}
 	return nil
 }
