@@ -50,10 +50,8 @@ infrastructure/  → domain/applicationのインターフェース実装（inmem
 | Product | Entity | 「何を売るか」を定義。Price（「どう課金するか」）と分離 |
 | BalanceEntry | Entity | FIFO消費、有効期限対応 |
 
-**IMPORTANT: PlanID は非推奨。新規コードでは ProductID + PriceID を使用すること。**
-- `shared.PlanID` は既存イベントとの後方互換のために残存
 - `contract.BillingCycle` は `pricing.BillingCycle` のエイリアス（定義元は `pricing`）
-- 新しい契約は `CreateContractCommand.PriceID` で Price を指定する
+- 契約は `CreateContractCommand.PriceID` で Price を指定する
 
 ### Event Sourcing
 
@@ -132,7 +130,7 @@ BeforeCalculation → 価格計算 → Discount → Subtotal → Tax → Total �
 - [ ] 状態遷移が既存のフローと矛盾しないか
 - [ ] `Clock` インターフェースを使っているか（`time.Now()` を使っていないか）
 - [ ] テストが `-race` で通るか
-- [ ] 新規コードで `PlanID` ではなく `ProductID` + `PriceID` を使っているか
+- [ ] `ProductID` + `PriceID` を使っているか（`PlanID` は廃止済み）
 
 ### 既知の課題（コードレビュー 2026/03/27時点）
 

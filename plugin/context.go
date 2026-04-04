@@ -20,6 +20,7 @@ type CalculationContext struct {
 	ctx                   context.Context
 	contract              *contract.ContractAggregate
 	invoice               *invoice.Invoice
+	productID             shared.ProductID
 	subtotal              shared.Money
 	subtotalAfterDiscount shared.Money
 	appliedDiscounts      []AppliedDiscount
@@ -86,6 +87,12 @@ func (cc *CalculationContext) ContractID() shared.ContractID {
 	}
 	return cc.contract.ContractID()
 }
+
+// ProductID returns the product ID associated with this billing calculation.
+func (cc *CalculationContext) ProductID() shared.ProductID { return cc.productID }
+
+// SetProductID sets the product ID on the context.
+func (cc *CalculationContext) SetProductID(id shared.ProductID) { cc.productID = id }
 
 // Context provides a generic context for non-calculation hooks.
 type Context struct {

@@ -1,8 +1,8 @@
-desc: "Coupon plugin: apply coupon, verify plan restriction blocks non-matching plans"
+desc: "Coupon plugin: apply coupon, verify product restriction blocks non-matching products"
 runners:
   req: "{{ env.BASE_URL }}"
 steps:
-  - desc: Register coupon plugin with plan-restricted 20% coupon
+  - desc: Register coupon plugin with product-restricted 20% coupon
     req:
       /plugins/coupon/register:
         post:
@@ -14,18 +14,18 @@ steps:
                   value: 20
                   valid_from: "2026-01-01"
                   valid_until: "2026-12-31"
-                  plans:
-                    - "plan-premium"
+                  products:
+                    - "prod-premium"
     test: |
       current.res.status == 200
-  - desc: Create contract on plan-premium (coupon should apply)
+  - desc: Create contract on prod-premium (coupon should apply)
     req:
       /contracts:
         post:
           body:
             application/json:
               account_id: "acc-coupon-001"
-              plan_id: "plan-premium"
+              product_id: "prod-premium"
               contract_type: "subscription"
               billing_cycle: "monthly"
               price: 10000
@@ -54,14 +54,14 @@ steps:
       && current.res.body.discount_amount == 2000
       && current.res.body.total == 8000
       && current.res.body.amount_due == 8000
-  - desc: Create contract on plan-basic (coupon should NOT apply)
+  - desc: Create contract on prod-basic (coupon should NOT apply)
     req:
       /contracts:
         post:
           body:
             application/json:
               account_id: "acc-coupon-002"
-              plan_id: "plan-basic"
+              product_id: "prod-basic"
               contract_type: "subscription"
               billing_cycle: "monthly"
               price: 5000

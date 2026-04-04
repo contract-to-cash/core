@@ -15,7 +15,6 @@ const (
 	EventTypeContractResumed         eventstore.EventType = "contract.resumed"
 	EventTypeContractCancelled       eventstore.EventType = "contract.cancelled"
 	EventTypePriceChanged            eventstore.EventType = "contract.price_changed"
-	EventTypePlanChanged             eventstore.EventType = "contract.plan_changed"
 	EventTypeTrialStarted            eventstore.EventType = "contract.trial_started"
 	EventTypeTrialEnded              eventstore.EventType = "contract.trial_ended"
 	EventTypePaymentMethodChanged    eventstore.EventType = "contract.payment_method_changed"
@@ -31,8 +30,7 @@ const (
 type ContractCreatedEvent struct {
 	ContractID   shared.ContractID `json:"contract_id"`
 	AccountID    shared.AccountID  `json:"account_id"`
-	PlanID       shared.PlanID     `json:"plan_id"`
-	PriceID      shared.PriceID    `json:"price_id,omitempty"`
+	PriceID      shared.PriceID    `json:"price_id"`
 	Price        shared.Money      `json:"price"`
 	BillingCycle BillingCycle      `json:"billing_cycle"`
 	ContractType ContractType      `json:"contract_type"`
@@ -120,17 +118,6 @@ type PriceChangeUnscheduledEvent struct {
 func (e *PriceChangeUnscheduledEvent) EventType() eventstore.EventType {
 	return EventTypePriceChangeUnscheduled
 }
-
-// PlanChangedEvent is raised when a contract's plan changes.
-type PlanChangedEvent struct {
-	ContractID shared.ContractID    `json:"contract_id"`
-	OldPlanID  shared.PlanID        `json:"old_plan_id"`
-	NewPlanID  shared.PlanID        `json:"new_plan_id"`
-	Proration  *PlanChangeProration `json:"proration,omitempty"`
-	ChangedAt  time.Time            `json:"changed_at"`
-}
-
-func (e *PlanChangedEvent) EventType() eventstore.EventType { return EventTypePlanChanged }
 
 // TrialStartedEvent is raised when a trial period starts.
 type TrialStartedEvent struct {

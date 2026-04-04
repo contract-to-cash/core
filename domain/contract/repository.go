@@ -18,9 +18,6 @@ type Repository interface {
 	// FindByAccountID returns all contracts for an account.
 	FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*ContractAggregate, error)
 
-	// FindActiveByPlanID returns active contracts using the specified plan.
-	FindActiveByPlanID(ctx context.Context, planID shared.PlanID) ([]*ContractAggregate, error)
-
 	// FindExpiring returns contracts expiring before the given time.
 	FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
 

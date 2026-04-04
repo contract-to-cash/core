@@ -367,6 +367,15 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 	currency := subtotal.Currency()
 	calcCtx := plugin.NewCalculationContext(ctx, agg, shared.Zero(currency))
 
+	// Resolve ProductID from PriceID for plugin context (e.g. coupon applicability)
+	if priceID := agg.PriceID(); priceID != "" {
+		priceEntity, priceErr := s.priceRepo.FindByID(ctx, priceID)
+		if priceErr != nil {
+			return nil, fmt.Errorf("failed to load price for product resolution: %w", priceErr)
+		}
+		calcCtx.SetProductID(priceEntity.ProductID())
+	}
+
 	// BeforeCalculation (InvoiceLifecycleHooks)
 	for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
 		if err := hook.BeforeCalculation(calcCtx); err != nil {

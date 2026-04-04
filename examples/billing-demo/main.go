@@ -65,7 +65,6 @@ func main() {
 
 	contractID := shared.NewContractID()
 	accountID := shared.AccountID("acct-demo-001")
-	planID := shared.PlanID("plan-standard")
 	price := moneyJPY(3000)
 	metadata := eventstore.EventMetadata{UserID: "demo-user"}
 
@@ -76,7 +75,6 @@ func main() {
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create contract", agg.Create(contract.CreateContractCommand{
 		AccountID:    accountID,
-		PlanID:       planID,
 		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,

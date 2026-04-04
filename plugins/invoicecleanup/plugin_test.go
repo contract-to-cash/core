@@ -53,7 +53,6 @@ func TestOnContractCancel_VoidsDraftAndFinalized(t *testing.T) {
 	agg := contract.NewContractAggregate(contractID, clock)
 	_ = agg.Create(contract.CreateContractCommand{
 		AccountID:    accountID,
-		PlanID:       shared.NewPlanID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        jpy(10000),
@@ -97,7 +96,6 @@ func TestOnContractCancel_NoInvoices(t *testing.T) {
 	agg := contract.NewContractAggregate(contractID, clock)
 	_ = agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
-		PlanID:       shared.NewPlanID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,
 		Price:        jpy(1000),

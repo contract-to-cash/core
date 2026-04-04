@@ -261,7 +261,7 @@ func decodeJSON(r *http.Request, v interface{}) error {
 
 type createContractRequest struct {
 	AccountID    string `json:"account_id"`
-	PlanID       string `json:"plan_id"`
+	ProductID    string `json:"product_id"`
 	ContractType string `json:"contract_type"`
 	BillingCycle string `json:"billing_cycle"`
 	Price        int64  `json:"price"`
@@ -271,7 +271,6 @@ type createContractRequest struct {
 type contractResponse struct {
 	ID                string `json:"id"`
 	AccountID         string `json:"account_id"`
-	PlanID            string `json:"plan_id"`
 	Status            string `json:"status"`
 	ContractType      string `json:"contract_type"`
 	BillingCycle      string `json:"billing_cycle"`
@@ -283,7 +282,6 @@ func contractToResponse(agg *contract.ContractAggregate) contractResponse {
 	return contractResponse{
 		ID:                string(agg.ContractID()),
 		AccountID:         string(agg.AccountID()),
-		PlanID:            string(agg.PlanID()),
 		Status:            string(agg.Status()),
 		ContractType:      string(agg.GetContractType()),
 		BillingCycle:      string(agg.GetBillingCycle()),
@@ -302,7 +300,7 @@ func handleCreateContract(env *testEnv) http.HandlerFunc {
 
 		// Create a Price entity so BillingService.calculateSubtotal can look it up.
 		price := pricing.NewPrice(
-			shared.ProductID(req.PlanID), // reuse planID as productID for simplicity
+			shared.ProductID(req.ProductID),
 			moneyJPY(req.Price),
 			shared.CurrencyJPY,
 			pricing.BillingCycle(req.BillingCycle),
@@ -320,7 +318,6 @@ func handleCreateContract(env *testEnv) http.HandlerFunc {
 		autoRenew := req.AutoRenew == nil || *req.AutoRenew // default true
 		err := agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID(req.AccountID),
-			PlanID:       shared.PlanID(req.PlanID),
 			PriceID:      price.ID(),
 			ContractType: contract.ContractType(req.ContractType),
 			BillingCycle: contract.BillingCycle(req.BillingCycle),
@@ -943,9 +940,16 @@ func handleChangePrice(env *testEnv) http.HandlerFunc {
 			return
 		}
 
+		// Look up the current price to get the ProductID
+		currentPrice, err := env.priceRepo.FindByID(r.Context(), agg.PriceID())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "current price not found: "+err.Error())
+			return
+		}
+
 		// Create a new Price entity for the new price
 		newPrice := pricing.NewPrice(
-			shared.ProductID(agg.PlanID()),
+			currentPrice.ProductID(),
 			moneyJPY(req.NewPrice),
 			shared.CurrencyJPY,
 			pricing.BillingCycle(agg.GetBillingCycle()),
@@ -1153,7 +1157,7 @@ func (r *inMemoryCouponRepo) FindApplicable(_ context.Context, q couponplugin.Co
 	defer r.mu.RUnlock()
 	var result []*couponplugin.Coupon
 	for _, c := range r.coupons {
-		if c.IsValid(q.At) && c.IsApplicableToPlan(q.PlanID) {
+		if c.IsValid(q.At) && c.IsApplicableToProduct(q.ProductID) {
 			result = append(result, c)
 		}
 	}
@@ -1216,7 +1220,7 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 				ValidFrom  string   `json:"valid_from"`
 				ValidUntil string   `json:"valid_until"`
 				MaxUses    *int     `json:"max_uses"`
-				Plans      []string `json:"plans"`
+				Products   []string `json:"products"`
 			} `json:"coupons"`
 		}
 		if err := decodeJSON(r, &req); err != nil {
@@ -1244,6 +1248,10 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 				value = new(big.Rat).SetInt64(int64(c.Value))
 			}
 
+			productIDs := make([]shared.ProductID, len(c.Products))
+			for i, p := range c.Products {
+				productIDs[i] = shared.ProductID(p)
+			}
 			coupon := couponplugin.NewCoupon(
 				couponplugin.CouponID(shared.GenerateID()),
 				c.Code,
@@ -1254,7 +1262,7 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 				validFrom, validUntil,
 				c.MaxUses,
 				0,
-				c.Plans,
+				productIDs,
 			)
 			if err := repo.Save(r.Context(), coupon); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())

@@ -13,7 +13,7 @@ Contract-to-Cash Core は、**イベントソーシング**、**拡張可能な�
 | [plugin-pipeline-demo](plugin-pipeline-demo/) | 拡張可能なプラグインシステム | 割引/税金フック、優先度制御、カスタムプラグイン |
 | [lifecycle-demo](lifecycle-demo/) | 契約ライフサイクルとクレジット | トライアル、一時停止/再開、解約、FIFO クレジット適用 |
 | [hosting-integration-demo](hosting-integration-demo/) | 外部サービス連携 | ライフサイクルフックによるサーバープロビジョニング/停止 |
-| [multi-service-demo](multi-service-demo/) | 複数サービス種別 | PlanIDベースのプラグインルーティング（VPS/SSL/ドメイン） |
+| [multi-service-demo](multi-service-demo/) | 複数サービス種別 | PriceIDベースのプラグインルーティング（VPS/SSL/ドメイン） |
 | [pricing-models-demo](pricing-models-demo/) | 柔軟な料金設定 | 定額、段階制、ボリューム制、従量制 |
 
 ## 前提条件
@@ -40,7 +40,7 @@ go run ./examples/pricing-models-demo/
 3. **plugin-pipeline-demo** -- 割引・税金・ライフサイクルフックが優先度制御で合成される仕組み。
 4. **lifecycle-demo** -- トライアル、一時停止、クレジット管理を含む完全な契約ライフサイクル。
 5. **hosting-integration-demo** -- 課金イベントが外部サービスのプロビジョニングを駆動する仕組み（このライブラリの真価）。
-6. **multi-service-demo** -- 複数サービス種別（VPS/SSL/ドメイン）がPlanIDベースのプラグインルーティングで共存する仕組み。
+6. **multi-service-demo** -- 複数サービス種別（VPS/SSL/ドメイン）がPriceIDベースのプラグインルーティングで共存する仕組み。
 7. **pricing-models-demo** -- 4つの料金モデルの比較。
 
 ## アーキテクチャ概要

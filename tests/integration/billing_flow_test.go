@@ -57,7 +57,6 @@ func createActiveContractWithPrice(
 
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-001"),
-		PlanID:       shared.PlanID("plan-001"),
 		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
 		BillingCycle: contract.BillingCycleMonthly,

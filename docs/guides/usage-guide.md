@@ -246,7 +246,8 @@ func NewSubscribeUseCase(
 // Input
 type SubscribeInput struct {
     UserID    string
-    PlanID    string
+    ProductID string
+    PriceID   string
     StartDate time.Time
 }
 
@@ -273,9 +274,8 @@ func (uc *SubscribeUseCase) Execute(ctx context.Context, input SubscribeInput) (
 
     // 3. Createコマンドで契約を初期化
     cmd := contract.CreateContractCommand{
-        AccountID:    shared.AccountID(u.ID),        // サービスAのUserIDをAccountIDにマッピング
-        PlanID:       shared.PlanID(input.PlanID),
-        PriceID:      shared.PriceID("price_xxx"),   // Price集約のID
+        AccountID:    shared.AccountID(u.ID),           // サービスAのUserIDをAccountIDにマッピング
+        PriceID:      shared.PriceID(input.PriceID),  // Price集約のID
         ContractType: contract.ContractTypeSubscription,
         BillingCycle: contract.BillingCycleMonthly,
         Price:        price,
