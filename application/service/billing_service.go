@@ -369,9 +369,11 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 
 	// Resolve ProductID from PriceID for plugin context (e.g. coupon applicability)
 	if priceID := agg.PriceID(); priceID != "" {
-		if priceEntity, priceErr := s.priceRepo.FindByID(ctx, priceID); priceErr == nil {
-			calcCtx.SetProductID(priceEntity.ProductID())
+		priceEntity, priceErr := s.priceRepo.FindByID(ctx, priceID)
+		if priceErr != nil {
+			return nil, fmt.Errorf("failed to load price for product resolution: %w", priceErr)
 		}
+		calcCtx.SetProductID(priceEntity.ProductID())
 	}
 
 	// BeforeCalculation (InvoiceLifecycleHooks)
