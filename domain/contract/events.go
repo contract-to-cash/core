@@ -9,15 +9,12 @@ import (
 
 // Event type constants.
 const (
-	EventTypeContractCreated   eventstore.EventType = "contract.created"
-	EventTypeContractActivated eventstore.EventType = "contract.activated"
-	EventTypeContractSuspended eventstore.EventType = "contract.suspended"
-	EventTypeContractResumed   eventstore.EventType = "contract.resumed"
-	EventTypeContractCancelled eventstore.EventType = "contract.cancelled"
-	EventTypePriceChanged      eventstore.EventType = "contract.price_changed"
-	// Deprecated: PlanChangedEvent is no longer raised. Kept for backward compatibility
-	// with existing event stores that may contain historical plan_changed events.
-	EventTypePlanChanged             eventstore.EventType = "contract.plan_changed"
+	EventTypeContractCreated         eventstore.EventType = "contract.created"
+	EventTypeContractActivated       eventstore.EventType = "contract.activated"
+	EventTypeContractSuspended       eventstore.EventType = "contract.suspended"
+	EventTypeContractResumed         eventstore.EventType = "contract.resumed"
+	EventTypeContractCancelled       eventstore.EventType = "contract.cancelled"
+	EventTypePriceChanged            eventstore.EventType = "contract.price_changed"
 	EventTypeTrialStarted            eventstore.EventType = "contract.trial_started"
 	EventTypeTrialEnded              eventstore.EventType = "contract.trial_ended"
 	EventTypePaymentMethodChanged    eventstore.EventType = "contract.payment_method_changed"
@@ -31,18 +28,15 @@ const (
 
 // ContractCreatedEvent is raised when a new contract is created.
 type ContractCreatedEvent struct {
-	ContractID shared.ContractID `json:"contract_id"`
-	AccountID  shared.AccountID  `json:"account_id"`
-	// Deprecated: PlanID is kept for backward compatibility with historical events.
-	// New events use PriceID instead.
-	PlanID       shared.PlanID  `json:"plan_id,omitempty"`
-	PriceID      shared.PriceID `json:"price_id,omitempty"`
-	Price        shared.Money   `json:"price"`
-	BillingCycle BillingCycle   `json:"billing_cycle"`
-	ContractType ContractType   `json:"contract_type"`
-	BasePrice    shared.Money   `json:"base_price"`
-	AutoRenew    bool           `json:"auto_renew"`
-	CreatedAt    time.Time      `json:"created_at"`
+	ContractID   shared.ContractID `json:"contract_id"`
+	AccountID    shared.AccountID  `json:"account_id"`
+	PriceID      shared.PriceID    `json:"price_id"`
+	Price        shared.Money      `json:"price"`
+	BillingCycle BillingCycle      `json:"billing_cycle"`
+	ContractType ContractType      `json:"contract_type"`
+	BasePrice    shared.Money      `json:"base_price"`
+	AutoRenew    bool              `json:"auto_renew"`
+	CreatedAt    time.Time         `json:"created_at"`
 }
 
 func (e *ContractCreatedEvent) EventType() eventstore.EventType { return EventTypeContractCreated }
@@ -124,19 +118,6 @@ type PriceChangeUnscheduledEvent struct {
 func (e *PriceChangeUnscheduledEvent) EventType() eventstore.EventType {
 	return EventTypePriceChangeUnscheduled
 }
-
-// PlanChangedEvent is raised when a contract's plan changes.
-// Deprecated: No longer raised by new code. Kept for backward compatibility
-// with existing event stores that may contain historical plan_changed events.
-type PlanChangedEvent struct {
-	ContractID shared.ContractID    `json:"contract_id"`
-	OldPlanID  shared.PlanID        `json:"old_plan_id"`
-	NewPlanID  shared.PlanID        `json:"new_plan_id"`
-	Proration  *PlanChangeProration `json:"proration,omitempty"`
-	ChangedAt  time.Time            `json:"changed_at"`
-}
-
-func (e *PlanChangedEvent) EventType() eventstore.EventType { return EventTypePlanChanged }
 
 // TrialStartedEvent is raised when a trial period starts.
 type TrialStartedEvent struct {

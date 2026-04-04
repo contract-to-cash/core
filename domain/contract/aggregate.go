@@ -18,7 +18,6 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 	r.Register(&ContractResumedEvent{})
 	r.Register(&ContractCancelledEvent{})
 	r.Register(&PriceChangedEvent{})
-	r.Register(&PlanChangedEvent{}) // Deprecated: kept for backward compat with historical events
 	r.Register(&TrialStartedEvent{})
 	r.Register(&TrialEndedEvent{})
 	r.Register(&PaymentMethodChangedEvent{})
@@ -543,11 +542,6 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *PriceChangeUnscheduledEvent:
 		a.pendingPriceID = nil
 		a.updatedAt = e.UnscheduledAt
-
-	case *PlanChangedEvent:
-		// Deprecated: kept for backward compat with historical events.
-		// No state update needed since planID field is removed.
-		a.updatedAt = e.ChangedAt
 
 	case *TrialStartedEvent:
 		a.status = ContractStatusTrialing

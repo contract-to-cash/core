@@ -23,10 +23,6 @@ type PaymentID string
 // UsageRecordID identifies a usage record.
 type UsageRecordID string
 
-// PlanID identifies a pricing plan.
-// Deprecated: Use ProductID + PriceID instead. Kept for backward compatibility with existing events.
-type PlanID string
-
 // ProductID identifies a product.
 type ProductID string
 
