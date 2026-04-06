@@ -324,13 +324,13 @@ item.TaxAmount() shared.Money
 ### Construction
 
 ```go
-cn := invoice.NewCreditNote(id, invoiceID, accountID, contractID, reason, items,
+cn, err := invoice.NewCreditNote(id, invoiceID, accountID, contractID, reason, items,
     invoice.WithCreditNoteMemo("Adjustment for duplicate charge"),
     invoice.WithCreditNoteNumber("CN-2026-001"),
 )
 ```
 
-Panics if `items` is empty, as a credit note without items is a programming error.
+Returns an error if `items` is empty.
 
 ### Methods
 

@@ -1,6 +1,7 @@
 package invoice
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -9,7 +10,7 @@ import (
 )
 
 func newTestCreditNote() *CreditNote {
-	return NewCreditNote(
+	cn, err := NewCreditNote(
 		shared.NewCreditNoteID(),
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
@@ -20,13 +21,17 @@ func newTestCreditNote() *CreditNote {
 		},
 		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
 	)
+	if err != nil {
+		panic("newTestCreditNote: " + err.Error())
+	}
+	return cn
 }
 
 // --- Constructor tests ---
 
 func TestNewCreditNote_CreatedAtIsSetFromParameter(t *testing.T) {
 	fixedTime := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
-	cn := NewCreditNote(
+	cn, err := NewCreditNote(
 		shared.NewCreditNoteID(),
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
@@ -37,6 +42,9 @@ func TestNewCreditNote_CreatedAtIsSetFromParameter(t *testing.T) {
 		},
 		fixedTime,
 	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if !cn.CreatedAt().Equal(fixedTime) {
 		t.Errorf("expected createdAt %v, got %v", fixedTime, cn.CreatedAt())
@@ -54,7 +62,10 @@ func TestNewCreditNote_Defaults(t *testing.T) {
 		NewCreditNoteItem("li-2", "Proration", jpy(2000), big.NewRat(10, 100), jpy(200)),
 	}
 
-	cn := NewCreditNote(id, invoiceID, accountID, contractID, CreditNoteReasonOrderChange, items, createdAt)
+	cn, err := NewCreditNote(id, invoiceID, accountID, contractID, CreditNoteReasonOrderChange, items, createdAt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if cn.ID() != id {
 		t.Errorf("expected id %s, got %s", id, cn.ID())
@@ -99,7 +110,7 @@ func TestNewCreditNote_Defaults(t *testing.T) {
 }
 
 func TestNewCreditNote_WithOptions(t *testing.T) {
-	cn := NewCreditNote(
+	cn, err := NewCreditNote(
 		shared.NewCreditNoteID(),
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
@@ -112,6 +123,9 @@ func TestNewCreditNote_WithOptions(t *testing.T) {
 		WithCreditNoteMemo("Duplicate charge"),
 		WithCreditNoteNumber("CN-00001"),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if cn.Memo() != "Duplicate charge" {
 		t.Errorf("expected memo 'Duplicate charge', got %q", cn.Memo())
@@ -121,14 +135,8 @@ func TestNewCreditNote_WithOptions(t *testing.T) {
 	}
 }
 
-func TestNewCreditNote_EmptyItems_Panics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for empty items, got nil")
-		}
-	}()
-
-	NewCreditNote(
+func TestNewCreditNote_EmptyItems_ReturnsError(t *testing.T) {
+	cn, err := NewCreditNote(
 		shared.NewCreditNoteID(),
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
@@ -137,6 +145,38 @@ func TestNewCreditNote_EmptyItems_Panics(t *testing.T) {
 		[]CreditNoteItem{},
 		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
 	)
+	if err == nil {
+		t.Fatal("expected error for empty items, got nil")
+	}
+	if cn != nil {
+		t.Error("expected nil credit note when items are empty")
+	}
+
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected DomainError, got %T", err)
+	}
+	if domainErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected error code %s, got %s", shared.ErrCodeValidation, domainErr.Code)
+	}
+}
+
+func TestNewCreditNote_NilItems_ReturnsError(t *testing.T) {
+	cn, err := NewCreditNote(
+		shared.NewCreditNoteID(),
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		CreditNoteReasonOther,
+		nil,
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
+	)
+	if err == nil {
+		t.Fatal("expected error for nil items, got nil")
+	}
+	if cn != nil {
+		t.Error("expected nil credit note when items are nil")
+	}
 }
 
 // --- CreditNoteItem tests ---

@@ -90,7 +90,7 @@ func WithCreditNoteNumber(number string) CreditNoteOption {
 }
 
 // NewCreditNote creates a new CreditNote in draft status.
-// Panics if items is empty, as a credit note without items is a programming error.
+// Returns an error if items is empty.
 func NewCreditNote(
 	id shared.CreditNoteID,
 	invoiceID shared.InvoiceID,
@@ -100,9 +100,9 @@ func NewCreditNote(
 	items []CreditNoteItem,
 	createdAt time.Time,
 	opts ...CreditNoteOption,
-) *CreditNote {
+) (*CreditNote, error) {
 	if len(items) == 0 {
-		panic("credit note must have at least one item")
+		return nil, shared.NewDomainError(shared.ErrCodeValidation, "credit note must have at least one item")
 	}
 
 	currency := items[0].amount.Currency()
@@ -138,7 +138,7 @@ func NewCreditNote(
 		opt(cn)
 	}
 
-	return cn
+	return cn, nil
 }
 
 // Issue transitions the credit note from draft to issued.
