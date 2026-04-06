@@ -68,6 +68,14 @@ func (m *mockInvoiceRepoWithFind) Save(_ context.Context, inv *invoice.Invoice) 
 
 // --- Helpers ---
 
+func mustLineItems() []invoice.LineItem {
+	li, err := invoice.NewLineItem("li-1", "Subscription", 1, jpy(10000), jpy(10000), big.NewRat(10, 100))
+	if err != nil {
+		panic(fmt.Sprintf("mustLineItems: %v", err))
+	}
+	return []invoice.LineItem{li}
+}
+
 func newPaidInvoice(accountID shared.AccountID, contractID shared.ContractID) *invoice.Invoice {
 	inv := invoice.NewInvoice(
 		shared.NewInvoiceID(),
@@ -77,9 +85,7 @@ func newPaidInvoice(accountID shared.AccountID, contractID shared.ContractID) *i
 		jpy(0),
 		jpy(1000),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
-		invoice.WithLineItems([]invoice.LineItem{
-			invoice.NewLineItem("li-1", "Subscription", 1, jpy(10000), jpy(10000), big.NewRat(10, 100)),
-		}),
+		invoice.WithLineItems(mustLineItems()),
 	)
 	_ = inv.RecordPayment(jpy(11000), time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
 	return inv

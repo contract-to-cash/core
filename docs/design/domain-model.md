@@ -919,7 +919,8 @@ type LineItem struct {
 }
 
 // NewLineItem creates a new LineItem.
-func NewLineItem(id, description string, quantity int64, unitPrice, amount shared.Money, taxRate *big.Rat, opts ...LineItemOption) LineItem
+// Returns an error if quantity is negative.
+func NewLineItem(id, description string, quantity int64, unitPrice, amount shared.Money, taxRate *big.Rat, opts ...LineItemOption) (LineItem, error)
 
 type LineItemOption func(*LineItem)
 func WithPriceID(id shared.PriceID) LineItemOption
