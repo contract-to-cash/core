@@ -366,3 +366,172 @@ func TestPaymentMethod_Constants(t *testing.T) {
 		}
 	}
 }
+
+// --- Exhaustive invalid state transition tests ---
+
+// paymentInState returns a Payment set to the given status via valid transitions.
+func paymentInState(t *testing.T, status PaymentStatus) *Payment {
+	t.Helper()
+	p := newTestPayment()
+	switch status {
+	case PaymentStatusPending:
+		// already pending
+	case PaymentStatusCompleted:
+		if err := p.Complete(); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	case PaymentStatusFailed:
+		if err := p.Fail("test"); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	case PaymentStatusPartiallyRefunded:
+		if err := p.Complete(); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		if err := p.MarkPartiallyRefunded(); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	case PaymentStatusRefunded:
+		if err := p.Complete(); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		if err := p.MarkRefunded(); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	case PaymentStatusChargedBack:
+		if err := p.Complete(); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		if err := p.MarkChargedBack(); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+	default:
+		t.Fatalf("unknown status: %s", status)
+	}
+	return p
+}
+
+func TestPayment_Complete_AllInvalidStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		status PaymentStatus
+	}{
+		{"from completed", PaymentStatusCompleted},
+		{"from failed", PaymentStatusFailed},
+		{"from partially_refunded", PaymentStatusPartiallyRefunded},
+		{"from refunded", PaymentStatusRefunded},
+		{"from charged_back", PaymentStatusChargedBack},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := paymentInState(t, tt.status)
+			if err := p.Complete(); err == nil {
+				t.Errorf("expected error calling Complete() from %s", tt.status)
+			}
+		})
+	}
+}
+
+func TestPayment_Fail_AllInvalidStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		status PaymentStatus
+	}{
+		{"from completed", PaymentStatusCompleted},
+		{"from failed", PaymentStatusFailed},
+		{"from partially_refunded", PaymentStatusPartiallyRefunded},
+		{"from refunded", PaymentStatusRefunded},
+		{"from charged_back", PaymentStatusChargedBack},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := paymentInState(t, tt.status)
+			if err := p.Fail("test"); err == nil {
+				t.Errorf("expected error calling Fail() from %s", tt.status)
+			}
+		})
+	}
+}
+
+func TestPayment_MarkRefunded_AllInvalidStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		status PaymentStatus
+	}{
+		{"from pending", PaymentStatusPending},
+		{"from failed", PaymentStatusFailed},
+		{"from refunded", PaymentStatusRefunded},
+		{"from charged_back", PaymentStatusChargedBack},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := paymentInState(t, tt.status)
+			if err := p.MarkRefunded(); err == nil {
+				t.Errorf("expected error calling MarkRefunded() from %s", tt.status)
+			}
+		})
+	}
+}
+
+func TestPayment_MarkPartiallyRefunded_AllInvalidStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		status PaymentStatus
+	}{
+		{"from pending", PaymentStatusPending},
+		{"from failed", PaymentStatusFailed},
+		{"from partially_refunded", PaymentStatusPartiallyRefunded},
+		{"from refunded", PaymentStatusRefunded},
+		{"from charged_back", PaymentStatusChargedBack},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := paymentInState(t, tt.status)
+			if err := p.MarkPartiallyRefunded(); err == nil {
+				t.Errorf("expected error calling MarkPartiallyRefunded() from %s", tt.status)
+			}
+		})
+	}
+}
+
+func TestPayment_MarkChargedBack_AllInvalidStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		status PaymentStatus
+	}{
+		{"from pending", PaymentStatusPending},
+		{"from failed", PaymentStatusFailed},
+		{"from partially_refunded", PaymentStatusPartiallyRefunded},
+		{"from refunded", PaymentStatusRefunded},
+		{"from charged_back", PaymentStatusChargedBack},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := paymentInState(t, tt.status)
+			if err := p.MarkChargedBack(); err == nil {
+				t.Errorf("expected error calling MarkChargedBack() from %s", tt.status)
+			}
+		})
+	}
+}
+
+func TestPayment_RecordRefund_AllInvalidStates(t *testing.T) {
+	tests := []struct {
+		name   string
+		status PaymentStatus
+	}{
+		{"from pending", PaymentStatusPending},
+		{"from failed", PaymentStatusFailed},
+		{"from refunded", PaymentStatusRefunded},
+		{"from charged_back", PaymentStatusChargedBack},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := paymentInState(t, tt.status)
+			refundAmt := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
+			if err := p.RecordRefund(refundAmt); err == nil {
+				t.Errorf("expected error calling RecordRefund() from %s", tt.status)
+			}
+		})
+	}
+}
