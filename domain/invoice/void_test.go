@@ -7,8 +7,9 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
-func newDraftInvoice() *Invoice {
-	return NewInvoice(
+func newDraftInvoice(t *testing.T) *Invoice {
+	t.Helper()
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -16,10 +17,14 @@ func newDraftInvoice() *Invoice {
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating draft invoice: %v", err)
+	}
+	return inv
 }
 
 func TestVoid_FromDraft(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 	if err := inv.Void(); err != nil {
 		t.Fatalf("unexpected error voiding draft invoice: %v", err)
 	}
@@ -29,7 +34,7 @@ func TestVoid_FromDraft(t *testing.T) {
 }
 
 func TestVoid_FromFinalized(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 	if err := inv.Finalize(); err != nil {
 		t.Fatalf("finalize failed: %v", err)
 	}
@@ -42,7 +47,7 @@ func TestVoid_FromFinalized(t *testing.T) {
 }
 
 func TestVoid_FromPaid_Rejected(t *testing.T) {
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -51,13 +56,16 @@ func TestVoid_FromPaid_Rejected(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithStatus(InvoiceStatusPaid),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 	if err := inv.Void(); err == nil {
 		t.Fatal("expected error voiding paid invoice, got nil")
 	}
 }
 
 func TestVoid_FromPartialPaid_Rejected(t *testing.T) {
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -66,13 +74,16 @@ func TestVoid_FromPartialPaid_Rejected(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithStatus(InvoiceStatusPartialPaid),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 	if err := inv.Void(); err == nil {
 		t.Fatal("expected error voiding partial_paid invoice, got nil")
 	}
 }
 
 func TestVoid_FromOverdue_Rejected(t *testing.T) {
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -81,13 +92,16 @@ func TestVoid_FromOverdue_Rejected(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithStatus(InvoiceStatusOverdue),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 	if err := inv.Void(); err == nil {
 		t.Fatal("expected error voiding overdue invoice, got nil")
 	}
 }
 
 func TestVoid_FromVoided_Rejected(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 	_ = inv.Void()
 	if err := inv.Void(); err == nil {
 		t.Fatal("expected error voiding already-voided invoice, got nil")

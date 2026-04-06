@@ -16,13 +16,18 @@ func jpy(amount int64) shared.Money {
 	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyJPY)
 }
 
-func newTestInvoice() *invoice.Invoice {
-	return invoice.NewInvoice(
+func newTestInvoice(t *testing.T) *invoice.Invoice {
+	t.Helper()
+	inv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(),
 		shared.AccountID("acct-001"),
 		shared.ContractID("contract-001"),
 		jpy(10000), jpy(0), jpy(0),
 	)
+	if err != nil {
+		t.Fatalf("newTestInvoice failed: %v", err)
+	}
+	return inv
 }
 
 func newTestPayment(invoiceID shared.InvoiceID) *payment.Payment {
@@ -37,7 +42,7 @@ func newTestPayment(invoiceID shared.InvoiceID) *payment.Payment {
 }
 
 func TestPaymentContext_NewAndGetters(t *testing.T) {
-	inv := newTestInvoice()
+	inv := newTestInvoice(t)
 	p := newTestPayment(inv.ID())
 
 	ctx := NewPaymentContext(context.Background(), p, inv)
@@ -57,7 +62,7 @@ func TestPaymentContext_NewAndGetters(t *testing.T) {
 }
 
 func TestPaymentContext_SetContract(t *testing.T) {
-	inv := newTestInvoice()
+	inv := newTestInvoice(t)
 	ctx := NewPaymentContext(context.Background(), nil, inv)
 
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
@@ -70,7 +75,7 @@ func TestPaymentContext_SetContract(t *testing.T) {
 }
 
 func TestPaymentContext_ContractID_FromInvoice(t *testing.T) {
-	inv := newTestInvoice()
+	inv := newTestInvoice(t)
 	ctx := NewPaymentContext(context.Background(), nil, inv)
 
 	if ctx.ContractID() != inv.ContractID() {
@@ -79,7 +84,7 @@ func TestPaymentContext_ContractID_FromInvoice(t *testing.T) {
 }
 
 func TestPaymentContext_AccountID_FromInvoice(t *testing.T) {
-	inv := newTestInvoice()
+	inv := newTestInvoice(t)
 	ctx := NewPaymentContext(context.Background(), nil, inv)
 
 	if ctx.AccountID() != inv.AccountID() {
@@ -102,7 +107,7 @@ func TestPaymentContext_NilInvoice_ReturnsEmptyIDs(t *testing.T) {
 }
 
 func TestPaymentContext_NilPayment(t *testing.T) {
-	inv := newTestInvoice()
+	inv := newTestInvoice(t)
 	ctx := NewPaymentContext(context.Background(), nil, inv)
 
 	if ctx.Payment() != nil {

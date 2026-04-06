@@ -16,7 +16,10 @@ func TestNewInvoice_Defaults(t *testing.T) {
 	discount := shared.Zero(shared.CurrencyJPY)
 	tax := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
 
-	inv := NewInvoice(id, acct, contract, subtotal, discount, tax)
+	inv, err := NewInvoice(id, acct, contract, subtotal, discount, tax)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if inv.ID() != id {
 		t.Errorf("expected id %s, got %s", id, inv.ID())
@@ -64,7 +67,7 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 	}
 	credit := shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY)
 
-	inv := NewInvoice(id, acct, contract, subtotal, discount, tax,
+	inv, err := NewInvoice(id, acct, contract, subtotal, discount, tax,
 		WithStatus(InvoiceStatusFinalized),
 		WithBillingPeriod(period),
 		WithDueDate(due),
@@ -72,6 +75,9 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 		WithAllowPartialPayment(true),
 		WithInvoiceNumber("INV-2026-001"),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if inv.Status() != InvoiceStatusFinalized {
 		t.Errorf("expected status finalized, got %s", inv.Status())
@@ -94,7 +100,7 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 }
 
 func TestInvoice_Finalize(t *testing.T) {
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -102,6 +108,9 @@ func TestInvoice_Finalize(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.Finalize(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -118,7 +127,7 @@ func TestInvoice_Finalize(t *testing.T) {
 
 func TestInvoice_RecordPayment_Full(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -126,13 +135,16 @@ func TestInvoice_RecordPayment_Full(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.Finalize(); err != nil {
 		t.Fatalf("finalize failed: %v", err)
 	}
 
 	paidAt := time.Now().UTC()
-	err := inv.RecordPayment(shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY), paidAt)
+	err = inv.RecordPayment(shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY), paidAt)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,7 +162,7 @@ func TestInvoice_RecordPayment_Full(t *testing.T) {
 
 func TestInvoice_RecordPayment_Overpayment(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -158,6 +170,9 @@ func TestInvoice_RecordPayment_Overpayment(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.Finalize(); err != nil {
 		t.Fatalf("finalize failed: %v", err)
@@ -165,7 +180,7 @@ func TestInvoice_RecordPayment_Overpayment(t *testing.T) {
 
 	// Attempt to pay more than amountDue
 	paidAt := time.Now().UTC()
-	err := inv.RecordPayment(shared.NewMoney(big.NewRat(15000, 1), shared.CurrencyJPY), paidAt)
+	err = inv.RecordPayment(shared.NewMoney(big.NewRat(15000, 1), shared.CurrencyJPY), paidAt)
 	if err == nil {
 		t.Fatal("expected error for overpayment, got nil")
 	}
@@ -182,7 +197,7 @@ func TestInvoice_RecordPayment_Overpayment(t *testing.T) {
 
 func TestInvoice_RecordPayment_CumulativeOverpayment(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -190,6 +205,9 @@ func TestInvoice_RecordPayment_CumulativeOverpayment(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.Finalize(); err != nil {
 		t.Fatalf("finalize failed: %v", err)
@@ -206,7 +224,7 @@ func TestInvoice_RecordPayment_CumulativeOverpayment(t *testing.T) {
 	}
 
 	// Second payment exceeding remaining: 5000 (remaining is 3000)
-	err := inv.RecordPayment(shared.NewMoney(big.NewRat(5000, 1), shared.CurrencyJPY), paidAt)
+	err = inv.RecordPayment(shared.NewMoney(big.NewRat(5000, 1), shared.CurrencyJPY), paidAt)
 	if err == nil {
 		t.Fatal("expected error for cumulative overpayment, got nil")
 	}
@@ -233,7 +251,7 @@ func TestInvoice_RecordPayment_CumulativeOverpayment(t *testing.T) {
 
 func TestInvoice_RecordPayment_Partial(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -241,13 +259,16 @@ func TestInvoice_RecordPayment_Partial(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.Finalize(); err != nil {
 		t.Fatalf("finalize failed: %v", err)
 	}
 
 	paidAt := time.Now().UTC()
-	err := inv.RecordPayment(shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY), paidAt)
+	err = inv.RecordPayment(shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY), paidAt)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -258,5 +279,59 @@ func TestInvoice_RecordPayment_Partial(t *testing.T) {
 	expectedBalance := big.NewRat(7000, 1)
 	if inv.Balance().Amount().Cmp(expectedBalance) != 0 {
 		t.Errorf("expected balance 7000, got %s", inv.Balance().Amount().RatString())
+	}
+}
+
+func TestNewInvoice_CurrencyMismatch_SubtotalAndDiscount(t *testing.T) {
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	discount := shared.NewMoney(big.NewRat(500, 1), shared.CurrencyUSD) // different currency
+	tax := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
+
+	_, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		subtotal, discount, tax,
+	)
+	if err == nil {
+		t.Fatal("expected error for currency mismatch between subtotal and discount, got nil")
+	}
+}
+
+func TestNewInvoice_CurrencyMismatch_SubtotalAndTax(t *testing.T) {
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	discount := shared.NewMoney(big.NewRat(500, 1), shared.CurrencyJPY)
+	tax := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyUSD) // different currency
+
+	_, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		subtotal, discount, tax,
+	)
+	if err == nil {
+		t.Fatal("expected error for currency mismatch between subtotal and tax, got nil")
+	}
+}
+
+func TestNewInvoice_SameCurrency_ReturnsNoError(t *testing.T) {
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	discount := shared.NewMoney(big.NewRat(500, 1), shared.CurrencyJPY)
+	tax := shared.NewMoney(big.NewRat(950, 1), shared.CurrencyJPY)
+
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		subtotal, discount, tax,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// total = 10000 - 500 + 950 = 10450
+	expectedTotal := big.NewRat(10450, 1)
+	if inv.Total().Amount().Cmp(expectedTotal) != 0 {
+		t.Errorf("expected total 10450, got %s", inv.Total().Amount().RatString())
 	}
 }

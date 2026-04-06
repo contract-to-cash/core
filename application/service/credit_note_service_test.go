@@ -77,7 +77,7 @@ func mustLineItems() []invoice.LineItem {
 }
 
 func newPaidInvoice(accountID shared.AccountID, contractID shared.ContractID) *invoice.Invoice {
-	inv := invoice.NewInvoice(
+	inv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(),
 		accountID,
 		contractID,
@@ -87,6 +87,9 @@ func newPaidInvoice(accountID shared.AccountID, contractID shared.ContractID) *i
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
 		invoice.WithLineItems(mustLineItems()),
 	)
+	if err != nil {
+		panic(fmt.Sprintf("newPaidInvoice: NewInvoice failed: %v", err))
+	}
 	_ = inv.RecordPayment(jpy(11000), time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
 	return inv
 }
@@ -160,10 +163,13 @@ func TestCreateCreditNote_InvoiceNotFound(t *testing.T) {
 func TestCreateCreditNote_DraftInvoice_Rejected(t *testing.T) {
 	accountID := shared.NewAccountID()
 	contractID := shared.NewContractID()
-	draftInv := invoice.NewInvoice(
+	draftInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), accountID, contractID,
 		jpy(10000), jpy(0), jpy(0),
 	)
+	if err != nil {
+		t.Fatalf("NewInvoice failed: %v", err)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{draftInv.ID(): draftInv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -173,7 +179,7 @@ func TestCreateCreditNote_DraftInvoice_Rejected(t *testing.T) {
 		invoice.NewCreditNoteItem("li-1", "Refund", jpy(1000), big.NewRat(10, 100), jpy(100)),
 	}
 
-	_, err := svc.CreateCreditNote(context.Background(), draftInv.ID(), invoice.CreditNoteReasonOther, items, "")
+	_, err = svc.CreateCreditNote(context.Background(), draftInv.ID(), invoice.CreditNoteReasonOther, items, "")
 	if err == nil {
 		t.Fatal("expected error for draft invoice (should use Void instead)")
 	}
@@ -201,11 +207,14 @@ func TestCreateCreditNote_ExceedsInvoiceTotal_Rejected(t *testing.T) {
 func TestCreateCreditNote_FinalizedInvoice_Rejected(t *testing.T) {
 	accountID := shared.NewAccountID()
 	contractID := shared.NewContractID()
-	finalizedInv := invoice.NewInvoice(
+	finalizedInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), accountID, contractID,
 		jpy(10000), jpy(0), jpy(0),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
 	)
+	if err != nil {
+		t.Fatalf("NewInvoice failed: %v", err)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{finalizedInv.ID(): finalizedInv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -215,7 +224,7 @@ func TestCreateCreditNote_FinalizedInvoice_Rejected(t *testing.T) {
 		invoice.NewCreditNoteItem("li-1", "Refund", jpy(1000), big.NewRat(10, 100), jpy(100)),
 	}
 
-	_, err := svc.CreateCreditNote(context.Background(), finalizedInv.ID(), invoice.CreditNoteReasonOther, items, "")
+	_, err = svc.CreateCreditNote(context.Background(), finalizedInv.ID(), invoice.CreditNoteReasonOther, items, "")
 	if err == nil {
 		t.Fatal("expected error for finalized invoice (should use Void instead)")
 	}
@@ -384,13 +393,16 @@ func TestReissueInvoice_Success(t *testing.T) {
 	period := currentPeriodOf(agg)
 
 	// Create a finalized invoice with matching billing period
-	originalInv := invoice.NewInvoice(
+	originalInv, invErr := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(1000),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
 		invoice.WithInvoiceNumber("INV-001"),
 		invoice.WithBillingPeriod(period),
 	)
+	if invErr != nil {
+		t.Fatalf("NewInvoice failed: %v", invErr)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -437,12 +449,15 @@ func TestReissueInvoice_Hook_Called(t *testing.T) {
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
 	period := currentPeriodOf(agg)
 
-	originalInv := invoice.NewInvoice(
+	originalInv, invErr := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(0),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
 		invoice.WithBillingPeriod(period),
 	)
+	if invErr != nil {
+		t.Fatalf("NewInvoice failed: %v", invErr)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -478,12 +493,15 @@ func TestReissueInvoice_VoidedInvoice_Rejected(t *testing.T) {
 	clock := newTestClock()
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
 
-	voidedInv := invoice.NewInvoice(
+	voidedInv, invErr := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(0),
 		invoice.WithStatus(invoice.InvoiceStatusVoided),
 		invoice.WithBillingPeriod(currentPeriodOf(agg)),
 	)
+	if invErr != nil {
+		t.Fatalf("NewInvoice failed: %v", invErr)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{voidedInv.ID(): voidedInv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -514,12 +532,15 @@ func TestReissueInvoice_EmptyReason_Rejected(t *testing.T) {
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
 	period := currentPeriodOf(agg)
 
-	inv := invoice.NewInvoice(
+	inv, invErr := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(0),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
 		invoice.WithBillingPeriod(period),
 	)
+	if invErr != nil {
+		t.Fatalf("NewInvoice failed: %v", invErr)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{inv.ID(): inv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -552,12 +573,15 @@ func TestReissueInvoice_UsesTransaction(t *testing.T) {
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
 	period := currentPeriodOf(agg)
 
-	originalInv := invoice.NewInvoice(
+	originalInv, invErr := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(1000),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
 		invoice.WithBillingPeriod(period),
 	)
+	if invErr != nil {
+		t.Fatalf("NewInvoice failed: %v", invErr)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -601,12 +625,15 @@ func TestReissueInvoice_TransactionFailure_ReturnsError(t *testing.T) {
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
 	period := currentPeriodOf(agg)
 
-	originalInv := invoice.NewInvoice(
+	originalInv, invErr := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(1000),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
 		invoice.WithBillingPeriod(period),
 	)
+	if invErr != nil {
+		t.Fatalf("NewInvoice failed: %v", invErr)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -682,12 +709,15 @@ func TestReissueInvoice_HookFailure_NonFatal(t *testing.T) {
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
 	period := currentPeriodOf(agg)
 
-	originalInv := invoice.NewInvoice(
+	originalInv, invErr := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(0),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
 		invoice.WithBillingPeriod(period),
 	)
+	if invErr != nil {
+		t.Fatalf("NewInvoice failed: %v", invErr)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -729,12 +759,15 @@ func TestReissueInvoice_SetsOriginalInvoiceID(t *testing.T) {
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
 	period := currentPeriodOf(agg)
 
-	originalInv := invoice.NewInvoice(
+	originalInv, invErr := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(1000),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
 		invoice.WithBillingPeriod(period),
 	)
+	if invErr != nil {
+		t.Fatalf("NewInvoice failed: %v", invErr)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
 	cnRepo := &mockCreditNoteRepo{}
@@ -775,7 +808,7 @@ func TestReissueInvoice_ChainedRevision_PreservesOriginalInvoiceID(t *testing.T)
 
 	rootID := shared.NewInvoiceID()
 	// This invoice was itself a revision of rootID
-	revisedInv := invoice.NewInvoice(
+	revisedInv, invErr := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(10000), jpy(0), jpy(1000),
 		invoice.WithStatus(invoice.InvoiceStatusFinalized),
@@ -783,6 +816,9 @@ func TestReissueInvoice_ChainedRevision_PreservesOriginalInvoiceID(t *testing.T)
 		invoice.WithOriginalInvoiceID(rootID),
 		invoice.WithRevisionOf(rootID),
 	)
+	if invErr != nil {
+		t.Fatalf("NewInvoice failed: %v", invErr)
+	}
 
 	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{revisedInv.ID(): revisedInv}}
 	cnRepo := &mockCreditNoteRepo{}

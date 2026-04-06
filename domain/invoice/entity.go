@@ -181,6 +181,7 @@ func WithInvoiceNumber(n string) InvoiceOption {
 }
 
 // NewInvoice creates a new Invoice with the given required fields and options.
+// Returns an error if subtotal, discountAmount, and taxAmount have mismatched currencies.
 func NewInvoice(
 	id shared.InvoiceID,
 	accountID shared.AccountID,
@@ -189,10 +190,16 @@ func NewInvoice(
 	discountAmount shared.Money,
 	taxAmount shared.Money,
 	opts ...InvoiceOption,
-) *Invoice {
+) (*Invoice, error) {
 	// total = subtotal - discountAmount + taxAmount
-	afterDiscount, _ := subtotal.Subtract(discountAmount)
-	total, _ := afterDiscount.Add(taxAmount)
+	afterDiscount, err := subtotal.Subtract(discountAmount)
+	if err != nil {
+		return nil, fmt.Errorf("NewInvoice: subtotal - discountAmount: %w", err)
+	}
+	total, err := afterDiscount.Add(taxAmount)
+	if err != nil {
+		return nil, fmt.Errorf("NewInvoice: (subtotal - discountAmount) + taxAmount: %w", err)
+	}
 
 	inv := &Invoice{
 		id:             id,
@@ -215,7 +222,7 @@ func NewInvoice(
 		opt(inv)
 	}
 
-	return inv
+	return inv, nil
 }
 
 // Finalize transitions the invoice from draft to finalized.

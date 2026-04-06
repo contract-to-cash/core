@@ -213,7 +213,7 @@ func newPaymentTestClock() shared.FixedClock {
 }
 
 func newSimpleFinalizedInvoice() *invoice.Invoice {
-	inv := invoice.NewInvoice(
+	inv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -221,6 +221,9 @@ func newSimpleFinalizedInvoice() *invoice.Invoice {
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 	)
+	if err != nil {
+		panic(fmt.Sprintf("newSimpleFinalizedInvoice: NewInvoice failed: %v", err))
+	}
 	_ = inv.Finalize()
 	return inv
 }
@@ -232,7 +235,7 @@ func newFinalizedInvoice(accountID shared.AccountID, contractID shared.ContractI
 	if pmID != nil {
 		opts = append(opts, invoice.WithPaymentMethodID(pmID))
 	}
-	return invoice.NewInvoice(
+	inv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(),
 		accountID,
 		contractID,
@@ -241,6 +244,10 @@ func newFinalizedInvoice(accountID shared.AccountID, contractID shared.ContractI
 		shared.Zero(amount.Currency()),
 		opts...,
 	)
+	if err != nil {
+		panic(fmt.Sprintf("newFinalizedInvoice: NewInvoice failed: %v", err))
+	}
+	return inv
 }
 
 func strPtr(s string) *string {

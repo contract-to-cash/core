@@ -10,7 +10,7 @@ import (
 // --- VoidWithReason tests ---
 
 func TestVoidWithReason_FromIssued(t *testing.T) {
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -19,6 +19,9 @@ func TestVoidWithReason_FromIssued(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithStatus(InvoiceStatusIssued),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.VoidWithReason("billing error"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -32,7 +35,7 @@ func TestVoidWithReason_FromIssued(t *testing.T) {
 }
 
 func TestVoidWithReason_FromPaid(t *testing.T) {
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -41,6 +44,9 @@ func TestVoidWithReason_FromPaid(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithStatus(InvoiceStatusPaid),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.VoidWithReason("credit note issued"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -51,7 +57,7 @@ func TestVoidWithReason_FromPaid(t *testing.T) {
 }
 
 func TestVoidWithReason_FromOverdue(t *testing.T) {
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -60,6 +66,9 @@ func TestVoidWithReason_FromOverdue(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithStatus(InvoiceStatusOverdue),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.VoidWithReason("order cancelled"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -70,7 +79,7 @@ func TestVoidWithReason_FromOverdue(t *testing.T) {
 }
 
 func TestVoidWithReason_FromDraft(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 
 	if err := inv.VoidWithReason("not needed"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -81,7 +90,7 @@ func TestVoidWithReason_FromDraft(t *testing.T) {
 }
 
 func TestVoidWithReason_FromFinalized(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 	_ = inv.Finalize()
 
 	if err := inv.VoidWithReason("correction needed"); err != nil {
@@ -93,7 +102,7 @@ func TestVoidWithReason_FromFinalized(t *testing.T) {
 }
 
 func TestVoidWithReason_FromPartialPaid(t *testing.T) {
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -102,6 +111,9 @@ func TestVoidWithReason_FromPartialPaid(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithStatus(InvoiceStatusPartialPaid),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.VoidWithReason("credit note issued for partial refund"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -115,7 +127,7 @@ func TestVoidWithReason_FromPartialPaid(t *testing.T) {
 }
 
 func TestVoidWithReason_FromVoided_Rejected(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 	_ = inv.Void()
 
 	if err := inv.VoidWithReason("duplicate void"); err == nil {
@@ -124,7 +136,7 @@ func TestVoidWithReason_FromVoided_Rejected(t *testing.T) {
 }
 
 func TestVoidWithReason_FromRefunded_Rejected(t *testing.T) {
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -133,6 +145,9 @@ func TestVoidWithReason_FromRefunded_Rejected(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithStatus(InvoiceStatusRefunded),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if err := inv.VoidWithReason("already refunded"); err == nil {
 		t.Fatal("expected error voiding refunded invoice")
@@ -140,7 +155,7 @@ func TestVoidWithReason_FromRefunded_Rejected(t *testing.T) {
 }
 
 func TestVoidWithReason_EmptyReason_Rejected(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 
 	if err := inv.VoidWithReason(""); err == nil {
 		t.Fatal("expected error for empty void reason")
@@ -151,7 +166,7 @@ func TestVoidWithReason_EmptyReason_Rejected(t *testing.T) {
 
 func TestInvoice_WithRevisionOf(t *testing.T) {
 	originalID := shared.NewInvoiceID()
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -160,6 +175,9 @@ func TestInvoice_WithRevisionOf(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithRevisionOf(originalID),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if inv.RevisionOf() == nil {
 		t.Fatal("expected revisionOf to be set")
@@ -171,7 +189,7 @@ func TestInvoice_WithRevisionOf(t *testing.T) {
 
 func TestInvoice_WithOriginalInvoiceID(t *testing.T) {
 	originalID := shared.NewInvoiceID()
-	inv := NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -180,6 +198,9 @@ func TestInvoice_WithOriginalInvoiceID(t *testing.T) {
 		shared.Zero(shared.CurrencyJPY),
 		WithOriginalInvoiceID(originalID),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
 
 	if inv.OriginalInvoiceID() == nil {
 		t.Fatal("expected originalInvoiceID to be set")
@@ -190,7 +211,7 @@ func TestInvoice_WithOriginalInvoiceID(t *testing.T) {
 }
 
 func TestInvoice_SetRevisionOf(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 	originalID := shared.NewInvoiceID()
 
 	inv.SetRevisionOf(originalID)
@@ -204,7 +225,7 @@ func TestInvoice_SetRevisionOf(t *testing.T) {
 }
 
 func TestInvoice_SetOriginalInvoiceID(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 	rootID := shared.NewInvoiceID()
 
 	inv.SetOriginalInvoiceID(rootID)
@@ -218,7 +239,7 @@ func TestInvoice_SetOriginalInvoiceID(t *testing.T) {
 }
 
 func TestInvoice_RevisionFields_DefaultNil(t *testing.T) {
-	inv := newDraftInvoice()
+	inv := newDraftInvoice(t)
 
 	if inv.RevisionOf() != nil {
 		t.Error("expected revisionOf to be nil by default")

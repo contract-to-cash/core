@@ -27,26 +27,35 @@ func TestOnContractCancel_VoidsDraftAndFinalized(t *testing.T) {
 	accountID := shared.NewAccountID()
 
 	// Create a draft invoice
-	draftInv := invoice.NewInvoice(
+	draftInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), accountID, contractID,
 		jpy(10000), jpy(0), jpy(0),
 	)
+	if err != nil {
+		t.Fatalf("NewInvoice failed: %v", err)
+	}
 	_ = invoiceRepo.Save(ctx, draftInv)
 
 	// Create a finalized invoice
-	finalizedInv := invoice.NewInvoice(
+	finalizedInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), accountID, contractID,
 		jpy(5000), jpy(0), jpy(0),
 	)
+	if err != nil {
+		t.Fatalf("NewInvoice failed: %v", err)
+	}
 	_ = finalizedInv.Finalize()
 	_ = invoiceRepo.Save(ctx, finalizedInv)
 
 	// Create a paid invoice (should NOT be voided)
-	paidInv := invoice.NewInvoice(
+	paidInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), accountID, contractID,
 		jpy(3000), jpy(0), jpy(0),
 		invoice.WithStatus(invoice.InvoiceStatusPaid),
 	)
+	if err != nil {
+		t.Fatalf("NewInvoice failed: %v", err)
+	}
 	_ = invoiceRepo.Save(ctx, paidInv)
 
 	// Create contract aggregate and cancel it
@@ -64,7 +73,7 @@ func TestOnContractCancel_VoidsDraftAndFinalized(t *testing.T) {
 	// Execute the plugin
 	p := NewInvoiceCleanupPlugin(invoiceRepo)
 	pluginCtx := plugin.NewContext(ctx)
-	err := p.OnContractCancel(pluginCtx, agg)
+	err = p.OnContractCancel(pluginCtx, agg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -479,7 +479,8 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 		}
 		invOpts = append(invOpts, input.extraOpts...)
 
-		inv = invoice.NewInvoice(
+		var invoiceErr error
+		inv, invoiceErr = invoice.NewInvoice(
 			invoiceID,
 			agg.AccountID(),
 			input.contractID,
@@ -488,6 +489,9 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 			totalTax,
 			invOpts...,
 		)
+		if invoiceErr != nil {
+			return fmt.Errorf("invoice creation failed: %w", invoiceErr)
+		}
 		calcCtx.SetInvoice(inv)
 
 		// AfterCalculation (InvoiceLifecycleHooks)
