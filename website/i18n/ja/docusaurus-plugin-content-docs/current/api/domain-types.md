@@ -314,7 +314,7 @@ import "github.com/contract-to-cash/core/domain/invoice"
 ### 生成
 
 ```go
-cn := invoice.NewCreditNote(
+cn, err := invoice.NewCreditNote(
     id,          // shared.CreditNoteID
     invoiceID,   // shared.InvoiceID
     accountID,   // shared.AccountID

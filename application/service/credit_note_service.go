@@ -131,7 +131,7 @@ func (s *CreditNoteService) CreateCreditNote(
 		opts = append(opts, invoice.WithCreditNoteMemo(memo))
 	}
 
-	cn := invoice.NewCreditNote(
+	cn, err := invoice.NewCreditNote(
 		shared.NewCreditNoteID(),
 		invoiceID,
 		inv.AccountID(),
@@ -141,6 +141,9 @@ func (s *CreditNoteService) CreateCreditNote(
 		s.clock.Now(),
 		opts...,
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	if err := s.creditNoteRepo.Save(ctx, cn); err != nil {
 		return nil, fmt.Errorf("failed to save credit note: %w", err)

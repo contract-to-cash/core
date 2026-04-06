@@ -1069,6 +1069,7 @@ type CreditNote struct {
 }
 
 // コンストラクタ
+// Returns an error if items is empty.
 func NewCreditNote(
     id shared.CreditNoteID,
     invoiceID shared.InvoiceID,
@@ -1077,7 +1078,7 @@ func NewCreditNote(
     reason CreditNoteReason,
     items []CreditNoteItem,
     opts ...CreditNoteOption,
-) *CreditNote
+) (*CreditNote, error)
 
 type CreditNoteOption func(*CreditNote)
 func WithCreditNoteMemo(memo string) CreditNoteOption
