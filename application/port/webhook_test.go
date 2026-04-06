@@ -80,7 +80,7 @@ func TestWebhookProcessor_TimestampTooOld(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for timestamp too old, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"too old") {
+	if got := err.Error(); !strings.Contains(got, "too old") {
 		t.Fatalf("expected error containing 'too old', got: %s", got)
 	}
 }
@@ -103,7 +103,7 @@ func TestWebhookProcessor_TimestampTooNew(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for timestamp too new, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"too new") {
+	if got := err.Error(); !strings.Contains(got, "too new") {
 		t.Fatalf("expected error containing 'too new', got: %s", got)
 	}
 }
@@ -174,7 +174,7 @@ func TestWebhookProcessor_DeduplicatorError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from deduplicator, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"deduplication check failed") {
+	if got := err.Error(); !strings.Contains(got, "deduplication check failed") {
 		t.Fatalf("expected error containing 'deduplication check failed', got: %s", got)
 	}
 }
@@ -339,7 +339,7 @@ func TestWebhookProcessor_DLQSendFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when DLQ send fails, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"DLQ send failed") {
+	if got := err.Error(); !strings.Contains(got, "DLQ send failed") {
 		t.Fatalf("expected error containing 'DLQ send failed', got: %s", got)
 	}
 }
@@ -368,7 +368,7 @@ func TestWebhookProcessor_NilDLQ(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when handler fails with nil DLQ, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"handler error") {
+	if got := err.Error(); !strings.Contains(got, "handler error") {
 		t.Fatalf("expected error containing 'handler error', got: %s", got)
 	}
 }
@@ -386,7 +386,7 @@ func TestWebhookProcessor_ParseAndVerifyFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from ParseAndVerify, got nil")
 	}
-	if got := err.Error(); !strings.Contains(got,"webhook verification failed") {
+	if got := err.Error(); !strings.Contains(got, "webhook verification failed") {
 		t.Fatalf("expected error containing 'webhook verification failed', got: %s", got)
 	}
 }
@@ -444,7 +444,7 @@ func TestWebhookProcessor_ContextCancelDuringRetry(t *testing.T) {
 	}
 	cfg := defaultConfig()
 	cfg.MaxRetries = 5
-	cfg.RetryBackoff = 100 * time.Millisecond // long enough that cancel fires during backoff
+	cfg.RetryBackoff = 1 * time.Hour // large value ensures select always picks ctx.Done() over time.After
 
 	callCount := 0
 	ctx, cancel := context.WithCancel(context.Background())

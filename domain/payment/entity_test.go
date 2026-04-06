@@ -545,7 +545,10 @@ func TestPayment_RecordRefund_ZeroAmount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Zero refund should keep status as partially_refunded (cumulative 0 < 5000)
+	// NOTE: Zero refund changes status from completed to partially_refunded
+	// because cumulative refunded (0) < payment amount (5000) hits the else branch.
+	// This is arguably a design issue (zero refund shouldn't trigger a state change),
+	// but it reflects the current implementation. Consider adding a guard in RecordRefund.
 	if p.Status() != PaymentStatusPartiallyRefunded {
 		t.Errorf("expected partially_refunded after zero refund, got %s", p.Status())
 	}
