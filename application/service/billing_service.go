@@ -319,20 +319,28 @@ func (s *BillingService) GenerateProrationInvoice(ctx context.Context, contractI
 	// Credit line item (negative — what the customer overpaid on the old price)
 	if !proration.CreditAmount.IsZero() {
 		creditNeg := proration.CreditAmount.Negate()
-		lineItems = append(lineItems, invoice.NewLineItem(
+		li, err := invoice.NewLineItem(
 			shared.GenerateID(),
 			"Proration credit (unused period on previous price)",
 			1, creditNeg, creditNeg, nil,
-		))
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create proration credit line item: %w", err)
+		}
+		lineItems = append(lineItems, li)
 	}
 
 	// Charge line item (positive — what the customer owes on the new price)
 	if !proration.ChargeAmount.IsZero() {
-		lineItems = append(lineItems, invoice.NewLineItem(
+		li, err := invoice.NewLineItem(
 			shared.GenerateID(),
 			"Proration charge (remaining period on new price)",
 			1, proration.ChargeAmount, proration.ChargeAmount, nil,
-		))
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create proration charge line item: %w", err)
+		}
+		lineItems = append(lineItems, li)
 	}
 
 	// Subtotal is the net adjustment amount
@@ -538,11 +546,14 @@ func (s *BillingService) calculateSubtotal(ctx context.Context, agg *contract.Co
 		if agg.GetContractType() == contract.ContractTypeOneTime {
 			description = "One-time charge"
 		}
-		li := invoice.NewLineItem(
+		li, err := invoice.NewLineItem(
 			shared.GenerateID(), description, 1,
 			effectiveAmount, effectiveAmount, nil,
 			invoice.WithPriceID(price.ID()),
 		)
+		if err != nil {
+			return shared.Money{}, nil, fmt.Errorf("failed to create line item: %w", err)
+		}
 		return effectiveAmount, []invoice.LineItem{li}, nil
 	}
 
@@ -570,11 +581,15 @@ func (s *BillingService) calculateUsageCharge(
 	var lineItems []invoice.LineItem
 
 	// Base price line item
-	lineItems = append(lineItems, invoice.NewLineItem(
+	baseLI, err := invoice.NewLineItem(
 		shared.GenerateID(), "Base price", 1,
 		baseAmount, baseAmount, nil,
 		invoice.WithPriceID(price.ID()),
-	))
+	)
+	if err != nil {
+		return shared.Money{}, nil, fmt.Errorf("failed to create base price line item: %w", err)
+	}
+	lineItems = append(lineItems, baseLI)
 
 	for _, metric := range prod.UsageMetrics() {
 		summary, err := s.usageRepo.GetSummary(ctx, agg.ContractID(), metric.Name, billingPeriod)
@@ -595,13 +610,17 @@ func (s *BillingService) calculateUsageCharge(
 		}
 
 		if billableUsage > 0 {
-			lineItems = append(lineItems, invoice.NewLineItem(
+			usageLI, liErr := invoice.NewLineItem(
 				shared.GenerateID(),
 				fmt.Sprintf("Usage: %s", metric.Name),
 				billableUsage,
 				metricPrice, metricPrice, nil,
 				invoice.WithPriceID(price.ID()),
-			))
+			)
+			if liErr != nil {
+				return shared.Money{}, nil, fmt.Errorf("failed to create usage line item: %w", liErr)
+			}
+			lineItems = append(lineItems, usageLI)
 		}
 	}
 
