@@ -161,6 +161,10 @@ func TestBalanceEntry_Consume_PartialConsumption(t *testing.T) {
 		t.Errorf("expected remaining amount 700, got %s", entry.RemainingAmount().Amount().RatString())
 	}
 
+	if entry.OriginalAmount().Amount().Cmp(new(big.Rat).SetInt64(1000)) != 0 {
+		t.Errorf("expected originalAmount to remain 1000, got %s", entry.OriginalAmount().Amount().RatString())
+	}
+
 	if entry.IsFullyConsumed() {
 		t.Error("expected not fully consumed after partial consumption")
 	}
@@ -184,6 +188,10 @@ func TestBalanceEntry_Consume_FullConsumption(t *testing.T) {
 
 	if !entry.RemainingAmount().IsZero() {
 		t.Errorf("expected remaining amount to be zero, got %s", entry.RemainingAmount().Amount().RatString())
+	}
+
+	if entry.OriginalAmount().Amount().Cmp(new(big.Rat).SetInt64(1000)) != 0 {
+		t.Errorf("expected originalAmount to remain 1000, got %s", entry.OriginalAmount().Amount().RatString())
 	}
 
 	if !entry.IsFullyConsumed() {
@@ -214,6 +222,62 @@ func TestBalanceEntry_Consume_Overconsumption(t *testing.T) {
 
 	if !entry.IsFullyConsumed() {
 		t.Error("expected fully consumed after overconsumption")
+	}
+
+	if entry.OriginalAmount().Amount().Cmp(new(big.Rat).SetInt64(500)) != 0 {
+		t.Errorf("expected originalAmount to remain 500, got %s", entry.OriginalAmount().Amount().RatString())
+	}
+}
+
+func TestBalanceEntry_Consume_ZeroAmount(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+
+	consumeAmt := shared.NewMoney(new(big.Rat).SetInt64(0), shared.CurrencyJPY)
+	consumed, err := entry.Consume(consumeAmt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !consumed.IsZero() {
+		t.Errorf("expected zero consumed, got %s", consumed.Amount().RatString())
+	}
+	if entry.RemainingAmount().Amount().Cmp(new(big.Rat).SetInt64(1000)) != 0 {
+		t.Errorf("expected remaining amount to stay 1000, got %s", entry.RemainingAmount().Amount().RatString())
+	}
+	if entry.Version() != 0 {
+		t.Errorf("expected version to stay 0, got %d", entry.Version())
+	}
+}
+
+func TestBalanceEntry_Consume_AlreadyFullyConsumed(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY)
+	entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+
+	// Consume all
+	_, err := entry.Consume(shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !entry.IsFullyConsumed() {
+		t.Fatal("expected fully consumed")
+	}
+	versionAfterFull := entry.Version()
+
+	// Try to consume again from empty balance
+	consumed, err := entry.Consume(shared.NewMoney(new(big.Rat).SetInt64(100), shared.CurrencyJPY))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !consumed.IsZero() {
+		t.Errorf("expected zero consumed from fully-consumed entry, got %s", consumed.Amount().RatString())
+	}
+	if !entry.RemainingAmount().IsZero() {
+		t.Errorf("expected remaining to stay zero, got %s", entry.RemainingAmount().Amount().RatString())
+	}
+	if entry.Version() != versionAfterFull {
+		t.Errorf("expected version to stay %d, got %d", versionAfterFull, entry.Version())
 	}
 }
 

@@ -535,3 +535,21 @@ func TestPayment_RecordRefund_AllInvalidStates(t *testing.T) {
 		})
 	}
 }
+
+func TestPayment_RecordRefund_ZeroAmount(t *testing.T) {
+	p := newTestPayment() // amount = 5000
+	completePayment(t, p)
+
+	zero := shared.NewMoney(big.NewRat(0, 1), shared.CurrencyJPY)
+	err := p.RecordRefund(zero)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Zero refund should keep status as partially_refunded (cumulative 0 < 5000)
+	if p.Status() != PaymentStatusPartiallyRefunded {
+		t.Errorf("expected partially_refunded after zero refund, got %s", p.Status())
+	}
+	if !p.RefundedAmount().IsZero() {
+		t.Errorf("expected refundedAmount to be zero, got %s", p.RefundedAmount().Amount().RatString())
+	}
+}

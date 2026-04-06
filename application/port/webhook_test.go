@@ -1,8 +1,10 @@
 package port
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,7 +80,7 @@ func TestWebhookProcessor_TimestampTooOld(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for timestamp too old, got nil")
 	}
-	if got := err.Error(); !contains(got, "too old") {
+	if got := err.Error(); !strings.Contains(got,"too old") {
 		t.Fatalf("expected error containing 'too old', got: %s", got)
 	}
 }
@@ -101,7 +103,7 @@ func TestWebhookProcessor_TimestampTooNew(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for timestamp too new, got nil")
 	}
-	if got := err.Error(); !contains(got, "too new") {
+	if got := err.Error(); !strings.Contains(got,"too new") {
 		t.Fatalf("expected error containing 'too new', got: %s", got)
 	}
 }
@@ -172,7 +174,7 @@ func TestWebhookProcessor_DeduplicatorError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from deduplicator, got nil")
 	}
-	if got := err.Error(); !contains(got, "deduplication check failed") {
+	if got := err.Error(); !strings.Contains(got,"deduplication check failed") {
 		t.Fatalf("expected error containing 'deduplication check failed', got: %s", got)
 	}
 }
@@ -223,6 +225,15 @@ func TestWebhookProcessor_RetryableError_Exhausted(t *testing.T) {
 	}
 	if entry.LastError != "temporary failure" {
 		t.Fatalf("expected DLQ LastError 'temporary failure', got '%s'", entry.LastError)
+	}
+	if entry.RetryCount != cfg.MaxRetries+1 {
+		t.Fatalf("expected DLQ RetryCount %d, got %d", cfg.MaxRetries+1, entry.RetryCount)
+	}
+	if !bytes.Equal(entry.Payload, event.RawData) {
+		t.Fatalf("expected DLQ Payload %q, got %q", event.RawData, entry.Payload)
+	}
+	if entry.CreatedAt != now {
+		t.Fatalf("expected DLQ CreatedAt %v, got %v", now, entry.CreatedAt)
 	}
 }
 
@@ -328,7 +339,7 @@ func TestWebhookProcessor_DLQSendFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when DLQ send fails, got nil")
 	}
-	if got := err.Error(); !contains(got, "DLQ send failed") {
+	if got := err.Error(); !strings.Contains(got,"DLQ send failed") {
 		t.Fatalf("expected error containing 'DLQ send failed', got: %s", got)
 	}
 }
@@ -357,7 +368,7 @@ func TestWebhookProcessor_NilDLQ(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when handler fails with nil DLQ, got nil")
 	}
-	if got := err.Error(); !contains(got, "handler error") {
+	if got := err.Error(); !strings.Contains(got,"handler error") {
 		t.Fatalf("expected error containing 'handler error', got: %s", got)
 	}
 }
@@ -375,17 +386,87 @@ func TestWebhookProcessor_ParseAndVerifyFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from ParseAndVerify, got nil")
 	}
-	if got := err.Error(); !contains(got, "webhook verification failed") {
+	if got := err.Error(); !strings.Contains(got,"webhook verification failed") {
 		t.Fatalf("expected error containing 'webhook verification failed', got: %s", got)
 	}
 }
 
-// contains checks if s contains substr (avoids importing strings in test).
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+func TestWebhookProcessor_TimestampAtExactBoundary(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tolerance := 5 * time.Minute
+
+	t.Run("exactly at past boundary", func(t *testing.T) {
+		event := &WebhookEvent{
+			ID:        "evt_boundary_old",
+			Type:      WebhookEventPaymentSucceeded,
+			CreatedAt: now.Add(-tolerance), // exactly 5min ago
 		}
+		p := NewWebhookProcessor(
+			&mockWebhookHandler{event: event},
+			&mockDeduplicator{},
+			&mockDLQ{},
+			shared.FixedClock{FixedTime: now},
+			defaultConfig(),
+		)
+		// Before/After are strict: exactly at boundary should pass
+		err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler)
+		if err != nil {
+			t.Fatalf("expected no error at exact past boundary, got: %v", err)
+		}
+	})
+
+	t.Run("exactly at future boundary", func(t *testing.T) {
+		event := &WebhookEvent{
+			ID:        "evt_boundary_new",
+			Type:      WebhookEventPaymentSucceeded,
+			CreatedAt: now.Add(tolerance), // exactly 5min ahead
+		}
+		p := NewWebhookProcessor(
+			&mockWebhookHandler{event: event},
+			&mockDeduplicator{},
+			&mockDLQ{},
+			shared.FixedClock{FixedTime: now},
+			defaultConfig(),
+		)
+		err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler)
+		if err != nil {
+			t.Fatalf("expected no error at exact future boundary, got: %v", err)
+		}
+	})
+}
+
+func TestWebhookProcessor_ContextCancelDuringRetry(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	event := &WebhookEvent{
+		ID:        "evt_cancel",
+		Type:      WebhookEventPaymentFailed,
+		CreatedAt: now,
 	}
-	return false
+	cfg := defaultConfig()
+	cfg.MaxRetries = 5
+	cfg.RetryBackoff = 100 * time.Millisecond // long enough that cancel fires during backoff
+
+	callCount := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := func(_ context.Context, _ *WebhookEvent) error {
+		callCount++
+		if callCount == 1 {
+			cancel() // cancel after first attempt
+		}
+		return &WebhookRetryableError{Err: fmt.Errorf("temporary failure")}
+	}
+	p := NewWebhookProcessor(
+		&mockWebhookHandler{event: event},
+		&mockDeduplicator{},
+		&mockDLQ{},
+		shared.FixedClock{FixedTime: now},
+		cfg,
+	)
+	err := p.ProcessWebhook(ctx, &WebhookRequest{}, handler)
+	if err == nil {
+		t.Fatal("expected error on context cancellation, got nil")
+	}
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
 }
