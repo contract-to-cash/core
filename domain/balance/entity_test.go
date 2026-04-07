@@ -313,6 +313,35 @@ func TestBalanceEntry_Consume_ExpiredEntryCanStillBeConsumed(t *testing.T) {
 	}
 }
 
+func TestBalanceSourceType_TypeSafety(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+
+	entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+
+	// Default sourceType should be zero value
+	if entry.SourceType() != "" {
+		t.Errorf("expected empty sourceType by default, got %q", entry.SourceType())
+	}
+
+	// Set using typed constant
+	entry.SetSourceType(BalanceSourceTypeProration)
+	if entry.SourceType() != BalanceSourceTypeProration {
+		t.Errorf("expected sourceType %q, got %q", BalanceSourceTypeProration, entry.SourceType())
+	}
+
+	// Verify constant values
+	if BalanceSourceTypeProration != "proration" {
+		t.Errorf("expected BalanceSourceTypeProration to be 'proration', got %q", BalanceSourceTypeProration)
+	}
+	if BalanceSourceTypeManual != "manual" {
+		t.Errorf("expected BalanceSourceTypeManual to be 'manual', got %q", BalanceSourceTypeManual)
+	}
+	if BalanceSourceTypeRefundConversion != "refund_conversion" {
+		t.Errorf("expected BalanceSourceTypeRefundConversion to be 'refund_conversion', got %q", BalanceSourceTypeRefundConversion)
+	}
+}
+
 func TestBalanceEntry_IsExpired_ExactBoundary(t *testing.T) {
 	accountID := shared.NewAccountID()
 	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)

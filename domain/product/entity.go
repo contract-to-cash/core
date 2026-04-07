@@ -23,7 +23,7 @@ type Feature struct {
 
 // UsageMetric defines a usage-based metric within a product.
 type UsageMetric struct {
-	Name             string
+	Name             shared.MetricName
 	IncludedQuantity int64
 }
 

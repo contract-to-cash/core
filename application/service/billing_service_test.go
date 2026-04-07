@@ -88,10 +88,10 @@ func (m *mockInvoiceRepo) FindUnpaidByContract(_ context.Context, _ shared.Contr
 type mockUsageRepo struct{}
 
 func (m *mockUsageRepo) Record(_ context.Context, _ *usage.UsageRecord) error { return nil }
-func (m *mockUsageRepo) GetSummary(_ context.Context, _ shared.ContractID, _ string, _ shared.DateRange) (*usage.UsageSummary, error) {
+func (m *mockUsageRepo) GetSummary(_ context.Context, _ shared.ContractID, _ shared.MetricName, _ shared.DateRange) (*usage.UsageSummary, error) {
 	return &usage.UsageSummary{TotalUsage: 100}, nil
 }
-func (m *mockUsageRepo) GetRecords(_ context.Context, _ shared.ContractID, _ string, _, _ time.Time) ([]*usage.UsageRecord, error) {
+func (m *mockUsageRepo) GetRecords(_ context.Context, _ shared.ContractID, _ shared.MetricName, _, _ time.Time) ([]*usage.UsageRecord, error) {
 	return nil, nil
 }
 
@@ -702,7 +702,7 @@ func TestCalculateSubtotal_UsageBased_ViaProductAndPrice(t *testing.T) {
 
 	// Usage repo returns 150 total usage for api_calls
 	usageRepo := &mockUsageRepoWithMetrics{
-		summaries: map[string]*usage.UsageSummary{
+		summaries: map[shared.MetricName]*usage.UsageSummary{
 			"api_calls": {TotalUsage: 150},
 		},
 	}
@@ -746,7 +746,7 @@ func TestCalculateSubtotal_UsageBased_IncludedQuantityCoversAll(t *testing.T) {
 	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeUsageBased, jpy(1000), priceEntity.ID())
 
 	usageRepo := &mockUsageRepoWithMetrics{
-		summaries: map[string]*usage.UsageSummary{
+		summaries: map[shared.MetricName]*usage.UsageSummary{
 			"api_calls": {TotalUsage: 100}, // below included quantity
 		},
 	}
@@ -817,17 +817,17 @@ func TestGenerateInvoice_LineItemHasPriceID(t *testing.T) {
 
 // mockUsageRepoWithMetrics returns specific summaries per metric name.
 type mockUsageRepoWithMetrics struct {
-	summaries map[string]*usage.UsageSummary
+	summaries map[shared.MetricName]*usage.UsageSummary
 }
 
 func (m *mockUsageRepoWithMetrics) Record(_ context.Context, _ *usage.UsageRecord) error { return nil }
-func (m *mockUsageRepoWithMetrics) GetSummary(_ context.Context, _ shared.ContractID, metric string, _ shared.DateRange) (*usage.UsageSummary, error) {
+func (m *mockUsageRepoWithMetrics) GetSummary(_ context.Context, _ shared.ContractID, metric shared.MetricName, _ shared.DateRange) (*usage.UsageSummary, error) {
 	if s, ok := m.summaries[metric]; ok {
 		return s, nil
 	}
 	return &usage.UsageSummary{TotalUsage: 0}, nil
 }
-func (m *mockUsageRepoWithMetrics) GetRecords(_ context.Context, _ shared.ContractID, _ string, _, _ time.Time) ([]*usage.UsageRecord, error) {
+func (m *mockUsageRepoWithMetrics) GetRecords(_ context.Context, _ shared.ContractID, _ shared.MetricName, _, _ time.Time) ([]*usage.UsageRecord, error) {
 	return nil, nil
 }
 

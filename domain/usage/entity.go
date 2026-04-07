@@ -11,7 +11,7 @@ import (
 type UsageRecord struct {
 	id             shared.UsageRecordID
 	contractID     shared.ContractID
-	metricName     string
+	metricName     shared.MetricName
 	quantity       int64
 	timestamp      time.Time
 	metadata       map[string]string
@@ -23,7 +23,7 @@ type UsageRecord struct {
 func NewUsageRecord(
 	id shared.UsageRecordID,
 	contractID shared.ContractID,
-	metricName string,
+	metricName shared.MetricName,
 	quantity int64,
 	timestamp time.Time,
 	idempotencyKey string,
@@ -47,7 +47,7 @@ func NewUsageRecord(
 
 func (r *UsageRecord) ID() shared.UsageRecordID      { return r.id }
 func (r *UsageRecord) ContractID() shared.ContractID { return r.contractID }
-func (r *UsageRecord) MetricName() string            { return r.metricName }
+func (r *UsageRecord) MetricName() shared.MetricName { return r.metricName }
 func (r *UsageRecord) Quantity() int64               { return r.quantity }
 func (r *UsageRecord) Timestamp() time.Time          { return r.timestamp }
 func (r *UsageRecord) Metadata() map[string]string {
@@ -62,7 +62,7 @@ func (r *UsageRecord) IdempotencyKey() string { return r.idempotencyKey }
 // UsageSummary represents aggregated usage for a metric over a period.
 type UsageSummary struct {
 	ContractID shared.ContractID
-	MetricName string
+	MetricName shared.MetricName
 	Period     shared.DateRange
 	TotalUsage int64
 }
