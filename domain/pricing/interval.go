@@ -136,7 +136,12 @@ type billingIntervalJSON struct {
 }
 
 // MarshalJSON implements json.Marshaler.
+// Returns null for zero-value BillingInterval so that omitempty works correctly
+// with event/snapshot serialization.
 func (i BillingInterval) MarshalJSON() ([]byte, error) {
+	if i.IsZero() {
+		return []byte("null"), nil
+	}
 	return json.Marshal(billingIntervalJSON{Unit: i.unit, Count: i.count})
 }
 
@@ -152,6 +157,12 @@ var billingCycleToIntervalMap = map[string]BillingInterval{
 // Supports both new format ({"unit":"month","count":3}) and
 // old format ("monthly") for backward compatibility with existing events/snapshots.
 func (i *BillingInterval) UnmarshalJSON(data []byte) error {
+	// Handle JSON null
+	if string(data) == "null" {
+		*i = BillingInterval{}
+		return nil
+	}
+
 	// Try old format first: plain string like "monthly"
 	var oldFormat string
 	if err := json.Unmarshal(data, &oldFormat); err == nil {
@@ -159,7 +170,7 @@ func (i *BillingInterval) UnmarshalJSON(data []byte) error {
 			*i = interval
 			return nil
 		}
-		// Not a known old format string, try as new format
+		return fmt.Errorf("unknown billing cycle: %q (expected daily, weekly, monthly, or yearly)", oldFormat)
 	}
 
 	// Try new format: {"unit":"month","count":3}
@@ -172,11 +183,12 @@ func (i *BillingInterval) UnmarshalJSON(data []byte) error {
 		*i = BillingInterval{}
 		return nil
 	}
-	if v.Count < 1 {
-		return fmt.Errorf("invalid interval count: %d", v.Count)
+	// Validate using the constructor to ensure unit and count are valid
+	interval, err := NewBillingInterval(v.Unit, v.Count)
+	if err != nil {
+		return fmt.Errorf("invalid BillingInterval in JSON: %w", err)
 	}
-	i.unit = v.Unit
-	i.count = v.Count
+	*i = interval
 	return nil
 }
 

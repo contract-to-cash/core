@@ -349,3 +349,63 @@ func TestBillingInterval_ToBillingCycle(t *testing.T) {
 		t.Errorf("expected empty string for quarterly, got %s", cycle)
 	}
 }
+
+func TestBillingInterval_UnmarshalJSON_InvalidUnit(t *testing.T) {
+	// M1 fix: invalid unit in new format should be rejected
+	data := []byte(`{"unit":"quarter","count":3}`)
+	var interval BillingInterval
+	err := json.Unmarshal(data, &interval)
+	if err == nil {
+		t.Fatal("expected error for invalid unit in JSON, got nil")
+	}
+}
+
+func TestBillingInterval_UnmarshalJSON_UnknownOldFormat(t *testing.T) {
+	// M3 fix: unknown old format string should return clear error
+	data := []byte(`"bimonthly"`)
+	var interval BillingInterval
+	err := json.Unmarshal(data, &interval)
+	if err == nil {
+		t.Fatal("expected error for unknown old format, got nil")
+	}
+	if got := err.Error(); !contains(got, "unknown billing cycle") {
+		t.Errorf("expected error containing 'unknown billing cycle', got: %s", got)
+	}
+}
+
+func TestBillingInterval_MarshalJSON_ZeroValue(t *testing.T) {
+	// M2 fix: zero value should marshal as null
+	var interval BillingInterval
+	data, err := json.Marshal(interval)
+	if err != nil {
+		t.Fatalf("unexpected marshal error: %v", err)
+	}
+	if string(data) != "null" {
+		t.Errorf("expected null for zero-value, got %s", string(data))
+	}
+}
+
+func TestBillingInterval_UnmarshalJSON_Null(t *testing.T) {
+	// null should unmarshal to zero value
+	interval := Monthly() // start with non-zero
+	err := json.Unmarshal([]byte("null"), &interval)
+	if err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+	if !interval.IsZero() {
+		t.Errorf("expected zero value after unmarshaling null, got %v", interval)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
