@@ -8,7 +8,7 @@ import (
 )
 
 func newDraftInvoice() *Invoice {
-	return NewInvoice(
+	inv, err := NewInvoice(
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -16,6 +16,10 @@ func newDraftInvoice() *Invoice {
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 	)
+	if err != nil {
+		panic("newDraftInvoice: " + err.Error())
+	}
+	return inv
 }
 
 func TestVoid_FromDraft(t *testing.T) {
@@ -42,7 +46,7 @@ func TestVoid_FromFinalized(t *testing.T) {
 }
 
 func TestVoid_FromPaid_Rejected(t *testing.T) {
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -57,7 +61,7 @@ func TestVoid_FromPaid_Rejected(t *testing.T) {
 }
 
 func TestVoid_FromPartialPaid_Rejected(t *testing.T) {
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -72,7 +76,7 @@ func TestVoid_FromPartialPaid_Rejected(t *testing.T) {
 }
 
 func TestVoid_FromOverdue_Rejected(t *testing.T) {
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),

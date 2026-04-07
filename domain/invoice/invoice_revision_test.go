@@ -10,7 +10,7 @@ import (
 // --- VoidWithReason tests ---
 
 func TestVoidWithReason_FromIssued(t *testing.T) {
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -32,7 +32,7 @@ func TestVoidWithReason_FromIssued(t *testing.T) {
 }
 
 func TestVoidWithReason_FromPaid(t *testing.T) {
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -51,7 +51,7 @@ func TestVoidWithReason_FromPaid(t *testing.T) {
 }
 
 func TestVoidWithReason_FromOverdue(t *testing.T) {
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -93,7 +93,7 @@ func TestVoidWithReason_FromFinalized(t *testing.T) {
 }
 
 func TestVoidWithReason_FromPartialPaid(t *testing.T) {
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -124,7 +124,7 @@ func TestVoidWithReason_FromVoided_Rejected(t *testing.T) {
 }
 
 func TestVoidWithReason_FromRefunded_Rejected(t *testing.T) {
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -151,7 +151,7 @@ func TestVoidWithReason_EmptyReason_Rejected(t *testing.T) {
 
 func TestInvoice_WithRevisionOf(t *testing.T) {
 	originalID := shared.NewInvoiceID()
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -171,7 +171,7 @@ func TestInvoice_WithRevisionOf(t *testing.T) {
 
 func TestInvoice_WithOriginalInvoiceID(t *testing.T) {
 	originalID := shared.NewInvoiceID()
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
