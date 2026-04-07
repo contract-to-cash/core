@@ -8,6 +8,48 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
+func TestNewInvoice_CurrencyMismatch_Subtotal_Discount(t *testing.T) {
+	id := shared.NewInvoiceID()
+	acct := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	discount := shared.NewMoney(big.NewRat(500, 1), shared.CurrencyUSD) // mismatch
+	tax := shared.Zero(shared.CurrencyJPY)
+
+	_, err := NewInvoice(id, acct, contractID, subtotal, discount, tax)
+	if err == nil {
+		t.Fatal("expected error for currency mismatch between subtotal and discount, got nil")
+	}
+	domErr, ok := err.(*shared.DomainError)
+	if !ok {
+		t.Fatalf("expected *shared.DomainError, got %T", err)
+	}
+	if domErr.Code != shared.ErrCodeCurrencyMismatch {
+		t.Errorf("expected error code %s, got %s", shared.ErrCodeCurrencyMismatch, domErr.Code)
+	}
+}
+
+func TestNewInvoice_CurrencyMismatch_AfterDiscount_Tax(t *testing.T) {
+	id := shared.NewInvoiceID()
+	acct := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	discount := shared.Zero(shared.CurrencyJPY)
+	tax := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyUSD) // mismatch
+
+	_, err := NewInvoice(id, acct, contractID, subtotal, discount, tax)
+	if err == nil {
+		t.Fatal("expected error for currency mismatch between subtotal and tax, got nil")
+	}
+	domErr, ok := err.(*shared.DomainError)
+	if !ok {
+		t.Fatalf("expected *shared.DomainError, got %T", err)
+	}
+	if domErr.Code != shared.ErrCodeCurrencyMismatch {
+		t.Errorf("expected error code %s, got %s", shared.ErrCodeCurrencyMismatch, domErr.Code)
+	}
+}
+
 func TestNewInvoice_Defaults(t *testing.T) {
 	id := shared.NewInvoiceID()
 	acct := shared.NewAccountID()
@@ -16,7 +58,10 @@ func TestNewInvoice_Defaults(t *testing.T) {
 	discount := shared.Zero(shared.CurrencyJPY)
 	tax := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
 
-	inv := NewInvoice(id, acct, contract, subtotal, discount, tax)
+	inv, err := NewInvoice(id, acct, contract, subtotal, discount, tax)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if inv.ID() != id {
 		t.Errorf("expected id %s, got %s", id, inv.ID())
@@ -64,7 +109,7 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 	}
 	credit := shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY)
 
-	inv := NewInvoice(id, acct, contract, subtotal, discount, tax,
+	inv, err := NewInvoice(id, acct, contract, subtotal, discount, tax,
 		WithStatus(InvoiceStatusFinalized),
 		WithBillingPeriod(period),
 		WithDueDate(due),
@@ -72,6 +117,9 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 		WithAllowPartialPayment(true),
 		WithInvoiceNumber("INV-2026-001"),
 	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if inv.Status() != InvoiceStatusFinalized {
 		t.Errorf("expected status finalized, got %s", inv.Status())
@@ -93,8 +141,17 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 	}
 }
 
+func mustNewInvoice(t *testing.T, id shared.InvoiceID, accountID shared.AccountID, contractID shared.ContractID, subtotal, discount, tax shared.Money, opts ...InvoiceOption) *Invoice {
+	t.Helper()
+	inv, err := NewInvoice(id, accountID, contractID, subtotal, discount, tax, opts...)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
+	return inv
+}
+
 func TestInvoice_Finalize(t *testing.T) {
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -118,7 +175,7 @@ func TestInvoice_Finalize(t *testing.T) {
 
 func TestInvoice_RecordPayment_Full(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -150,7 +207,7 @@ func TestInvoice_RecordPayment_Full(t *testing.T) {
 
 func TestInvoice_RecordPayment_Overpayment(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -182,7 +239,7 @@ func TestInvoice_RecordPayment_Overpayment(t *testing.T) {
 
 func TestInvoice_RecordPayment_CumulativeOverpayment(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
@@ -233,7 +290,7 @@ func TestInvoice_RecordPayment_CumulativeOverpayment(t *testing.T) {
 
 func TestInvoice_RecordPayment_Partial(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	inv := NewInvoice(
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),

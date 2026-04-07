@@ -17,12 +17,16 @@ func jpy(amount int64) shared.Money {
 }
 
 func newTestInvoice() *invoice.Invoice {
-	return invoice.NewInvoice(
+	inv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(),
 		shared.AccountID("acct-001"),
 		shared.ContractID("contract-001"),
 		jpy(10000), jpy(0), jpy(0),
 	)
+	if err != nil {
+		panic("newTestInvoice: " + err.Error())
+	}
+	return inv
 }
 
 func newTestPayment(invoiceID shared.InvoiceID) *payment.Payment {
