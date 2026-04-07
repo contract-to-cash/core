@@ -124,3 +124,36 @@ func TestPrice_DifferentBillingCycles(t *testing.T) {
 		}
 	}
 }
+
+func TestNewPriceWithInterval(t *testing.T) {
+	productID := shared.NewProductID()
+	createdAt := time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC)
+
+	t.Run("quarterly", func(t *testing.T) {
+		p := NewPriceWithInterval(productID, jpy(3000), shared.CurrencyJPY, Quarterly(), nil, createdAt)
+		if p.Interval().Unit() != IntervalUnitMonth {
+			t.Errorf("expected unit month, got %s", p.Interval().Unit())
+		}
+		if p.Interval().Count() != 3 {
+			t.Errorf("expected count 3, got %d", p.Interval().Count())
+		}
+		// Quarterly has no exact BillingCycle match
+		if p.BillingCycle() != "" {
+			t.Errorf("expected empty billing cycle for quarterly, got %s", p.BillingCycle())
+		}
+	})
+
+	t.Run("monthly via interval", func(t *testing.T) {
+		p := NewPriceWithInterval(productID, jpy(1000), shared.CurrencyJPY, Monthly(), nil, createdAt)
+		if p.BillingCycle() != BillingCycleMonthly {
+			t.Errorf("expected monthly billing cycle, got %s", p.BillingCycle())
+		}
+	})
+
+	t.Run("backward compat: NewPrice stores interval", func(t *testing.T) {
+		p := NewPrice(productID, jpy(1000), shared.CurrencyJPY, BillingCycleYearly, nil, createdAt)
+		if !p.Interval().Equals(Yearly()) {
+			t.Errorf("expected yearly interval, got %v", p.Interval())
+		}
+	})
+}

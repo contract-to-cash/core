@@ -75,8 +75,9 @@ func (r DateRange) Next(cycle string) DateRange {
 }
 
 // AddBillingCycleDuration adds one billing cycle duration to a time.
-// This is the single source of truth for cycle-to-duration mapping,
-// used by both DateRange.Next() and contract aggregate logic.
+// This is kept for backward compatibility with DateRange.Next() and other callers
+// that use string-based billing cycles.
+// For new code, use pricing.BillingInterval.AddTo() directly.
 func AddBillingCycleDuration(t time.Time, cycle string) time.Time {
 	switch cycle {
 	case "monthly":

@@ -27,20 +27,21 @@ const (
 )
 
 // Price represents how you charge for a product.
-// Price is immutable after creation — amount, currency, billingCycle, and pricingModel cannot change.
+// Price is immutable after creation — amount, currency, interval, and pricingModel cannot change.
 // To revise a price, create a new Price object.
 type Price struct {
 	id           shared.PriceID
 	productID    shared.ProductID
 	amount       shared.Money
 	currency     shared.Currency
-	billingCycle BillingCycle
+	interval     BillingInterval
 	pricingModel PricingModel
 	status       PriceStatus
 	createdAt    time.Time
 }
 
 // NewPrice creates a new active Price.
+// billingCycle is kept for backward compatibility; it is converted to a BillingInterval internally.
 func NewPrice(
 	productID shared.ProductID,
 	amount shared.Money,
@@ -54,7 +55,29 @@ func NewPrice(
 		productID:    productID,
 		amount:       amount,
 		currency:     currency,
-		billingCycle: billingCycle,
+		interval:     BillingCycleToInterval(billingCycle),
+		pricingModel: pricingModel,
+		status:       PriceStatusActive,
+		createdAt:    createdAt,
+	}
+}
+
+// NewPriceWithInterval creates a new active Price with a BillingInterval.
+// This supports flexible billing intervals like quarterly (3 months) or semi-annual (6 months).
+func NewPriceWithInterval(
+	productID shared.ProductID,
+	amount shared.Money,
+	currency shared.Currency,
+	interval BillingInterval,
+	pricingModel PricingModel,
+	createdAt time.Time,
+) *Price {
+	return &Price{
+		id:           shared.NewPriceID(),
+		productID:    productID,
+		amount:       amount,
+		currency:     currency,
+		interval:     interval,
 		pricingModel: pricingModel,
 		status:       PriceStatusActive,
 		createdAt:    createdAt,
@@ -73,8 +96,13 @@ func (p *Price) Amount() shared.Money { return p.amount }
 // Currency returns the currency.
 func (p *Price) Currency() shared.Currency { return p.currency }
 
-// BillingCycle returns the billing cycle.
-func (p *Price) BillingCycle() BillingCycle { return p.billingCycle }
+// BillingCycle returns the billing cycle string derived from the interval.
+// For intervals without an exact BillingCycle match (e.g., quarterly), returns "".
+// Prefer Interval() for new code.
+func (p *Price) BillingCycle() BillingCycle { return p.interval.ToBillingCycle() }
+
+// Interval returns the billing interval.
+func (p *Price) Interval() BillingInterval { return p.interval }
 
 // PricingModel returns the pricing model (for usage-based pricing).
 func (p *Price) PricingModel() PricingModel { return p.pricingModel }

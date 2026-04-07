@@ -30,7 +30,7 @@ const (
 )
 
 // BillingCycle is an alias for pricing.BillingCycle.
-// New code should use pricing.BillingCycle directly.
+// Deprecated: New code should use pricing.BillingInterval directly.
 type BillingCycle = pricing.BillingCycle
 
 // Billing cycle constants re-exported from pricing for backward compatibility.
@@ -41,6 +41,9 @@ const (
 	BillingCycleYearly  = pricing.BillingCycleYearly
 )
 
+// BillingInterval is an alias for pricing.BillingInterval.
+type BillingInterval = pricing.BillingInterval
+
 // Contract represents a contract entity.
 type Contract struct {
 	id               shared.ContractID
@@ -48,6 +51,7 @@ type Contract struct {
 	status           ContractStatus
 	contractType     ContractType
 	billingCycle     BillingCycle
+	interval         BillingInterval
 	currentPeriod    shared.DateRange
 	trialConfig      *TrialConfiguration
 	suspensionConfig *SuspensionConfiguration
@@ -73,7 +77,11 @@ func (c *Contract) Status() ContractStatus { return c.status }
 func (c *Contract) ContractType() ContractType { return c.contractType }
 
 // BillingCycle returns the billing cycle.
+// Deprecated: Use Interval() for new code. Returns "" for intervals without an exact match.
 func (c *Contract) BillingCycle() BillingCycle { return c.billingCycle }
+
+// Interval returns the billing interval.
+func (c *Contract) Interval() BillingInterval { return c.interval }
 
 // CurrentPeriod returns the current billing period.
 func (c *Contract) CurrentPeriod() shared.DateRange { return c.currentPeriod }
