@@ -222,10 +222,9 @@ func TestGetContractAsOf_SnapshotOnly(t *testing.T) {
 		t.Fatalf("SaveSnapshot failed: %v", err)
 	}
 
-	// Query at t2: snapshot covers all events, no additional replay needed
-	// The snapshot is at version 2 and both events are at t1 and t2,
-	// so after filtering events > snapshot.Version, no events remain.
-	agg, err := svc.GetContractAsOf(ctx, contractID, t2)
+	// Query at t3: snapshot (CreatedAt=t2) is before t3 so LoadSnapshotBefore returns it.
+	// The snapshot covers all events (version 2), so no additional replay is needed.
+	agg, err := svc.GetContractAsOf(ctx, contractID, t3)
 	if err != nil {
 		t.Fatalf("GetContractAsOf failed: %v", err)
 	}
@@ -362,28 +361,50 @@ func TestGetContractAsOf_WithSnapshot_FiltersEventsCorrectly(t *testing.T) {
 	// Activate at t2
 	clock2 := shared.FixedClock{FixedTime: t2}
 	agg2 := contract.NewContractAggregate(contractID, clock2)
-	storedEvents, _ := store.Load(ctx, streamID)
-	_ = agg2.LoadFromHistory(storedEvents)
-	_ = agg2.Activate(testMetadata())
+	storedEvents, err := store.Load(ctx, streamID)
+	if err != nil {
+		t.Fatalf("failed to load events: %v", err)
+	}
+	if err := agg2.LoadFromHistory(storedEvents); err != nil {
+		t.Fatalf("failed to load history: %v", err)
+	}
+	if err := agg2.Activate(testMetadata()); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
 	appendEvents(t, store, streamID, agg2.UncommittedEvents(), 1)
 
 	// Suspend at t3
 	clock3 := shared.FixedClock{FixedTime: t3}
 	agg3 := contract.NewContractAggregate(contractID, clock3)
-	storedEvents, _ = store.Load(ctx, streamID)
-	_ = agg3.LoadFromHistory(storedEvents)
-	_ = agg3.Suspend(contract.SuspensionConfiguration{
+	storedEvents, err = store.Load(ctx, streamID)
+	if err != nil {
+		t.Fatalf("failed to load events: %v", err)
+	}
+	if err := agg3.LoadFromHistory(storedEvents); err != nil {
+		t.Fatalf("failed to load history: %v", err)
+	}
+	if err := agg3.Suspend(contract.SuspensionConfiguration{
 		BillingBehavior: contract.SuspensionBillingSkip,
 		Reason:          "test",
-	}, testMetadata())
+	}, testMetadata()); err != nil {
+		t.Fatalf("Suspend failed: %v", err)
+	}
 	appendEvents(t, store, streamID, agg3.UncommittedEvents(), 2)
 
 	// Create snapshot at t2 covering Create+Activate (version 2)
 	snapClock := shared.FixedClock{FixedTime: t2}
 	snapAgg := contract.NewContractAggregate(contractID, snapClock)
-	eventsForSnap, _ := store.LoadUntilVersion(ctx, streamID, 2)
-	_ = snapAgg.LoadFromHistory(eventsForSnap)
-	snapState, _ := snapAgg.MarshalSnapshot()
+	eventsForSnap, err := store.LoadUntilVersion(ctx, streamID, 2)
+	if err != nil {
+		t.Fatalf("failed to load events for snapshot: %v", err)
+	}
+	if err := snapAgg.LoadFromHistory(eventsForSnap); err != nil {
+		t.Fatalf("failed to load history for snapshot: %v", err)
+	}
+	snapState, err := snapAgg.MarshalSnapshot()
+	if err != nil {
+		t.Fatalf("failed to marshal snapshot: %v", err)
+	}
 	snap := eventstore.Snapshot{
 		StreamID:  streamID,
 		Version:   2,
@@ -391,7 +412,9 @@ func TestGetContractAsOf_WithSnapshot_FiltersEventsCorrectly(t *testing.T) {
 		AsOf:      t2,
 		CreatedAt: t2,
 	}
-	_ = store.SaveSnapshot(ctx, snap)
+	if err := store.SaveSnapshot(ctx, snap); err != nil {
+		t.Fatalf("failed to save snapshot: %v", err)
+	}
 
 	// Query at t3: should restore from snapshot (active at v2) + apply suspend event
 	result, err := svc.GetContractAsOf(ctx, contractID, t3)
