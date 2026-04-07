@@ -92,6 +92,24 @@ type WebhookProcessorConfig struct {
 	RetryBackoff       time.Duration // default: 1 second
 }
 
+// Validate checks that all WebhookProcessorConfig fields have valid values.
+// Zero values are valid and will use defaults at runtime.
+func (c WebhookProcessorConfig) Validate() error {
+	if c.TimestampTolerance < 0 {
+		return fmt.Errorf("TimestampTolerance must not be negative, got %v", c.TimestampTolerance)
+	}
+	if c.DeduplicationTTL < 0 {
+		return fmt.Errorf("DeduplicationTTL must not be negative, got %v", c.DeduplicationTTL)
+	}
+	if c.MaxRetries < 0 {
+		return fmt.Errorf("MaxRetries must not be negative, got %d", c.MaxRetries)
+	}
+	if c.RetryBackoff < 0 {
+		return fmt.Errorf("RetryBackoff must not be negative, got %v", c.RetryBackoff)
+	}
+	return nil
+}
+
 // WebhookProcessor processes incoming webhook events with deduplication,
 // timestamp validation, retry, and DLQ.
 type WebhookProcessor struct {
@@ -103,13 +121,18 @@ type WebhookProcessor struct {
 }
 
 // NewWebhookProcessor creates a new WebhookProcessor.
+// Returns an error if config contains invalid values (negative durations, negative retries).
+// Zero values are valid and will use defaults.
 func NewWebhookProcessor(
 	handler WebhookHandler,
 	deduplicator WebhookDeduplicator,
 	dlq WebhookDeadLetterQueue,
 	clock shared.Clock,
 	config WebhookProcessorConfig,
-) *WebhookProcessor {
+) (*WebhookProcessor, error) {
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid webhook processor config: %w", err)
+	}
 	if config.TimestampTolerance == 0 {
 		config.TimestampTolerance = 5 * time.Minute
 	}
@@ -128,7 +151,7 @@ func NewWebhookProcessor(
 		dlq:          dlq,
 		clock:        clock,
 		config:       config,
-	}
+	}, nil
 }
 
 // ProcessWebhook parses, validates, deduplicates, and processes a webhook request.
