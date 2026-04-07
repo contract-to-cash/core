@@ -45,7 +45,7 @@ func (r *InMemoryUsageRepository) Record(_ context.Context, record *usage.UsageR
 }
 
 // GetSummary returns aggregated usage for a metric over a period.
-func (r *InMemoryUsageRepository) GetSummary(_ context.Context, contractID shared.ContractID, metric string, period shared.DateRange) (*usage.UsageSummary, error) {
+func (r *InMemoryUsageRepository) GetSummary(_ context.Context, contractID shared.ContractID, metric shared.MetricName, period shared.DateRange) (*usage.UsageSummary, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -67,7 +67,7 @@ func (r *InMemoryUsageRepository) GetSummary(_ context.Context, contractID share
 }
 
 // GetRecords returns usage records for a contract/metric within a time range.
-func (r *InMemoryUsageRepository) GetRecords(_ context.Context, contractID shared.ContractID, metric string, from, to time.Time) ([]*usage.UsageRecord, error) {
+func (r *InMemoryUsageRepository) GetRecords(_ context.Context, contractID shared.ContractID, metric shared.MetricName, from, to time.Time) ([]*usage.UsageRecord, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 

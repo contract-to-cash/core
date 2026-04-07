@@ -11,7 +11,7 @@ type PricingModel interface {
 
 // UsageMetric defines a usage-based metric with its pricing model.
 type UsageMetric struct {
-	Name             string
+	Name             shared.MetricName
 	PricingModel     PricingModel
 	IncludedQuantity int64
 }

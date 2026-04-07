@@ -10,6 +10,6 @@ import (
 // Repository defines the persistence interface for usage records.
 type Repository interface {
 	Record(ctx context.Context, record *UsageRecord) error
-	GetSummary(ctx context.Context, contractID shared.ContractID, metric string, period shared.DateRange) (*UsageSummary, error)
-	GetRecords(ctx context.Context, contractID shared.ContractID, metric string, from, to time.Time) ([]*UsageRecord, error)
+	GetSummary(ctx context.Context, contractID shared.ContractID, metric shared.MetricName, period shared.DateRange) (*UsageSummary, error)
+	GetRecords(ctx context.Context, contractID shared.ContractID, metric shared.MetricName, from, to time.Time) ([]*UsageRecord, error)
 }

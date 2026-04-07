@@ -17,6 +17,15 @@ const (
 	BalanceReasonGoodwill         BalanceReason = "goodwill"
 )
 
+// BalanceSourceType describes the origin of a credit entry.
+type BalanceSourceType string
+
+const (
+	BalanceSourceTypeProration        BalanceSourceType = "proration"
+	BalanceSourceTypeManual           BalanceSourceType = "manual"
+	BalanceSourceTypeRefundConversion BalanceSourceType = "refund_conversion"
+)
+
 // BalanceEntry represents a credit issued to an account.
 type BalanceEntry struct {
 	id              shared.BalanceEntryID
@@ -24,7 +33,7 @@ type BalanceEntry struct {
 	originalAmount  shared.Money
 	remainingAmount shared.Money
 	reason          BalanceReason
-	sourceType      string
+	sourceType      BalanceSourceType
 	sourceID        string
 	description     string
 	expiresAt       *time.Time
@@ -62,7 +71,10 @@ func (e *BalanceEntry) RemainingAmount() shared.Money { return e.remainingAmount
 func (e *BalanceEntry) Reason() BalanceReason { return e.reason }
 
 // SourceType returns the source type.
-func (e *BalanceEntry) SourceType() string { return e.sourceType }
+func (e *BalanceEntry) SourceType() BalanceSourceType { return e.sourceType }
+
+// SetSourceType sets the source type (called after construction or by repository).
+func (e *BalanceEntry) SetSourceType(st BalanceSourceType) { e.sourceType = st }
 
 // SourceID returns the source ID.
 func (e *BalanceEntry) SourceID() string { return e.sourceID }

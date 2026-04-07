@@ -7,10 +7,43 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
+func TestMetricName_TypeSafety(t *testing.T) {
+	// MetricName is a typed string assignable from string literals
+	var m shared.MetricName = "api_calls"
+	if m.String() != "api_calls" {
+		t.Errorf("expected 'api_calls', got %q", m.String())
+	}
+
+	// Verify typed MetricName is used in UsageRecord
+	id := shared.NewUsageRecordID()
+	contractID := shared.NewContractID()
+	r, err := NewUsageRecord(id, contractID, "storage_gb", 100, time.Now().UTC(), "idem_1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.MetricName() != "storage_gb" {
+		t.Errorf("expected metric 'storage_gb', got %q", r.MetricName())
+	}
+
+	// Verify typed MetricName is used in UsageSummary
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	period, _ := shared.NewDateRange(start, end)
+	summary := &UsageSummary{
+		ContractID: contractID,
+		MetricName: "api_calls",
+		Period:     period,
+		TotalUsage: 500,
+	}
+	if summary.MetricName != "api_calls" {
+		t.Errorf("expected MetricName 'api_calls', got %q", summary.MetricName)
+	}
+}
+
 func TestNewUsageRecord(t *testing.T) {
 	id := shared.NewUsageRecordID()
 	contractID := shared.NewContractID()
-	metricName := "api_calls"
+	metricName := shared.MetricName("api_calls")
 	quantity := int64(150)
 	ts := time.Now().UTC()
 	idempotencyKey := "idem_abc123"

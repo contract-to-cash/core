@@ -45,6 +45,12 @@ func (id PriceID) String() string        { return string(id) }
 func (id BalanceEntryID) String() string { return string(id) }
 func (id CreditNoteID) String() string   { return string(id) }
 
+// MetricName identifies a usage metric (e.g. "api_calls", "storage_gb").
+// Using a typed string prevents accidental mixing with other string fields.
+type MetricName string
+
+func (m MetricName) String() string { return string(m) }
+
 func generateULID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
 }
