@@ -44,7 +44,11 @@ func (m *mockDLQ) Send(ctx context.Context, entry *WebhookDLQEntry) error {
 // --- Helper ---
 
 func newTestProcessor(handler WebhookHandler, dedup WebhookDeduplicator, dlq WebhookDeadLetterQueue, clock shared.Clock, config WebhookProcessorConfig) *WebhookProcessor {
-	return NewWebhookProcessor(handler, dedup, dlq, clock, config)
+	p, err := NewWebhookProcessor(handler, dedup, dlq, clock, config)
+	if err != nil {
+		panic(fmt.Sprintf("newTestProcessor: %v", err))
+	}
+	return p
 }
 
 func defaultConfig() WebhookProcessorConfig {
@@ -401,7 +405,7 @@ func TestWebhookProcessor_TimestampAtExactBoundary(t *testing.T) {
 			Type:      WebhookEventPaymentSucceeded,
 			CreatedAt: now.Add(-tolerance), // exactly 5min ago
 		}
-		p := NewWebhookProcessor(
+		p := newTestProcessor(
 			&mockWebhookHandler{event: event},
 			&mockDeduplicator{},
 			&mockDLQ{},
@@ -421,7 +425,7 @@ func TestWebhookProcessor_TimestampAtExactBoundary(t *testing.T) {
 			Type:      WebhookEventPaymentSucceeded,
 			CreatedAt: now.Add(tolerance), // exactly 5min ahead
 		}
-		p := NewWebhookProcessor(
+		p := newTestProcessor(
 			&mockWebhookHandler{event: event},
 			&mockDeduplicator{},
 			&mockDLQ{},
@@ -455,7 +459,7 @@ func TestWebhookProcessor_ContextCancelDuringRetry(t *testing.T) {
 		}
 		return &WebhookRetryableError{Err: fmt.Errorf("temporary failure")}
 	}
-	p := NewWebhookProcessor(
+	p := newTestProcessor(
 		&mockWebhookHandler{event: event},
 		&mockDeduplicator{},
 		&mockDLQ{},

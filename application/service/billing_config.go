@@ -8,7 +8,7 @@ import (
 )
 
 // CollectionMethod represents the invoice collection method.
-type CollectionMethod = string
+type CollectionMethod string
 
 // Collection method constants.
 const (

@@ -124,11 +124,10 @@ func TestBillingConfig_ZeroValueBackwardCompatibility(t *testing.T) {
 	}
 }
 
-func TestBillingConfig_OldStringAssignment(t *testing.T) {
-	// Existing code that uses string literal should still compile.
-	// CollectionMethod is a typed string, so string constants are assignable.
+func TestBillingConfig_ConstantAssignment(t *testing.T) {
+	// CollectionMethod is a distinct type. Use typed constants for assignment.
 	cfg := BillingConfig{
-		CollectionMethod: "charge_automatically",
+		CollectionMethod: CollectionAutoCharge,
 		DaysUntilDue:     30,
 	}
 	if cfg.CollectionMethod != CollectionAutoCharge {
