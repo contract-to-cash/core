@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"sync"
 	"testing"
 
 	"github.com/contract-to-cash/core/domain/shared"
@@ -56,18 +55,23 @@ func BenchmarkGetDiscountHooks_10Plugins(b *testing.B) {
 func BenchmarkRegister_Sequential(b *testing.B) {
 	b.ReportAllocs()
 
-	b.ResetTimer()
+	// Pre-create plugins to avoid measuring allocation in the name formatting
+	plugins := make([][]*mockDiscountPlugin, b.N)
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		reg := NewRegistry()
-		b.StartTimer()
-
+		plugins[i] = make([]*mockDiscountPlugin, 20)
 		for j := 0; j < 20; j++ {
-			p := &mockDiscountPlugin{
-				name:     fmt.Sprintf("plugin-%d", j),
+			plugins[i][j] = &mockDiscountPlugin{
+				name:     fmt.Sprintf("plugin-%d-%d", i, j),
 				priority: j * 50,
 			}
-			_ = reg.Register(p)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reg := NewRegistry()
+		for j := 0; j < 20; j++ {
+			_ = reg.Register(plugins[i][j])
 		}
 	}
 }
@@ -86,20 +90,16 @@ func BenchmarkGetDiscountHooks_ConcurrentReadWrite(b *testing.B) {
 		}
 	}
 
-	// Writer goroutine registers additional plugins during benchmark
-	var counter int
-	var mu sync.Mutex
+	// Writer goroutine registers a bounded number of plugins during benchmark.
+	// Limited to 100 to avoid unbounded memory growth and measurement noise.
+	const maxWriterPlugins = 100
 	done := make(chan struct{})
 	go func() {
-		for {
+		for n := 0; n < maxWriterPlugins; n++ {
 			select {
 			case <-done:
 				return
 			default:
-				mu.Lock()
-				counter++
-				n := counter
-				mu.Unlock()
 				p := &mockDiscountPlugin{
 					name:     fmt.Sprintf("concurrent-%d", n),
 					priority: n * 10,

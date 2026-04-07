@@ -11,21 +11,24 @@ import (
 func BenchmarkConsume_Sequential(b *testing.B) {
 	b.ReportAllocs()
 
-	b.ResetTimer()
+	consumeAmount := shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY)
+
+	// Pre-allocate entries for each iteration to avoid StopTimer/StartTimer overhead
+	entries := make([]*BalanceEntry, b.N)
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		entry := NewBalanceEntry(
+		entries[i] = NewBalanceEntry(
 			shared.AccountID("acc-bench"),
 			shared.NewMoney(big.NewRat(1000000, 1), shared.CurrencyJPY),
 			BalanceReasonManualAdjustment,
 			time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		)
-		consumeAmount := shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY)
-		b.StartTimer()
+	}
 
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
 		// Consume in small increments to exercise the version increment path
 		for j := 0; j < 100; j++ {
-			_, _ = entry.Consume(consumeAmount)
+			_, _ = entries[i].Consume(consumeAmount)
 		}
 	}
 }
@@ -33,19 +36,22 @@ func BenchmarkConsume_Sequential(b *testing.B) {
 func BenchmarkConsume_FullyConsumed(b *testing.B) {
 	b.ReportAllocs()
 
-	b.ResetTimer()
+	fullAmount := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+
+	// Pre-allocate entries
+	entries := make([]*BalanceEntry, b.N)
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		entry := NewBalanceEntry(
+		entries[i] = NewBalanceEntry(
 			shared.AccountID("acc-bench"),
 			shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
 			BalanceReasonProration,
 			time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		)
-		fullAmount := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-		b.StartTimer()
+	}
 
-		_, _ = entry.Consume(fullAmount)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = entries[i].Consume(fullAmount)
 	}
 }
 
