@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration test-e2e vet lint fmt check cover clean
+.PHONY: build test test-unit test-integration test-e2e vet lint fmt check cover bench clean
 
 build:
 	go build ./...
@@ -33,6 +33,9 @@ cover:
 	go test ./... -race -coverprofile=coverage.out
 	go tool cover -func=coverage.out | tail -1
 	@echo "To view HTML report: go tool cover -html=coverage.out"
+
+bench:
+	go test -bench=. -benchmem -count=1 -run=^$$ ./...
 
 check: build lint test
 
