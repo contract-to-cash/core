@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 )
@@ -40,15 +41,19 @@ func BenchmarkEventStore_Append(b *testing.B) {
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	ctx := context.Background()
 
+	// Pre-allocate stores and events
+	stores := make([]*InMemoryEventStore, b.N)
+	streamIDs := make([]string, b.N)
+	events := make([][]eventstore.Event, b.N)
+	for i := 0; i < b.N; i++ {
+		stores[i] = NewInMemoryEventStore(clock)
+		streamIDs[i] = fmt.Sprintf("stream-%d", i)
+		events[i] = []eventstore.Event{makeBenchEvent(streamIDs[i], 1, clock)}
+	}
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		store := NewInMemoryEventStore(clock)
-		streamID := fmt.Sprintf("stream-%d", i)
-		evt := makeBenchEvent(streamID, 1, clock)
-		b.StartTimer()
-
-		_ = store.Append(ctx, streamID, []eventstore.Event{evt}, 0)
+		_ = stores[i].Append(ctx, streamIDs[i], events[i], 0)
 	}
 }
 
@@ -57,18 +62,56 @@ func BenchmarkEventStore_Append_Batch10(b *testing.B) {
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	ctx := context.Background()
 
+	// Pre-allocate stores and event batches
+	stores := make([]*InMemoryEventStore, b.N)
+	streamIDs := make([]string, b.N)
+	batches := make([][]eventstore.Event, b.N)
+	for i := 0; i < b.N; i++ {
+		stores[i] = NewInMemoryEventStore(clock)
+		streamIDs[i] = fmt.Sprintf("stream-%d", i)
+		batch := make([]eventstore.Event, 10)
+		for j := range batch {
+			batch[j] = makeBenchEvent(streamIDs[i], j+1, clock)
+		}
+		batches[i] = batch
+	}
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		b.StopTimer()
-		store := NewInMemoryEventStore(clock)
-		streamID := fmt.Sprintf("stream-%d", i)
-		events := make([]eventstore.Event, 10)
-		for j := range events {
-			events[j] = makeBenchEvent(streamID, j+1, clock)
-		}
-		b.StartTimer()
+		_ = stores[i].Append(ctx, streamIDs[i], batches[i], 0)
+	}
+}
 
-		_ = store.Append(ctx, streamID, events, 0)
+func BenchmarkBalanceRepository_FindAvailable_100Entries(b *testing.B) {
+	b.ReportAllocs()
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	ctx := context.Background()
+
+	repo := NewInMemoryBalanceRepository(clock)
+	accountID := shared.AccountID("bench-account")
+
+	// Populate 100 balance entries
+	for i := 0; i < 100; i++ {
+		entry := balance.NewBalanceEntry(
+			accountID,
+			shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+			balance.BalanceReasonManualAdjustment,
+			clock.Now(),
+		)
+		if err := repo.Save(ctx, entry); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		entries, err := repo.FindAvailable(ctx, accountID, shared.CurrencyJPY)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(entries) != 100 {
+			b.Fatalf("expected 100 entries, got %d", len(entries))
+		}
 	}
 }
 
