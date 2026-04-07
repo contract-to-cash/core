@@ -21,10 +21,13 @@ import (
 )
 
 // BillingConfig holds billing service configuration.
+// Use NewBillingConfig() for validated construction with defaults.
+// Zero-value struct literal (BillingConfig{}) remains valid for backward compatibility;
+// zero values are treated as "use defaults" at usage time.
 type BillingConfig struct {
 	GracePeriod      time.Duration
 	DaysUntilDue     int
-	CollectionMethod string
+	CollectionMethod CollectionMethod
 }
 
 // BillingServiceOption configures optional dependencies of BillingService.
