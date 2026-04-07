@@ -32,7 +32,8 @@ type ContractCreatedEvent struct {
 	AccountID    shared.AccountID  `json:"account_id"`
 	PriceID      shared.PriceID    `json:"price_id"`
 	Price        shared.Money      `json:"price"`
-	BillingCycle BillingCycle      `json:"billing_cycle"`
+	BillingCycle BillingCycle      `json:"billing_cycle"`      // Deprecated: kept for backward compat
+	Interval     BillingInterval   `json:"interval,omitempty"` // New: flexible billing interval
 	ContractType ContractType      `json:"contract_type"`
 	BasePrice    shared.Money      `json:"base_price"`
 	AutoRenew    bool              `json:"auto_renew"`
@@ -157,8 +158,10 @@ type ContractRenewedEvent struct {
 	OldPriceID      shared.PriceID    `json:"old_price_id"`
 	NewPriceID      shared.PriceID    `json:"new_price_id"`
 	PriceChanged    bool              `json:"price_changed"`
-	OldBillingCycle BillingCycle      `json:"old_billing_cycle,omitempty"`
-	NewBillingCycle BillingCycle      `json:"new_billing_cycle,omitempty"`
+	OldBillingCycle BillingCycle      `json:"old_billing_cycle,omitempty"` // Deprecated: kept for backward compat
+	NewBillingCycle BillingCycle      `json:"new_billing_cycle,omitempty"` // Deprecated: kept for backward compat
+	OldInterval     BillingInterval   `json:"old_interval,omitempty"`      // Previous billing interval
+	NewInterval     BillingInterval   `json:"new_interval,omitempty"`      // New billing interval
 	RenewedAt       time.Time         `json:"renewed_at"`
 }
 

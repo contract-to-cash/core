@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 )
@@ -36,10 +37,24 @@ type CreateContractCommand struct {
 	AccountID      shared.AccountID
 	PriceID        shared.PriceID
 	ContractType   ContractType
-	BillingCycle   BillingCycle
+	BillingCycle   BillingCycle // Deprecated: Use Interval instead. Kept for backward compatibility.
+	Interval       BillingInterval
 	Price          shared.Money
 	BasePrice      shared.Money
 	AutoRenew      bool
+}
+
+// resolvedInterval returns the BillingInterval to use. If Interval is set, it is returned.
+// If BillingCycle is set, it is converted to a BillingInterval for backward compatibility.
+// Returns zero-value BillingInterval if neither is set.
+func (cmd *CreateContractCommand) resolvedInterval() BillingInterval {
+	if !cmd.Interval.IsZero() {
+		return cmd.Interval
+	}
+	if cmd.BillingCycle != "" {
+		return pricing.BillingCycleToInterval(cmd.BillingCycle)
+	}
+	return BillingInterval{}
 }
 
 // ContractAggregate is the event-sourced aggregate for contracts.
@@ -51,6 +66,7 @@ type ContractAggregate struct {
 	status            ContractStatus
 	contractType      ContractType
 	billingCycle      BillingCycle
+	interval          BillingInterval
 	currentPeriod     shared.DateRange
 	trialConfig       *TrialConfiguration
 	suspensionConfig  *SuspensionConfiguration
@@ -87,7 +103,11 @@ func (a *ContractAggregate) Status() ContractStatus { return a.status }
 func (a *ContractAggregate) GetContractType() ContractType { return a.contractType }
 
 // GetBillingCycle returns the billing cycle.
+// Deprecated: Use GetInterval() for new code.
 func (a *ContractAggregate) GetBillingCycle() BillingCycle { return a.billingCycle }
+
+// GetInterval returns the billing interval.
+func (a *ContractAggregate) GetInterval() BillingInterval { return a.interval }
 
 // CurrentPeriod returns the current billing period.
 func (a *ContractAggregate) CurrentPeriod() shared.DateRange { return a.currentPeriod }
@@ -148,6 +168,11 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 	}
 
 	now := a.Clock().Now()
+	interval := cmd.resolvedInterval()
+	if interval.IsZero() {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"either BillingCycle or Interval must be set")
+	}
 	event := &ContractCreatedEvent{
 		ContractID:   a.contractID,
 		AccountID:    cmd.AccountID,
@@ -155,6 +180,7 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 		Price:        cmd.Price,
 		BasePrice:    cmd.BasePrice,
 		BillingCycle: cmd.BillingCycle,
+		Interval:     interval,
 		ContractType: cmd.ContractType,
 		AutoRenew:    cmd.AutoRenew,
 		CreatedAt:    now,
@@ -174,8 +200,8 @@ func (a *ContractAggregate) Activate(metadata eventstore.EventMetadata) error {
 	}
 
 	now := a.Clock().Now()
-	// Calculate the initial billing period based on billingCycle
-	periodEnd := addBillingCycle(now, a.billingCycle)
+	// Calculate the initial billing period based on interval
+	periodEnd := a.interval.AddTo(now)
 	initialPeriod, err := shared.NewDateRange(now, periodEnd)
 	if err != nil {
 		return err
@@ -382,7 +408,13 @@ func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMe
 // Renew renews the contract for a new billing period.
 // The newBillingCycle parameter specifies the billing cycle for the next period,
 // typically resolved from the Price entity by the caller (e.g., batch processor).
+// Deprecated: Use RenewWithInterval for new code.
 func (a *ContractAggregate) Renew(newBillingCycle BillingCycle, metadata eventstore.EventMetadata) error {
+	return a.RenewWithInterval(pricing.BillingCycleToInterval(newBillingCycle), metadata)
+}
+
+// RenewWithInterval renews the contract for a new billing period using a BillingInterval.
+func (a *ContractAggregate) RenewWithInterval(newInterval BillingInterval, metadata eventstore.EventMetadata) error {
 	if a.status != ContractStatusActive {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot renew: status is %s", a.status))
@@ -396,7 +428,13 @@ func (a *ContractAggregate) Renew(newBillingCycle BillingCycle, metadata eventst
 		return a.expire(metadata)
 	}
 
-	newPeriod := a.currentPeriod.Next(string(newBillingCycle))
+	// Calculate the next period using the new interval's AddTo
+	newPeriodStart := a.currentPeriod.End()
+	newPeriodEnd := newInterval.AddTo(newPeriodStart)
+	newPeriod, err := shared.NewDateRange(newPeriodStart, newPeriodEnd)
+	if err != nil {
+		return err
+	}
 
 	oldPriceID := a.priceID
 	newPriceID := a.priceID
@@ -405,6 +443,8 @@ func (a *ContractAggregate) Renew(newBillingCycle BillingCycle, metadata eventst
 		newPriceID = *a.pendingPriceID
 		priceChanged = true
 	}
+
+	newBillingCycle := newInterval.ToBillingCycle()
 
 	event := &ContractRenewedEvent{
 		ContractID:      a.contractID,
@@ -415,6 +455,8 @@ func (a *ContractAggregate) Renew(newBillingCycle BillingCycle, metadata eventst
 		PriceChanged:    priceChanged,
 		OldBillingCycle: a.billingCycle,
 		NewBillingCycle: newBillingCycle,
+		OldInterval:     a.interval,
+		NewInterval:     newInterval,
 		RenewedAt:       a.Clock().Now(),
 	}
 
@@ -479,13 +521,6 @@ func (a *ContractAggregate) expire(metadata eventstore.EventMetadata) error {
 	return a.RaiseEvent(event, metadata)
 }
 
-// addBillingCycle adds one billing cycle duration to a time.
-// This delegates to shared.AddBillingCycleDuration to avoid duplicating
-// the cycle-to-duration mapping with DateRange.Next().
-func addBillingCycle(t time.Time, cycle BillingCycle) time.Time {
-	return shared.AddBillingCycleDuration(t, string(cycle))
-}
-
 // Apply applies a domain event to update aggregate state.
 func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	switch e := event.(type) {
@@ -496,6 +531,12 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.price = e.Price
 		a.basePrice = e.BasePrice
 		a.billingCycle = e.BillingCycle
+		// Resolve interval: prefer explicit Interval, fall back to BillingCycle conversion
+		if !e.Interval.IsZero() {
+			a.interval = e.Interval
+		} else {
+			a.interval = pricing.BillingCycleToInterval(e.BillingCycle)
+		}
 		a.contractType = e.ContractType
 		a.autoRenew = e.AutoRenew
 		a.status = ContractStatusDraft
@@ -565,8 +606,12 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.currentPeriod = e.NewPeriod
 		a.priceID = e.NewPriceID
 		a.pendingPriceID = nil
-		if e.NewBillingCycle != "" {
+		if !e.NewInterval.IsZero() {
+			a.interval = e.NewInterval
+			a.billingCycle = e.NewInterval.ToBillingCycle()
+		} else if e.NewBillingCycle != "" {
 			a.billingCycle = e.NewBillingCycle
+			a.interval = pricing.BillingCycleToInterval(e.NewBillingCycle)
 		}
 		a.updatedAt = e.RenewedAt
 
@@ -598,6 +643,7 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		Status:            a.status,
 		ContractType:      a.contractType,
 		BillingCycle:      a.billingCycle,
+		Interval:          a.interval,
 		CurrentPeriod:     a.currentPeriod,
 		TrialConfig:       a.trialConfig,
 		SuspensionConfig:  a.suspensionConfig,
@@ -644,7 +690,8 @@ type contractSnapshotState struct {
 	AccountID         shared.AccountID         `json:"account_id"`
 	Status            ContractStatus           `json:"status"`
 	ContractType      ContractType             `json:"contract_type"`
-	BillingCycle      BillingCycle             `json:"billing_cycle"`
+	BillingCycle      BillingCycle             `json:"billing_cycle"`      // Deprecated: kept for backward compat
+	Interval          BillingInterval          `json:"interval,omitempty"` // New: flexible billing interval
 	CurrentPeriod     shared.DateRange         `json:"current_period"`
 	TrialConfig       *TrialConfiguration      `json:"trial_config,omitempty"`
 	SuspensionConfig  *SuspensionConfiguration `json:"suspension_config,omitempty"`
@@ -672,6 +719,12 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.status = state.Status
 	a.contractType = state.ContractType
 	a.billingCycle = state.BillingCycle
+	// Resolve interval: prefer explicit Interval, fall back to BillingCycle conversion
+	if !state.Interval.IsZero() {
+		a.interval = state.Interval
+	} else {
+		a.interval = pricing.BillingCycleToInterval(state.BillingCycle)
+	}
 	a.currentPeriod = state.CurrentPeriod
 	a.trialConfig = state.TrialConfig
 	a.suspensionConfig = state.SuspensionConfig
