@@ -160,7 +160,8 @@ type ContractRenewedEvent struct {
 	PriceChanged    bool              `json:"price_changed"`
 	OldBillingCycle BillingCycle      `json:"old_billing_cycle,omitempty"` // Deprecated: kept for backward compat
 	NewBillingCycle BillingCycle      `json:"new_billing_cycle,omitempty"` // Deprecated: kept for backward compat
-	NewInterval     BillingInterval   `json:"new_interval,omitempty"`      // New: flexible billing interval
+	OldInterval     BillingInterval   `json:"old_interval,omitempty"`      // Previous billing interval
+	NewInterval     BillingInterval   `json:"new_interval,omitempty"`      // New billing interval
 	RenewedAt       time.Time         `json:"renewed_at"`
 }
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 )
@@ -1288,5 +1289,67 @@ func TestRenew_CancelAtPeriodEnd_ResetsCancelFlag(t *testing.T) {
 	}
 	if agg.CancelAtPeriodEnd() {
 		t.Error("expected cancelAtPeriodEnd to be false after cancellation")
+	}
+}
+
+func TestCreate_NoBillingCycleOrInterval_ReturnsError(t *testing.T) {
+	agg := newTestAggregate()
+	cmd := CreateContractCommand{
+		AccountID:    shared.AccountID("acc-001"),
+		ContractType: ContractTypeSubscription,
+		Price:        newTestMoney(),
+		BasePrice:    newTestMoney(),
+		// BillingCycle and Interval both unset
+	}
+	err := agg.Create(cmd, newTestMetadata())
+	if err == nil {
+		t.Fatal("expected error when both BillingCycle and Interval are unset")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if domErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected ErrCodeValidation, got %s", domErr.Code)
+	}
+}
+
+func TestRenewWithInterval_SetsOldInterval(t *testing.T) {
+	agg := newTestAggregate()
+	meta := newTestMetadata()
+
+	// Create with Quarterly interval
+	cmd := CreateContractCommand{
+		AccountID:    shared.AccountID("acc-001"),
+		ContractType: ContractTypeSubscription,
+		Interval:     pricing.Quarterly(),
+		Price:        newTestMoney(),
+		BasePrice:    newTestMoney(),
+		AutoRenew:    true,
+	}
+	if err := agg.Create(cmd, meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+
+	// Renew with SemiAnnual
+	if err := agg.RenewWithInterval(pricing.SemiAnnual(), meta); err != nil {
+		t.Fatalf("RenewWithInterval failed: %v", err)
+	}
+
+	// Check the last uncommitted event contains OldInterval
+	events := agg.UncommittedEvents()
+	lastEvent := events[len(events)-1]
+	var renewed ContractRenewedEvent
+	if err := json.Unmarshal(lastEvent.Data, &renewed); err != nil {
+		t.Fatalf("unmarshal renewed event: %v", err)
+	}
+	if !renewed.OldInterval.Equals(pricing.Quarterly()) {
+		t.Errorf("expected OldInterval Quarterly, got %v", renewed.OldInterval)
+	}
+	if !renewed.NewInterval.Equals(pricing.SemiAnnual()) {
+		t.Errorf("expected NewInterval SemiAnnual, got %v", renewed.NewInterval)
 	}
 }

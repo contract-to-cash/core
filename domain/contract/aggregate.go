@@ -45,12 +45,16 @@ type CreateContractCommand struct {
 }
 
 // resolvedInterval returns the BillingInterval to use. If Interval is set, it is returned.
-// Otherwise, BillingCycle is converted to a BillingInterval for backward compatibility.
+// If BillingCycle is set, it is converted to a BillingInterval for backward compatibility.
+// Returns zero-value BillingInterval if neither is set.
 func (cmd *CreateContractCommand) resolvedInterval() BillingInterval {
 	if !cmd.Interval.IsZero() {
 		return cmd.Interval
 	}
-	return pricing.BillingCycleToInterval(cmd.BillingCycle)
+	if cmd.BillingCycle != "" {
+		return pricing.BillingCycleToInterval(cmd.BillingCycle)
+	}
+	return BillingInterval{}
 }
 
 // ContractAggregate is the event-sourced aggregate for contracts.
@@ -165,6 +169,10 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 
 	now := a.Clock().Now()
 	interval := cmd.resolvedInterval()
+	if interval.IsZero() {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"either BillingCycle or Interval must be set")
+	}
 	event := &ContractCreatedEvent{
 		ContractID:   a.contractID,
 		AccountID:    cmd.AccountID,
@@ -447,6 +455,7 @@ func (a *ContractAggregate) RenewWithInterval(newInterval BillingInterval, metad
 		PriceChanged:    priceChanged,
 		OldBillingCycle: a.billingCycle,
 		NewBillingCycle: newBillingCycle,
+		OldInterval:     a.interval,
 		NewInterval:     newInterval,
 		RenewedAt:       a.Clock().Now(),
 	}
