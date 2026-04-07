@@ -51,6 +51,21 @@ func BenchmarkGenerateInvoice_Subscription(b *testing.B) {
 	}
 }
 
+func BenchmarkGenerateInvoice_UsageBased(b *testing.B) {
+	b.ReportAllocs()
+
+	clock := benchClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeUsageBased, benchMoney(0))
+	svc := benchBillingService(agg, priceEntity, clock)
+	period := currentPeriodOf(agg)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = svc.GenerateInvoice(ctx, agg.ContractID(), period)
+	}
+}
+
 func BenchmarkGenerateInvoice_WithPlugins(b *testing.B) {
 	b.ReportAllocs()
 

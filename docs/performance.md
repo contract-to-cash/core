@@ -7,6 +7,7 @@ Benchmark results measured on Apple M4 Pro (darwin/arm64), Go 1.25, `make bench`
 | Benchmark | ns/op | B/op | allocs/op |
 |-----------|------:|-----:|----------:|
 | GenerateInvoice_Subscription | 1,527 | 2,940 | 84 |
+| GenerateInvoice_UsageBased | 13,114 | 2,845 | 49 |
 | GenerateInvoice_WithPlugins (3 discount) | 2,091 | 4,141 | 120 |
 | GenerateInvoice_WithCredits (10 entries) | 1,517 | 3,004 | 85 |
 
