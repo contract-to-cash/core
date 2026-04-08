@@ -195,7 +195,9 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	saga := tx.NewSaga()
 	saga.AddCompensation(func(compCtx context.Context) error {
 		_, refundErr := s.gateway.Refund(compCtx, &port.RefundRequest{
-			TransactionID: chargeResp.TransactionID,
+			TransactionID:  chargeResp.TransactionID,
+			Reason:         port.RefundReasonOther,
+			IdempotencyKey: "comp-refund-" + chargeResp.TransactionID,
 		})
 		return refundErr
 	})
@@ -244,7 +246,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil
 	})
 	if err != nil {
-		// Local save failed — compensate by voiding the gateway charge
+		// Local save failed — compensate by refunding the gateway charge
 		if compErr := saga.Compensate(ctx); compErr != nil {
 			s.logger.Error("local save failed and compensation also failed (MANUAL RECONCILIATION REQUIRED)",
 				"paymentID", p.ID(),
@@ -254,7 +256,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			)
 			return nil, fmt.Errorf("local save failed: %w; compensation also failed: %v", err, compErr)
 		}
-		return nil, fmt.Errorf("local save failed (gateway charge voided): %w", err)
+		return nil, fmt.Errorf("local save failed (gateway charge refunded): %w", err)
 	}
 
 	// Phase 4: AfterCharge hooks (non-fatal, outside transaction)

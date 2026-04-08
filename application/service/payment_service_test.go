@@ -33,7 +33,7 @@ func (g *mockGateway) Charge(_ context.Context, req *port.ChargeRequest) (*port.
 		TransactionID: "txn-" + req.IdempotencyKey,
 		Status:        port.TransactionStatusCaptured,
 		Amount:        req.Amount,
-		CreatedAt:     time.Now(),
+		CreatedAt:     time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
 	}, nil
 }
 func (g *mockGateway) Authorize(_ context.Context, _ *port.AuthorizeRequest) (*port.AuthorizeResponse, error) {
@@ -512,6 +512,7 @@ type spyGateway struct {
 	voidReq      *port.VoidRequest
 	refundCalled bool
 	refundReq    *port.RefundRequest
+	refundErr    error
 }
 
 func (g *spyGateway) Void(_ context.Context, req *port.VoidRequest) (*port.VoidResponse, error) {
@@ -523,6 +524,9 @@ func (g *spyGateway) Void(_ context.Context, req *port.VoidRequest) (*port.VoidR
 func (g *spyGateway) Refund(_ context.Context, req *port.RefundRequest) (*port.RefundResponse, error) {
 	g.refundCalled = true
 	g.refundReq = req
+	if g.refundErr != nil {
+		return nil, g.refundErr
+	}
 	return &port.RefundResponse{TransactionID: "refund-comp"}, nil
 }
 
@@ -612,6 +616,66 @@ func TestProcessPayment_SagaCompensation_RefundUsesCorrectTransactionID(t *testi
 	if gw.refundReq.Amount != nil {
 		t.Error("expected nil Amount for full refund compensation")
 	}
+	// Reason should be set for gateway audit trail
+	if gw.refundReq.Reason != port.RefundReasonOther {
+		t.Errorf("expected refund Reason %q, got %q", port.RefundReasonOther, gw.refundReq.Reason)
+	}
+	// IdempotencyKey should be set to prevent double-refund on retry
+	expectedKey := "comp-refund-" + expectedTxnID
+	if gw.refundReq.IdempotencyKey != expectedKey {
+		t.Errorf("expected refund IdempotencyKey %q, got %q", expectedKey, gw.refundReq.IdempotencyKey)
+	}
+}
+
+func TestProcessPayment_SagaCompensation_RefundFailure_ReturnsCompoundError(t *testing.T) {
+	// When both local save and compensation refund fail,
+	// the error should contain both failures for manual reconciliation.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{refundErr: fmt.Errorf("gateway timeout")}
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-double-fail",
+	})
+
+	if err == nil {
+		t.Fatal("expected error when both save and compensation fail")
+	}
+	// Error should mention both failures
+	errMsg := err.Error()
+	if !contains(errMsg, "local save failed") {
+		t.Errorf("expected error to mention local save failure, got: %s", errMsg)
+	}
+	if !contains(errMsg, "compensation also failed") {
+		t.Errorf("expected error to mention compensation failure, got: %s", errMsg)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchString(s, substr)
+}
+
+func searchString(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 func TestProcessPayment_AutoResolvesPaymentMethod(t *testing.T) {
