@@ -1,222 +1,189 @@
 ---
 sidebar_position: 3
+title: "プラグインシステム"
 ---
 
-# プラグインシステム
+<!-- docs/design/plugin-system.md から自動同期。直接編集しないでください。 -->
+<!-- 実行: cd website && npm run sync-docs -->
 
-プラグインシステムにより、明確に定義されたフックを通じて課金ロジックを拡張できます。各フックタイプは特定の目的を持ち、必要なインターフェースだけを実装します。
 
-## Pluginインターフェース
+> **ソースコード参照**: フックインターフェース定義は `plugin/hooks*.go`、
+> レジストリは `plugin/registry.go`、公式プラグイン実装は `plugins/` を参照のこと。
 
-すべてのプラグインは基本インターフェースを実装します：
+## 1. 概要
 
-```go
-type Plugin interface {
-    Name() string
-    Version() string
-    Initialize(ctx context.Context, config Config) error
-    Shutdown(ctx context.Context) error
-    Priority() int  // 小さい数値 = 高い優先度
-}
-```
+### 目的
 
-### 優先度定数
+契約決済システムの以下の機能をプラガブルに拡張可能にする:
 
-```go
-const (
-    PriorityHighest  = 0
-    PriorityHigh     = 100
-    PriorityNormal   = 500
-    PriorityLow      = 900
-    PriorityLowest   = 1000
-)
-```
+- クーポン・割引、税計算、通知、メトリクス収集、請求書生成
 
-プラグインは優先度順に実行されます。例えば、優先度0の監査ログは優先度500の割引計算より先に実行されます。
+### 設計原則
 
-## フックカテゴリ
+1. **疎結合** — コアロジックとプラグインは明確に分離
+2. **型安全** — インターフェースによる契約
+3. **ISP準拠** — 必要なフックインターフェースのみ実装。空メソッドの強制実装は不要
+4. **実行順序保証** — コアが会計基準に則った計算順序を構造的に保証
 
-### 課金計算フック
+## 2. フック一覧（全20種）
 
-請求書生成パイプラインに参加するフック：
+### 請求計算フック
 
-**DiscountHook** — 割引計算（クーポン、ロイヤリティ、ボリューム）：
-
-```go
-type DiscountHook interface {
-    Plugin
-    CalculateDiscount(ctx *CalculationContext) (shared.Money, error)
-}
-```
-
-**TaxHook** — 割引後金額に対する税計算：
-
-```go
-type TaxHook interface {
-    Plugin
-    CalculateTax(ctx *CalculationContext) (shared.Money, error)
-}
-```
-
-**InvoiceLifecycleHook** — 請求書計算の前後：
-
-```go
-type InvoiceLifecycleHook interface {
-    Plugin
-    BeforeCalculation(ctx *CalculationContext) error
-    AfterCalculation(ctx *CalculationContext, invoice *invoice.Invoice) error
-}
-```
+| フック | 用途 | ソース |
+|--------|------|--------|
+| `DiscountHook` | 割引計算 | `plugin/hooks.go` |
+| `TaxHook` | 税計算（割引後の金額に対して） | `plugin/hooks.go` |
+| `InvoiceLifecycleHook` | 計算前後処理（BeforeCalculation/AfterCalculation） | `plugin/hooks.go` |
 
 ### 契約ライフサイクルフック
 
-契約の状態変更に反応：
+| フック | 用途 | ソース |
+|--------|------|--------|
+| `OnContractCreateHook` | 契約作成時 | `plugin/hooks_contract.go` |
+| `OnContractActivateHook` | 契約有効化時 | `plugin/hooks_contract.go` |
+| `OnContractSuspendHook` | 契約一時停止時 | `plugin/hooks_contract.go` |
+| `OnContractResumeHook` | 契約再開時 | `plugin/hooks_contract.go` |
+| `OnContractCancelHook` | 契約解約時 | `plugin/hooks_contract.go` |
+| `OnContractRenewHook` | 契約更新時 | `plugin/hooks_contract.go` |
+| `OnContractTrialEndHook` | トライアル終了時 | `plugin/hooks_contract.go` |
 
-```go
-type OnContractCreateHook interface {
-    Plugin
-    OnContractCreate(ctx *Context, contract *contract.ContractAggregate) error
-}
+### 支払いフック
 
-type OnContractActivateHook interface {
-    Plugin
-    OnContractActivate(ctx *Context, contract *contract.ContractAggregate) error
-}
-
-// OnContractSuspendHook, OnContractResumeHook, OnContractCancelHook,
-// OnContractRenewHook, OnContractTrialEndHook も同様
-```
-
-### 決済フック
-
-決済処理フローへのフック：
-
-```go
-type BeforeChargeHook interface {
-    Plugin
-    BeforeCharge(ctx *PaymentContext, amount shared.Money) error
-}
-
-type AfterChargeHook interface {
-    Plugin
-    AfterCharge(ctx *PaymentContext) error
-}
-
-type OnPaymentFailedHook interface {
-    Plugin
-    OnPaymentFailed(ctx *PaymentContext, err error) error
-}
-
-type OnRefundHook interface {
-    Plugin
-    OnRefund(ctx *PaymentContext, refundAmount shared.Money) error
-}
-```
+| フック | 用途 | ソース |
+|--------|------|--------|
+| `BeforeChargeHook` | 課金前処理 | `plugin/hooks_payment.go` |
+| `AfterChargeHook` | 課金後処理 | `plugin/hooks_payment.go` |
+| `OnPaymentFailedHook` | 支払い失敗時 | `plugin/hooks_payment.go` |
+| `OnRefundHook` | 返金時 | `plugin/hooks_payment.go` |
 
 ### メトリクスフック
 
-KPIやビジネスメトリクスの収集：
+| フック | 用途 | ソース |
+|--------|------|--------|
+| `OnContractChangeHook` | 契約変更メトリクス | `plugin/hooks_metrics.go` |
+| `OnInvoiceIssuedHook` | 請求書発行メトリクス | `plugin/hooks_metrics.go` |
+| `OnPaymentProcessedHook` | 支払い処理メトリクス | `plugin/hooks_metrics.go` |
 
-```go
-type OnContractChangeHook interface {
-    Plugin
-    OnContractChange(ctx *Context, event ContractChangeEvent) error
-}
+### クレジットノートフック
 
-type OnInvoiceIssuedHook interface {
-    Plugin
-    OnInvoiceIssued(ctx *Context, invoice *invoice.Invoice) error
-}
-
-type OnPaymentProcessedHook interface {
-    Plugin
-    OnPaymentProcessed(ctx *Context, payment *payment.Payment) error
-}
-```
+| フック | 用途 | ソース |
+|--------|------|--------|
+| `OnCreditNoteIssuedHook` | CN発行時 | `plugin/hooks_creditnote.go` |
+| `OnInvoiceRevisedHook` | 請求書差替時 | `plugin/hooks_creditnote.go` |
 
 ### 請求書生成フック
 
-カスタム請求書レンダリングと配信：
+| フック | 用途 | ソース |
+|--------|------|--------|
+| `InvoiceGenerationHook` | PDF生成・送付（BuildDocument/AfterRender/AfterDelivery） | `plugin/hooks_invoicegen.go` |
 
-```go
-type InvoiceGenerationHook interface {
-    Plugin
-    BuildDocument(ctx *Context, invoice *invoice.Invoice, doc *InvoiceDocument) error
-    AfterRender(ctx *Context, doc *InvoiceDocument, rendered []byte) error
-    AfterDelivery(ctx *Context, doc *InvoiceDocument, result *DeliveryResult) error
-}
+## 3. コンテキスト
+
+### CalculationContext（請求計算用）
+
+ソース: `plugin/context.go`
+
+型安全な計算コンテキスト。コアが各計算ステップで値を設定し、プラグインが参照する。
+
+- `Contract()`: 契約集約
+- `Subtotal()`: 基本料金（DiscountHookが参照）
+- `SubtotalAfterDiscount()`: 割引後小計（TaxHookが参照）
+- `AppliedDiscounts()`: 適用された割引の記録（プラグイン名・コード・金額）
+- `Invoice()`: 請求書（AfterCalculation用）
+
+### PaymentContext（支払い用）
+
+ソース: `plugin/context_payment.go`
+
+支払いフック専用。payment, invoice, contract を保持。
+
+### Context（汎用）
+
+ソース: `plugin/context.go`
+
+契約ライフサイクル、メトリクス等の汎用コンテキスト。`metadata` map で拡張データを受け渡し。
+
+## 4. 実行順序
+
+### コアが保証する計算順序
+
+```
+1. InvoiceLifecycleHook.BeforeCalculation()  ← 計算前処理
+2. 料金計算（コア、契約タイプに応じて分岐）
+3. DiscountHook.CalculateDiscount()          ← 割引計算（全DiscountHook）
+   → 割引上限ガード（割引合計 > subtotalの場合にcap）
+4. 小計算出（コア: subtotal - totalDiscount）
+5. TaxHook.CalculateTax()                    ← 税計算（割引後に対して）
+6. 合計算出（コア: afterDiscount + totalTax）
+7. クレジット台帳からの充当（コア）          ← 残高があれば税込合計から差引
+8. 請求書をdraft状態で生成 → GracePeriod後にfinalize
+9. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
 ```
 
-## 計算コンテキスト
+### Priority の役割
 
-課金フックは`CalculationContext`で以下にアクセスできます：
+`Priority` は**同一フック種別内**での実行順序のみに影響する。
+フック種別間の順序（DiscountHook → TaxHook）はコアが制御する。
 
-```go
-ctx.Contract()              // 契約集約
-ctx.Subtotal()              // 現在の小計
-ctx.SubtotalAfterDiscount() // 全割引後の小計（税計算用）
-ctx.AppliedDiscounts()      // 適用された割引のリスト
-ctx.Invoice()               // 生成中の請求書
-ctx.ContractID()            // 契約IDへのショートカット
+```
+PriorityHighest = 0
+PriorityHigh    = 100
+PriorityNormal  = 500
+PriorityLow     = 900
+PriorityLowest  = 1000
 ```
 
-## プラグインレジストリ
+## 5. プラグインレジストリ
 
-プラグインの登録、初期化、管理：
+ソース: `plugin/registry.go`
 
-```go
-registry := plugin.NewRegistry()
+- `Register(plugin)`: プラグインを登録。型アサーションで実装するフックを自動分類
+- `InitializeAll(ctx, configs)`: 全プラグインを初期化
+- `ShutdownAll(ctx)`: 全プラグインをシャットダウン
+- `Get*Hooks()`: フック種別ごとのプラグインリスト取得（Priority順）
+- スレッドセーフ（`sync.RWMutex`）
 
-// プラグイン登録（インターフェースにより自動分類）
-registry.Register(myDiscountPlugin)
-registry.Register(myTaxPlugin)
-registry.Register(myAuditPlugin)
+## 6. フック分離の設計根拠
 
-// 設定で全初期化
-configs := map[string]plugin.Config{
-    "my-discount": {"percentage": 10},
-    "my-tax":      {"priority": plugin.PriorityLow},
-}
-registry.InitializeAll(ctx, configs)
+`InvoiceCalculationHook`（統合IF）ではなく、DiscountHook / TaxHook / InvoiceLifecycleHook に分離した理由:
 
-// 型別フック取得（優先度順）
-discountHooks := registry.GetDiscountHooks()
-taxHooks := registry.GetTaxHooks()
-```
+1. **ISP** — 割引のみのプラグインに空のCalculateTax実装を強制しない
+2. **計算順序の構造的保証** — コアが呼び出し順を制御するため、Priority値によるミスが発生しない
+3. **型安全** — `CalculationContext` でプラグイン間のデータ受け渡しを型安全に行う
 
-## 公式プラグイン
+初版（v1.0.0）から分割設計を採用しているため、移行ガイドは不要。
 
-### 税プラグイン
+## 7. 公式プラグイン
 
-プラグインの`TaxCalculator`インターフェースで税計算：
+| プラグイン | フック | ソース |
+|-----------|--------|--------|
+| Coupon | `DiscountHook` | `plugins/coupon/` |
+| Tax | `TaxHook` | `plugins/tax/` |
+| InvoiceCleanup | `OnContractCancelHook` | `plugins/invoicecleanup/` |
 
-```go
-taxPlugin := tax.NewTaxPlugin(&tax.JapaneseTaxCalculator{}) // 10%
-```
+### カスタムプラグイン作成
 
-他の税制度向けにカスタム`TaxCalculator`を実装可能。
-
-### クーポンプラグイン
-
-クーポンベースの割引を管理：
-- パーセンテージおよび固定金額割引
-- 使用回数制限（グローバルおよびアカウント別）
-- 最小購入金額 / 最大割引キャップ
-- `applicableTo`によるプラン別制限
-- スタッキング制御
+1. `plugin.Plugin` 基本インターフェース + 必要なフックインターフェースを実装
+2. `plugin.Registry.Register()` で登録
+3. 型アサーションで自動的にフックに分類される
 
 ```go
-couponPlugin := coupon.NewCouponPlugin(couponRepo, clock)
+// 例: 割引プラグインはDiscountHookのみ実装
+var _ plugin.DiscountHook = (*MyDiscountPlugin)(nil)
+
+// 例: 複数フックを1プラグインで実装
+var _ plugin.DiscountHook = (*MyBillingPlugin)(nil)
+var _ plugin.TaxHook = (*MyBillingPlugin)(nil)
 ```
 
-:::note
-`applicableTo`によるプラン別制限は現在`PlanID`ベースで照合しています。Product/Price分離の一環として、将来のリリースで`ProductID`ベースの照合に移行予定です。
-:::
+## 8. API互換性
 
-### InvoiceCleanupプラグイン
+Semantic Versioning 2.0.0 に従う。
 
-古い請求書データのクリーンアップを管理：
+| 変更 | バージョン |
+|------|-----------|
+| フックインターフェースの破壊的変更 | Major |
+| 新規フックの追加 | Minor |
+| バグ修正 | Patch |
 
-```go
-cleanupPlugin := invoicecleanup.NewInvoiceCleanupPlugin(invoiceRepo, clock)
-```
+破壊的変更: メソッド追加（デフォルト実装なし）、シグネチャ変更、IF削除/統合/分離、Context型のフィールド削除/型変更

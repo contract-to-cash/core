@@ -1,211 +1,410 @@
 ---
 sidebar_position: 1
+title: "ドメインモデル"
 ---
 
-# ドメインモデル
+<!-- docs/design/domain-model.md から自動同期。直接編集しないでください。 -->
+<!-- 実行: cd website && npm run sync-docs -->
 
-ドメインモデルは、課金ドメインを表現するエンティティ、値オブジェクト、集約で構成されています。
 
-## 契約集約（Contract Aggregate）
+> **ソースコード参照**: 各エンティティの実装は対応するパッケージのソースコードを参照のこと。
+> 本ドキュメントは設計意図・制約・関連性を記述し、Goインターフェース定義はソースに委ねる。
 
-契約は中心的なエンティティで、イベントソースの集約ルートとしてモデリングされています。課金契約の全ライフサイクルを管理します。
+## 論理データモデル図
 
-### 状態
+```mermaid
+erDiagram
+    Account ||--o{ Contract : "holds"
+    Account ||--o{ BalanceEntry : "owns"
+    Product ||--o{ Price : "priced by"
+    Product ||--o{ Feature : "includes"
+    Product ||--o{ UsageMetric : "tracks"
+    Contract ||--o{ Invoice : "generates"
+    Contract ||--o{ UsageRecord : "records"
+    Contract ||--o| TrialConfiguration : "trial config"
+    Contract ||--o| SuspensionConfiguration : "suspension config"
+    Invoice ||--o{ LineItem : "contains"
+    Invoice ||--o{ CreditNote : "adjusted by"
+    Invoice ||--o{ Payment : "paid by"
+    CreditNote ||--o{ CreditNoteItem : "contains"
+    Invoice ||--o| Invoice : "revision of"
 
-| ステータス | 説明 |
-|-----------|------|
-| `draft` | 作成済みだが未有効化 |
-| `trialing` | トライアル期間中 |
-| `active` | 有効。課金対象 |
-| `past_due` | 支払い期限超過 |
-| `suspended` | 一時停止中（支払い問題または手動） |
-| `cancelled` | 永久的に解約済み |
-| `expired` | 更新なしで期間終了 |
+    Account {
+        AccountID id PK
+    }
+
+    Product {
+        ProductID id PK
+        string name
+        string description
+        ProductStatus status "active | archived"
+        map metadata
+        timestamp createdAt
+    }
+
+    Feature {
+        string name
+        bool included
+        int64 limit "optional"
+    }
+
+    UsageMetric {
+        string name
+        int64 includedQuantity
+    }
+
+    Price {
+        PriceID id PK
+        ProductID productID FK
+        Money amount
+        Currency currency
+        BillingCycle billingCycle "daily | weekly | monthly | yearly"
+        PricingModel pricingModel "flat | tiered | usage"
+        PriceStatus status "active | archived"
+        timestamp createdAt
+    }
+
+    Contract {
+        ContractID id PK
+        AccountID accountID FK
+        PriceID priceID FK
+        ContractStatus status "draft | trialing | active | past_due | suspended | cancelled | expired"
+        ContractType contractType "one_time | subscription | usage_based"
+        BillingCycle billingCycle
+        DateRange currentPeriod
+        Money price
+        Money basePrice
+        bool autoRenew
+        bool cancelAtPeriodEnd
+        PriceID pendingPriceID "optional"
+        string paymentMethodID "optional"
+        map metadata
+        int version
+        timestamp createdAt
+        timestamp updatedAt
+    }
+
+    TrialConfiguration {
+        timestamp trialEndDate
+        bool autoConvert
+        bool requirePaymentMethod
+        int_array conversionReminderDays
+    }
+
+    SuspensionConfiguration {
+        timestamp suspendedAt
+        timestamp resumeDate "optional"
+        SuspensionBillingBehavior billingBehavior "skip | defer | continue"
+        bool extendContract
+        string reason
+    }
+
+    Invoice {
+        InvoiceID id PK
+        string invoiceNumber
+        AccountID accountID FK
+        ContractID contractID FK
+        InvoiceStatus status "draft | finalized | issued | paid | partial_paid | overdue | voided | refunded"
+        Money subtotal
+        Money taxAmount
+        Money discountAmount
+        Money total
+        Money appliedBalance
+        Money amountDue
+        Money paidAmount
+        Money balance
+        DateRange billingPeriod
+        bool allowPartialPay
+        string paymentMethodID "optional"
+        InvoiceID originalInvoiceID "optional: revision chain root"
+        InvoiceID revisionOf "optional: direct parent"
+        string voidReason "optional"
+        map metadata
+        timestamp issueDate "optional"
+        timestamp dueDate
+        timestamp paidAt "optional"
+    }
+
+    LineItem {
+        string id PK
+        string description
+        int64 quantity
+        Money unitPrice
+        Money amount
+        Decimal taxRate "*big.Rat"
+        PriceID priceID FK "optional"
+        map metadata
+    }
+
+    Payment {
+        PaymentID id PK
+        InvoiceID invoiceID FK
+        Money amount
+        Money refundedAmount
+        PaymentMethod method "credit_card | bank_transfer | direct_debit | convenience_store | carrier"
+        PaymentStatus status "pending | completed | failed | partially_refunded | refunded | charged_back"
+        string gatewayTransactionID
+        string idempotencyKey
+        string failureReason "optional"
+        map metadata
+        timestamp processedAt
+    }
+
+    BalanceEntry {
+        BalanceEntryID id PK
+        AccountID accountID FK
+        Money originalAmount
+        Money remainingAmount
+        BalanceReason reason "proration | cancellation | manual_adjustment | refund_conversion | goodwill"
+        string sourceType "optional"
+        string sourceID "optional"
+        string description
+        int version "optimistic lock"
+        timestamp expiresAt "optional"
+        timestamp createdAt
+    }
+
+    UsageRecord {
+        UsageRecordID id PK
+        ContractID contractID FK
+        string metricName
+        int64 quantity
+        string idempotencyKey
+        timestamp timestamp
+        map metadata
+    }
+
+    UsageSummary {
+        ContractID contractID FK
+        string metricName
+        DateRange period
+        int64 totalUsage
+    }
+
+    CreditNote {
+        CreditNoteID id PK
+        string number
+        InvoiceID invoiceID FK
+        AccountID accountID FK
+        ContractID contractID FK
+        CreditNoteStatus status "draft | issued | applied | refunded | voided"
+        CreditNoteReason reason "duplicate | order_change | cancellation | product_unsatisfactory | other"
+        string memo
+        Money subtotal
+        Money taxAmount
+        Money total
+        Money creditAmount
+        Money refundAmount
+        timestamp issuedAt "optional"
+        timestamp createdAt
+    }
+
+    CreditNoteItem {
+        string invoiceLineItemID FK
+        string description
+        Money amount
+        Decimal taxRate "*big.Rat"
+        Money taxAmount
+    }
+```
+
+> **凡例:** Account は外部境界（このドメイン外で管理）。Contract はイベントソーシング集約根（`ContractAggregate`）。
+> Money は `big.Rat` ベースの値オブジェクト、Decimal は `*big.Rat`、ID は ULID で生成。
+> TrialConfiguration / SuspensionConfiguration / UsageSummary は値オブジェクト（独立した永続化IDを持たない）。
+
+## 1. 共通値オブジェクト
+
+ソース: `domain/shared/`
+
+| 型 | ファイル | 説明 |
+|---|---|---|
+| `Money` | `money.go` | `big.Rat` ベースの通貨付き金額。浮動小数点は使用禁止。Add/Subtract時に通貨一致を検証 |
+| `DateRange` | `datetime.go` | 半開区間 `[start, end)` の期間。`Next(cycle)` で次の請求サイクルを算出 |
+| `Currency` | `money.go` | JPY, USD, EUR |
+| ID型 | `identifier.go` | `AccountID`, `ContractID`, `InvoiceID` 等。ULID で生成。循環依存回避のため `shared` に集約 |
+| `DomainError` | `errors.go` | `ErrorCode` + `Message` + `Cause` の構造化エラー |
+| `Clock` | `clock.go` | 時刻取得の抽象化。`SystemClock`（本番）と `FixedClock`（テスト） |
+
+**設計判断:**
+- `AddBillingCycleDuration()` は `DateRange.Next()` と `ContractAggregate` の両方から参照される唯一の変換ロジック
+- `time.Now()` の直接呼び出しはドメイン層・アプリケーション層で禁止。必ず `Clock` IF 経由
+
+## 2. Contract（契約）
+
+ソース: `domain/contract/`
+
+### 状態遷移
+
+```
+draft → active | trialing | cancelled（作成直後のキャンセル）
+trialing → active（トライアル終了・自動移行）| cancelled（トライアル中の解約）
+active → past_due | suspended | cancelled | expired
+past_due → active（支払い成功）| suspended（リトライ上限到達）| cancelled
+suspended → active（再開）| cancelled（一時停止中の解約）
+cancelled → 終端状態（遷移なし）
+expired → 終端状態（遷移なし）
+```
 
 ### 契約タイプ
 
 | タイプ | 説明 |
-|-------|------|
-| `one_time` | 買い切り。定期課金なし |
-| `subscription` | 一定間隔の定期課金 |
-| `usage_based` | メータリングされた使用量に基づく課金 |
+|--------|------|
+| `one_time` | 買い切り |
+| `subscription` | サブスクリプション（定期課金） |
+| `usage_based` | 従量課金 |
 
-### 主要フィールド
+### ContractAggregate
 
-```go
-type ContractAggregate struct {
-    contractID       shared.ContractID
-    accountID        shared.AccountID
-    priceID          shared.PriceID       // 不変Priceエンティティへの参照
-    pendingPriceID   *shared.PriceID      // 次回更新時に適用予定
-    priceOverride    *shared.Money         // 契約別の価格調整
-    status           ContractStatus
-    contractType     ContractType
-    billingCycle     BillingCycle
-    currentPeriod    shared.DateRange
-    autoRenew        bool
-    cancelAtPeriodEnd bool
-    paymentMethodID  *string               // 契約レベルの決済手段
-}
-```
+- イベントソーシング対応の集約ルート（`eventstore.BaseAggregate` を埋め込み）
+- 15種以上のドメインイベント（`events.go` 参照）
+- `Create`, `Activate`, `Suspend`, `Resume`, `Cancel`, `ChangePrice`, `Renew` 等のコマンドメソッド
+- `LoadFromHistory()` でイベント履歴から状態を復元、`LoadFromSnapshot()` でスナップショットから復元
+- `BillingCycle` は `pricing.BillingCycle` のエイリアス（定義元は `pricing`）
+- 契約は `CreateContractCommand.PriceID` で Price を指定する
 
-### 操作
+### 価格変更ポリシー
 
-```go
-// ライフサイクル
-agg.Create(cmd CreateContractCommand, metadata EventMetadata) error
-agg.Activate(metadata EventMetadata) error
-agg.Suspend(config SuspensionConfiguration, metadata EventMetadata) error
-agg.Resume(metadata EventMetadata) error
-agg.Cancel(reason string, metadata EventMetadata) error
-agg.Renew(metadata EventMetadata) error
+| ポリシー | 説明 |
+|----------|------|
+| `immediate` | 即座に変更を適用。日割り計算が発生しうる |
+| `end_of_term` | 次回更新時に変更を適用。`pendingPriceID` に予約 |
 
-// 価格変更
-agg.ChangePrice(newPriceID PriceID, policy ChangePolicy, proration *PlanChangeProration, metadata EventMetadata) error
-agg.UnscheduleChange(reason string, metadata EventMetadata) error
-agg.SetPriceOverride(override Money, metadata EventMetadata) error
+### トライアル設定
 
-// トライアル
-agg.StartTrial(config TrialConfiguration, metadata EventMetadata) error
-agg.EndTrial(converted bool, metadata EventMetadata) error
+`TrialConfiguration`: トライアル終了日、自動本契約移行、支払い方法事前登録必須、移行リマインダー
 
-// イベントソーシング
-agg.LoadFromHistory(events []Event) error
-agg.LoadFromSnapshot(snapshot Snapshot) error
-agg.MarshalSnapshot() ([]byte, error)
-```
+### 一時停止設定
 
-## 請求書（Invoice）
+`SuspensionConfiguration`: 請求動作（skip/defer/continue）、契約期間延長、再開日
 
-請求書は`BillingService`によって生成され、課金計算の結果を追跡します。
+### 日割り計算設定
+
+`ProrationBehavior`: immediate（即時日割り）、next_cycle（次サイクルから）、immediate_full（即時全額）
+
+## 3. Invoice（請求書）
+
+ソース: `domain/invoice/`
 
 ### 状態遷移
 
-```mermaid
-stateDiagram-v2
-    [*] --> draft
-    draft --> finalized
-    finalized --> issued
-    issued --> paid
-    issued --> overdue
-    overdue --> voided
-    issued --> partial_paid
+```
+draft → finalized（確定。GracePeriod後）
+finalized → issued（送付済み）
+issued → paid | partial_paid | overdue
+partial_paid → paid（残額入金）
+overdue → paid | voided
+paid → refunded（返金）
+voided → 終端状態
 ```
 
-### 構造
+### 設計上のポイント
 
-```go
-type Invoice struct {
-    id              shared.InvoiceID
-    contractID      shared.ContractID
-    accountID       shared.AccountID
-    lineItems       []LineItem
-    subtotal        shared.Money     // 割引前
-    discountAmount  shared.Money     // 適用された割引合計
-    taxAmount       shared.Money     // 税額合計
-    total           shared.Money     // subtotal - discount + tax
-    appliedBalance   shared.Money     // クレジット台帳から消費されたクレジット
-    amountDue       shared.Money     // total - appliedBalance
-    billingPeriod   shared.DateRange
-    dueDate         time.Time
-    status          InvoiceStatus
-}
+- Functional Options パターンによるコンストラクタ（`WithStatus`, `WithBillingPeriod` 等）
+- リビジョンチェーン: `originalInvoiceID`（チェーンのルート）と `revisionOf`（直接の親）の2レベルリンク
+- `appliedBalance`: クレジット台帳から充当された金額。`amountDue = total - appliedBalance`
+- 部分入金: `allowPartialPay` フラグで制御。`paidAmount` と `balance` で残高追跡
+- `LineItem.quantity` は `int64`（メトリクスの `InvoiceLineItem.Quantity` は `float64`、変換時にキャスト）
+
+### CreditNote（クレジットノート）
+
+- 発行済み請求書に対する行項目レベルの調整
+- ステータス: draft → issued → applied | refunded | voided
+- 発行理由: duplicate, order_change, cancellation, product_unsatisfactory, other
+- `CreditNoteItem` で請求書明細に対応する調整額と税率を保持
+
+## 4. Payment（支払い）
+
+ソース: `domain/payment/`
+
+### 状態遷移
+
+```
+pending → completed | failed
+completed → partially_refunded | refunded | charged_back
+partially_refunded → refunded（残額返金時）
+failed → pending（リトライ時。DunningConfig.MaxRetries に達した場合は終端）
+charged_back, refunded → 終端状態
 ```
 
-## 支払い（Payment）
+### 設計上のポイント
 
-個々の支払いトランザクションを追跡します。
+- `idempotencyKey` 必須（リトライ時の重複防止）
+- `RecordRefund(amount)` で返金額を累計に記録、ステータスを自動更新
+- 決済ゲートウェイとの連携は `application/port/` のインターフェースを使用
 
-```go
-type Payment struct {
-    id                   shared.PaymentID
-    invoiceID            shared.InvoiceID
-    amount               shared.Money
-    method               PaymentMethod    // credit_card, bank_transferなど
-    status               PaymentStatus    // pending, completed, failed, refunded
-    gatewayTransactionID string
-    processedAt          time.Time
-}
-```
+### Dunning（支払い回収）
 
-## ProductとPrice
+`DunningConfig`: 最大リトライ回数、リトライ間隔、ステップごとのアクション（retry/notify/suspend/cancel）
 
-Stripeパターンに倣い、「何を売るか」と「どう課金するか」を分離：
+## 5. Usage（従量課金）
 
-```go
-// Product — 何を売るか
-type Product struct {
-    id           shared.ProductID
-    name         string
-    features     []Feature
-    usageMetrics []UsageMetric
-    status       ProductStatus    // active, archived
-}
+ソース: `domain/usage/`
 
-// Price — どう課金するか（作成後は不変）
-type Price struct {
-    id           shared.PriceID
-    productID    shared.ProductID
-    amount       shared.Money
-    currency     shared.Currency
-    billingCycle BillingCycle     // monthly, yearlyなど
-    pricingModel PricingModel    // 定額課金の場合はnil
-    status       PriceStatus     // active, archived
-}
-```
+- `UsageRecord`: 契約ごとのメトリクス使用量の記録。`idempotencyKey` で重複登録防止
+- `UsageSummary`: 期間集計結果（value object）
+- メータリング（生イベントの収集・集計）はOSSスコープ外。利用者側で集計し `UsageRecord` として記録
 
-**重要原則**: Priceは不変です。価格を変更するには新しいPriceオブジェクトを作成します。既存の契約は明示的に変更されるか更新されるまで、現在のPrice参照を保持します。
+## 6. Pricing（料金モデル）
 
-## 共有値オブジェクト
+ソース: `domain/pricing/`
 
-### Money
+### Price エンティティ
 
-通貨安全性を持つ任意精度の金額値：
+- 「どう課金するか」を表すイミュータブルなエンティティ。作成後は変更不可、価格改定時は新しい Price を作成
+- `BillingCycle` の定義元パッケージ。`contract.BillingCycle` はエイリアス
 
-```go
-price := shared.NewMoney(new(big.Rat).SetInt64(3000), shared.CurrencyJPY)
-tax := price.Multiply(new(big.Rat).SetFrac64(10, 100)) // 10%
-total, err := price.Add(tax) // 通貨不一致はエラーを返す
-```
+### PricingModel（Strategy パターン）
 
-対応通貨: `JPY`, `USD`, `EUR`
+| モデル | 説明 |
+|--------|------|
+| `FlatPrice` | 固定料金 |
+| `TieredPrice` (graduated) | 段階別課金。各段階に該当する使用量にその段階の単価を適用 |
+| `TieredPrice` (volume) | 全量課金。到達した段階の単価を全使用量に適用 |
+| `UsagePrice` | 従量料金。最低料金・最大料金（上限）オプション |
 
-### DateRange
+## 7. Product（プロダクト）
 
-課金期間用の半開区間 `[start, end)`:
+ソース: `domain/product/`
 
-```go
-period, _ := shared.NewDateRange(start, end)
-period.Contains(someTime) // start <= someTime < end ならtrue
-period.Duration()
-```
+- 「何を売るか」を表すエンティティ。Price（「どう課金するか」）と分離
+- `Feature`: 機能定義（名前、含有フラグ、上限）
+- `UsageMetric`: 従量課金メトリクス定義（名前、含有枠）
+- ステータス: active → archived
 
-### ID型
+## 8. Balance（クレジット台帳）
 
-時間順ユニーク性のためのULIDベース識別子：
+ソース: `domain/balance/`
 
-```go
-shared.NewContractID()   // ContractID
-shared.NewInvoiceID()    // InvoiceID
-shared.NewPaymentID()    // PaymentID
-shared.NewProductID()    // ProductID
-shared.NewPriceID()      // PriceID
-shared.NewAccountID()    // AccountID
-```
+### BalancePolicy
 
-## クレジット台帳
+| ポリシー | 説明 |
+|----------|------|
+| `ledger` | クレジット台帳に積み、次回以降の請求書で自動差引（デフォルト） |
+| `refund` | 即座に元の決済手段に返金 |
+| `none` | クレジットを発生させない（差額は切り捨て） |
 
-日割り計算、解約クレジット、調整処理のためのFIFOベースクレジットシステム：
+### BalanceEntry
 
-```go
-type BalanceEntry struct {
-    id              shared.BalanceEntryID
-    accountID       shared.AccountID
-    originalAmount  shared.Money
-    remainingAmount shared.Money
-    reason          BalanceReason  // proration, cancellation, manual_adjustmentなど
-    expiresAt       *time.Time
-}
-```
+- FIFO消費（古いクレジットから順に使用）
+- 有効期限対応（`expiresAt`、nil = 無期限）
+- 楽観的ロック（`version` / `loadedVersion`）
+- `Consume(amount)` は残高不足の場合は残高分のみ消費
 
-クレジットは請求書生成時に自動的に消費されます（古いものから順に）。
+### 請求書生成時のクレジット適用フロー
+
+1. `FindAvailable(accountID, currency)` で同一通貨かつ有効期限内のクレジットをFIFO取得
+2. 古いクレジットから順に消費（有効期限切れはスキップ）
+3. `Invoice.appliedBalance` に適用額を記録、`BalanceApplication` レコード作成
+4. 実請求額 = 合計 - クレジット適用額（0なら決済不要）
+
+### トランザクション戦略
+
+クレジット適用は BalanceEntry と Invoice を跨ぐ操作。簡易CQRS（同一DB）のため、アプリケーションサービス層での同一DBトランザクションでアトミック性を保証する。
+フルCQRS移行時は Saga / Process Manager パターンに置き換える。
+
+### ダウングレード時のフロー
+
+`ProrationResult.AdjustmentAmount < 0` の場合、`BalancePolicy` に従い分岐:
+- `ledger` → BalanceEntry 作成（reason: proration）、次回請求で自動差引
+- `refund` → PaymentGateway.Refund() で即時返金
+- `none` → 何もしない

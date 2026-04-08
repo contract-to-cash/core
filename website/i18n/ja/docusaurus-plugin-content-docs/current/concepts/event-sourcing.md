@@ -1,147 +1,181 @@
 ---
 sidebar_position: 2
+title: "イベントソーシング"
 ---
 
-# イベントソーシング
+<!-- docs/design/event-sourcing.md から自動同期。直接編集しないでください。 -->
+<!-- 実行: cd website && npm run sync-docs -->
 
-Contract Billing Coreは、Contract集約にイベントソーシングを使用し、完全な監査証跡と時間旅行機能を提供します。
 
-## 仕組み
+> **ソースコード参照**: インターフェース定義は `eventstore/` パッケージ、
+> 契約集約の実装は `domain/contract/aggregate.go` を参照のこと。
 
-現在の状態のみを保存する代わりに、すべての状態変更が不変のイベントとして記録されます：
+## 1. 概要
 
+### イベントソーシングの利点
+
+| 利点 | 説明 |
+|------|------|
+| 完全な監査証跡 | いつ、何が起こったかを完全に記録 |
+| 時点再構築 | 任意の過去時点の状態を再現可能 |
+| デバッグ容易性 | 問題発生時にイベントを追跡して原因特定 |
+| イベント駆動統合 | 他システムとの疎結合な連携が可能 |
+| Projection再構築 | 読み取りモデルを何度でも再構築可能 |
+
+## 2. Event Store
+
+ソース: `eventstore/store.go`
+
+### 主要メソッド
+
+| メソッド | 説明 |
+|---------|------|
+| `Append` | イベントの永続化（楽観的ロック付き） |
+| `Load` | ストリームの全イベント取得 |
+| `LoadUntilVersion` | 特定バージョンまでのイベント取得 |
+| `LoadUntil` | 特定時点（`OccurredAt` ベース）までのイベント取得 |
+| `LoadRange` | 期間指定でのイベント取得 |
+| `Subscribe` | 全ストリームのイベント購読（Projection用） |
+| `SaveSnapshot` / `LoadSnapshot` | スナップショットの保存・読み込み |
+| `LoadSnapshotBefore` | 指定時点より前の最新スナップショット取得 |
+
+### Event 構造
+
+ソース: `eventstore/event.go`
+
+- `ID`: イベント一意ID
+- `StreamID`: 集約ID
+- `Type`: `EventType`（型付き定数）
+- `Version`: ストリーム内のバージョン（楽観的ロック用）
+- `SchemaVersion`: イベントスキーマバージョン（upcaster用）
+- `Data`: `json.RawMessage`（イベントデータ）
+- `Metadata`: `UserID`（必須）、`IPAddress`/`UserAgent`（オプション）、`CorrelationID`/`CausationID`
+- `OccurredAt`: ビジネス時刻（Clock IF 経由で設定）
+- `RecordedAt`: システム記録時刻（Event Store 側で設定）
+
+### DomainEvent インターフェース
+
+各集約のイベント型が実装する。`EventType()` メソッドで型定数を返す。
+
+## 3. 集約ルート
+
+ソース: `eventstore/aggregate.go`, `eventstore/aggregate_base.go`
+
+### BaseAggregate
+
+- `RaiseEvent(domainEvent, metadata)`: 型付きDomainEventを発行。EventType() を自動取得
+- `Clock()`: ビジネス時刻取得用（`time.Now()` 直接呼び出し禁止）
+- `IncrementVersion()` / `SetVersion()`: バージョン管理
+
+### Evolver インターフェース
+
+`Apply(event DomainEvent) error` — 型付きDomainEventを受け取り状態を更新する純粋関数。
+デシリアライズ（`json.RawMessage` → `DomainEvent`）は `LoadFromHistory` の責務。
+
+### EventRegistry
+
+ソース: `eventstore/event_registry.go`
+
+`EventType` → Go型のマッピングを管理。`Register()` で型を登録、`Deserialize()` で復元。
+
+**重要**: 新しいイベント型を追加する場合、以下の2箇所を必ず更新すること:
+1. `EventRegistry` に `Register()` で型を登録
+2. `ContractAggregate.Apply()` の switch case に対応を追加
+
+`exhaustive` lint ツールで `Apply` 側の漏れは検出可能だが、`Register` 漏れは検出できない。
+
+## 4. 契約集約のイベント型
+
+ソース: `domain/contract/events.go`
+
+| イベント | 説明 |
+|---------|------|
+| `contract.created` | 契約作成 |
+| `contract.activated` | 契約有効化 |
+| `contract.suspended` | 契約一時停止 |
+| `contract.resumed` | 契約再開 |
+| `contract.cancelled` | 契約解約 |
+| `contract.price_changed` | 価格変更（即時適用） |
+| `contract.price_change_scheduled` | 価格変更予約（期間終了時適用） |
+| `contract.price_change_unscheduled` | 価格変更予約取消 |
+| `contract.trial_started` | トライアル開始 |
+| `contract.trial_ended` | トライアル終了 |
+| `contract.payment_method_changed` | 決済手段変更 |
+| `contract.renewed` | 契約更新 |
+| `contract.expired` | 契約期限切れ |
+| `contract.cancellation_scheduled` | 解約予約 |
+| `contract.cancellation_unscheduled` | 解約予約取消 |
+
+## 5. 時点再構築（Temporal Query）
+
+ソース: `application/query/temporal_query_service.go`
+
+### GetContractAsOf
+
+指定時点の契約状態を取得。スナップショット + 差分イベントで効率的に復元:
+1. `LoadSnapshotBefore(contractID, asOf)` でスナップショット取得
+2. スナップショット以降〜asOf までのイベントを `LoadRange` で取得
+3. `LoadFromSnapshot` → `LoadFromHistory` で状態を復元
+
+### GetContractHistory / CompareStates
+
+変更履歴の取得、2時点間の状態比較。
+
+## 6. Projection（読み取りモデル）
+
+ソース: `application/projection/service.go`
+
+### ProjectionOptions
+
+| オプション | 説明 |
+|-----------|------|
+| `SyncMode` | true: 同期更新（即座の一貫性）、false: 非同期更新（スループット重視） |
+| `BatchSize` | 非同期時のバッチサイズ |
+| `MaxRetries` / `RetryDelay` | リトライ設定 |
+
+### Projector インターフェース
+
+- `Project(ctx, event)`: イベントをProjectionに反映
+- `Rebuild(ctx, until)`: 指定時点までのProjectionを再構築
+
+## 7. データベーススキーマ
+
+### Event Store テーブル
+
+```sql
+CREATE TABLE events (
+    id UUID PRIMARY KEY,
+    stream_id VARCHAR(255) NOT NULL,
+    type VARCHAR(255) NOT NULL,
+    version INT NOT NULL,
+    schema_version INT NOT NULL DEFAULT 1,
+    data JSONB NOT NULL,
+    metadata JSONB NOT NULL,
+    occurred_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    recorded_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    UNIQUE (stream_id, version)
+);
+
+CREATE TABLE snapshots (
+    id UUID PRIMARY KEY,
+    stream_id VARCHAR(255) NOT NULL,
+    version INT NOT NULL,
+    state JSONB NOT NULL,
+    as_of TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    UNIQUE (stream_id, version)
+);
 ```
-ContractCreatedEvent     → status: draft, price: ¥3,000
-ContractActivatedEvent   → status: active
-PriceChangedEvent        → price: ¥5,000（即時適用）
-ContractSuspendedEvent   → status: suspended
-ContractResumedEvent     → status: active
-ContractRenewedEvent     → 新しい期間、保留価格がプロモート
-```
 
-現在の状態は、すべてのイベントを最初からリプレイして再構築します：
+## 8. スナップショット戦略
 
-```go
-agg := contract.NewContractAggregate(contractID, clock)
-events, _ := eventStore.Load(ctx, string(contractID))
-agg.LoadFromHistory(events)
-// aggは現在の状態を反映
-```
+- デフォルト: N件（100）ごとにスナップショット作成
+- `SnapshotService` が `ShouldCreateSnapshot()` で判定、`CreateSnapshot()` で作成
+- ソース: `application/service/snapshot_service.go`
 
-## イベント構造
+## 9. イベントバージョニング
 
-すべてのイベントには監査とトレーサビリティのためのメタデータが含まれます：
-
-```go
-type Event struct {
-    ID            string           // ユニークイベントID
-    StreamID      string           // 集約ID（契約ID）
-    Type          EventType        // 例: "contract.created"
-    Version       int              // ストリーム内のシーケンシャルバージョン
-    SchemaVersion int              // 将来のアップキャスティング用
-    Data          json.RawMessage  // イベント固有のペイロード
-    Metadata      EventMetadata    // 監査情報
-    OccurredAt    time.Time        // ビジネス時刻
-    RecordedAt    time.Time        // システム時刻
-}
-
-type EventMetadata struct {
-    UserID        string   // 操作を実行した人（必須）
-    CorrelationID string   // リクエストトレーシング
-    CausationID   string   // 因果イベントチェーン
-    IPAddress     *string  // オプション
-    UserAgent     *string  // オプション
-}
-```
-
-## 時間旅行クエリ
-
-過去の任意の時点での契約状態をクエリ：
-
-```go
-queryService := query.NewTemporalQueryService(eventStore, clock)
-
-// 5月15日時点の契約状態は？
-may15 := time.Date(2026, 5, 15, 0, 0, 0, 0, time.UTC)
-historical, _ := queryService.GetContractAsOf(ctx, contractID, may15)
-historical.Status() // "active"
-historical.Price()  // ¥3,000（価格変更前）
-
-// 完全な変更履歴
-history, _ := queryService.GetContractHistory(ctx, contractID)
-for _, entry := range history {
-    fmt.Printf("%s: %s (by %s)\n", entry.OccurredAt, entry.EventType, entry.UserID)
-}
-```
-
-## スナップショット
-
-多数のイベントを持つ集約では、スナップショットでロードを高速化：
-
-```go
-snapshotService := service.NewSnapshotService(eventStore, clock, snapshotInterval)
-
-// 現在の状態のスナップショットを保存
-snapshotService.CreateSnapshot(ctx, agg)
-
-// ロード時はスナップショット + 最近のイベントを使用（全イベントの代わりに）
-snap, _ := eventStore.LoadSnapshot(ctx, string(contractID))
-agg.LoadFromSnapshot(*snap)
-// スナップショットバージョン以降のイベントのみリプレイ
-```
-
-## Event Storeインターフェース
-
-このインターフェースをデータベース向けに実装します：
-
-```go
-type Store interface {
-    Append(ctx context.Context, streamID string, events []Event, expectedVersion int) error
-    Load(ctx context.Context, streamID string) ([]Event, error)
-    LoadUntilVersion(ctx context.Context, streamID string, version int) ([]Event, error)
-    LoadUntil(ctx context.Context, streamID string, until time.Time) ([]Event, error)
-    LoadRange(ctx context.Context, streamID string, from, to time.Time) ([]Event, error)
-    Subscribe(ctx context.Context, fromPosition int64) (<-chan Event, error)
-    SaveSnapshot(ctx context.Context, snapshot Snapshot) error
-    LoadSnapshot(ctx context.Context, streamID string) (*Snapshot, error)
-    LoadSnapshotBefore(ctx context.Context, streamID string, before time.Time) (*Snapshot, error)
-}
-```
-
-`expectedVersion`による楽観的ロックで並行書き込みの競合を防止します。
-
-## 契約イベント一覧
-
-| イベント | トリガー |
-|---------|---------|
-| `ContractCreatedEvent` | `agg.Create()` |
-| `ContractActivatedEvent` | `agg.Activate()` |
-| `ContractSuspendedEvent` | `agg.Suspend()` |
-| `ContractResumedEvent` | `agg.Resume()` |
-| `ContractCancelledEvent` | `agg.Cancel()` |
-| `ContractRenewedEvent` | `agg.Renew()` |
-| `ContractExpiredEvent` | `agg.Renew()` autoRenew=false時 |
-| `PriceChangedEvent` | `agg.ChangePrice()` IMMEDIATEポリシー |
-| `PriceChangeScheduledEvent` | `agg.ChangePrice()` END_OF_TERMポリシー |
-| `PriceChangeUnscheduledEvent` | `agg.UnscheduleChange()` |
-| `TrialStartedEvent` | `agg.StartTrial()` |
-| `TrialEndedEvent` | `agg.EndTrial()` |
-
-## プロジェクション
-
-プロジェクションサービスでイベントから読み取り最適化ビューを構築：
-
-```go
-type Projector interface {
-    Project(ctx context.Context, event eventstore.Event) error
-    Rebuild(ctx context.Context, until time.Time) error
-}
-
-projectionService := projection.NewProjectionService(eventStore, projection.ProjectionOptions{
-    SyncMode:   true,
-    BatchSize:  100,
-    MaxRetries: 3,
-})
-projectionService.RegisterProjector(myProjector)
-projectionService.Start(ctx)
-```
+- `SchemaVersion` フィールドで管理
+- `Upcaster` インターフェースで古いイベントを新しいスキーマに変換
+- `UpcasterChain` で複数のUpcasterをチェーン可能
+- ソース: `eventstore/upcaster.go`

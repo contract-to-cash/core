@@ -1,170 +1,139 @@
 ---
 sidebar_position: 4
+title: "決済ゲートウェイ"
 ---
 
-# 決済ゲートウェイ
+<!-- docs/design/payment-gateway.md から自動同期。直接編集しないでください。 -->
+<!-- 実行: cd website && npm run sync-docs -->
 
-Contract Billing Coreは、決済処理を抽象化する`PaymentGateway`インターフェースを定義しています。お使いの決済プロバイダー（Stripe、Braintree、PayPayなど）向けにこのインターフェースを実装します。
 
-## インターフェース
+> **ソースコード参照**: インターフェース定義は `application/port/` パッケージ、
+> Payment エンティティは `domain/payment/`、決済サービスは `application/service/payment_service.go` を参照。
 
-```go
-type PaymentGateway interface {
-    ID() string
-    SupportedMethods() []PaymentMethodType
+## 1. 概要
 
-    // 直接チャージ
-    Charge(ctx context.Context, req *ChargeRequest) (*ChargeResponse, error)
+決済サービス（Stripe, PayPay, GMO, Square等）に依存しない抽象化レイヤーを提供する。
 
-    // 2フェーズ: オーソリ → キャプチャ
-    Authorize(ctx context.Context, req *AuthorizeRequest) (*AuthorizeResponse, error)
-    Capture(ctx context.Context, req *CaptureRequest) (*CaptureResponse, error)
-    Void(ctx context.Context, req *VoidRequest) (*VoidResponse, error)
-
-    // 返金
-    Refund(ctx context.Context, req *RefundRequest) (*RefundResponse, error)
-    Cancel(ctx context.Context, req *CancelRequest) (*CancelResponse, error)
-
-    // トランザクションクエリ
-    GetTransaction(ctx context.Context, transactionID string) (*Transaction, error)
-
-    // 決済手段管理
-    RegisterPaymentMethod(ctx context.Context, req *RegisterPaymentMethodRequest) (*PaymentMethodDetail, error)
-    DeletePaymentMethod(ctx context.Context, paymentMethodID string) error
-    GetPaymentMethod(ctx context.Context, paymentMethodID string) (*PaymentMethodDetail, error)
-    ListPaymentMethods(ctx context.Context, customerID string) ([]*PaymentMethodDetail, error)
-}
+```mermaid
+graph TB
+    subgraph Application
+        PS[PaymentService] --> PG[port.PaymentGateway IF]
+        PG -.->|implements| SG[StripeGateway]
+        PG -.->|implements| PPG[PayPayGateway]
+        PG -.->|implements| GMOG[GMOGateway]
+    end
 ```
 
-## 決済手段タイプ
+### パッケージ配置方針
 
-```go
-const (
-    PaymentMethodTypeCreditCard       = "credit_card"       // クレジットカード
-    PaymentMethodTypeDebitCard        = "debit_card"        // デビットカード
-    PaymentMethodTypeBankTransfer     = "bank_transfer"     // 銀行振込
-    PaymentMethodTypeConvenienceStore = "convenience_store" // コンビニ決済
-    PaymentMethodTypeQRCode           = "qr_code"          // QRコード決済
-    PaymentMethodTypeCarrier          = "carrier"           // キャリア決済
-    PaymentMethodTypePostpay          = "postpay"           // 後払い
-    PaymentMethodTypeDirectDebit      = "direct_debit"      // 口座振替
-)
-```
+| パッケージ | 配置するもの | 根拠 |
+|-----------|-------------|------|
+| `domain/payment/` | Payment エンティティ、ドメインイベント、Repository IF | 純粋なドメイン概念のみ |
+| `application/port/` | PaymentGateway IF, CustomerGateway IF, WebhookHandler IF, GatewayRouter IF, リクエスト/レスポンス型 | 外部決済サービスとの統合境界（ポート） |
+| `infrastructure/gateway/` | DefaultGatewayRouter, 各ゲートウェイ実装 | 具象実装（アダプタ） |
 
-## チャージフロー
+## 2. 決済の種類と対応範囲
 
-最もシンプルな決済フロー — 即時チャージ：
+### 決済方法
 
-```go
-pmID := "pm-visa-1234"
-resp, err := gateway.Charge(ctx, &port.ChargeRequest{
-    CustomerID:      "cust-001",
-    Amount:          invoiceTotal,
-    PaymentMethodID: &pmID,
-    IdempotencyKey:  "charge-inv-001",
-})
-```
+クレジットカード、デビットカード、銀行振込、コンビニ払い、QRコード決済（PayPay, LINE Pay等）、キャリア決済、後払い、口座振替
 
-## オーソリ/キャプチャフロー
-
-サービス提供前に決済を確認する必要がある場合（決済ゲート付きプロビジョニング）：
-
-```go
-// 1. オーソリ（資金を確保）
-pmID := "pm-visa-1234"
-authResp, _ := gateway.Authorize(ctx, &port.AuthorizeRequest{
-    CustomerID:      "cust-001",
-    Amount:          invoiceTotal,
-    PaymentMethodID: &pmID,
-    IdempotencyKey:  "auth-inv-001",
-})
-
-// 2. サービスプロビジョニング...
-
-// 3. キャプチャ（チャージを確定）
-captureResp, _ := gateway.Capture(ctx, &port.CaptureRequest{
-    AuthorizationID: authResp.AuthorizationID,
-    Amount:          &invoiceTotal, // 一部キャプチャも可能
-})
-```
-
-## 決済ゲート付きプロビジョニング
-
-ホスティング/クラウドプロバイダーで一般的なパターン。決済完了がサービス有効化の条件：
+### 決済フロー
 
 ```
-1. Contract: Draft     → 契約作成
-2. Contract: Active    → 有効化
-3. Contract: Suspended → 即時停止（決済待ち）
-4. Invoice: Finalized  → 請求書の生成・確定
-5. Payment: Completed  → 決済処理
-6. Contract: Active    → 再開 → サービスプロビジョニング
+Authorize（オーソリ） → Capture（売上確定） → Complete（完了） → Refund（返金）
+                     → Void（オーソリ取消）
+即時決済: Authorize + Capture を同時に行う（Charge）
 ```
 
-`Suspended`状態を以下の両方に再利用：
-- **初回有効化**: 初回決済を待つ新規契約
-- **未払い停止**: 支払い遅延の既存契約（ダニング）
+## 3. コアインターフェース
 
-両方とも同じ方法で解決: 決済 → 再開。
+### PaymentGateway（メインIF）
 
-`OnContractResumeHook`でサービスプロビジョニングをトリガー：
+ソース: `application/port/gateway.go`
 
-:::note
-`AfterChargeHook`が受け取る`PaymentContext`では、`Contract()`はデフォルトで`nil`を返します。契約情報にアクセスするには、`Invoice.ContractID()`経由で自分で契約をルックアップする必要があります。そのため、決済ゲート付きプロビジョニングでは、フックではなく`ProcessPayment`成功後にアプリケーションコードでResumeを処理する方法が推奨されます（[決済統合ガイド](../guides/payment-integration)参照）。
-:::
+| メソッド | 説明 |
+|---------|------|
+| `ID()` | ゲートウェイ識別子 |
+| `SupportedMethods()` | サポートする決済方法 |
+| `Charge` | 即時決済（オーソリ+キャプチャ同時） |
+| `Authorize` / `Capture` / `Void` | オーソリフロー |
+| `Refund` / `Cancel` | 返金・キャンセル |
+| `GetTransaction` | トランザクション詳細取得 |
+| `RegisterPaymentMethod` / `DeletePaymentMethod` / `GetPaymentMethod` / `ListPaymentMethods` | 支払い方法管理 |
 
-```go
-func (p *ProvisioningPlugin) OnContractResume(ctx *plugin.Context, c *contract.ContractAggregate) error {
-    return p.provisioningService.Activate(ctx.Context(), c.ContractID())
-}
-```
+### CustomerGateway
 
-:::caution 既知の制約
-`OnContractResumeHook`は**初回有効化**（初回決済完了）と**再有効化**（停止後の決済完了）を区別できません。これは集約の`Apply()`メソッドで`SuspensionConfiguration`がフック発火前に`nil`にクリアされるためです。
+ソース: `application/port/customer.go`
 
-**回避策:**
-- プロビジョニング状態を外部で追跡（例: データベースに「プロビジョニング済み」フラグ）
-- `plugin.Context`のメタデータを使って停止理由をオーケストレーションコードから渡す
-- プロビジョニング前にサービスが既に存在するか確認する
+ゲートウェイ側の顧客情報管理（CRUD）。
 
-詳細は[Issue #5](https://github.com/contract-to-cash/core/issues/5)を参照。
-:::
+### WebhookHandler / WebhookProcessor
 
-## 決済手段のフォールバック解決
+ソース: `application/port/webhook.go`
 
-決済手段は階層的に解決されます（Stripeスタイル）：
+| コンポーネント | 責務 |
+|--------------|------|
+| `WebhookHandler` | ゲートウェイ固有のパース・署名検証 |
+| `WebhookProcessor` | 横断的関心事: タイムスタンプ検証、重複検出、リトライ、DLQ |
 
-```
-1. ProcessPaymentInput内の明示的PaymentMethodID
-2. Invoice.PaymentMethodID
-3. Contract.PaymentMethodID
-4. Customer.DefaultPaymentMethodID
-```
+**Webhook処理フロー:**
+1. `ParseAndVerify`（署名検証 + パース）
+2. タイムスタンプ双方向検証（過去・未来。デフォルト±5分、Standard Webhooks仕様準拠）
+3. 重複検出（`WebhookDeduplicator`。デフォルトTTL 72時間=Stripe最大リトライ期間）
+4. イベントハンドラ呼び出し（リトライ可能エラーのみリトライ、指数バックオフ+ジッター）
+5. リトライ超過時は`WebhookDeadLetterQueue`に送信
 
-:::note
-ContractおよびCustomerレベルのフォールバックには、`NewPaymentService`に`contractRepo`を渡す必要があります。`contractRepo`が`nil`の場合、解決はInvoiceレベルで止まります。
-:::
+### GatewayRouter
 
-より具体的なレベルがより一般的なレベルをオーバーライドします。
+ソース: `application/port/router.go`
 
-## ゲートウェイの実装
+条件（金額、通貨、決済方法、国）に基づいてゲートウェイを選択するルーター。
+`DefaultGatewayRouter` 実装は `infrastructure/gateway/router.go`。
 
-```go
-type StripeGateway struct {
-    client *stripe.Client
-}
+## 4. セキュリティ方針
 
-func (g *StripeGateway) ID() string { return "stripe" }
+**非通過型設計（PCI DSS SAQ A相当）:**
+- カード番号・CVCはサーバーサイドに一切登場しない
+- 決済GWのJS SDK でトークン化、サーバーにはトークン/PaymentMethodIDのみ送信
+- `CardSource` 型（カード番号直接受信）は意図的に提供しない
+- 改正割賦販売法（2018年施行）の非保持化要件に準拠
 
-func (g *StripeGateway) SupportedMethods() []port.PaymentMethodType {
-    return []port.PaymentMethodType{
-        port.PaymentMethodTypeCreditCard,
-        port.PaymentMethodTypeDebitCard,
-    }
-}
+## 5. エラー定義
 
-func (g *StripeGateway) Charge(ctx context.Context, req *port.ChargeRequest) (*port.ChargeResponse, error) {
-    // Stripe APIにマッピング
-    // ...
-}
-```
+ソース: `application/port/errors.go`
+
+`GatewayError`: Code（ErrorCode）+ Message + DeclineCode + Retryable フラグ。
+カード関連（declined, expired, insufficient_funds等）、処理関連（rate_limit, duplicate等）、GW関連（unavailable, timeout, fraud等）。
+
+## 6. 決済サービス（PaymentService）
+
+ソース: `application/service/payment_service.go`
+
+### ProcessPayment フロー
+
+1. 請求書取得 → 支払い金額決定
+2. `BeforeChargeHook` 実行
+3. `PaymentGateway.Charge()` で決済実行
+4. 失敗時: `OnPaymentFailedHook` 実行
+5. 成功時: Payment記録作成、請求書に支払い反映、イベント発行
+6. `AfterChargeHook` 実行
+
+### 支払い方法の階層的フォールバック
+
+請求書レベル → 契約レベル → アカウントデフォルトの順で支払い方法を解決。
+
+## 7. サービス側での実装
+
+OSS が提供するもの:
+- `port.PaymentGateway` / `port.CustomerGateway` / `port.WebhookHandler` インターフェース
+- リクエスト/レスポンス型、エラーコード
+- `PaymentService`（アプリケーション層）
+- `DefaultGatewayRouter`（インフラ層）
+- テスト用モック実装
+
+サービス側が実装するもの:
+- 具象ゲートウェイ（Stripe, PayPay等）
+- `WebhookDeduplicator` / `WebhookDeadLetterQueue` のストレージ実装
+
+詳細な統合手順: [guides/usage-guide.md](../guides/usage-guide.md)
