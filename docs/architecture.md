@@ -1,18 +1,22 @@
-# Contract Billing Core - アーキテクチャ概要
+---
+sidebar_position: 3
+---
 
-**イベントソーシング + プラグインアーキテクチャによる契約決済OSSパッケージ**
+# Architecture Overview
 
-## 1. 概要
+**Event Sourcing + Plugin Architecture for contract-to-cash billing**
 
-### 1.1 目的
+## 1. Overview
 
-SaaSやサービス事業において、契約・決済ロジックは本質的に類似している。本パッケージは以下を提供する：
+### 1.1 Purpose
 
-- 契約ライフサイクル管理（買い切り / サブスクリプション / 従量課金）
-- イベントソーシングによる全操作の完全な監査証跡
-- プラグインアーキテクチャによる拡張性（クーポン、割引、税計算など）
+Contract and billing logic is fundamentally similar across SaaS and service businesses. This package provides:
 
-### 1.2 システム構成
+- Contract lifecycle management (one-time / subscription / usage-based)
+- Complete audit trail via Event Sourcing
+- Extensibility through a Plugin Architecture (coupons, discounts, tax, etc.)
+
+### 1.2 System Diagram
 
 ```mermaid
 graph TB
@@ -20,233 +24,270 @@ graph TB
         subgraph Plugins
             CP[Coupon Plugin]
             TP[Tax Plugin]
-            CUP[Custom Plugin<br/>User Defined]
+            CUP[Custom Plugin]
         end
-        
+
         CP --> PAI
         TP --> PAI
         CUP --> PAI
         PAI[Plugin Adapter Interface]
-        
+
         subgraph ContractCore[Contract Core]
             SE[Subscription Engine]
             OE[One-Time Engine]
             UE[Usage-Based Engine]
         end
-        
+
         PAI --> ContractCore
-        
-        ES[(Event Store<br/>Append-Only Event Log)]
+
+        ES[(Event Store\nAppend-Only Log)]
         ContractCore --> ES
     end
 ```
 
-## 2. 設計原則
+## 2. Design Principles
 
-### 2.1 依存逆転の原則（DIP）
+### 2.1 Layer Architecture (Clean Architecture + DDD)
 
 ```mermaid
 graph TB
     subgraph PL[Presentation Layer]
         PL_DESC[HTTP Handler, gRPC, CLI]
     end
-    
+
     subgraph AL[Application Layer]
         AL_DESC[UseCase, Command/Query Handler]
     end
-    
+
     subgraph DL[Domain Layer]
-        DL_DESC[Entity, Value Object,<br/>Domain Service, Repository Interface]
-        DL_NOTE[※外部依存なし]
+        DL_DESC[Entity, Value Object,\nDomain Service, Repository Interface]
+        DL_NOTE[No external dependencies]
     end
-    
+
     subgraph IL[Infrastructure Layer]
-        IL_DESC[PostgreSQL, MySQL,<br/>DynamoDB, EventStore...]
+        IL_DESC[PostgreSQL, MySQL,\nDynamoDB, EventStore...]
     end
-    
+
     PL -->|depends on| AL
     AL -->|depends on| DL
     IL -.->|implements| DL
 ```
 
-### 2.2 CQRS（コマンド・クエリ分離）
+**Strict rules:**
 
-| 項目 | 決定 |
-|------|------|
-| CQRS | **簡易CQRS** |
-| Projection更新 | **利用者が選択** |
-| 説明 | 同一DBでProjectionテーブルを使用。同期/非同期をオプションで指定可能 |
+- `domain/` must have zero external dependencies (stdlib + `ulid` only)
+- `application/` depends only on `domain/`, never on `infrastructure/`
+- Dependencies always point inward (Dependency Inversion)
+- Interfaces are defined in `domain/` or `application/port/`; implementations live in `infrastructure/`
 
-### 2.3 その他の設計方針
+### 2.2 Dependency Graph
 
-| 項目 | 決定 | 備考 |
-|------|------|------|
-| マルチテナント | サービス側に委ねる | OSS側では対応しない |
-| タイムゾーン | **UTC固定** | 全イベント時刻はUTC |
-| 請求サイクル | 選択肢をOSSで提供 | 日次/週次/月次/年次 |
+```mermaid
+graph BT
+    shared["domain/shared"]
+    contract["domain/contract"] --> shared
+    invoice["domain/invoice"] --> shared
+    payment["domain/payment"] --> shared
+    balance["domain/balance"] --> shared
+    usage["domain/usage"] --> shared
+    product["domain/product"] --> shared
+    pricing["domain/pricing"] --> shared
+    contract --> pricing
+    eventstore["eventstore/"] --> shared
+    plugin["plugin/"] --> contract
+    plugin --> invoice
+    plugin --> payment
+    appService["application/service/"] --> contract
+    appService --> invoice
+    appService --> usage
+    appService --> balance
+    appService --> pricing
+    appService --> product
+    appService --> plugin
+    appService --> eventstore
+    port["application/port/"] --> shared
+    infra["infrastructure/inmemory/"] -.->|implements| contract
+    infra -.->|implements| invoice
+    plugins["plugins/"] --> plugin
+    batch["batch/"] --> appService
+```
 
-## 3. パッケージ構成
+### 2.3 CQRS (Command Query Responsibility Segregation)
+
+| Item | Decision |
+|------|----------|
+| CQRS | **Simplified CQRS** |
+| Projection updates | **Consumer's choice** |
+| Description | Uses projection tables in the same DB. Sync/async selectable via options |
+
+### 2.4 Other Design Decisions
+
+| Item | Decision | Notes |
+|------|----------|-------|
+| Multi-tenancy | Delegated to consumer | Not handled by this library |
+| Timezone | **UTC only** | All event timestamps are UTC |
+| Billing cycles | Provided by library | Daily / Weekly / Monthly / Yearly |
+
+## 3. Package Structure
 
 ```
 github.com/contract-to-cash/core/
-├── domain/                      # ドメイン層（依存なし）
-│   ├── contract/
-│   │   ├── aggregate.go         # イベントソーシング集約
-│   │   ├── repository.go        # インターフェース定義
-│   │   ├── events.go
-│   │   └── entity.go
-│   ├── invoice/
-│   ├── payment/
-│   ├── balance/                 # クレジット台帳
-│   ├── billing/                 # 計算抽象化
-│   ├── pricing/                 # 不変Price、料金モデル
-│   ├── product/                 # Product定義
-│   ├── usage/
-│   └── shared/                  # 共通値オブジェクト
-│       ├── money.go
-│       ├── daterange.go
-│       └── identifier.go
+├── domain/                      # Domain layer (no external deps)
+│   ├── contract/                #   Event Sourced aggregate
+│   ├── invoice/                 #   Invoice + CreditNote entities
+│   ├── payment/                 #   Payment entity + Dunning
+│   ├── balance/                 #   Credit ledger
+│   ├── billing/                 #   Billing calculation abstraction
+│   ├── pricing/                 #   Immutable Price, pricing models
+│   ├── product/                 #   Product definition
+│   ├── usage/                   #   Usage record + summary
+│   └── shared/                  #   Shared value objects (Money, Clock, etc.)
 │
-├── application/                 # アプリケーション層
-│   ├── port/                    # 外部連携IF（PaymentGateway等）
-│   ├── query/
-│   ├── projection/
-│   ├── tx/                      # トランザクション管理（TxManager, Saga）
-│   └── service/                 # BillingService, PaymentService, SnapshotService, CreditNoteService
+├── application/                 # Application layer
+│   ├── port/                    #   External integration IFs (PaymentGateway, etc.)
+│   ├── query/                   #   Temporal query service
+│   ├── projection/              #   Projection service (sync/async)
+│   ├── tx/                      #   Transaction management (TxManager, Saga)
+│   └── service/                 #   BillingService, PaymentService, SnapshotService, CreditNoteService
 │
-├── plugin/                      # プラグインシステム
-│   ├── registry.go
-│   ├── hooks.go
-│   └── context.go
-│
-├── eventstore/                  # Event Store インターフェース
-│   ├── store.go
-│   ├── event.go
-│   └── snapshot.go
-│
-├── batch/                       # バッチ処理
-│   ├── processor.go
-│   └── ...
-│
-├── infrastructure/              # インフラ実装
-│   └── inmemory/               # テスト・デモ用インメモリ実装
-│
-└── plugins/                     # 公式プラグイン
+├── plugin/                      # Plugin system core
+├── eventstore/                  # Event Store interfaces
+├── batch/                       # Batch processing (ContractRenewal, etc.)
+├── infrastructure/inmemory/     # In-memory implementations (test/demo)
+└── plugins/                     # Official plugins
     ├── coupon/
     ├── tax/
     └── invoicecleanup/
 ```
 
-## 4. 主要コンポーネント
+## 4. Core Components
 
-### 4.1 コアドメイン
+### 4.1 Domain Entities
 
-| ドメイン | 責務 |
-|---------|------|
-| **Contract** | 契約のライフサイクル管理（作成、有効化、一時停止、解約、更新） |
-| **Invoice** | 請求書の生成、発行、支払い記録 |
-| **CreditNote** | クレジットノートの作成・発行・適用・返金、請求書再発行（リビジョンチェーン） |
-| **Payment** | 決済処理、返金 |
-| **Usage** | 従量課金のメトリクス記録・集計 |
+| Entity | Kind | Notes |
+|--------|------|-------|
+| **Contract** | Event Sourced Aggregate | States: Draft -> Trialing -> Active -> PastDue/Suspended -> Cancelled/Expired |
+| **Invoice** | Entity | Revision chain support (void-and-recreate) |
+| **CreditNote** | Entity | Line-item-level adjustments |
+| **Payment** | Entity | Idempotency key required |
+| **Price** | Immutable Entity | Flat / Tiered (Graduated, Volume) / Usage pricing models |
+| **Product** | Entity | Defines "what to sell"; separated from Price ("how to charge") |
+| **BalanceEntry** | Entity | FIFO consumption, expiration support |
 
-### 4.2 契約タイプ
+### 4.2 Contract Types
 
-| タイプ | 説明 |
-|--------|------|
-| `one_time` | 買い切り |
-| `subscription` | サブスクリプション（定期課金） |
-| `usage_based` | 従量課金 |
+| Type | Description |
+|------|-------------|
+| `one_time` | One-time purchase |
+| `subscription` | Recurring billing |
+| `usage_based` | Metered billing |
 
-### 4.3 契約ステータス
+### 4.3 Contract State Machine
 
-```go
-type ContractStatus string
-
-const (
-    ContractStatusDraft     ContractStatus = "draft"
-    ContractStatusTrialing  ContractStatus = "trialing"   // トライアル
-    ContractStatusActive    ContractStatus = "active"
-    ContractStatusPastDue   ContractStatus = "past_due"   // 支払い遅延（Dunning中）
-    ContractStatusSuspended ContractStatus = "suspended"
-    ContractStatusCancelled ContractStatus = "cancelled"
-    ContractStatusExpired   ContractStatus = "expired"
-)
+```mermaid
+stateDiagram-v2
+    [*] --> Draft : Create
+    Draft --> Active : Activate
+    Draft --> Trialing : StartTrial
+    Draft --> Cancelled : Cancel
+    Trialing --> Active : EndTrial(converted=true)
+    Trialing --> Cancelled : EndTrial(converted=false) / Cancel
+    Active --> PastDue : Payment failure (Dunning)
+    Active --> Suspended : Suspend
+    Active --> Cancelled : Cancel
+    Active --> Expired : Term end (autoRenew=false)
+    PastDue --> Active : Payment success
+    PastDue --> Suspended : Max retries reached
+    PastDue --> Cancelled : Cancel
+    Suspended --> Active : Resume
+    Suspended --> Cancelled : Cancel
+    Cancelled --> [*]
+    Expired --> [*]
 ```
 
-## 5. 推奨フロー: Payment-Gated Provisioning
+## 5. Payment-Gated Provisioning (Recommended Flow)
 
-初回決済が完了するまでサービスを開始しない「Payment-Gated Provisioning」パターンを推奨する（Issue #5で設計決定）。既存の状態遷移のみで実現可能であり、新規ステータスは不要。
+A pattern where service access is withheld until the first payment succeeds. This uses existing state transitions only -- no new statuses needed.
 
-### 5.1 フロー
+### 5.1 Flow
 
-| ステップ | Contract Status | Invoice Status | 説明 |
-|---------|----------------|----------------|------|
-| 1 | Draft | (なし) | 契約作成 |
-| 2 | Draft | Draft | 請求書生成（ステータスガードでDraft許可） |
-| 3 | Active | Finalized | ユーザー確認後、契約と請求書の両方を確定 |
-| 4 | Suspended | Finalized | 即座にSuspend（決済待ち） |
-| 5 | Active | Paid | 決済確認 → Resume → サービス開始 |
+| Step | Contract Status | Invoice Status | Description |
+|------|----------------|----------------|-------------|
+| 1 | Draft | (none) | Create contract |
+| 2 | Draft | Draft | Generate invoice (Draft status allows this) |
+| 3 | Active | Finalized | User confirms; finalize both contract and invoice |
+| 4 | Suspended | Finalized | Immediately suspend (awaiting payment) |
+| 5 | Active | Paid | Payment confirmed -> Resume -> Service starts |
 
-### 5.2 設計上のポイント
+### 5.2 Design Points
 
-- **Suspendedの統一的な再利用**: `Suspended`を「初回決済待ち」と「未払い停止」の両方で統一的な「サービス非稼働」状態として使用する
-- **既存の状態遷移で完結**: Active → Suspended → Active（Resume）の遷移は既存のライフサイクルにすでに定義されている
-- **決済完了がサービス開始のゲート**: 契約がActiveになった直後にSuspendし、決済確認後にResumeすることで、決済完了をサービス提供の前提条件とする
+- **Unified Suspended state**: Used for both "awaiting first payment" and "payment failure suspension"
+- **No new transitions needed**: Active -> Suspended -> Active (Resume) already exists
+- **Payment gates service access**: Activate then immediately Suspend; Resume only after payment confirmation
 
-### 5.3 シンプルフローも選択可能
+A simpler flow (`Draft -> Activate -> Generate Invoice -> Process Payment`) is also supported. Choose based on business requirements.
 
-上記は推奨フローであり、必須ではない。以下のシンプルなフローも選択可能：
+## 6. Plugin System
 
-```
-Draft → Activate → Invoice生成 → Payment処理
-```
+### 6.1 Extension Points
 
-ビジネス要件に応じて適切なフローを選択すること。
+All hooks follow ISP (Interface Segregation Principle). Implement only the hooks you need.
 
-## 6. プラグインシステム
+| Category | Hooks | Purpose |
+|----------|-------|---------|
+| **Billing calculation** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | Discounts, tax, pre/post calculation |
+| **Contract lifecycle** | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | React to individual contract events |
+| **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | Pre/post charge, failure, refund |
+| **Credit notes** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | CN issuance, invoice revision |
+| **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |
+| **Invoice generation** | `InvoiceGenerationHook` | PDF generation, delivery |
 
-### 6.1 拡張ポイント
+### 6.2 Billing Pipeline
 
-全フックがISP（インターフェース分離の原則）に準拠。必要なフックだけ実装すればよい。
+The core structurally guarantees the accounting-correct calculation order. Plugin `Priority` values only control execution order *within* the same hook type.
 
-| カテゴリ | フック例 | 用途 |
-|---------|---------|------|
-| **請求計算** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引・税計算、計算前後処理 |
-| **契約ライフサイクル** | `OnContractCreateHook`, `OnContractCancelHook` 等 | 契約の各イベントに個別対応 |
-| **支払い** | `BeforeChargeHook`, `AfterChargeHook` 等 | 課金前後、失敗時、返金時 |
-| **クレジットノート** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | クレジットノート発行、請求書再発行 |
-| **メトリクス** | `OnContractChangeHook`, `OnInvoiceIssuedHook` 等 | KPI収集 |
-| **請求書生成** | `InvoiceGenerationHook` | PDF生成、送付 |
-
-### 6.2 実行順序
-
-コアが会計基準に則った計算順序を構造的に保証する：
-
-```
-1. InvoiceLifecycleHook.BeforeCalculation()  ← 計算前処理
-2. 料金計算（コア、契約タイプに応じて分岐）
-   - subscription: 固定料金
-   - usage_based:  UsageRecord集計 → 含有枠差引 → PricingModel適用
-   - one_time:     固定料金（1回のみ）
-   - ハイブリッド:  基本料金 + 従量料金
-3. DiscountHook.CalculateDiscount()          ← 割引計算
-   → 割引上限ガード（割引合計 > subtotalの場合にcap）
-4. 小計算出（コア: subtotal - totalDiscount）
-5. TaxHook.CalculateTax()                    ← 税計算（割引後に対して）
-6. 合計算出（コア: afterDiscount + totalTax）
-7. クレジット台帳からの充当（コア）          ← 残高があれば税込合計から差引
-8. 請求書をdraft状態で生成 → GracePeriod後にfinalize
-9. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
+```mermaid
+flowchart LR
+    subgraph Pipeline["BillingService Invoice Generation"]
+        A["1. Load contract"] --> B["2. Calculate base price"]
+        B --> C["3. BeforeCalculation hook"]
+        C --> D["4. DiscountHook"]
+        D --> E["5. Discount cap guard"]
+        E --> F["6. Subtotal = base - discount"]
+        F --> G["7. TaxHook"]
+        G --> H["8. Total = subtotal + tax"]
+        H --> I["9. Credit application (FIFO)"]
+        I --> J["10. Create draft invoice"]
+        J --> K["11. AfterCalculation hook"]
+        K --> L["12. Save"]
+    end
 ```
 
-## 7. 関連ドキュメント
+**Calculation order detail:**
 
-| ドキュメント | 内容 |
-|-------------|------|
-| [ドメインモデル設計](./design/domain-model.md) | エンティティ、値オブジェクトの詳細設計 |
-| [イベントソーシング設計](./design/event-sourcing.md) | Event Store、時点再構築の詳細 |
-| [プラグインシステム設計](./design/plugin-system.md) | プラグインの実装方法 |
-| [決済ゲートウェイ設計](./design/payment-gateway.md) | 決済インターフェースの詳細 |
-| [メトリクス・インボイス生成設計](./design/metrics-invoicegen.md) | 集計・レポート、請求書発行 |
-| [設計決定事項](./decisions/design-decisions.md) | 設計上の判断とその理由 |
-| [利用ガイド](./guides/usage-guide.md) | サービスへの導入方法 |
+1. `InvoiceLifecycleHook.BeforeCalculation()` -- Pre-calculation processing
+2. Base price calculation (core, branched by contract type)
+   - subscription: fixed price
+   - usage_based: UsageRecord aggregation -> included allowance deduction -> PricingModel
+   - one_time: fixed price (once)
+   - hybrid: base price + usage charge
+3. `DiscountHook.CalculateDiscount()` -- Discount calculation
+   - Discount cap guard: total discount is capped at subtotal
+4. Subtotal computation (core: subtotal - totalDiscount)
+5. `TaxHook.CalculateTax()` -- Tax on post-discount amount
+6. Total computation (core: afterDiscount + totalTax)
+7. Credit ledger application (core) -- FIFO deduction from balance
+8. Create draft invoice -> finalize after GracePeriod
+9. `InvoiceLifecycleHook.AfterCalculation()` -- Post-calculation processing
+
+## 7. Related Documents
+
+| Document | Contents |
+|----------|----------|
+| [Domain Model](./concepts/domain-model.md) | Entities, value objects, detailed design |
+| [Event Sourcing](./concepts/event-sourcing.md) | Event Store, temporal reconstruction |
+| [Plugin System](./concepts/plugin-system.md) | Plugin implementation guide |
+| [Payment Gateway](./concepts/payment-gateway.md) | Payment interface design |
+| [Metrics & Invoice Generation](./internals/metrics-invoicegen.md) | Aggregation, reporting, invoice rendering |
+| [Design Decisions](./decisions/design-decisions.md) | Key decisions and rationale |
+| [Integration Guide](./guides/integration.md) | How to integrate into your service |

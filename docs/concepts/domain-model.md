@@ -235,7 +235,7 @@ Following the Stripe pattern of separating **what you sell** from **how you char
 
 Pricing models: `FlatPrice`, `TieredPrice` (graduated or volume), `UsagePrice`
 
-> For complete type definitions and pricing model details, see [Domain Types Reference](../api/domain-types.md#product-and-price).
+> For complete type definitions and pricing model details, see [Domain Types Reference](../api/domain-types.md#product).
 
 ## Credit Ledger
 
@@ -243,7 +243,7 @@ FIFO-based credit system for handling prorations, cancellation credits, and adju
 
 Reasons: `proration`, `cancellation`, `manual_adjustment`, `refund_conversion`, `goodwill`
 
-> For complete type definitions, see [Domain Types Reference](../api/domain-types.md#balance-credit-ledger).
+> For complete type definitions, see [Domain Types Reference](../api/domain-types.md#credit).
 
 ## Shared Value Objects
 

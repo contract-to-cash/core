@@ -23,6 +23,7 @@ const sidebars: SidebarsConfig = {
         'guides/custom-plugin',
         'guides/temporal-queries',
         'guides/payment-integration',
+        'guides/performance',
       ],
     },
     {
