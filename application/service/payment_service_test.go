@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/application/port"
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/payment"
@@ -500,6 +501,116 @@ func TestResolvePaymentMethod_NoPaymentMethodFound(t *testing.T) {
 	_, err := svc.ResolvePaymentMethod(context.Background(), inv)
 	if err == nil {
 		t.Fatal("expected error when no payment method found")
+	}
+}
+
+// --- Spy gateway for compensation tracking ---
+
+type spyGateway struct {
+	mockGateway
+	voidCalled   bool
+	voidReq      *port.VoidRequest
+	refundCalled bool
+	refundReq    *port.RefundRequest
+}
+
+func (g *spyGateway) Void(_ context.Context, req *port.VoidRequest) (*port.VoidResponse, error) {
+	g.voidCalled = true
+	g.voidReq = req
+	return &port.VoidResponse{}, nil
+}
+
+func (g *spyGateway) Refund(_ context.Context, req *port.RefundRequest) (*port.RefundResponse, error) {
+	g.refundCalled = true
+	g.refundReq = req
+	return &port.RefundResponse{TransactionID: "refund-comp"}, nil
+}
+
+// --- Failing TxManager to trigger compensation ---
+
+type paymentFailingTxManager struct{}
+
+func (m *paymentFailingTxManager) RunInTx(_ context.Context, _ func(context.Context, tx.Repos) error) error {
+	return fmt.Errorf("simulated database failure")
+}
+
+// --- Saga compensation tests (Issue #82) ---
+
+func TestProcessPayment_SagaCompensation_CallsRefundNotVoid(t *testing.T) {
+	// When Charge succeeds but local save fails, the saga compensation
+	// must call Refund (not Void) because Charge is authorize+capture.
+	// Void only works on pre-capture authorizations.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{}
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-comp",
+	})
+
+	// Should fail because local save failed
+	if err == nil {
+		t.Fatal("expected error from local save failure")
+	}
+
+	// Compensation should have called Refund, NOT Void
+	if gw.voidCalled {
+		t.Error("Void should NOT be called for saga compensation after Charge (captured transaction)")
+	}
+	if !gw.refundCalled {
+		t.Fatal("Refund should be called as saga compensation after Charge fails to save locally")
+	}
+}
+
+func TestProcessPayment_SagaCompensation_RefundUsesCorrectTransactionID(t *testing.T) {
+	// Verify the refund compensation uses the correct gateway transaction ID.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{}
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, _ = svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-txnid",
+	})
+
+	if !gw.refundCalled {
+		t.Fatal("Refund should be called as compensation")
+	}
+	// mockGateway.Charge returns "txn-" + IdempotencyKey
+	expectedTxnID := "txn-key-txnid"
+	if gw.refundReq.TransactionID != expectedTxnID {
+		t.Errorf("expected refund TransactionID %q, got %q", expectedTxnID, gw.refundReq.TransactionID)
+	}
+	// Full refund (nil Amount) since the entire charge needs to be reversed
+	if gw.refundReq.Amount != nil {
+		t.Error("expected nil Amount for full refund compensation")
 	}
 }
 

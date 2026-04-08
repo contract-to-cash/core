@@ -188,13 +188,16 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("gateway charge failed: %w", err)
 	}
 
-	// Phase 2: Saga compensation for gateway charge
+	// Phase 2: Saga compensation for gateway charge.
+	// Charge is authorize+capture (one-step), so the transaction is already
+	// captured. Void only works on pre-capture authorizations; we must use
+	// Refund to reverse a captured charge.
 	saga := tx.NewSaga()
 	saga.AddCompensation(func(compCtx context.Context) error {
-		_, voidErr := s.gateway.Void(compCtx, &port.VoidRequest{
-			AuthorizationID: chargeResp.TransactionID,
+		_, refundErr := s.gateway.Refund(compCtx, &port.RefundRequest{
+			TransactionID: chargeResp.TransactionID,
 		})
-		return voidErr
+		return refundErr
 	})
 
 	// Create payment record
