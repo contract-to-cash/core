@@ -1,5 +1,5 @@
 ---
-sidebar_label: domain model
+sidebar_label: Domain Model
 ---
 
 # ドメインモデル設計

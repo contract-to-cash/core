@@ -1,5 +1,5 @@
 ---
-sidebar_label: payment gateway
+sidebar_label: Payment Gateway
 ---
 
 # Payment Gateway Interface 設計

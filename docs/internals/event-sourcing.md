@@ -1,5 +1,5 @@
 ---
-sidebar_label: event sourcing
+sidebar_label: Event Sourcing
 ---
 
 # イベントソーシング設計

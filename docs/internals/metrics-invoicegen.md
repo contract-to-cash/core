@@ -1,5 +1,5 @@
 ---
-sidebar_label: metrics invoicegen
+sidebar_label: Metrics & Invoice Generation
 ---
 
 # プラグインAdapter設計: 集計・レポート & インボイス発行
@@ -1220,7 +1220,7 @@ func (s *Service) Search(ctx context.Context, query *SearchQuery) (*SearchResult
 **請求書生成フック:**
 - `plugin.InvoiceGenerationHook` → `registry.GetInvoiceGenerationHooks()`
 
-詳細は `docs/design/plugin-system.md` のセクション4（プラグインレジストリ）を参照。
+詳細は `docs/internals/plugin-system.md` のセクション4（プラグインレジストリ）を参照。
 
 ---
 

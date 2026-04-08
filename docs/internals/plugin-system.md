@@ -1,5 +1,5 @@
 ---
-sidebar_label: plugin system
+sidebar_label: Plugin System
 ---
 
 # プラグインシステム設計

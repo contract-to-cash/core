@@ -59,9 +59,9 @@ const sidebars: SidebarsConfig = {
         'internals/payment-gateway',
         'internals/metrics-invoicegen',
         'internals/codebase-review-20260327',
+        'decisions/design-decisions',
       ],
     },
-    'decisions/design-decisions',
     {
       type: 'category',
       label: 'Research',
