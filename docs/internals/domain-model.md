@@ -1,3 +1,7 @@
+---
+sidebar_label: domain model
+---
+
 # ドメインモデル設計
 
 ## 論理データモデル図

@@ -1,3 +1,7 @@
+---
+sidebar_label: payment gateway
+---
+
 # Payment Gateway Interface 設計
 
 ## 1. 概要

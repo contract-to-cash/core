@@ -1,3 +1,7 @@
+---
+sidebar_label: Design Decisions
+---
+
 # 設計決定事項
 
 本ドキュメントでは、Contract Billing Coreの設計上の重要な決定事項とその理由を記録する。

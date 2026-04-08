@@ -49,6 +49,28 @@ const sidebars: SidebarsConfig = {
         'api/event-store',
       ],
     },
+    {
+      type: 'category',
+      label: 'Internals',
+      items: [
+        'internals/domain-model',
+        'internals/event-sourcing',
+        'internals/plugin-system',
+        'internals/payment-gateway',
+        'internals/metrics-invoicegen',
+        'internals/codebase-review-20260327',
+      ],
+    },
+    'decisions/design-decisions',
+    {
+      type: 'category',
+      label: 'Research',
+      items: [
+        'research/2026-03-28-billing-interval-industry-standards',
+        'research/2026-03-28-invoice-reissue-industry-standards',
+        'research/2026-01-30-design-review-improvements',
+      ],
+    },
   ],
 };
 

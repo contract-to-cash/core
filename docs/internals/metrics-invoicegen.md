@@ -1,3 +1,7 @@
+---
+sidebar_label: metrics invoicegen
+---
+
 # プラグインAdapter設計: 集計・レポート & インボイス発行
 
 ## 1. 概要

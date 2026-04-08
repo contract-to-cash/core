@@ -145,6 +145,7 @@ BeforeCalculation → 価格計算 → Discount → Subtotal → Tax → Total �
 - `BalanceEntry.sourceType` が未型付きstring（タイポが検出されない）
 - `Product.AddFeature/AddUsageMetric` に重複チェックがない
 
+詳細: @docs/internals/codebase-review-20260327.md
 
 ## 詳細ドキュメント
 
