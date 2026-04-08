@@ -1,3 +1,7 @@
+---
+sidebar_label: Plugin System
+---
+
 # プラグインシステム設計
 
 ## 1. 概要

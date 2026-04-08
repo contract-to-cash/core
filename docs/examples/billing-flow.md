@@ -42,7 +42,6 @@ Creates a ¥3,000/month subscription in Draft status:
 agg := contract.NewContractAggregate(contractID, clock)
 agg.Create(contract.CreateContractCommand{
     AccountID:    shared.AccountID("acct-demo-001"),
-    PlanID:       shared.PlanID("plan-standard"),
     PriceID:      priceEntity.ID(),
     ContractType: contract.ContractTypeSubscription,
     BillingCycle: contract.BillingCycleMonthly,

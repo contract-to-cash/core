@@ -1,3 +1,7 @@
+---
+sidebar_label: Event Sourcing
+---
+
 # イベントソーシング設計
 
 ## 1. 概要

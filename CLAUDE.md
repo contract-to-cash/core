@@ -145,15 +145,15 @@ BeforeCalculation → 価格計算 → Discount → Subtotal → Tax → Total �
 - `BalanceEntry.sourceType` が未型付きstring（タイポが検出されない）
 - `Product.AddFeature/AddUsageMetric` に重複チェックがない
 
-詳細: @docs/reviews/codebase-review-20260327.md
+詳細: @docs/internals/codebase-review-20260327.md
 
 ## 詳細ドキュメント
 
-- @docs/architecture.md - アーキテクチャ全体像
-- @docs/decisions/design-decisions.md - 設計判断とその理由
-- @docs/design/domain-model.md - ドメインモデル詳細
-- @docs/design/event-sourcing.md - Event Sourcing設計
-- @docs/design/plugin-system.md - プラグインシステム設計
-- @docs/design/payment-gateway.md - 決済ゲートウェイ設計
-- @docs/guides/usage-guide.md - サービス側での組み込みガイド
-- @docs/reviews/codebase-review-20260327.md - コードレビュー結果・既知の課題
+- @docs/architecture.md - Architecture overview
+- @docs/decisions/design-decisions.md - Design decisions and rationale
+- @docs/internals/domain-model.md - Domain model detailed spec
+- @docs/internals/event-sourcing.md - Event sourcing detailed spec
+- @docs/internals/plugin-system.md - Plugin system detailed spec
+- @docs/internals/payment-gateway.md - Payment gateway detailed spec
+- @docs/internals/metrics-invoicegen.md - Metrics & invoice generation spec
+- @docs/guides/integration.md - Integration guide for service developers

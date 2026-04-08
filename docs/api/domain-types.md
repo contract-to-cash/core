@@ -60,7 +60,6 @@ ULID-based identifiers:
 | `PaymentID` | `NewPaymentID()` |
 | `ProductID` | `NewProductID()` |
 | `PriceID` | `NewPriceID()` |
-| `PlanID` | `NewPlanID()` |
 | `UsageRecordID` | `NewUsageRecordID()` |
 | `BalanceEntryID` | `NewBalanceEntryID()` |
 | `CreditNoteID` | `NewCreditNoteID()` |
@@ -136,7 +135,6 @@ agg := contract.NewContractAggregate(contractID, clock)
 ```go
 type CreateContractCommand struct {
     AccountID      shared.AccountID
-    PlanID         shared.PlanID
     PriceID        shared.PriceID
     ContractType   ContractType
     BillingCycle   BillingCycle
@@ -173,7 +171,6 @@ const (
 ```go
 agg.ContractID() shared.ContractID
 agg.AccountID() shared.AccountID
-agg.PlanID() shared.PlanID
 agg.Status() ContractStatus
 agg.GetContractType() ContractType
 agg.GetBillingCycle() BillingCycle
@@ -211,7 +208,6 @@ type Repository interface {
     Save(ctx context.Context, aggregate *ContractAggregate) error
     FindByID(ctx context.Context, id shared.ContractID) (*ContractAggregate, error)
     FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*ContractAggregate, error)
-    FindActiveByPlanID(ctx context.Context, planID shared.PlanID) ([]*ContractAggregate, error)
     FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
     FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
     FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)

@@ -1,3 +1,7 @@
+---
+sidebar_label: Codebase Review (2026-03-27)
+---
+
 # コードベース調査レポート: Contract-to-Cash Core
 
 **調査日**: 2026-03-27

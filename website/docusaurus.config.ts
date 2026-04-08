@@ -39,9 +39,10 @@ const config: Config = {
       'classic',
       {
         docs: {
+          path: '../docs',
           sidebarPath: './sidebars.ts',
           editUrl:
-            'https://github.com/contract-to-cash/core/tree/main/website/',
+            'https://github.com/contract-to-cash/core/tree/main/',
         },
         blog: false,
         theme: {

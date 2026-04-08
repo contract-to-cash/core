@@ -1,3 +1,7 @@
+---
+sidebar_label: Design Review Improvements (2026-01-30)
+---
+
 # 設計レビュー: 改善計画
 
 **作成日**: 2026-01-30
@@ -25,7 +29,7 @@
 ## 改善1: ドメイン層とインフラ層の境界修正
 
 > **注**: 本改善は設計段階で先行適用済み。
-> - `docs/design/payment-gateway.md`: Gateway IF → `application/port/gateway.go` (PaymentGateway)、
+> - `docs/internals/payment-gateway.md`: Gateway IF → `application/port/gateway.go` (PaymentGateway)、
 >   WebhookHandler → `application/port/webhook.go`、CustomerGateway → `application/port/customer_gateway.go`、
 >   GatewayRouter IF → `application/port/gateway_router.go`、
 >   DefaultGatewayRouter → `infrastructure/gateway/router.go` に移動
@@ -123,14 +127,14 @@ type PaymentGateway interface {
 
 ### 影響を受けるドキュメント
 
-- `docs/design/payment-gateway.md`: パッケージパスの修正
+- `docs/internals/payment-gateway.md`: パッケージパスの修正
 - `docs/architecture.md`: パッケージ構成図の更新
 
 ---
 
 ## 改善2: プラグインシステムのフック分離
 
-> **注**: 本改善は設計段階で先行適用済み。`docs/design/plugin-system.md` は
+> **注**: 本改善は設計段階で先行適用済み。`docs/internals/plugin-system.md` は
 > 初版から DiscountHook / TaxHook / InvoiceLifecycleHook の分離設計を採用しており、
 > InvoiceCalculationHook は存在しない。以下は改善の根拠を記録として残す。
 
@@ -321,7 +325,7 @@ func (r *Registry) GetInvoiceLifecycleHooks() []InvoiceLifecycleHook { ... }
 
 ### 影響を受けるドキュメント
 
-- `docs/design/plugin-system.md`: フック定義の全面改訂
+- `docs/internals/plugin-system.md`: フック定義の全面改訂
 - `docs/architecture.md`: プラグイン実行順序の説明更新
 
 ---
@@ -329,11 +333,11 @@ func (r *Registry) GetInvoiceLifecycleHooks() []InvoiceLifecycleHook { ... }
 ## 改善3: イベントソーシングの集約設計改善
 
 > **注**: 本改善は設計段階で先行適用済み。
-> - `docs/design/event-sourcing.md`: 型付きイベント（DomainEvent IF, EventType定数, EventRegistry）、
+> - `docs/internals/event-sourcing.md`: 型付きイベント（DomainEvent IF, EventType定数, EventRegistry）、
 >   型スイッチによるApply、Clock IF注入（shared/clock.go）を適用済み
-> - `docs/design/payment-gateway.md`: WebhookProcessor, PaymentService に clock IF を注入、
+> - `docs/internals/payment-gateway.md`: WebhookProcessor, PaymentService に clock IF を注入、
 >   time.Now() を clock.Now() に置換済み
-> - `docs/design/plugin-system.md`: CouponPlugin に clock IF を注入、テスト例を FixedClock に更新済み
+> - `docs/internals/plugin-system.md`: CouponPlugin に clock IF を注入、テスト例を FixedClock に更新済み
 > 以下は改善の根拠を記録として残す。
 
 ### 問題
@@ -562,8 +566,8 @@ func (a *BaseAggregate) RaiseEvent(domainEvent DomainEvent, metadata EventMetada
 
 ### 影響を受けるドキュメント
 
-- `docs/design/event-sourcing.md`: 集約ルート、イベント定義セクションの改訂
-- `docs/design/domain-model.md`: 契約集約のコード例更新
+- `docs/internals/event-sourcing.md`: 集約ルート、イベント定義セクションの改訂
+- `docs/internals/domain-model.md`: 契約集約のコード例更新
 
 ---
 
@@ -784,8 +788,8 @@ github.com/contract-to-cash/core/
 ### 影響を受けるドキュメント
 
 - `docs/architecture.md`: パッケージ構成の全面改訂
-- `docs/design/domain-model.md`: 全エンティティのID型変更、Engine 除去
-- `docs/design/payment-gateway.md`: パッケージパスの変更
+- `docs/internals/domain-model.md`: 全エンティティのID型変更、Engine 除去
+- `docs/internals/payment-gateway.md`: パッケージパスの変更
 
 ---
 
@@ -954,8 +958,8 @@ func mapErrorCodeToHTTPStatus(code shared.ErrorCode) int {
 
 ### 影響を受けるドキュメント
 
-- `docs/design/domain-model.md`: 全エラー箇所の更新
-- `docs/design/event-sourcing.md`: 集約のエラー処理更新
+- `docs/internals/domain-model.md`: 全エラー箇所の更新
+- `docs/internals/event-sourcing.md`: 集約のエラー処理更新
 - `docs/architecture.md`: エラーハンドリング戦略の追記
 
 ---
@@ -965,11 +969,11 @@ func mapErrorCodeToHTTPStatus(code shared.ErrorCode) int {
 | ドキュメント | 影響する改善 | 変更内容 |
 |-------------|------------|---------|
 | `docs/architecture.md` | 1, 2, 4, 5 | パッケージ構成図の全面改訂、エラーハンドリング戦略追記 |
-| `docs/design/domain-model.md` | 3, 4, 5 | ID型の変更、Engine除去、型付きイベント、エラー型変更 |
-| `docs/design/event-sourcing.md` | 3, 5 | 集約ルート設計改訂、EventRegistry追加、Clock導入 |
-| `docs/design/plugin-system.md` | 2 | フック分離（DiscountHook / TaxHook）、Context型安全化 |
-| `docs/design/payment-gateway.md` | 1, 4 | パッケージパスを `application/port/` に変更 |
-| `docs/design/metrics-invoicegen.md` | 2 | フック名の変更に合わせた更新 |
+| `docs/internals/domain-model.md` | 3, 4, 5 | ID型の変更、Engine除去、型付きイベント、エラー型変更 |
+| `docs/internals/event-sourcing.md` | 3, 5 | 集約ルート設計改訂、EventRegistry追加、Clock導入 |
+| `docs/internals/plugin-system.md` | 2 | フック分離（DiscountHook / TaxHook）、Context型安全化 |
+| `docs/internals/payment-gateway.md` | 1, 4 | パッケージパスを `application/port/` に変更 |
+| `docs/internals/metrics-invoicegen.md` | 2 | フック名の変更に合わせた更新 |
 | `docs/decisions/design-decisions.md` | 全て | 本改善を新しいADRとして追記 |
 
 ---

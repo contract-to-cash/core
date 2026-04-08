@@ -1,3 +1,7 @@
+---
+sidebar_label: Performance
+---
+
 # Performance Baseline
 
 Benchmark results measured on Apple M4 Pro (darwin/arm64), Go 1.25, `make bench`.
