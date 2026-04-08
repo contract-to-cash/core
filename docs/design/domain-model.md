@@ -205,7 +205,20 @@ erDiagram
 > Money は `big.Rat` ベースの値オブジェクト、Decimal は `*big.Rat`、ID は ULID で生成。
 > TrialConfiguration / SuspensionConfiguration / UsageSummary は値オブジェクト（独立した永続化IDを持たない）。
 
-## 1. 共通値オブジェクト
+## 1. Account（アカウント）
+
+> Account はこのドメイン外（サービス側）で管理される外部境界エンティティ。
+> 以下はOSSが期待するフィールド構成の設計仕様。`domain/account/` パッケージは未実装。
+
+| フィールド群 | 主要フィールド | 説明 |
+|-------------|---------------|------|
+| 基本情報 | `id: AccountID`, `name`, `email` | アカウント識別 |
+| 請求情報 | `BillingInfo` | 住所、税ID、支払い期限（日数） |
+| クレジット設定 | `BillingInfo.BalanceConfig` | nil = グローバルデフォルトを使用 |
+
+`BalanceConfig` は `Account.BillingInfo` に含める。未設定の場合はグローバルデフォルトを使用する（`domain/balance/policy.go` 参照）。
+
+## 2. 共通値オブジェクト
 
 ソース: `domain/shared/`
 
@@ -274,7 +287,24 @@ expired → 終端状態（遷移なし）
 
 `ProrationBehavior`: immediate（即時日割り）、next_cycle（次サイクルから）、immediate_full（即時全額）
 
-## 3. Invoice（請求書）
+## ドメインサービス: billing.Calculator
+
+ソース: `domain/billing/service.go`
+
+`Calculator` は **contract と invoice を橋渡しする、両方のドメインを参照してよい唯一のドメインサービス**。
+他のドメインサービスは単一のドメインパッケージ内に閉じること。
+
+### ProrationResult のセマンティクス
+
+`ProrationResult` は日割り計算結果を保持する。`AdjustmentAmount = ChargeAmount - CreditAmount`。
+
+| AdjustmentAmount | 意味 | 決済時の動作 |
+|-----------------|------|------------|
+| `> 0` | アップグレード | AdjustmentAmount のみ1回請求 |
+| `< 0` | ダウングレード | BalancePolicy に従って処理（ledger/refund/none） |
+| `= 0` | 同額価格変更 | 決済なし |
+
+## 4. Invoice（請求書）
 
 ソース: `domain/invoice/`
 
@@ -323,7 +353,7 @@ charged_back, refunded → 終端状態
 
 - `idempotencyKey` 必須（リトライ時の重複防止）
 - `RecordRefund(amount)` で返金額を累計に記録、ステータスを自動更新
-- 決済ゲートウェイとの連携は `application/port/` のインターフェースを使用
+- 決済ゲートウェイとの連携は `application/port/` のインターフェースを使用（`domain/payment/` にはエンティティ・イベント・リポジトリIFのみ。詳細は [payment-gateway.md](./payment-gateway.md) 参照）
 
 ### Dunning（支払い回収）
 
@@ -352,7 +382,12 @@ charged_back, refunded → 終端状態
 |--------|------|
 | `FlatPrice` | 固定料金 |
 | `TieredPrice` (graduated) | 段階別課金。各段階に該当する使用量にその段階の単価を適用 |
-| `TieredPrice` (volume) | 全量課金。到達した段階の単価を全使用量に適用 |
+| `TieredPrice` (volume) | 全量課金。到達した段階の単価を全使用量に適用。**注意: クリフエッジ問題あり**（下記参照） |
+
+> **TieredPrice (volume) のクリフエッジ問題:**
+> Graduated例: 0-100回@¥10 + 101-500回@¥8 → 250回 = (100×¥10)+(150×¥8) = ¥2,200
+> Volume例: 同条件 → 250回 = 250×¥8 = ¥2,000
+> Volume注意: 100回=¥1,000 > 101回=¥808 となり、使用量増で料金が下がるクリフエッジが発生しうる
 | `UsagePrice` | 従量料金。最低料金・最大料金（上限）オプション |
 
 ## 7. Product（プロダクト）
@@ -363,6 +398,9 @@ charged_back, refunded → 終端状態
 - `Feature`: 機能定義（名前、含有フラグ、上限）
 - `UsageMetric`: 従量課金メトリクス定義（名前、含有枠）
 - ステータス: active → archived
+
+> **非推奨（Deprecated）**: `pricing.UsageMetric` と `pricing.Feature` は `product.UsageMetric` / `product.Feature` に置き換えられた。
+> 従量料金計算で `PricingModel` を保持するため `pricing` 側の型は残存するが、プロダクト定義には `product.*` を使用すること。
 
 ## 8. Balance（クレジット台帳）
 
@@ -393,7 +431,12 @@ charged_back, refunded → 終端状態
 ### トランザクション戦略
 
 クレジット適用は BalanceEntry と Invoice を跨ぐ操作。簡易CQRS（同一DB）のため、アプリケーションサービス層での同一DBトランザクションでアトミック性を保証する。
-フルCQRS移行時は Saga / Process Manager パターンに置き換える。
+
+**フルCQRS移行時の移行パス（Saga パターン）:**
+1. `InvoiceFinalizedEvent` を発行
+2. `BalanceApplicationSaga` がイベントを受信し、クレジット適用コマンドを発行
+3. 成功時: `CreditAppliedEvent` → Invoice の amountDue を更新
+4. 失敗時: 補償トランザクション（クレジット適用取消）を実行
 
 ### ダウングレード時のフロー
 

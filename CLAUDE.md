@@ -17,6 +17,39 @@ make check              # build + lint + test（CI相当）
 
 詳細: @docs/architecture.md
 
+### ドメインモデル
+
+| エンティティ | 種別 | 特記 |
+|---|---|---|
+| Contract | Event Sourced Aggregate | 状態遷移: Draft→Trialing→Active→PastDue/Suspended→Cancelled/Expired |
+| Invoice | Entity | 改訂チェーン（void-and-recreate）対応 |
+| CreditNote | Entity | 行項目レベルの調整 |
+| Payment | Entity | 冪等性キー必須 |
+| Price | Immutable Entity | Flat/Tiered(Graduated,Volume)/Usage の価格モデル |
+| Product | Entity | 「何を売るか」を定義。Price（「どう課金するか」）と分離 |
+| BalanceEntry | Entity | FIFO消費、有効期限対応 |
+
+- `contract.BillingCycle` は `pricing.BillingCycle` のエイリアス（定義元は `pricing`）
+- 契約は `CreateContractCommand.PriceID` で Price を指定する
+
+### Event Sourcing
+
+- イベントは不変・追記のみ（append-only）
+- `EventRegistry` で型安全なデシリアライズ。**新イベント追加時は必ず `Register()` と `Apply()` の両方を更新**
+- `SchemaVersion` フィールドでイベントスキーマのバージョン管理
+- スナップショット: N件ごと（デフォルト100）で最適化
+- 楽観的ロック（version-based）で並行制御
+
+### プラグインシステム
+
+コアが会計基準に則った計算順序を構造的に保証する:
+```
+BeforeCalculation → 価格計算 → Discount → Subtotal → Tax → Total → Credit適用 → Invoice生成 → AfterCalculation
+```
+
+- ISP準拠：必要なHookインターフェースのみ実装。空メソッドの強制実装は不要
+- `Priority` は同一Hook内の実行順序のみ制御（Hook種別間の順序はコアが保証）
+
 **絶対に守るルール:**
 - `domain/` は外部パッケージに依存してはならない（標準ライブラリ + `ulid` のみ）
 - `application/` は `domain/` のみに依存。`infrastructure/` に依存してはならない

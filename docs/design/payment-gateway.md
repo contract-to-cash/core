@@ -29,15 +29,32 @@ graph TB
 
 ### 決済方法
 
-クレジットカード、デビットカード、銀行振込、コンビニ払い、QRコード決済（PayPay, LINE Pay等）、キャリア決済、後払い、口座振替
+| 決済方法 | 説明 | 対応 |
+|----------|------|------|
+| クレジットカード | Visa, Master, JCB等 | ✅ |
+| デビットカード | 即時引落 | ✅ |
+| 銀行振込 | 振込依頼→入金確認 | ✅ |
+| コンビニ払い | 払込票/バーコード | ✅ |
+| QRコード決済 | PayPay, LINE Pay等 | ✅ |
+| キャリア決済 | docomo, au, SoftBank | ✅ |
+| 後払い | Paidy, NP後払い等 | ✅ |
+| 口座振替 | 定期引落 | ✅ |
 
 ### 決済フロー
 
+```mermaid
+stateDiagram-v2
+    [*] --> Authorize: オーソリ
+    Authorize --> Capture: 売上確定
+    Authorize --> Void: オーソリ取消
+    Capture --> Complete: 完了
+    Complete --> Refund: 返金
+    Complete --> [*]
+    Refund --> [*]
+    Void --> [*]
 ```
-Authorize（オーソリ） → Capture（売上確定） → Complete（完了） → Refund（返金）
-                     → Void（オーソリ取消）
-即時決済: Authorize + Capture を同時に行う（Charge）
-```
+
+> 即時決済の場合は Authorize + Capture を同時に行う（Charge）
 
 ## 3. コアインターフェース
 
@@ -76,6 +93,22 @@ Authorize（オーソリ） → Capture（売上確定） → Complete（完了�
 3. 重複検出（`WebhookDeduplicator`。デフォルトTTL 72時間=Stripe最大リトライ期間）
 4. イベントハンドラ呼び出し（リトライ可能エラーのみリトライ、指数バックオフ+ジッター）
 5. リトライ超過時は`WebhookDeadLetterQueue`に送信
+
+#### Webhook エラーとHTTPステータスのマッピング
+
+決済GWは「2xxか否か」でリトライ判定するため、HTTPステータスの使い分けが重要:
+
+| 状況 | HTTPステータス | GW側の挙動 | 備考 |
+|------|-------------|-----------|------|
+| 処理成功 | 200 | リトライしない | — |
+| 重複イベント（正常系） | 200 | リトライしない | ProcessWebhookがnil返却 |
+| 非リトライエラー（DLQ行き） | 200 | リトライしない | DLQで追跡 |
+| 署名検証失敗 | 401 | リトライする | 不正リクエスト |
+| タイムスタンプ範囲外 | 400 | リトライする | リプレイ攻撃 or クロックスキュー |
+| 重複検出ストレージ障害 | 503 | リトライする | Redis/DB一時障害 |
+
+> **設計判断**: リトライさせたい障害→503、リトライさせたくないエラー→200（内部でDLQ/アラート対応）。
+> `MapWebhookErrorToHTTP()` として実装予定（現在未実装）。
 
 ### GatewayRouter
 
@@ -130,3 +163,31 @@ OSS が提供するもの:
 - `WebhookDeduplicator` / `WebhookDeadLetterQueue` のストレージ実装
 
 詳細な統合手順: [guides/usage-guide.md](../guides/usage-guide.md)
+
+## 8. 決済手段別フロー
+
+| 決済手段 | 代表プロバイダ | フロー |
+|---------|-------------|--------|
+| クレジットカード | Stripe, PAY.JP, GMO | 同期（即時結果） |
+| デビットカード | Stripe, GMO | 同期 |
+| 銀行振込 | GMO, PAY.JP | 非同期（入金確認はWebhook） |
+| コンビニ払い | GMO, Komoju | 非同期（支払い確認はWebhook） |
+| QRコード決済 | PayPay, LINE Pay | リダイレクト → Webhook |
+| キャリア決済 | SoftBank, docomo | リダイレクト → Webhook |
+| 後払い | Paidy, NP後払い | 非同期（与信結果はWebhook） |
+| 口座振替 | GMO, 各銀行API | 非同期（引落結果はWebhook） |
+
+## 9. 新規ゲートウェイ連携チェックリスト
+
+新しい決済ゲートウェイを連携する際の確認事項:
+
+1. [ ] `port.PaymentGateway` インターフェースの全メソッドを実装
+2. [ ] `port.WebhookHandler` の署名検証を実装（ゲートウェイ固有のHMAC等）
+3. [ ] `WebhookDeduplicator` のストレージ実装（Redis推奨）
+4. [ ] エラーコードのマッピング（ゲートウェイ固有コード → `ErrorCode`）
+5. [ ] 冪等性キーの送信（`IdempotencyKey` → ゲートウェイの冪等性ヘッダー）
+6. [ ] 3Dセキュア対応（該当する場合）
+7. [ ] テスト/サンドボックス環境での結合テスト
+8. [ ] Webhookエンドポイントの登録とテスト
+9. [ ] `GatewayRouter` へのルーティングルール追加
+10. [ ] 本番環境でのスモークテスト

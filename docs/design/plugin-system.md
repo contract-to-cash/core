@@ -100,6 +100,11 @@
 
 ### コアが保証する計算順序
 
+請求書計算の順序はコアが構造的に保証する。
+Priority値に依存しないため、プラグイン登録順のミスで会計基準違反が発生しない。
+
+> このフロー順序は `architecture.md` セクション6.2 および `billing_service.go` の `GenerateInvoice()` と同一。
+
 ```
 1. InvoiceLifecycleHook.BeforeCalculation()  ← 計算前処理
 2. 料金計算（コア、契約タイプに応じて分岐）
@@ -116,7 +121,8 @@
 ### Priority の役割
 
 `Priority` は**同一フック種別内**での実行順序のみに影響する。
-フック種別間の順序（DiscountHook → TaxHook）はコアが制御する。
+フック種別間の順序（DiscountHook → TaxHook）はコアが制御するため、
+TaxPluginのPriorityをどう設定してもDiscountHookより先に実行されることはない。
 
 ```
 PriorityHighest = 0
@@ -125,6 +131,8 @@ PriorityNormal  = 500
 PriorityLow     = 900
 PriorityLowest  = 1000
 ```
+
+例: ボリューム割引（PriorityHigh=100、先に適用）→ クーポン割引（PriorityNormal=500、後に適用）
 
 ## 5. プラグインレジストリ
 
@@ -156,9 +164,11 @@ PriorityLowest  = 1000
 
 ### カスタムプラグイン作成
 
-1. `plugin.Plugin` 基本インターフェース + 必要なフックインターフェースを実装
-2. `plugin.Registry.Register()` で登録
-3. 型アサーションで自動的にフックに分類される
+1. **インターフェース選択**: `plugin.Plugin` 基本IF + 必要なフックIFを実装
+2. **優先度設定**: 他のプラグインとの実行順序を考慮し `Priority()` を設定
+3. **設定読み込み**: `Initialize(ctx, config)` で設定を読み込む
+4. **リソース解放**: `Shutdown(ctx)` でリソースを解放
+5. **登録**: `plugin.Registry.Register()` で登録。型アサーションで自動的にフックに分類
 
 ```go
 // 例: 割引プラグインはDiscountHookのみ実装
@@ -179,4 +189,9 @@ Semantic Versioning 2.0.0 に従う。
 | 新規フックの追加 | Minor |
 | バグ修正 | Patch |
 
-破壊的変更: メソッド追加（デフォルト実装なし）、シグネチャ変更、IF削除/統合/分離、Context型のフィールド削除/型変更
+破壊的変更の定義:
+1. インターフェースのメソッド追加（デフォルト実装なし）
+2. インターフェースのメソッドシグネチャ変更
+3. インターフェースの削除・統合・分離
+4. CalculationContext/Context型のフィールド削除・型変更
+5. Registry APIの変更（Register/Get系メソッド）
