@@ -82,7 +82,6 @@ func main() {
     agg := contract.NewContractAggregate(contractID, clock)
     agg.Create(contract.CreateContractCommand{
         AccountID:    shared.AccountID("acct-001"),
-        PlanID:       shared.PlanID("plan-standard"),
         PriceID:      priceEntity.ID(),
         ContractType: contract.ContractTypeSubscription,
         BillingCycle: contract.BillingCycleMonthly,

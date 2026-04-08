@@ -122,7 +122,7 @@ type HostingPlugin struct {
 
 // Implement OnContractActivateHook
 func (p *HostingPlugin) OnContractActivate(ctx *plugin.Context, c *contract.ContractAggregate) error {
-    return p.provisioningClient.CreateServer(ctx.Context(), c.ContractID(), c.PlanID())
+    return p.provisioningClient.CreateServer(ctx.Context(), c.ContractID(), c.PriceID())
 }
 
 // Implement OnContractSuspendHook
@@ -149,7 +149,7 @@ func (p *HostingPlugin) OnContractResume(ctx *plugin.Context, c *contract.Contra
     if p.provisioningClient.Exists(ctx.Context(), c.ContractID()) {
         return p.provisioningClient.StartServer(ctx.Context(), c.ContractID())
     }
-    return p.provisioningClient.CreateServer(ctx.Context(), c.ContractID(), c.PlanID())
+    return p.provisioningClient.CreateServer(ctx.Context(), c.ContractID(), c.PriceID())
 }
 ```
 :::
