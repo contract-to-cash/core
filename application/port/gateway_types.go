@@ -55,6 +55,7 @@ type Transaction struct {
 	RefundedAt      *time.Time
 	FailureCode     *string
 	FailureMessage  *string
+	ThreeDSecure    *ThreeDSecureResult
 }
 
 // --- Charge ---
@@ -96,6 +97,7 @@ type AuthorizeRequest struct {
 	IdempotencyKey  string
 	Metadata        map[string]string
 	ExpiresIn       *time.Duration
+	ThreeDSecure    *ThreeDSecureRequest
 }
 
 // AuthorizeResponse is the output of an authorize operation.
