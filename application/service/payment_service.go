@@ -196,6 +196,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	saga.AddCompensation(func(compCtx context.Context) error {
 		_, refundErr := s.gateway.Refund(compCtx, &port.RefundRequest{
 			TransactionID:  chargeResp.TransactionID,
+			Amount:         &chargeResp.Amount,
 			Reason:         port.RefundReasonOther,
 			IdempotencyKey: "comp-refund-" + chargeResp.TransactionID,
 		})

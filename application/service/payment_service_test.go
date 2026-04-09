@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -612,9 +613,13 @@ func TestProcessPayment_SagaCompensation_RefundUsesCorrectTransactionID(t *testi
 	if gw.refundReq.TransactionID != expectedTxnID {
 		t.Errorf("expected refund TransactionID %q, got %q", expectedTxnID, gw.refundReq.TransactionID)
 	}
-	// Full refund (nil Amount) since the entire charge needs to be reversed
-	if gw.refundReq.Amount != nil {
-		t.Error("expected nil Amount for full refund compensation")
+	// Amount should explicitly match the charged amount
+	if gw.refundReq.Amount == nil {
+		t.Fatal("expected explicit Amount on compensation refund, got nil")
+	}
+	expectedAmount := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	if gw.refundReq.Amount.Amount().Cmp(expectedAmount.Amount()) != 0 {
+		t.Errorf("expected refund Amount %v, got %v", expectedAmount.Amount(), gw.refundReq.Amount.Amount())
 	}
 	// Reason should be set for gateway audit trail
 	if gw.refundReq.Reason != port.RefundReasonOther {
@@ -657,25 +662,12 @@ func TestProcessPayment_SagaCompensation_RefundFailure_ReturnsCompoundError(t *t
 	}
 	// Error should mention both failures
 	errMsg := err.Error()
-	if !contains(errMsg, "local save failed") {
+	if !strings.Contains(errMsg, "local save failed") {
 		t.Errorf("expected error to mention local save failure, got: %s", errMsg)
 	}
-	if !contains(errMsg, "compensation also failed") {
+	if !strings.Contains(errMsg, "compensation also failed") {
 		t.Errorf("expected error to mention compensation failure, got: %s", errMsg)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 func TestProcessPayment_AutoResolvesPaymentMethod(t *testing.T) {
