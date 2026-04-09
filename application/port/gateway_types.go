@@ -31,6 +31,7 @@ const (
 	TransactionStatusCanceled          TransactionStatus = "canceled"
 	TransactionStatusRefunded          TransactionStatus = "refunded"
 	TransactionStatusPartiallyRefunded TransactionStatus = "partially_refunded"
+	TransactionStatusRequiresAction    TransactionStatus = "requires_action"
 )
 
 // Transaction represents a payment transaction from the gateway.
@@ -81,6 +82,7 @@ type ChargeResponse struct {
 	PaymentMethodID string
 	CreatedAt       time.Time
 	Metadata        map[string]string
+	ThreeDSecure    *ThreeDSecureResult
 }
 
 // --- Authorize ---
@@ -105,6 +107,7 @@ type AuthorizeResponse struct {
 	ExpiresAt       *time.Time
 	CreatedAt       time.Time
 	Metadata        map[string]string
+	ThreeDSecure    *ThreeDSecureResult
 }
 
 // --- Capture ---
