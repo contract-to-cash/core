@@ -18,6 +18,7 @@ var _ eventstore.Store = (*InMemoryEventStore)(nil)
 type InMemoryEventStore struct {
 	mu          sync.RWMutex
 	streams     map[string][]eventstore.Event    // streamID -> events
+	allEvents   []eventstore.Event               // all events in global position order
 	snapshots   map[string][]eventstore.Snapshot // streamID -> snapshots (multiple)
 	position    int64                            // global position counter
 	subscribers []chan eventstore.Event
@@ -50,6 +51,7 @@ func (s *InMemoryEventStore) Append(_ context.Context, streamID string, events [
 		s.position++
 		events[i].GlobalPosition = s.position
 		s.streams[streamID] = append(s.streams[streamID], events[i])
+		s.allEvents = append(s.allEvents, events[i])
 	}
 
 	// Notify subscribers.
@@ -121,31 +123,25 @@ func (s *InMemoryEventStore) LoadRange(_ context.Context, streamID string, from,
 
 // LoadAll loads events across all streams ordered by global position.
 // fromPosition is exclusive (events after this position are returned).
+// limit controls the maximum number of events returned. A limit <= 0 means no limit.
 func (s *InMemoryEventStore) LoadAll(_ context.Context, fromPosition int64, limit int) ([]eventstore.Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Collect all events from all streams.
-	var all []eventstore.Event
-	for _, events := range s.streams {
-		for _, e := range events {
-			if e.GlobalPosition > fromPosition {
-				all = append(all, e)
-			}
-		}
-	}
-
-	// Sort by global position.
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].GlobalPosition < all[j].GlobalPosition
+	// Binary search for the first event with GlobalPosition > fromPosition.
+	start := sort.Search(len(s.allEvents), func(i int) bool {
+		return s.allEvents[i].GlobalPosition > fromPosition
 	})
 
-	// Apply limit.
-	if limit > 0 && len(all) > limit {
-		all = all[:limit]
+	remaining := s.allEvents[start:]
+	if limit <= 0 || len(remaining) <= limit {
+		result := make([]eventstore.Event, len(remaining))
+		copy(result, remaining)
+		return result, nil
 	}
-
-	return all, nil
+	result := make([]eventstore.Event, limit)
+	copy(result, remaining[:limit])
+	return result, nil
 }
 
 // Subscribe returns a channel that receives events from the given global position.

@@ -203,20 +203,24 @@ func TestLoadAll_AcrossStreams(t *testing.T) {
 	store := NewInMemoryEventStore(shared.SystemClock{})
 	ctx := context.Background()
 
-	// Append events to multiple streams
-	e1 := makeEvent("stream-1", 1, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
-	e2 := makeEvent("stream-1", 2, time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC))
-	if err := store.Append(ctx, "stream-1", []eventstore.Event{e1, e2}, 0); err != nil {
+	// Append events to multiple streams in interleaved order.
+	e1 := makeEvent("stream-A", 1, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	e2 := makeEvent("stream-A", 2, time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err := store.Append(ctx, "stream-A", []eventstore.Event{e1, e2}, 0); err != nil {
 		t.Fatalf("Append failed: %v", err)
 	}
 
-	e3 := makeEvent("stream-2", 1, time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC))
-	e4 := makeEvent("stream-2", 2, time.Date(2025, 1, 4, 0, 0, 0, 0, time.UTC))
-	if err := store.Append(ctx, "stream-2", []eventstore.Event{e3, e4}, 0); err != nil {
+	e3 := makeEvent("stream-B", 1, time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC))
+	if err := store.Append(ctx, "stream-B", []eventstore.Event{e3}, 0); err != nil {
 		t.Fatalf("Append failed: %v", err)
 	}
 
-	// LoadAll from position 0 should return all 4 events in global order
+	e4 := makeEvent("stream-A", 3, time.Date(2025, 1, 4, 0, 0, 0, 0, time.UTC))
+	if err := store.Append(ctx, "stream-A", []eventstore.Event{e4}, 2); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	// LoadAll from position 0 should return all 4 events in global order.
 	events, err := store.LoadAll(ctx, 0, 100)
 	if err != nil {
 		t.Fatalf("LoadAll failed: %v", err)
@@ -225,12 +229,17 @@ func TestLoadAll_AcrossStreams(t *testing.T) {
 		t.Fatalf("expected 4 events, got %d", len(events))
 	}
 
-	// Verify global position ordering
+	// Verify global position ordering.
 	for i := 0; i < len(events)-1; i++ {
 		if events[i].GlobalPosition >= events[i+1].GlobalPosition {
 			t.Errorf("events not in global position order at index %d: %d >= %d",
 				i, events[i].GlobalPosition, events[i+1].GlobalPosition)
 		}
+	}
+
+	// Events should come from different streams.
+	if events[0].StreamID != "stream-A" || events[2].StreamID != "stream-B" {
+		t.Errorf("unexpected stream order: %v, %v", events[0].StreamID, events[2].StreamID)
 	}
 }
 
@@ -248,7 +257,7 @@ func TestLoadAll_FromPosition(t *testing.T) {
 		t.Fatalf("Append failed: %v", err)
 	}
 
-	// fromPosition is exclusive: LoadAll(ctx, 2, 100) should return events after position 2
+	// fromPosition is exclusive: LoadAll(ctx, 2, 100) should return events after position 2.
 	events, err := store.LoadAll(ctx, 2, 100)
 	if err != nil {
 		t.Fatalf("LoadAll failed: %v", err)
@@ -258,6 +267,61 @@ func TestLoadAll_FromPosition(t *testing.T) {
 	}
 	if events[0].GlobalPosition != 3 {
 		t.Errorf("expected GlobalPosition 3, got %d", events[0].GlobalPosition)
+	}
+}
+
+func TestLoadAll_Pagination(t *testing.T) {
+	store := NewInMemoryEventStore(shared.SystemClock{})
+	ctx := context.Background()
+
+	// Create 5 events across 2 streams.
+	for i := 1; i <= 3; i++ {
+		e := makeEvent("s1", i, time.Date(2025, 1, i, 0, 0, 0, 0, time.UTC))
+		if err := store.Append(ctx, "s1", []eventstore.Event{e}, i-1); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+	}
+	for i := 1; i <= 2; i++ {
+		e := makeEvent("s2", i, time.Date(2025, 2, i, 0, 0, 0, 0, time.UTC))
+		if err := store.Append(ctx, "s2", []eventstore.Event{e}, i-1); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+	}
+
+	// Page 1: first 2 events.
+	page1, err := store.LoadAll(ctx, 0, 2)
+	if err != nil {
+		t.Fatalf("LoadAll page1 failed: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(page1))
+	}
+	if page1[0].GlobalPosition != 1 || page1[1].GlobalPosition != 2 {
+		t.Errorf("page1 positions: got %d, %d", page1[0].GlobalPosition, page1[1].GlobalPosition)
+	}
+
+	// Page 2: next 2 events.
+	page2, err := store.LoadAll(ctx, page1[1].GlobalPosition, 2)
+	if err != nil {
+		t.Fatalf("LoadAll page2 failed: %v", err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(page2))
+	}
+	if page2[0].GlobalPosition != 3 || page2[1].GlobalPosition != 4 {
+		t.Errorf("page2 positions: got %d, %d", page2[0].GlobalPosition, page2[1].GlobalPosition)
+	}
+
+	// Page 3: last event.
+	page3, err := store.LoadAll(ctx, page2[1].GlobalPosition, 2)
+	if err != nil {
+		t.Fatalf("LoadAll page3 failed: %v", err)
+	}
+	if len(page3) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(page3))
+	}
+	if page3[0].GlobalPosition != 5 {
+		t.Errorf("page3 position: got %d", page3[0].GlobalPosition)
 	}
 }
 
@@ -272,7 +336,7 @@ func TestLoadAll_WithLimit(t *testing.T) {
 		}
 	}
 
-	// Limit to 3 events
+	// Limit to 3 events.
 	events, err := store.LoadAll(ctx, 0, 3)
 	if err != nil {
 		t.Fatalf("LoadAll failed: %v", err)
@@ -282,6 +346,45 @@ func TestLoadAll_WithLimit(t *testing.T) {
 	}
 	if events[2].GlobalPosition != 3 {
 		t.Errorf("expected last event GlobalPosition 3, got %d", events[2].GlobalPosition)
+	}
+}
+
+func TestLoadAll_NoLimit(t *testing.T) {
+	store := NewInMemoryEventStore(shared.SystemClock{})
+	ctx := context.Background()
+
+	for i := 1; i <= 5; i++ {
+		e := makeEvent("s", i, time.Date(2025, 1, i, 0, 0, 0, 0, time.UTC))
+		if err := store.Append(ctx, "s", []eventstore.Event{e}, i-1); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+	}
+
+	// limit=0 means no limit — should return all events.
+	events, err := store.LoadAll(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events with limit=0 (no limit), got %d", len(events))
+	}
+
+	// limit=-1 also means no limit.
+	events, err = store.LoadAll(ctx, 0, -1)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events with limit=-1 (no limit), got %d", len(events))
+	}
+
+	// With fromPosition, still returns remaining events.
+	events, err = store.LoadAll(ctx, 3, 0)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events from position 3 with no limit, got %d", len(events))
 	}
 }
 
