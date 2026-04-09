@@ -670,6 +670,41 @@ func TestProcessPayment_SagaCompensation_RefundFailure_ReturnsCompoundError(t *t
 	}
 }
 
+func TestProcessPayment_TxFailure_InvoiceStateUnchanged(t *testing.T) {
+	// Issue #85: inv.RecordPayment() must be inside RunInTx so that
+	// a transaction failure does not leave the in-memory invoice mutated.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	statusBefore := inv.Status()
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-tx-fail",
+	})
+	if err == nil {
+		t.Fatal("expected error from tx failure")
+	}
+
+	// The invoice in-memory state must NOT have been mutated by RecordPayment.
+	if inv.Status() != statusBefore {
+		t.Errorf("invoice status should remain %s after tx failure, got %s", statusBefore, inv.Status())
+	}
+}
+
 func TestProcessPayment_AutoResolvesPaymentMethod(t *testing.T) {
 	clock := newPaymentTestClock()
 	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(1000))
