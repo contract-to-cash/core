@@ -188,6 +188,25 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("gateway charge failed: %w", err)
 	}
 
+	// Handle requires_action (3D Secure authentication pending).
+	// The payment is not yet captured — save a pending record and return
+	// so the caller can redirect the customer to the 3DS authentication page.
+	if chargeResp.Status == port.TransactionStatusRequiresAction {
+		pendingPayment := payment.NewPayment(
+			shared.NewPaymentID(),
+			invoiceID,
+			amount,
+			payment.PaymentMethodCreditCard,
+			chargeResp.TransactionID,
+			s.clock.Now(),
+		)
+		if input.IdempotencyKey != "" {
+			pendingPayment.SetIdempotencyKey(input.IdempotencyKey)
+		}
+		_ = s.paymentRepo.Save(ctx, pendingPayment)
+		return pendingPayment, fmt.Errorf("payment requires_action: 3D Secure authentication required (transaction %s)", chargeResp.TransactionID)
+	}
+
 	// Phase 2: Saga compensation for gateway charge.
 	// Charge is authorize+capture (one-step), so the transaction is already
 	// captured. Void only works on pre-capture authorizations; we must use

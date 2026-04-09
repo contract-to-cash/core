@@ -21,7 +21,9 @@ import (
 // --- Mock gateway ---
 
 type mockGateway struct {
-	failCharge bool
+	failCharge      bool
+	requiresAction  bool
+	threeDSRedirect string
 }
 
 func (g *mockGateway) ID() string                                 { return "mock" }
@@ -29,6 +31,19 @@ func (g *mockGateway) SupportedMethods() []port.PaymentMethodType { return nil }
 func (g *mockGateway) Charge(_ context.Context, req *port.ChargeRequest) (*port.ChargeResponse, error) {
 	if g.failCharge {
 		return nil, fmt.Errorf("card declined")
+	}
+	if g.requiresAction {
+		resp := &port.ChargeResponse{
+			TransactionID: "txn-" + req.IdempotencyKey,
+			Status:        port.TransactionStatusRequiresAction,
+			Amount:        req.Amount,
+			CreatedAt:     time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+			ThreeDSecure: &port.ThreeDSecureResult{
+				Status:      port.ThreeDSecureStatusRequired,
+				RedirectURL: &g.threeDSRedirect,
+			},
+		}
+		return resp, nil
 	}
 	return &port.ChargeResponse{
 		TransactionID: "txn-" + req.IdempotencyKey,
@@ -697,5 +712,93 @@ func TestProcessPayment_AutoResolvesPaymentMethod(t *testing.T) {
 	}
 	if pmt == nil {
 		t.Fatal("expected payment, got nil")
+	}
+}
+
+// --- 3D Secure requires_action tests ---
+
+func TestProcessPayment_RequiresAction_ReturnsPendingPayment(t *testing.T) {
+	// When gateway returns requires_action (3DS needed), ProcessPayment
+	// should NOT mark the payment as completed. It should save a pending
+	// payment and return a specific error indicating 3DS is required.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	paymentRepo := &mockPaymentRepo{}
+
+	gw := &mockGateway{
+		requiresAction:  true,
+		threeDSRedirect: "https://bank.example.com/3ds",
+	}
+
+	svc := NewPaymentService(
+		gw,
+		paymentRepo,
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-3ds",
+	})
+
+	// Should return an error indicating 3DS authentication is required
+	if err == nil {
+		t.Fatal("expected error for requires_action status")
+	}
+	if !strings.Contains(err.Error(), "requires_action") {
+		t.Errorf("expected error to mention requires_action, got: %s", err.Error())
+	}
+
+	// Payment should be saved in pending status (not completed)
+	if pmt == nil {
+		t.Fatal("expected pending payment to be returned")
+	}
+	if pmt.Status() != payment.PaymentStatusPending {
+		t.Errorf("expected payment status %q, got %q", payment.PaymentStatusPending, pmt.Status())
+	}
+
+	// Payment should be persisted for later completion after 3DS callback
+	if paymentRepo.saved == nil {
+		t.Error("expected payment to be saved to repository")
+	}
+}
+
+func TestProcessPayment_RequiresAction_DoesNotRecordPaymentOnInvoice(t *testing.T) {
+	// When 3DS is required, the invoice should NOT be updated as paid.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+
+	gw := &mockGateway{
+		requiresAction:  true,
+		threeDSRedirect: "https://bank.example.com/3ds",
+	}
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		invRepo,
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	_, _ = svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-3ds-inv",
+	})
+
+	// Invoice paid amount should still be zero
+	if !inv.PaidAmount().IsZero() {
+		t.Errorf("invoice should not have recorded payment, but paidAmount is %v", inv.PaidAmount().Amount())
 	}
 }
