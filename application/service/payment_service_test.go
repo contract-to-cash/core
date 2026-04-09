@@ -539,6 +539,19 @@ func (m *paymentFailingTxManager) RunInTx(_ context.Context, _ func(context.Cont
 	return fmt.Errorf("simulated database failure")
 }
 
+// commitFailingTxManager executes fn (so in-memory state is mutated) but then
+// simulates a commit failure. This models a real DB transaction that rolls back
+// after the closure has already run.
+type commitFailingTxManager struct{}
+
+func (m *commitFailingTxManager) RunInTx(ctx context.Context, fn func(context.Context, tx.Repos) error) error {
+	_ = fn(ctx, tx.Repos{
+		Payments: &mockPaymentRepo{},
+		Invoices: &mockInvoiceRepoForPayment{},
+	})
+	return fmt.Errorf("simulated commit failure")
+}
+
 // --- Saga compensation tests (Issue #82) ---
 
 func TestProcessPayment_SagaCompensation_CallsRefundNotVoid(t *testing.T) {
@@ -702,6 +715,42 @@ func TestProcessPayment_TxFailure_InvoiceStateUnchanged(t *testing.T) {
 	// The invoice in-memory state must NOT have been mutated by RecordPayment.
 	if inv.Status() != statusBefore {
 		t.Errorf("invoice status should remain %s after tx failure, got %s", statusBefore, inv.Status())
+	}
+}
+
+func TestProcessPayment_CommitFailure_ReturnsError(t *testing.T) {
+	// Complementary to TxFailure_InvoiceStateUnchanged: here the closure IS
+	// executed (so RecordPayment runs and mutates inv) but the commit fails.
+	// After RunInTx returns an error the service must return an error and
+	// NOT hand back the (now-stale) invoice to callers. The in-memory mutation
+	// is acceptable because the service returns immediately without reusing inv.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentTxManager(&commitFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-commit-fail",
+	})
+	if err == nil {
+		t.Fatal("expected error from commit failure")
+	}
+
+	// The service must return an error so callers never see the stale invoice.
+	if !strings.Contains(err.Error(), "commit failure") && !strings.Contains(err.Error(), "local save failed") {
+		t.Errorf("error should indicate save/commit failure, got: %s", err.Error())
 	}
 }
 
