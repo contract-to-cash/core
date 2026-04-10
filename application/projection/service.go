@@ -83,6 +83,51 @@ func (s *ProjectionService) Start(ctx context.Context) error {
 	}
 }
 
+// defaultBatchSize is used when ProjectionOptions.BatchSize is not set.
+const defaultBatchSize = 1000
+
+// RebuildAll rebuilds all projections by loading events across all streams
+// using LoadAll and dispatching them to all registered projectors in global
+// position order. Events are fetched in batches controlled by BatchSize.
+//
+// Unlike Projector.Rebuild (which delegates rebuilding to each projector),
+// RebuildAll streams events in global position order across all streams,
+// ensuring consistent cross-stream ordering for all registered projectors.
+//
+// Callers are responsible for clearing existing projection data before
+// calling RebuildAll (e.g., TRUNCATE projection tables).
+func (s *ProjectionService) RebuildAll(ctx context.Context) error {
+	batchSize := s.options.BatchSize
+	if batchSize <= 0 {
+		batchSize = defaultBatchSize
+	}
+
+	var fromPosition int64
+	for {
+		events, err := s.eventStore.LoadAll(ctx, fromPosition, batchSize)
+		if err != nil {
+			return fmt.Errorf("failed to load events from position %d: %w", fromPosition, err)
+		}
+		if len(events) == 0 {
+			break
+		}
+
+		for _, event := range events {
+			if err := s.ProcessEvent(ctx, event); err != nil {
+				return fmt.Errorf("rebuild failed at global position %d: %w", event.GlobalPosition, err)
+			}
+		}
+
+		newPosition := events[len(events)-1].GlobalPosition
+		if newPosition == fromPosition {
+			return fmt.Errorf("LoadAll returned events but global position did not advance (stuck at %d)", fromPosition)
+		}
+		fromPosition = newPosition
+	}
+
+	return nil
+}
+
 // ProcessEvent dispatches an event to all registered projectors.
 func (s *ProjectionService) ProcessEvent(ctx context.Context, event eventstore.Event) error {
 	for _, p := range s.projectors {

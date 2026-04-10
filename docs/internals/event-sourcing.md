@@ -68,6 +68,10 @@ type Store interface {
     // OccurredAt ベースで from <= OccurredAt <= to のイベントを返す。
     LoadRange(ctx context.Context, streamID string, from, to time.Time) ([]Event, error)
     
+    // ストリーム横断の全イベント取得（Projection Rebuild用）
+    // fromPosition は排他的（この位置より後のイベントを返す）。limit <= 0 は無制限。
+    LoadAll(ctx context.Context, fromPosition int64, limit int) ([]Event, error)
+
     // 全ストリームのイベント購読（Projection用）
     Subscribe(ctx context.Context, fromPosition int64) (<-chan Event, error)
     
@@ -100,15 +104,16 @@ type DomainEvent interface {
 
 // Event 永続化されたイベント
 type Event struct {
-    ID            string          // イベント一意ID
-    StreamID      string          // 集約ID
-    Type          EventType       // イベントタイプ（型付き）
-    Version       int             // ストリーム内のバージョン
-    SchemaVersion int             // イベントスキーマバージョン（将来のupcaster用）
-    Data          json.RawMessage // イベントデータ
-    Metadata      EventMetadata   // メタデータ
-    OccurredAt    time.Time       // イベント発生時刻（ビジネス時刻）
-    RecordedAt    time.Time       // イベント記録時刻（システム時刻）
+    ID             string          // イベント一意ID
+    StreamID       string          // 集約ID
+    Type           EventType       // イベントタイプ（型付き）
+    Version        int             // ストリーム内のバージョン
+    SchemaVersion  int             // イベントスキーマバージョン（将来のupcaster用）
+    Data           json.RawMessage // イベントデータ
+    Metadata       EventMetadata   // メタデータ
+    OccurredAt     time.Time       // イベント発生時刻（ビジネス時刻）
+    RecordedAt     time.Time       // イベント記録時刻（システム時刻）
+    GlobalPosition int64           // ストリーム横断のグローバル位置（Projection Rebuild用）
 }
 
 // EventMetadata イベントメタデータ
@@ -805,11 +810,31 @@ func (s *ProjectionService) Start(ctx context.Context) error {
 }
 
 // RebuildAll 全Projectionを再構築
-func (s *ProjectionService) RebuildAll(ctx context.Context, until time.Time) error {
-    for _, projector := range s.projectors {
-        if err := projector.Rebuild(ctx, until); err != nil {
+// LoadAll でストリーム横断のイベントをグローバル位置順に取得し、
+// 全登録 Projector に ProcessEvent で配信する。
+// Projector.Rebuild（各Projector固有の再構築）とは異なり、
+// クロスストリームの順序保証が必要な場合に使用する。
+// 呼び出し元は事前に既存の Projection データをクリアすること。
+func (s *ProjectionService) RebuildAll(ctx context.Context) error {
+    batchSize := s.options.BatchSize
+    if batchSize <= 0 {
+        batchSize = 1000
+    }
+    var fromPosition int64
+    for {
+        events, err := s.eventStore.LoadAll(ctx, fromPosition, batchSize)
+        if err != nil {
             return err
         }
+        if len(events) == 0 {
+            break
+        }
+        for _, event := range events {
+            if err := s.ProcessEvent(ctx, event); err != nil {
+                return err
+            }
+        }
+        fromPosition = events[len(events)-1].GlobalPosition
     }
     return nil
 }
@@ -891,6 +916,7 @@ CREATE TABLE events (
     metadata JSONB NOT NULL,
     occurred_at TIMESTAMP WITH TIME ZONE NOT NULL,
     recorded_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    global_position BIGSERIAL NOT NULL,
     
     -- ストリーム内でのバージョン一意性を保証（楽観的ロック）
     UNIQUE (stream_id, version)
@@ -902,6 +928,7 @@ CREATE INDEX idx_events_stream_id_version ON events(stream_id, version);
 CREATE INDEX idx_events_occurred_at ON events(occurred_at);
 CREATE INDEX idx_events_recorded_at ON events(recorded_at);
 CREATE INDEX idx_events_type ON events(type);
+CREATE INDEX idx_events_global_position ON events(global_position);
 
 -- スナップショットテーブル
 CREATE TABLE snapshots (
