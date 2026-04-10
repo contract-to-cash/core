@@ -26,8 +26,12 @@ var ErrRequiresAction = errors.New("payment requires action")
 // ProcessPaymentInput holds the parameters for processing a payment.
 // PaymentMethodID is optional — if empty, the service resolves it via the
 // hierarchical fallback chain: Invoice → Contract → Customer.
+// PaymentMethod is the type of payment method (e.g. bank_transfer, convenience_store).
+// If not set, it is resolved from ChargeResponse.PaymentMethodType, falling back
+// to credit_card for backward compatibility.
 type ProcessPaymentInput struct {
 	PaymentMethodID string
+	PaymentMethod   payment.PaymentMethod
 	Amount          shared.Money
 	Currency        shared.Currency
 	IdempotencyKey  string
@@ -171,13 +175,16 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		IdempotencyKey:  input.IdempotencyKey,
 	})
 
+	// No ChargeResponse available on failure — resolve from input only
+	inputMethodType := s.resolvePaymentMethodType("", input.PaymentMethod)
+
 	if err != nil {
 		// Create and persist a failed payment record for tracking
 		failedPayment := payment.NewPayment(
 			shared.NewPaymentID(),
 			invoiceID,
 			amount,
-			payment.PaymentMethodCreditCard,
+			inputMethodType,
 			"",
 			s.clock.Now(),
 		)
@@ -222,7 +229,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			shared.NewPaymentID(),
 			invoiceID,
 			amount,
-			payment.PaymentMethodCreditCard,
+			s.resolvePaymentMethodType(chargeResp.PaymentMethodType, input.PaymentMethod),
 			chargeResp.TransactionID,
 			s.clock.Now(),
 		)
@@ -238,6 +245,16 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			return nil, fmt.Errorf("failed to save pending payment for 3DS (transaction %s): %w", chargeResp.TransactionID, err)
 		}
 		return pendingPayment, fmt.Errorf("%w: 3D Secure authentication required (transaction %s)", ErrRequiresAction, chargeResp.TransactionID)
+	}
+
+	// Guard: only Captured and Succeeded are valid success statuses.
+	// Any other status (Pending, Failed, Canceled, Authorized, etc.) without an
+	// error from the gateway is unexpected and must not proceed to the success path.
+	switch chargeResp.Status {
+	case port.TransactionStatusCaptured, port.TransactionStatusSucceeded:
+		// proceed to success path
+	default:
+		return nil, fmt.Errorf("unexpected charge status %q for transaction %s", chargeResp.Status, chargeResp.TransactionID)
 	}
 
 	// Phase 2: Saga compensation for gateway charge.
@@ -260,7 +277,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		shared.NewPaymentID(),
 		invoiceID,
 		amount,
-		payment.PaymentMethodCreditCard,
+		s.resolvePaymentMethodType(chargeResp.PaymentMethodType, input.PaymentMethod),
 		chargeResp.TransactionID,
 		s.clock.Now(),
 	)
@@ -440,4 +457,52 @@ func (s *PaymentService) ResolvePaymentMethod(ctx context.Context, inv *invoice.
 	return "", shared.NewDomainError(shared.ErrCodeBusinessRule,
 		fmt.Sprintf("no payment method found for invoice %s: checked invoice, contract %s, and customer default",
 			inv.ID(), inv.ContractID()))
+}
+
+// resolvePaymentMethodType determines the payment method type to record on
+// a Payment entity. The resolution order is:
+//  1. ChargeResponse.PaymentMethodType (gateway knows the actual method used)
+//  2. ProcessPaymentInput.PaymentMethod (caller-specified)
+//  3. Default: credit_card (backward compatibility)
+func (s *PaymentService) resolvePaymentMethodType(chargeMethodType port.PaymentMethodType, inputMethod payment.PaymentMethod) payment.PaymentMethod {
+	if chargeMethodType != "" {
+		method, known := portMethodToPaymentMethod(chargeMethodType)
+		if !known {
+			s.logger.Warn("unknown gateway payment method type, falling back to credit_card",
+				"gatewayMethodType", chargeMethodType,
+			)
+		}
+		return method
+	}
+	if inputMethod != "" {
+		return inputMethod
+	}
+	return payment.PaymentMethodCreditCard
+}
+
+// portMethodToPaymentMethod converts a port.PaymentMethodType to a payment.PaymentMethod.
+// The second return value indicates whether the type was recognized.
+func portMethodToPaymentMethod(pmt port.PaymentMethodType) (payment.PaymentMethod, bool) {
+	switch pmt {
+	case port.PaymentMethodTypeCreditCard:
+		return payment.PaymentMethodCreditCard, true
+	case port.PaymentMethodTypeDebitCard:
+		return payment.PaymentMethodDebitCard, true
+	case port.PaymentMethodTypeBankTransfer:
+		return payment.PaymentMethodBankTransfer, true
+	case port.PaymentMethodTypeConvenienceStore:
+		return payment.PaymentMethodConvenience, true
+	case port.PaymentMethodTypeQRCode:
+		return payment.PaymentMethodQRCode, true
+	case port.PaymentMethodTypeDirectDebit:
+		return payment.PaymentMethodDirectDebit, true
+	case port.PaymentMethodTypeCarrier:
+		return payment.PaymentMethodCarrier, true
+	case port.PaymentMethodTypePostpay:
+		return payment.PaymentMethodPostpay, true
+	default:
+		// Unknown gateway payment method types fall back to credit_card.
+		// If a new PaymentMethodType is added to port/, add a case here.
+		return payment.PaymentMethodCreditCard, false
+	}
 }

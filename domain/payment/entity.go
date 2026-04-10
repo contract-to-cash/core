@@ -24,10 +24,13 @@ type PaymentMethod string
 
 const (
 	PaymentMethodCreditCard   PaymentMethod = "credit_card"
+	PaymentMethodDebitCard    PaymentMethod = "debit_card"
 	PaymentMethodBankTransfer PaymentMethod = "bank_transfer"
 	PaymentMethodDirectDebit  PaymentMethod = "direct_debit"
 	PaymentMethodConvenience  PaymentMethod = "convenience_store"
+	PaymentMethodQRCode       PaymentMethod = "qr_code"
 	PaymentMethodCarrier      PaymentMethod = "carrier"
+	PaymentMethodPostpay      PaymentMethod = "postpay"
 )
 
 // Payment represents a payment entity.
