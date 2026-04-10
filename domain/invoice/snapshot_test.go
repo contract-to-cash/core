@@ -81,6 +81,7 @@ func TestInvoice_Snapshot_RoundTrip(t *testing.T) {
 		t.Fatalf("FromSnapshot: %v", err)
 	}
 
+	// --- scalar and ID fields ---
 	if restored.ID() != inv.ID() {
 		t.Errorf("ID: got %s want %s", restored.ID(), inv.ID())
 	}
@@ -96,21 +97,51 @@ func TestInvoice_Snapshot_RoundTrip(t *testing.T) {
 	if restored.Status() != InvoiceStatusPaid {
 		t.Errorf("Status: got %s want paid", restored.Status())
 	}
+
+	// --- money fields (all 8) ---
 	if restored.Subtotal().Amount().Cmp(subtotal.Amount()) != 0 {
-		t.Errorf("Subtotal mismatch")
+		t.Errorf("Subtotal mismatch: got %s", restored.Subtotal().Amount().RatString())
 	}
 	if restored.DiscountAmount().Amount().Cmp(discount.Amount()) != 0 {
-		t.Errorf("DiscountAmount mismatch")
+		t.Errorf("DiscountAmount mismatch: got %s", restored.DiscountAmount().Amount().RatString())
 	}
 	if restored.TaxAmount().Amount().Cmp(tax.Amount()) != 0 {
-		t.Errorf("TaxAmount mismatch")
+		t.Errorf("TaxAmount mismatch: got %s", restored.TaxAmount().Amount().RatString())
+	}
+	// Total is the auto-computed (subtotal - discount + tax) stored in the snapshot.
+	expectedTotal := big.NewRat(10450, 1) // 10000 - 500 + 950
+	if restored.Total().Amount().Cmp(expectedTotal) != 0 {
+		t.Errorf("Total mismatch: got %s want %s",
+			restored.Total().Amount().RatString(), expectedTotal.RatString())
+	}
+	if restored.AppliedBalance().Amount().Cmp(big.NewRat(0, 1)) != 0 {
+		t.Errorf("AppliedBalance mismatch: got %s", restored.AppliedBalance().Amount().RatString())
+	}
+	if restored.AmountDue().Amount().Cmp(expectedTotal) != 0 {
+		t.Errorf("AmountDue mismatch: got %s", restored.AmountDue().Amount().RatString())
 	}
 	if restored.PaidAmount().Amount().Cmp(big.NewRat(10450, 1)) != 0 {
 		t.Errorf("PaidAmount mismatch: %s", restored.PaidAmount().Amount().RatString())
 	}
+	if !restored.Balance().IsZero() {
+		t.Errorf("Balance mismatch: got %s", restored.Balance().Amount().RatString())
+	}
+
+	// --- time fields ---
 	if restored.PaidAt() == nil || !restored.PaidAt().Equal(paidAt) {
 		t.Errorf("PaidAt mismatch: %v", restored.PaidAt())
 	}
+	if !restored.IssueDate().Equal(time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("IssueDate mismatch: %v", restored.IssueDate())
+	}
+	if !restored.DueDate().Equal(time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("DueDate mismatch: %v", restored.DueDate())
+	}
+	if !restored.BillingPeriod().Equals(period) {
+		t.Errorf("BillingPeriod mismatch")
+	}
+
+	// --- optional / pointer fields ---
 	if !restored.AllowPartialPay() {
 		t.Errorf("AllowPartialPay not restored")
 	}
@@ -123,14 +154,39 @@ func TestInvoice_Snapshot_RoundTrip(t *testing.T) {
 	if restored.RevisionOf() == nil || *restored.RevisionOf() != revOf {
 		t.Errorf("RevisionOf not restored")
 	}
+	if restored.VoidReason() != "" {
+		t.Errorf("VoidReason mismatch: %q", restored.VoidReason())
+	}
 	if meta := restored.Metadata(); meta["k"] != "v" {
 		t.Errorf("Metadata not restored: %v", meta)
 	}
-	if items := restored.LineItems(); len(items) != 1 || items[0].ID() != "li-1" {
-		t.Errorf("LineItems not restored: %+v", items)
+
+	// --- line items: verify every LineItem field ---
+	items := restored.LineItems()
+	if len(items) != 1 {
+		t.Fatalf("LineItems length: got %d want 1", len(items))
 	}
-	if !restored.BillingPeriod().Equals(period) {
-		t.Errorf("BillingPeriod mismatch")
+	got := items[0]
+	if got.ID() != "li-1" {
+		t.Errorf("LineItem.ID: got %s", got.ID())
+	}
+	if got.Description() != "item" {
+		t.Errorf("LineItem.Description: got %s", got.Description())
+	}
+	if got.Quantity() != 2 {
+		t.Errorf("LineItem.Quantity: got %d", got.Quantity())
+	}
+	if got.UnitPrice().Amount().Cmp(big.NewRat(5000, 1)) != 0 {
+		t.Errorf("LineItem.UnitPrice: got %s", got.UnitPrice().Amount().RatString())
+	}
+	if got.Amount().Amount().Cmp(big.NewRat(10000, 1)) != 0 {
+		t.Errorf("LineItem.Amount: got %s", got.Amount().Amount().RatString())
+	}
+	if got.TaxRate() == nil || got.TaxRate().Cmp(big.NewRat(10, 100)) != 0 {
+		t.Errorf("LineItem.TaxRate: got %v", got.TaxRate())
+	}
+	if got.PriceID() != shared.PriceID("price-1") {
+		t.Errorf("LineItem.PriceID: got %s", got.PriceID())
 	}
 }
 
@@ -242,5 +298,179 @@ func TestInvoice_ToSnapshot_IsIndependentCopy(t *testing.T) {
 	}
 	if inv.Status() == InvoiceStatusVoided {
 		t.Error("ToSnapshot leaked status reference")
+	}
+}
+
+// TestInvoice_ToSnapshot_PointerIndependence verifies that pointer fields
+// at the Snapshot boundary are isolated: mutating the snapshot's pointer
+// fields (directly or transitively) must not affect the source invoice.
+//
+// Note: this tests the Snapshot boundary only. The entity's own getters
+// (e.g. LineItem.TaxRate()) still return internal pointers; that's a
+// separate concern tracked as its own issue.
+func TestInvoice_ToSnapshot_PointerIndependence(t *testing.T) {
+	t.Parallel()
+
+	taxRate := big.NewRat(10, 100)
+	li, err := NewLineItem(
+		"li-1", "x", 1,
+		shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		taxRate,
+	)
+	if err != nil {
+		t.Fatalf("NewLineItem: %v", err)
+	}
+
+	paidAt := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	pmID := "pm-1"
+	origID := shared.InvoiceID("orig")
+	revOf := shared.InvoiceID("prev")
+
+	inv, err := NewInvoice(
+		shared.InvoiceID("inv-1"),
+		shared.AccountID("acc-1"),
+		shared.ContractID("ctr-1"),
+		shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		WithLineItems([]LineItem{li}),
+		WithPaymentMethodID(&pmID),
+		WithOriginalInvoiceID(origID),
+		WithRevisionOf(revOf),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+	// Manually set paidAt through snapshot round-trip (no public mutator).
+	tmp := inv.ToSnapshot()
+	tmp.PaidAt = &paidAt
+	inv, err = FromSnapshot(tmp)
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+
+	snap := inv.ToSnapshot()
+
+	// LineItem-nested *big.Rat must not be shared.
+	snap.LineItems[0].TaxRate.SetInt64(999)
+	if got := inv.LineItems()[0].TaxRate().RatString(); got == "999" {
+		t.Errorf("LineItem.TaxRate pointer was shared: snapshot mutation leaked to entity (%s)", got)
+	}
+
+	// LineItem-nested metadata map must not be shared.
+	snap2 := inv.ToSnapshot()
+	snap2.LineItems[0].Metadata["leak"] = "yes"
+	if _, leaked := inv.LineItems()[0].Metadata()["leak"]; leaked {
+		t.Error("LineItem.Metadata map was shared")
+	}
+
+	// Top-level *time.Time must not be shared.
+	snap3 := inv.ToSnapshot()
+	*snap3.PaidAt = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	if inv.PaidAt() != nil && inv.PaidAt().Year() == 2099 {
+		t.Error("Invoice.PaidAt pointer was shared")
+	}
+
+	// Top-level *string must not be shared.
+	snap4 := inv.ToSnapshot()
+	*snap4.PaymentMethodID = "mutated"
+	if inv.PaymentMethodID() != nil && *inv.PaymentMethodID() == "mutated" {
+		t.Error("Invoice.PaymentMethodID pointer was shared")
+	}
+
+	// Top-level *shared.InvoiceID must not be shared.
+	snap5 := inv.ToSnapshot()
+	*snap5.OriginalInvoiceID = shared.InvoiceID("mutated")
+	if inv.OriginalInvoiceID() != nil && *inv.OriginalInvoiceID() == shared.InvoiceID("mutated") {
+		t.Error("Invoice.OriginalInvoiceID pointer was shared")
+	}
+
+	snap6 := inv.ToSnapshot()
+	*snap6.RevisionOf = shared.InvoiceID("mutated")
+	if inv.RevisionOf() != nil && *inv.RevisionOf() == shared.InvoiceID("mutated") {
+		t.Error("Invoice.RevisionOf pointer was shared")
+	}
+}
+
+// TestInvoice_FromSnapshot_PointerIndependence verifies that after
+// FromSnapshot, mutating the original snapshot's pointer fields does not
+// affect the reconstructed invoice. This protects adapters that build a
+// snapshot from DB rows and keep it around for logging/retry.
+func TestInvoice_FromSnapshot_PointerIndependence(t *testing.T) {
+	t.Parallel()
+
+	taxRate := big.NewRat(10, 100)
+	paidAt := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	pmID := "pm-1"
+	origID := shared.InvoiceID("orig")
+	revOf := shared.InvoiceID("prev")
+
+	snap := InvoiceSnapshot{
+		ID:                shared.InvoiceID("inv-1"),
+		AccountID:         shared.AccountID("acc-1"),
+		ContractID:        shared.ContractID("ctr-1"),
+		Subtotal:          shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		DiscountAmount:    shared.Zero(shared.CurrencyJPY),
+		TaxAmount:         shared.Zero(shared.CurrencyJPY),
+		Total:             shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		AmountDue:         shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		PaidAmount:        shared.Zero(shared.CurrencyJPY),
+		Balance:           shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		AppliedBalance:    shared.Zero(shared.CurrencyJPY),
+		Status:            InvoiceStatusPaid,
+		PaidAt:            &paidAt,
+		PaymentMethodID:   &pmID,
+		OriginalInvoiceID: &origID,
+		RevisionOf:        &revOf,
+		LineItems: []LineItemSnapshot{
+			{
+				ID:          "li-1",
+				Description: "x",
+				Quantity:    1,
+				UnitPrice:   shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+				Amount:      shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+				TaxRate:     taxRate,
+				Metadata:    map[string]string{"k": "v"},
+			},
+		},
+		Metadata: map[string]string{"k": "v"},
+	}
+
+	inv, err := FromSnapshot(snap)
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+
+	// Mutate the original snapshot's pointers/maps/slices.
+	*snap.PaidAt = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	*snap.PaymentMethodID = "mutated"
+	*snap.OriginalInvoiceID = shared.InvoiceID("mutated")
+	*snap.RevisionOf = shared.InvoiceID("mutated")
+	snap.LineItems[0].TaxRate.SetInt64(999)
+	snap.LineItems[0].Metadata["leak"] = "yes"
+	snap.Metadata["leak"] = "yes"
+
+	// The reconstructed invoice must not be affected.
+	if inv.PaidAt() == nil || inv.PaidAt().Year() != 2026 {
+		t.Errorf("FromSnapshot: PaidAt pointer was shared (year=%v)", inv.PaidAt())
+	}
+	if inv.PaymentMethodID() == nil || *inv.PaymentMethodID() != "pm-1" {
+		t.Errorf("FromSnapshot: PaymentMethodID pointer was shared: %v", inv.PaymentMethodID())
+	}
+	if inv.OriginalInvoiceID() == nil || *inv.OriginalInvoiceID() != shared.InvoiceID("orig") {
+		t.Errorf("FromSnapshot: OriginalInvoiceID pointer was shared: %v", inv.OriginalInvoiceID())
+	}
+	if inv.RevisionOf() == nil || *inv.RevisionOf() != shared.InvoiceID("prev") {
+		t.Errorf("FromSnapshot: RevisionOf pointer was shared: %v", inv.RevisionOf())
+	}
+	if got := inv.LineItems()[0].TaxRate().RatString(); got == "999" {
+		t.Errorf("FromSnapshot: LineItem.TaxRate pointer was shared: %s", got)
+	}
+	if _, leaked := inv.LineItems()[0].Metadata()["leak"]; leaked {
+		t.Error("FromSnapshot: LineItem.Metadata map was shared")
+	}
+	if _, leaked := inv.Metadata()["leak"]; leaked {
+		t.Error("FromSnapshot: Invoice.Metadata map was shared")
 	}
 }

@@ -2,7 +2,15 @@
 //
 // Snapshot / Reconstruct pattern for Payment.
 //
-// DANGER ZONE — PERSISTENCE ADAPTERS ONLY
+// # Relation to ContractAggregate
+//
+// ContractAggregate (in domain/contract) is event-sourced and uses
+// MarshalSnapshot() ([]byte, error) + LoadFromSnapshot(eventstore.Snapshot).
+// Payment is state-based and uses ToSnapshot() / FromSnapshot(s) returning a
+// typed struct. Do not mix the two patterns — they serve different persistence
+// models.
+//
+// # DANGER ZONE — PERSISTENCE ADAPTERS ONLY
 //
 // The types and functions in this file deliberately bypass business rules
 // enforced by NewPayment / Complete / Fail / RecordRefund. They exist solely

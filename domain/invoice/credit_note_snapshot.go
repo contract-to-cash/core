@@ -1,7 +1,8 @@
 // Package invoice — credit_note_snapshot.go
 //
-// Snapshot / Reconstruct pattern for CreditNote. See snapshot.go for the
-// design rationale and the persistence-adapters-only warning.
+// Snapshot / Reconstruct pattern for CreditNote. See snapshot.go in this
+// package for the full design rationale, the distinction from
+// ContractAggregate.MarshalSnapshot, and the persistence-adapters-only warning.
 
 package invoice
 
@@ -45,19 +46,33 @@ type CreditNoteSnapshot struct {
 }
 
 // ToSnapshot returns a flat, independent copy of the credit note's internal state.
+// Mutating the returned snapshot (including its nested pointer and map
+// fields) does NOT affect the credit note at the Snapshot boundary.
 //
 // For persistence adapters only.
 func (cn *CreditNote) ToSnapshot() CreditNoteSnapshot {
 	items := make([]CreditNoteItemSnapshot, len(cn.items))
 	for i, it := range cn.items {
+		// Deep-copy *big.Rat so snapshot mutations do not leak into the entity.
+		var taxRate *big.Rat
+		if it.taxRate != nil {
+			taxRate = new(big.Rat).Set(it.taxRate)
+		}
 		items[i] = CreditNoteItemSnapshot{
 			InvoiceLineItemID: it.invoiceLineItemID,
 			Description:       it.description,
 			Amount:            it.amount,
-			TaxRate:           it.taxRate,
+			TaxRate:           taxRate,
 			TaxAmount:         it.taxAmount,
 		}
 	}
+
+	var issuedAt *time.Time
+	if cn.issuedAt != nil {
+		v := *cn.issuedAt
+		issuedAt = &v
+	}
+
 	return CreditNoteSnapshot{
 		ID:           cn.id,
 		Number:       cn.number,
@@ -73,7 +88,7 @@ func (cn *CreditNote) ToSnapshot() CreditNoteSnapshot {
 		Total:        cn.total,
 		CreditAmount: cn.creditAmount,
 		RefundAmount: cn.refundAmount,
-		IssuedAt:     cn.issuedAt,
+		IssuedAt:     issuedAt,
 		CreatedAt:    cn.createdAt,
 	}
 }
@@ -94,13 +109,25 @@ func CreditNoteFromSnapshot(s CreditNoteSnapshot) (*CreditNote, error) {
 
 	items := make([]CreditNoteItem, len(s.Items))
 	for i, is := range s.Items {
+		// Deep-copy *big.Rat so adapters that retain the snapshot after
+		// calling CreditNoteFromSnapshot cannot corrupt the reconstructed entity.
+		var taxRate *big.Rat
+		if is.TaxRate != nil {
+			taxRate = new(big.Rat).Set(is.TaxRate)
+		}
 		items[i] = CreditNoteItem{
 			invoiceLineItemID: is.InvoiceLineItemID,
 			description:       is.Description,
 			amount:            is.Amount,
-			taxRate:           is.TaxRate,
+			taxRate:           taxRate,
 			taxAmount:         is.TaxAmount,
 		}
+	}
+
+	var issuedAt *time.Time
+	if s.IssuedAt != nil {
+		v := *s.IssuedAt
+		issuedAt = &v
 	}
 
 	return &CreditNote{
@@ -118,7 +145,7 @@ func CreditNoteFromSnapshot(s CreditNoteSnapshot) (*CreditNote, error) {
 		total:        s.Total,
 		creditAmount: s.CreditAmount,
 		refundAmount: s.RefundAmount,
-		issuedAt:     s.IssuedAt,
+		issuedAt:     issuedAt,
 		createdAt:    s.CreatedAt,
 	}, nil
 }

@@ -118,3 +118,38 @@ func TestProduct_ToSnapshot_IsIndependentCopy(t *testing.T) {
 		t.Error("ToSnapshot leaked metadata reference")
 	}
 }
+
+// TestProduct_PointerIndependence verifies that Feature.Limit (*int64)
+// is isolated at the Snapshot boundary, in both directions.
+func TestProduct_PointerIndependence(t *testing.T) {
+	t.Parallel()
+
+	limit := int64(100)
+	p := NewProduct("x", "y", time.Now())
+	p.AddFeature(Feature{Name: "f1", Limit: &limit})
+
+	// ToSnapshot: mutate snapshot's Feature.Limit, entity must be unaffected.
+	snap := p.ToSnapshot()
+	*snap.Features[0].Limit = 999
+	if got := p.Features()[0].Limit; got != nil && *got == 999 {
+		t.Errorf("Feature.Limit pointer was shared: *got=%d", *got)
+	}
+
+	// FromSnapshot: mutate original snapshot, reconstructed entity must be unaffected.
+	origLimit := int64(50)
+	src := ProductSnapshot{
+		ID:        shared.ProductID("prod-1"),
+		Name:      "x",
+		Status:    ProductStatusActive,
+		Features:  []Feature{{Name: "f1", Limit: &origLimit}},
+		CreatedAt: time.Now(),
+	}
+	restored, err := FromSnapshot(src)
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+	*src.Features[0].Limit = 999
+	if got := restored.Features()[0].Limit; got != nil && *got == 999 {
+		t.Errorf("FromSnapshot: Feature.Limit pointer was shared: *got=%d", *got)
+	}
+}

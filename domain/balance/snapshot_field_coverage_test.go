@@ -5,11 +5,13 @@ import (
 	"testing"
 )
 
-// TestBalanceEntrySnapshot_FieldCoverage is a guard against field drift.
+// TestBalanceEntrySnapshot_FieldCoverage is a bidirectional guard against
+// field drift.
 //
 // BalanceEntry has a field `loadedVersion` that exists only to implement
 // optimistic locking at load time; it is deliberately NOT stored separately
-// in the snapshot (FromSnapshot sets both from Version). We exclude it here.
+// in the snapshot (FromSnapshot sets both from Version). We exclude it from
+// both directions of the parity check.
 func TestBalanceEntrySnapshot_FieldCoverage(t *testing.T) {
 	t.Parallel()
 
@@ -27,6 +29,15 @@ func TestBalanceEntrySnapshot_FieldCoverage(t *testing.T) {
 		if _, ok := snapshotFields[name]; !ok {
 			t.Errorf("BalanceEntry field %q has no matching BalanceEntrySnapshot field. "+
 				"When adding a new field to BalanceEntry, add it to BalanceEntrySnapshot too.", name)
+		}
+	}
+	for name := range snapshotFields {
+		if _, skip := excluded[name]; skip {
+			continue
+		}
+		if _, ok := entityFields[name]; !ok {
+			t.Errorf("BalanceEntrySnapshot field %q has no matching BalanceEntry field. "+
+				"If the field was removed from BalanceEntry, remove it from BalanceEntrySnapshot too.", name)
 		}
 	}
 }

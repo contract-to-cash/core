@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestUsageRecordSnapshot_FieldCoverage is a bidirectional guard against field drift.
 func TestUsageRecordSnapshot_FieldCoverage(t *testing.T) {
 	t.Parallel()
 
@@ -14,6 +15,11 @@ func TestUsageRecordSnapshot_FieldCoverage(t *testing.T) {
 	for name := range entityFields {
 		if _, ok := snapshotFields[name]; !ok {
 			t.Errorf("UsageRecord field %q has no matching UsageRecordSnapshot field", name)
+		}
+	}
+	for name := range snapshotFields {
+		if _, ok := entityFields[name]; !ok {
+			t.Errorf("UsageRecordSnapshot field %q has no matching UsageRecord field", name)
 		}
 	}
 }

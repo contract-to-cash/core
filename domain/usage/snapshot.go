@@ -2,7 +2,13 @@
 //
 // Snapshot / Reconstruct pattern for UsageRecord.
 //
-// DANGER ZONE — PERSISTENCE ADAPTERS ONLY
+// # Relation to ContractAggregate
+//
+// ContractAggregate (in domain/contract) is event-sourced and uses
+// MarshalSnapshot / LoadFromSnapshot. UsageRecord is state-based and uses
+// ToSnapshot / FromSnapshot returning a typed struct. Do not mix.
+//
+// # DANGER ZONE — PERSISTENCE ADAPTERS ONLY
 //
 // The types and functions in this file deliberately bypass NewUsageRecord's
 // quantity validation. Application code MUST NOT use these APIs.

@@ -66,6 +66,34 @@ func TestPayment_Snapshot_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestPayment_FromSnapshot_AllowsHistoricalOverRefund verifies that we can
+// reconstitute a payment whose refundedAmount exceeds the original amount —
+// a state that RecordRefund would reject today but may exist in historical
+// DB rows (e.g. from rounding errors in an earlier version of the system,
+// or from manual DBA adjustments).
+func TestPayment_FromSnapshot_AllowsHistoricalOverRefund(t *testing.T) {
+	t.Parallel()
+
+	snap := PaymentSnapshot{
+		ID:                   shared.PaymentID("pay-overrefund"),
+		InvoiceID:            shared.InvoiceID("inv-1"),
+		Amount:               shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		RefundedAmount:       shared.NewMoney(big.NewRat(1001, 1), shared.CurrencyJPY), // > amount
+		Method:               PaymentMethodCreditCard,
+		Status:               PaymentStatusRefunded,
+		GatewayTransactionID: "tx-1",
+		ProcessedAt:          time.Now(),
+	}
+	p, err := FromSnapshot(snap)
+	if err != nil {
+		t.Fatalf("FromSnapshot should accept historical over-refund: %v", err)
+	}
+	if p.RefundedAmount().Amount().Cmp(big.NewRat(1001, 1)) != 0 {
+		t.Errorf("RefundedAmount not preserved: got %s",
+			p.RefundedAmount().Amount().RatString())
+	}
+}
+
 // TestPayment_FromSnapshot_AllowsRefundedStateDirectly verifies that we
 // can restore a Payment in PaymentStatusRefunded state without going
 // through MarkRefunded / RecordRefund (which enforce business rules).

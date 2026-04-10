@@ -2,12 +2,22 @@
 //
 // Snapshot / Reconstruct pattern for BalanceEntry.
 //
-// DANGER ZONE — PERSISTENCE ADAPTERS ONLY
+// # Relation to ContractAggregate
 //
-// This file provides unified reconstitution for BalanceEntry. It supersedes
-// the scattered setters (SetSourceType, SetExpiresAt, SetVersion) for the
-// persistence-adapter use case, although those setters remain available for
-// backward compatibility.
+// ContractAggregate (in domain/contract) is event-sourced and uses
+// MarshalSnapshot() ([]byte, error) + LoadFromSnapshot(eventstore.Snapshot).
+// BalanceEntry is state-based and uses ToSnapshot() / FromSnapshot(s)
+// returning a typed struct. Do not mix the two patterns — they serve
+// different persistence models.
+//
+// # DANGER ZONE — PERSISTENCE ADAPTERS ONLY
+//
+// This file provides unified reconstitution for BalanceEntry. It is the
+// preferred way for persistence adapters to rebuild an entity from a DB row,
+// because it restores all fields (including version and loadedVersion) in a
+// single atomic call. The scattered setters (SetSourceType, SetExpiresAt,
+// SetVersion) remain available for construction helpers and post-construction
+// augmentation, but adapters loading whole entities should use FromSnapshot.
 //
 // Application code MUST NOT use these APIs. Use NewBalanceEntry and Consume
 // for normal operations.

@@ -2,7 +2,13 @@
 //
 // Snapshot / Reconstruct pattern for Product.
 //
-// DANGER ZONE — PERSISTENCE ADAPTERS ONLY
+// # Relation to ContractAggregate
+//
+// ContractAggregate (in domain/contract) is event-sourced and uses
+// MarshalSnapshot / LoadFromSnapshot. Product is state-based and uses
+// ToSnapshot / FromSnapshot returning a typed struct. Do not mix.
+//
+// # DANGER ZONE — PERSISTENCE ADAPTERS ONLY
 //
 // NewProduct generates a fresh ULID for the ID, which makes it impossible
 // to reconstruct an existing product through the normal constructor path.
@@ -38,11 +44,26 @@ type ProductSnapshot struct {
 }
 
 // ToSnapshot returns a flat, independent copy of the product's internal state.
+// Mutating the returned snapshot (including nested Feature.Limit pointers)
+// does NOT affect the product at the Snapshot boundary.
 //
 // For persistence adapters only.
 func (p *Product) ToSnapshot() ProductSnapshot {
+	// Deep-copy Features because Feature.Limit is *int64 which would
+	// otherwise be shared between snapshot and entity.
 	features := make([]Feature, len(p.features))
-	copy(features, p.features)
+	for i, f := range p.features {
+		var limit *int64
+		if f.Limit != nil {
+			v := *f.Limit
+			limit = &v
+		}
+		features[i] = Feature{
+			Name:     f.Name,
+			Included: f.Included,
+			Limit:    limit,
+		}
+	}
 
 	usageMetrics := make([]UsageMetric, len(p.usageMetrics))
 	copy(usageMetrics, p.usageMetrics)
@@ -76,8 +97,21 @@ func FromSnapshot(s ProductSnapshot) (*Product, error) {
 			"product snapshot: ID must not be empty")
 	}
 
+	// Deep-copy Features because Feature.Limit is *int64 which would
+	// otherwise be shared between snapshot and entity.
 	features := make([]Feature, len(s.Features))
-	copy(features, s.Features)
+	for i, f := range s.Features {
+		var limit *int64
+		if f.Limit != nil {
+			v := *f.Limit
+			limit = &v
+		}
+		features[i] = Feature{
+			Name:     f.Name,
+			Included: f.Included,
+			Limit:    limit,
+		}
+	}
 
 	usageMetrics := make([]UsageMetric, len(s.UsageMetrics))
 	copy(usageMetrics, s.UsageMetrics)

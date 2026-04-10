@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestPaymentSnapshot_FieldCoverage is a guard against field drift.
+// TestPaymentSnapshot_FieldCoverage is a bidirectional guard against field drift.
 func TestPaymentSnapshot_FieldCoverage(t *testing.T) {
 	t.Parallel()
 
@@ -16,6 +16,12 @@ func TestPaymentSnapshot_FieldCoverage(t *testing.T) {
 		if _, ok := snapshotFields[name]; !ok {
 			t.Errorf("Payment field %q has no matching PaymentSnapshot field. "+
 				"When adding a new field to Payment, add it to PaymentSnapshot too.", name)
+		}
+	}
+	for name := range snapshotFields {
+		if _, ok := entityFields[name]; !ok {
+			t.Errorf("PaymentSnapshot field %q has no matching Payment field. "+
+				"If the field was removed from Payment, remove it from PaymentSnapshot too.", name)
 		}
 	}
 }

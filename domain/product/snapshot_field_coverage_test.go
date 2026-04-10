@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// TestProductSnapshot_FieldCoverage is a bidirectional guard against field drift.
 func TestProductSnapshot_FieldCoverage(t *testing.T) {
 	t.Parallel()
 
@@ -14,6 +15,11 @@ func TestProductSnapshot_FieldCoverage(t *testing.T) {
 	for name := range entityFields {
 		if _, ok := snapshotFields[name]; !ok {
 			t.Errorf("Product field %q has no matching ProductSnapshot field", name)
+		}
+	}
+	for name := range snapshotFields {
+		if _, ok := entityFields[name]; !ok {
+			t.Errorf("ProductSnapshot field %q has no matching Product field", name)
 		}
 	}
 }

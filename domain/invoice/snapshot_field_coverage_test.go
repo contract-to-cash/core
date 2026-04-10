@@ -5,54 +5,52 @@ import (
 	"testing"
 )
 
-// TestInvoiceSnapshot_FieldCoverage is a guard against field drift.
-// When a new field is added to Invoice, the test fails unless the same
-// field is added to InvoiceSnapshot (or explicitly excluded below).
+// TestInvoiceSnapshot_FieldCoverage is a bidirectional guard against field
+// drift. When a new field is added to Invoice, the test fails unless the
+// same field is added to InvoiceSnapshot; conversely, if a field is removed
+// from Invoice but left in InvoiceSnapshot, the test also fails.
 //
 // This is cheaper than comparing every field individually in round-trip
 // tests and catches omissions at CI time.
 func TestInvoiceSnapshot_FieldCoverage(t *testing.T) {
 	t.Parallel()
+	assertFieldParity(t, "Invoice", reflect.TypeOf(Invoice{}),
+		"InvoiceSnapshot", reflect.TypeOf(InvoiceSnapshot{}))
+}
 
-	entityType := reflect.TypeOf(Invoice{})
-	snapshotType := reflect.TypeOf(InvoiceSnapshot{})
+func TestLineItemSnapshot_FieldCoverage(t *testing.T) {
+	t.Parallel()
+	assertFieldParity(t, "LineItem", reflect.TypeOf(LineItem{}),
+		"LineItemSnapshot", reflect.TypeOf(LineItemSnapshot{}))
+}
 
-	// Entity fields are unexported. Snapshot fields are exported. Compare
-	// names case-insensitively after snake/camel normalization.
+func TestCreditNoteSnapshot_FieldCoverage(t *testing.T) {
+	t.Parallel()
+	assertFieldParity(t, "CreditNote", reflect.TypeOf(CreditNote{}),
+		"CreditNoteSnapshot", reflect.TypeOf(CreditNoteSnapshot{}))
+}
+
+// assertFieldParity verifies bidirectional name parity between two struct
+// types after case-insensitive normalization. Any field present in one but
+// missing in the other produces a failure.
+func assertFieldParity(t *testing.T, entityName string, entityType reflect.Type, snapshotName string, snapshotType reflect.Type) {
+	t.Helper()
 	entityFields := collectFieldNames(entityType)
 	snapshotFields := collectFieldNames(snapshotType)
 
 	for name := range entityFields {
 		if _, ok := snapshotFields[name]; !ok {
-			t.Errorf("Invoice field %q has no matching InvoiceSnapshot field. "+
-				"When adding a new field to Invoice, add it to InvoiceSnapshot too "+
-				"(or update this test's exclusion list).", name)
+			t.Errorf("%s field %q has no matching %s field. "+
+				"When adding a new field to %s, add it to %s too "+
+				"(or update this test's exclusion list).",
+				entityName, name, snapshotName, entityName, snapshotName)
 		}
 	}
-}
-
-func TestLineItemSnapshot_FieldCoverage(t *testing.T) {
-	t.Parallel()
-
-	entityFields := collectFieldNames(reflect.TypeOf(LineItem{}))
-	snapshotFields := collectFieldNames(reflect.TypeOf(LineItemSnapshot{}))
-
-	for name := range entityFields {
-		if _, ok := snapshotFields[name]; !ok {
-			t.Errorf("LineItem field %q has no matching LineItemSnapshot field", name)
-		}
-	}
-}
-
-func TestCreditNoteSnapshot_FieldCoverage(t *testing.T) {
-	t.Parallel()
-
-	entityFields := collectFieldNames(reflect.TypeOf(CreditNote{}))
-	snapshotFields := collectFieldNames(reflect.TypeOf(CreditNoteSnapshot{}))
-
-	for name := range entityFields {
-		if _, ok := snapshotFields[name]; !ok {
-			t.Errorf("CreditNote field %q has no matching CreditNoteSnapshot field", name)
+	for name := range snapshotFields {
+		if _, ok := entityFields[name]; !ok {
+			t.Errorf("%s field %q has no matching %s field. "+
+				"If the field was removed from %s, remove it from %s too.",
+				snapshotName, name, entityName, entityName, snapshotName)
 		}
 	}
 }

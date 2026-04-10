@@ -4,7 +4,22 @@
 // persistence adapters. It exposes a flat DTO (InvoiceSnapshot / LineItemSnapshot)
 // and dedicated ToSnapshot / FromSnapshot entry points.
 //
-// DANGER ZONE — PERSISTENCE ADAPTERS ONLY
+// # Relation to ContractAggregate
+//
+// ContractAggregate is event-sourced and uses MarshalSnapshot() ([]byte, error)
+// + LoadFromSnapshot(eventstore.Snapshot) for event-store-level snapshotting.
+// That pattern serializes to a byte slice stored inside eventstore.Snapshot.State
+// and is coupled to the eventstore package.
+//
+// State-based entities (Invoice, CreditNote, Payment, BalanceEntry, UsageRecord,
+// Product, Price) are NOT event-sourced. They use ToSnapshot() / FromSnapshot(s)
+// which return a typed struct that adapters can map directly to DB columns.
+//
+// The two patterns coexist: each entity uses whichever matches its persistence
+// model. Do not mix: do not add ToSnapshot to ContractAggregate, and do not
+// add MarshalSnapshot to state-based entities.
+//
+// # DANGER ZONE — PERSISTENCE ADAPTERS ONLY
 //
 // The types and functions in this file deliberately bypass construction-time
 // invariants enforced by NewInvoice / NewLineItem / RecordPayment / etc.
@@ -14,7 +29,15 @@
 // Application code and domain services MUST NOT use these APIs. Use NewInvoice
 // and the state-transition methods (Finalize, RecordPayment, Void, ...) instead.
 //
-// See issue #94 for the design rationale.
+// # Pointer isolation
+//
+// ToSnapshot / FromSnapshot deep-copy pointer fields (*big.Rat, *time.Time,
+// *string, *shared.InvoiceID) so that mutations to the snapshot do not leak
+// into the entity (and vice versa). This isolation is at the Snapshot boundary
+// only; the entity's own getters may still return internal pointers — that is
+// tracked separately as issue #96.
+//
+// See issue #94 for the overall design rationale.
 
 package invoice
 
@@ -71,7 +94,12 @@ type InvoiceSnapshot struct {
 }
 
 // ToSnapshot returns a flat, independent copy of the invoice's internal state.
-// Mutating the returned snapshot does NOT affect the invoice.
+// Mutating the returned snapshot (including its nested pointer and map
+// fields) does NOT affect the invoice at the Snapshot boundary.
+//
+// Note: this isolation is at the Snapshot boundary only. The entity's own
+// getters (e.g. LineItem.TaxRate()) may still return internal pointers;
+// that's a separate concern tracked as issue #96.
 //
 // For persistence adapters only. See file header warning.
 func (inv *Invoice) ToSnapshot() InvoiceSnapshot {
@@ -81,13 +109,18 @@ func (inv *Invoice) ToSnapshot() InvoiceSnapshot {
 		for k, v := range li.metadata {
 			liMeta[k] = v
 		}
+		// Deep-copy *big.Rat so snapshot mutations do not leak into the entity.
+		var taxRate *big.Rat
+		if li.taxRate != nil {
+			taxRate = new(big.Rat).Set(li.taxRate)
+		}
 		lineItems[i] = LineItemSnapshot{
 			ID:          li.id,
 			Description: li.description,
 			Quantity:    li.quantity,
 			UnitPrice:   li.unitPrice,
 			Amount:      li.amount,
-			TaxRate:     li.taxRate,
+			TaxRate:     taxRate,
 			PriceID:     li.priceID,
 			Metadata:    liMeta,
 		}
@@ -96,6 +129,29 @@ func (inv *Invoice) ToSnapshot() InvoiceSnapshot {
 	metadata := make(map[string]string, len(inv.metadata))
 	for k, v := range inv.metadata {
 		metadata[k] = v
+	}
+
+	// Deep-copy pointer fields: dereference, then take the address of the
+	// local copy so that mutations via the snapshot do not reach the entity.
+	var paidAt *time.Time
+	if inv.paidAt != nil {
+		v := *inv.paidAt
+		paidAt = &v
+	}
+	var paymentMethodID *string
+	if inv.paymentMethodID != nil {
+		v := *inv.paymentMethodID
+		paymentMethodID = &v
+	}
+	var originalInvoiceID *shared.InvoiceID
+	if inv.originalInvoiceID != nil {
+		v := *inv.originalInvoiceID
+		originalInvoiceID = &v
+	}
+	var revisionOf *shared.InvoiceID
+	if inv.revisionOf != nil {
+		v := *inv.revisionOf
+		revisionOf = &v
 	}
 
 	return InvoiceSnapshot{
@@ -116,11 +172,11 @@ func (inv *Invoice) ToSnapshot() InvoiceSnapshot {
 		BillingPeriod:     inv.billingPeriod,
 		IssueDate:         inv.issueDate,
 		DueDate:           inv.dueDate,
-		PaidAt:            inv.paidAt,
-		PaymentMethodID:   inv.paymentMethodID,
+		PaidAt:            paidAt,
+		PaymentMethodID:   paymentMethodID,
 		AllowPartialPay:   inv.allowPartialPay,
-		OriginalInvoiceID: inv.originalInvoiceID,
-		RevisionOf:        inv.revisionOf,
+		OriginalInvoiceID: originalInvoiceID,
+		RevisionOf:        revisionOf,
 		VoidReason:        inv.voidReason,
 		Metadata:          metadata,
 	}
@@ -147,13 +203,19 @@ func FromSnapshot(s InvoiceSnapshot) (*Invoice, error) {
 		for k, v := range lis.Metadata {
 			liMeta[k] = v
 		}
+		// Deep-copy *big.Rat so adapters that retain the snapshot after
+		// calling FromSnapshot cannot corrupt the reconstructed entity.
+		var taxRate *big.Rat
+		if lis.TaxRate != nil {
+			taxRate = new(big.Rat).Set(lis.TaxRate)
+		}
 		lineItems[i] = LineItem{
 			id:          lis.ID,
 			description: lis.Description,
 			quantity:    lis.Quantity,
 			unitPrice:   lis.UnitPrice,
 			amount:      lis.Amount,
-			taxRate:     lis.TaxRate,
+			taxRate:     taxRate,
 			priceID:     lis.PriceID,
 			metadata:    liMeta,
 		}
@@ -162,6 +224,30 @@ func FromSnapshot(s InvoiceSnapshot) (*Invoice, error) {
 	metadata := make(map[string]string, len(s.Metadata))
 	for k, v := range s.Metadata {
 		metadata[k] = v
+	}
+
+	// Deep-copy pointer fields: dereference, then take the address of the
+	// local copy. This protects the entity from subsequent mutations to the
+	// original snapshot (e.g. an adapter that logs the snapshot after use).
+	var paidAt *time.Time
+	if s.PaidAt != nil {
+		v := *s.PaidAt
+		paidAt = &v
+	}
+	var paymentMethodID *string
+	if s.PaymentMethodID != nil {
+		v := *s.PaymentMethodID
+		paymentMethodID = &v
+	}
+	var originalInvoiceID *shared.InvoiceID
+	if s.OriginalInvoiceID != nil {
+		v := *s.OriginalInvoiceID
+		originalInvoiceID = &v
+	}
+	var revisionOf *shared.InvoiceID
+	if s.RevisionOf != nil {
+		v := *s.RevisionOf
+		revisionOf = &v
 	}
 
 	return &Invoice{
@@ -182,11 +268,11 @@ func FromSnapshot(s InvoiceSnapshot) (*Invoice, error) {
 		billingPeriod:     s.BillingPeriod,
 		issueDate:         s.IssueDate,
 		dueDate:           s.DueDate,
-		paidAt:            s.PaidAt,
-		paymentMethodID:   s.PaymentMethodID,
+		paidAt:            paidAt,
+		paymentMethodID:   paymentMethodID,
 		allowPartialPay:   s.AllowPartialPay,
-		originalInvoiceID: s.OriginalInvoiceID,
-		revisionOf:        s.RevisionOf,
+		originalInvoiceID: originalInvoiceID,
+		revisionOf:        revisionOf,
 		voidReason:        s.VoidReason,
 		metadata:          metadata,
 	}, nil

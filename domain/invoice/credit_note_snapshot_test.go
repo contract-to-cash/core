@@ -137,3 +137,85 @@ func TestCreditNote_ToSnapshot_IsIndependentCopy(t *testing.T) {
 		t.Error("ToSnapshot leaked items reference")
 	}
 }
+
+// TestCreditNote_PointerIndependence verifies that nested pointer fields
+// (CreditNoteItem.TaxRate *big.Rat, CreditNote.issuedAt *time.Time) are
+// isolated at the Snapshot boundary.
+func TestCreditNote_PointerIndependence(t *testing.T) {
+	t.Parallel()
+
+	taxRate := big.NewRat(10, 100)
+	item := NewCreditNoteItem(
+		"li-1", "x",
+		shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		taxRate,
+		shared.NewMoney(big.NewRat(10, 1), shared.CurrencyJPY),
+	)
+	cn, _ := NewCreditNote(
+		shared.CreditNoteID("cn-1"),
+		shared.InvoiceID("inv-1"),
+		shared.AccountID("acc-1"),
+		shared.ContractID("ctr-1"),
+		CreditNoteReasonDuplicate,
+		[]CreditNoteItem{item},
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	)
+	// Set issuedAt via snapshot round-trip.
+	tmp := cn.ToSnapshot()
+	issued := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	tmp.IssuedAt = &issued
+	cn, err := CreditNoteFromSnapshot(tmp)
+	if err != nil {
+		t.Fatalf("CreditNoteFromSnapshot: %v", err)
+	}
+
+	// ToSnapshot: mutate nested pointers, entity must be unaffected.
+	snap := cn.ToSnapshot()
+	snap.Items[0].TaxRate.SetInt64(999)
+	if got := cn.Items()[0].TaxRate().RatString(); got == "999" {
+		t.Errorf("CreditNoteItem.TaxRate pointer was shared: %s", got)
+	}
+
+	snap2 := cn.ToSnapshot()
+	*snap2.IssuedAt = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	if cn.IssuedAt() != nil && cn.IssuedAt().Year() == 2099 {
+		t.Error("CreditNote.IssuedAt pointer was shared")
+	}
+
+	// FromSnapshot: mutate original snapshot, reconstructed entity must be unaffected.
+	origTaxRate := big.NewRat(5, 100)
+	origIssued := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	srcSnap := CreditNoteSnapshot{
+		ID:         shared.CreditNoteID("cn-2"),
+		InvoiceID:  shared.InvoiceID("inv-1"),
+		AccountID:  shared.AccountID("acc-1"),
+		ContractID: shared.ContractID("ctr-1"),
+		Status:     CreditNoteStatusIssued,
+		Reason:     CreditNoteReasonDuplicate,
+		Items: []CreditNoteItemSnapshot{
+			{
+				InvoiceLineItemID: "li-1",
+				Amount:            shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+				TaxRate:           origTaxRate,
+				TaxAmount:         shared.NewMoney(big.NewRat(5, 1), shared.CurrencyJPY),
+			},
+		},
+		Subtotal:  shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		TaxAmount: shared.NewMoney(big.NewRat(5, 1), shared.CurrencyJPY),
+		Total:     shared.NewMoney(big.NewRat(105, 1), shared.CurrencyJPY),
+		IssuedAt:  &origIssued,
+	}
+	restored, err := CreditNoteFromSnapshot(srcSnap)
+	if err != nil {
+		t.Fatalf("CreditNoteFromSnapshot: %v", err)
+	}
+	srcSnap.Items[0].TaxRate.SetInt64(999)
+	*srcSnap.IssuedAt = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	if got := restored.Items()[0].TaxRate().RatString(); got == "999" {
+		t.Errorf("FromSnapshot: CreditNoteItem.TaxRate pointer was shared: %s", got)
+	}
+	if restored.IssuedAt() == nil || restored.IssuedAt().Year() != 2026 {
+		t.Errorf("FromSnapshot: CreditNote.IssuedAt pointer was shared")
+	}
+}

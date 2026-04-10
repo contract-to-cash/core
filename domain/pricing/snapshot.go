@@ -2,7 +2,13 @@
 //
 // Snapshot / Reconstruct pattern for Price.
 //
-// DANGER ZONE — PERSISTENCE ADAPTERS ONLY
+// # Relation to ContractAggregate
+//
+// ContractAggregate (in domain/contract) is event-sourced and uses
+// MarshalSnapshot / LoadFromSnapshot. Price is state-based and uses
+// ToSnapshot / FromSnapshot returning a typed struct. Do not mix.
+//
+// # DANGER ZONE — PERSISTENCE ADAPTERS ONLY
 //
 // NewPrice generates a fresh ULID for the ID, making it impossible to
 // reconstruct an existing price through the normal constructor path.
