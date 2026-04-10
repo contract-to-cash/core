@@ -905,3 +905,128 @@ func TestProcessPayment_RequiresAction_Idempotency_ReturnsCachedPayment(t *testi
 	// Gateway should still have been called (we can't prevent that), but
 	// the idempotency key on the ChargeRequest should prevent duplicate auth on the GW side
 }
+
+// --- Issue #85: state mutations must be inside RunInTx ---
+
+func TestProcessPayment_TxFailure_InvoiceStateNotMutated(t *testing.T) {
+	// When RunInTx fails, the invoice's in-memory state must NOT be mutated.
+	// Before the fix, RecordPayment was called outside RunInTx, so even when
+	// the transaction failed, the invoice was left in paid/partial_paid status.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	statusBefore := inv.Status()
+	paidBefore := inv.PaidAmount()
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-tx-fail-state",
+	})
+	if err == nil {
+		t.Fatal("expected error from tx failure")
+	}
+
+	// Invoice state must remain unchanged after tx failure
+	if inv.Status() != statusBefore {
+		t.Errorf("invoice status mutated after tx failure: expected %q, got %q", statusBefore, inv.Status())
+	}
+	if inv.PaidAmount().Amount().Cmp(paidBefore.Amount()) != 0 {
+		t.Errorf("invoice paidAmount mutated after tx failure: expected %v, got %v", paidBefore.Amount(), inv.PaidAmount().Amount())
+	}
+}
+
+func TestProcessPayment_Idempotency_DoesNotMutateInvoiceForDuplicateKey(t *testing.T) {
+	// When a payment with the same idempotency key already exists, the invoice
+	// must NOT have RecordPayment called (no double accounting).
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	existingPayment := payment.NewPayment(
+		shared.NewPaymentID(),
+		inv.ID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard,
+		"txn-existing",
+		clock.Now(),
+	)
+	_ = existingPayment.Complete()
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{existing: existingPayment},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "duplicate-key",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should return the existing payment
+	if pmt.GatewayTransactionID() != "txn-existing" {
+		t.Errorf("expected existing payment, got txn ID %q", pmt.GatewayTransactionID())
+	}
+
+	// Invoice must NOT have been mutated (no double RecordPayment)
+	if !inv.PaidAmount().IsZero() {
+		t.Errorf("invoice paidAmount should be zero for idempotent duplicate, got %v", inv.PaidAmount().Amount())
+	}
+}
+
+func TestProcessPayment_TxFailure_SagaCompensationFires(t *testing.T) {
+	// When RunInTx fails, saga compensation (refund) must be triggered.
+	// Before the fix, if RecordPayment failed outside RunInTx, the function
+	// returned early without calling saga.Compensate(), leaving a charged
+	// payment without a refund.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{}
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-tx-fail-saga",
+	})
+	if err == nil {
+		t.Fatal("expected error from tx failure")
+	}
+
+	// Saga compensation must have fired
+	if !gw.refundCalled {
+		t.Fatal("saga compensation (refund) must fire when RunInTx fails")
+	}
+}

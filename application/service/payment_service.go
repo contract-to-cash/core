@@ -158,7 +158,10 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		}
 	}
 
-	// Charge via gateway
+	// Charge via gateway.
+	// NOTE: Charge is called BEFORE the in-transaction idempotency check.
+	// This relies on the gateway honouring IdempotencyKey to prevent duplicate
+	// charges when the same request is retried (e.g. after a transient DB failure).
 	chargeResp, err := s.gateway.Charge(ctx, &port.ChargeRequest{
 		Amount:          amount,
 		CustomerID:      string(inv.AccountID()),
@@ -264,18 +267,16 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	if input.IdempotencyKey != "" {
 		p.SetIdempotencyKey(input.IdempotencyKey)
 	}
-	if err := p.Complete(); err != nil {
-		return nil, fmt.Errorf("failed to complete payment: %w", err)
-	}
 
-	// Record payment on invoice (state mutation after successful charge)
-	if err := inv.RecordPayment(amount, s.clock.Now()); err != nil {
-		return nil, fmt.Errorf("failed to record payment on invoice: %w", err)
-	}
-
-	// Phase 3: All local writes are atomic within a transaction.
+	// Phase 3: All state mutations and local writes are atomic within a transaction.
+	// p.Complete() and inv.RecordPayment() are inside RunInTx so that if the
+	// transaction fails, saga.Compensate() fires (no early return before it).
+	// Note: if RunInTx executes the closure but then rolls back the DB, the
+	// in-memory state of p and inv will remain mutated. This is acceptable
+	// because the caller returns an error and does not reuse these objects.
 	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
-		// Idempotency check: if a payment with this key already exists, skip
+		// Idempotency check first: avoid mutating in-memory state if a
+		// payment with this key was already persisted by a prior call.
 		if input.IdempotencyKey != "" {
 			existing, findErr := repos.Payments.FindByIdempotencyKey(txCtx, input.IdempotencyKey)
 			if findErr != nil {
@@ -285,6 +286,13 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 				p = existing
 				return nil
 			}
+		}
+
+		if completeErr := p.Complete(); completeErr != nil {
+			return fmt.Errorf("failed to complete payment: %w", completeErr)
+		}
+		if recordErr := inv.RecordPayment(amount, s.clock.Now()); recordErr != nil {
+			return fmt.Errorf("failed to record payment on invoice: %w", recordErr)
 		}
 
 		if saveErr := repos.Payments.Save(txCtx, p); saveErr != nil {
@@ -309,7 +317,9 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("local save failed (gateway charge refunded): %w", err)
 	}
 
-	// Phase 4: AfterCharge hooks (non-fatal, outside transaction)
+	// Phase 4: AfterCharge hooks (non-fatal, outside transaction).
+	// When the idempotency path returned an existing payment, these hooks
+	// still fire. Hook implementations should be idempotent.
 	successCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetAfterChargeHooks() {
 		if hookErr := hook.AfterCharge(successCtx); hookErr != nil {
