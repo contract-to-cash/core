@@ -264,17 +264,19 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	if input.IdempotencyKey != "" {
 		p.SetIdempotencyKey(input.IdempotencyKey)
 	}
-	if err := p.Complete(); err != nil {
-		return nil, fmt.Errorf("failed to complete payment: %w", err)
-	}
 
-	// Record payment on invoice (state mutation after successful charge)
-	if err := inv.RecordPayment(amount, s.clock.Now()); err != nil {
-		return nil, fmt.Errorf("failed to record payment on invoice: %w", err)
-	}
-
-	// Phase 3: All local writes are atomic within a transaction.
+	// Phase 3: All state mutations and local writes are atomic within a transaction.
+	// p.Complete() and inv.RecordPayment() are inside RunInTx so that:
+	//   1. In-memory state is only mutated when the transaction will persist it
+	//   2. If RunInTx fails, saga.Compensate() fires (no early return before it)
 	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+		if completeErr := p.Complete(); completeErr != nil {
+			return fmt.Errorf("failed to complete payment: %w", completeErr)
+		}
+		if recordErr := inv.RecordPayment(amount, s.clock.Now()); recordErr != nil {
+			return fmt.Errorf("failed to record payment on invoice: %w", recordErr)
+		}
+
 		// Idempotency check: if a payment with this key already exists, skip
 		if input.IdempotencyKey != "" {
 			existing, findErr := repos.Payments.FindByIdempotencyKey(txCtx, input.IdempotencyKey)
