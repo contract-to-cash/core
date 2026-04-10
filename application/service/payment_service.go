@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -14,6 +15,13 @@ import (
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/plugin"
 )
+
+// ErrRequiresAction is returned when the payment gateway indicates that
+// additional customer action is required (e.g., 3D Secure authentication).
+// The returned *payment.Payment is in Pending status with the gateway
+// transaction ID set. Callers should check for this error with errors.Is()
+// and redirect the customer to complete authentication.
+var ErrRequiresAction = errors.New("payment requires action")
 
 // ProcessPaymentInput holds the parameters for processing a payment.
 // PaymentMethodID is optional — if empty, the service resolves it via the
@@ -186,6 +194,47 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			}
 		}
 		return nil, fmt.Errorf("gateway charge failed: %w", err)
+	}
+
+	// Handle requires_action (3D Secure authentication pending).
+	// The payment is not yet captured — save a pending record and return
+	// so the caller can redirect the customer to the 3DS authentication page.
+	// Unlike the failed-payment best-effort save above, this save is critical:
+	// the gateway has an active authorization, and the 3DS callback will need
+	// this record to complete the payment flow.
+	if chargeResp.Status == port.TransactionStatusRequiresAction {
+		// Idempotency check: if a pending payment already exists for this key,
+		// return it instead of creating a duplicate authorization.
+		if input.IdempotencyKey != "" {
+			existing, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, input.IdempotencyKey)
+			if findErr != nil {
+				return nil, fmt.Errorf("idempotency check failed for requires_action: %w", findErr)
+			}
+			if existing != nil {
+				return existing, fmt.Errorf("%w: 3D Secure authentication required (transaction %s)", ErrRequiresAction, existing.GatewayTransactionID())
+			}
+		}
+
+		pendingPayment := payment.NewPayment(
+			shared.NewPaymentID(),
+			invoiceID,
+			amount,
+			payment.PaymentMethodCreditCard,
+			chargeResp.TransactionID,
+			s.clock.Now(),
+		)
+		if input.IdempotencyKey != "" {
+			pendingPayment.SetIdempotencyKey(input.IdempotencyKey)
+		}
+		if err := s.paymentRepo.Save(ctx, pendingPayment); err != nil {
+			s.logger.Error("failed to save pending payment for 3DS (gateway authorization exists without internal record)",
+				"transactionID", chargeResp.TransactionID,
+				"invoiceID", invoiceID,
+				"error", err,
+			)
+			return nil, fmt.Errorf("failed to save pending payment for 3DS (transaction %s): %w", chargeResp.TransactionID, err)
+		}
+		return pendingPayment, fmt.Errorf("%w: 3D Secure authentication required (transaction %s)", ErrRequiresAction, chargeResp.TransactionID)
 	}
 
 	// Phase 2: Saga compensation for gateway charge.
