@@ -26,8 +26,12 @@ var ErrRequiresAction = errors.New("payment requires action")
 // ProcessPaymentInput holds the parameters for processing a payment.
 // PaymentMethodID is optional — if empty, the service resolves it via the
 // hierarchical fallback chain: Invoice → Contract → Customer.
+// PaymentMethod is the type of payment method (e.g. bank_transfer, convenience_store).
+// If not set, it is resolved from ChargeResponse.PaymentMethodType, falling back
+// to credit_card for backward compatibility.
 type ProcessPaymentInput struct {
 	PaymentMethodID string
+	PaymentMethod   payment.PaymentMethod
 	Amount          shared.Money
 	Currency        shared.Currency
 	IdempotencyKey  string
@@ -171,13 +175,16 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		IdempotencyKey:  input.IdempotencyKey,
 	})
 
+	// Resolve payment method type from input (no ChargeResponse available on failure)
+	inputMethodType := resolvePaymentMethodType("", input.PaymentMethod)
+
 	if err != nil {
 		// Create and persist a failed payment record for tracking
 		failedPayment := payment.NewPayment(
 			shared.NewPaymentID(),
 			invoiceID,
 			amount,
-			payment.PaymentMethodCreditCard,
+			inputMethodType,
 			"",
 			s.clock.Now(),
 		)
@@ -222,7 +229,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			shared.NewPaymentID(),
 			invoiceID,
 			amount,
-			payment.PaymentMethodCreditCard,
+			resolvePaymentMethodType(chargeResp.PaymentMethodType, input.PaymentMethod),
 			chargeResp.TransactionID,
 			s.clock.Now(),
 		)
@@ -260,7 +267,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		shared.NewPaymentID(),
 		invoiceID,
 		amount,
-		payment.PaymentMethodCreditCard,
+		resolvePaymentMethodType(chargeResp.PaymentMethodType, input.PaymentMethod),
 		chargeResp.TransactionID,
 		s.clock.Now(),
 	)
@@ -440,4 +447,45 @@ func (s *PaymentService) ResolvePaymentMethod(ctx context.Context, inv *invoice.
 	return "", shared.NewDomainError(shared.ErrCodeBusinessRule,
 		fmt.Sprintf("no payment method found for invoice %s: checked invoice, contract %s, and customer default",
 			inv.ID(), inv.ContractID()))
+}
+
+// resolvePaymentMethodType determines the payment method type to record on
+// a Payment entity. The resolution order is:
+//  1. ChargeResponse.PaymentMethodType (gateway knows the actual method used)
+//  2. ProcessPaymentInput.PaymentMethod (caller-specified)
+//  3. Default: credit_card (backward compatibility)
+func resolvePaymentMethodType(chargeMethodType port.PaymentMethodType, inputMethod payment.PaymentMethod) payment.PaymentMethod {
+	if chargeMethodType != "" {
+		return portMethodToPaymentMethod(chargeMethodType)
+	}
+	if inputMethod != "" {
+		return inputMethod
+	}
+	return payment.PaymentMethodCreditCard
+}
+
+// portMethodToPaymentMethod converts a port.PaymentMethodType to a payment.PaymentMethod.
+func portMethodToPaymentMethod(pmt port.PaymentMethodType) payment.PaymentMethod {
+	switch pmt {
+	case port.PaymentMethodTypeCreditCard:
+		return payment.PaymentMethodCreditCard
+	case port.PaymentMethodTypeDebitCard:
+		return payment.PaymentMethodDebitCard
+	case port.PaymentMethodTypeBankTransfer:
+		return payment.PaymentMethodBankTransfer
+	case port.PaymentMethodTypeConvenienceStore:
+		return payment.PaymentMethodConvenience
+	case port.PaymentMethodTypeQRCode:
+		return payment.PaymentMethodQRCode
+	case port.PaymentMethodTypeDirectDebit:
+		return payment.PaymentMethodDirectDebit
+	case port.PaymentMethodTypeCarrier:
+		return payment.PaymentMethodCarrier
+	case port.PaymentMethodTypePostpay:
+		return payment.PaymentMethodPostpay
+	default:
+		// Unknown gateway payment method types fall back to credit_card.
+		// If a new PaymentMethodType is added to port/, add a case here.
+		return payment.PaymentMethodCreditCard
+	}
 }

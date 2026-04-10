@@ -75,15 +75,16 @@ type ChargeRequest struct {
 
 // ChargeResponse is the output of a charge operation.
 type ChargeResponse struct {
-	TransactionID   string
-	Status          TransactionStatus
-	Amount          shared.Money
-	Fee             *shared.Money
-	Net             *shared.Money
-	PaymentMethodID string
-	CreatedAt       time.Time
-	Metadata        map[string]string
-	ThreeDSecure    *ThreeDSecureResult
+	TransactionID     string
+	Status            TransactionStatus
+	Amount            shared.Money
+	Fee               *shared.Money
+	Net               *shared.Money
+	PaymentMethodID   string
+	PaymentMethodType PaymentMethodType // actual payment method used by the gateway
+	CreatedAt         time.Time
+	Metadata          map[string]string
+	ThreeDSecure      *ThreeDSecureResult
 }
 
 // --- Authorize ---

@@ -22,9 +22,10 @@ import (
 // --- Mock gateway ---
 
 type mockGateway struct {
-	failCharge      bool
-	requiresAction  bool
-	threeDSRedirect string
+	failCharge              bool
+	requiresAction          bool
+	threeDSRedirect         string
+	chargePaymentMethodType port.PaymentMethodType // if set, returned in ChargeResponse
 }
 
 func (g *mockGateway) ID() string                                 { return "mock" }
@@ -47,10 +48,11 @@ func (g *mockGateway) Charge(_ context.Context, req *port.ChargeRequest) (*port.
 		return resp, nil
 	}
 	return &port.ChargeResponse{
-		TransactionID: "txn-" + req.IdempotencyKey,
-		Status:        port.TransactionStatusCaptured,
-		Amount:        req.Amount,
-		CreatedAt:     time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+		TransactionID:     "txn-" + req.IdempotencyKey,
+		Status:            port.TransactionStatusCaptured,
+		Amount:            req.Amount,
+		PaymentMethodType: g.chargePaymentMethodType,
+		CreatedAt:         time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
 	}, nil
 }
 func (g *mockGateway) Authorize(_ context.Context, _ *port.AuthorizeRequest) (*port.AuthorizeResponse, error) {
@@ -906,6 +908,143 @@ func TestProcessPayment_RequiresAction_Idempotency_ReturnsCachedPayment(t *testi
 	// the idempotency key on the ChargeRequest should prevent duplicate auth on the GW side
 }
 
+// --- Issue #88: PaymentMethod should not be hardcoded ---
+
+func TestProcessPayment_UsesPaymentMethodTypeFromChargeResponse(t *testing.T) {
+	// When the gateway returns a PaymentMethodType in ChargeResponse,
+	// the Payment entity must use that type instead of hardcoded credit_card.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	paymentRepo := &mockPaymentRepo{}
+
+	gw := &mockGateway{
+		chargePaymentMethodType: port.PaymentMethodTypeBankTransfer,
+	}
+
+	svc := NewPaymentService(gw, paymentRepo, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-bank",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pmt.Method() != payment.PaymentMethodBankTransfer {
+		t.Errorf("expected payment method %q, got %q", payment.PaymentMethodBankTransfer, pmt.Method())
+	}
+}
+
+func TestProcessPayment_UsesPaymentMethodFromInput_WhenChargeResponseEmpty(t *testing.T) {
+	// When ChargeResponse does not include PaymentMethodType,
+	// the Payment entity should use the PaymentMethod from ProcessPaymentInput.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	paymentRepo := &mockPaymentRepo{}
+
+	gw := &mockGateway{} // chargePaymentMethodType is zero value (empty)
+
+	svc := NewPaymentService(gw, paymentRepo, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		PaymentMethod:   payment.PaymentMethodConvenience,
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-conv",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pmt.Method() != payment.PaymentMethodConvenience {
+		t.Errorf("expected payment method %q, got %q", payment.PaymentMethodConvenience, pmt.Method())
+	}
+}
+
+func TestProcessPayment_DefaultsToCreditCard_WhenNoPaymentMethodInfo(t *testing.T) {
+	// When neither ChargeResponse nor ProcessPaymentInput specifies a payment method,
+	// the Payment entity should default to credit_card for backward compatibility.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	paymentRepo := &mockPaymentRepo{}
+
+	gw := &mockGateway{} // no PaymentMethodType
+
+	svc := NewPaymentService(gw, paymentRepo, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		// PaymentMethod not set
+		Amount:         shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:       shared.CurrencyJPY,
+		IdempotencyKey: "key-default",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pmt.Method() != payment.PaymentMethodCreditCard {
+		t.Errorf("expected default payment method %q, got %q", payment.PaymentMethodCreditCard, pmt.Method())
+	}
+}
+
+func TestProcessPayment_FailedPayment_UsesCorrectPaymentMethod(t *testing.T) {
+	// When the gateway charge fails, the failed payment record should still
+	// use the correct payment method, not hardcoded credit_card.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	paymentRepo := &mockPaymentRepo{}
+
+	gw := &mockGateway{failCharge: true}
+
+	svc := NewPaymentService(gw, paymentRepo, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	_, _ = svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		PaymentMethod:   payment.PaymentMethodDirectDebit,
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-fail-dd",
+	})
+
+	if paymentRepo.saved == nil {
+		t.Fatal("expected failed payment to be saved")
+	}
+	if paymentRepo.saved.Method() != payment.PaymentMethodDirectDebit {
+		t.Errorf("expected failed payment method %q, got %q", payment.PaymentMethodDirectDebit, paymentRepo.saved.Method())
+	}
+}
+
+func TestProcessPayment_RequiresAction_UsesCorrectPaymentMethod(t *testing.T) {
+	// When 3DS is required, the pending payment should use the input payment method.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	paymentRepo := &mockPaymentRepo{}
+
+	gw := &mockGateway{
+		requiresAction:  true,
+		threeDSRedirect: "https://bank.example.com/3ds",
+	}
+
+	svc := NewPaymentService(gw, paymentRepo, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	pmt, _ := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		PaymentMethod:   payment.PaymentMethodCarrier,
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-3ds-carrier",
+	})
+
+	if pmt == nil {
+		t.Fatal("expected pending payment to be returned")
+	}
+	if pmt.Method() != payment.PaymentMethodCarrier {
+		t.Errorf("expected pending payment method %q, got %q", payment.PaymentMethodCarrier, pmt.Method())
+	}
+}
+
 // --- Issue #85: state mutations must be inside RunInTx ---
 
 func TestProcessPayment_TxFailure_InvoiceStateNotMutated(t *testing.T) {
@@ -1028,5 +1167,55 @@ func TestProcessPayment_TxFailure_SagaCompensationFires(t *testing.T) {
 	// Saga compensation must have fired
 	if !gw.refundCalled {
 		t.Fatal("saga compensation (refund) must fire when RunInTx fails")
+	}
+}
+
+// --- Issue #88: portMethodToPaymentMethod unit tests ---
+
+func Test_portMethodToPaymentMethod(t *testing.T) {
+	tests := []struct {
+		input port.PaymentMethodType
+		want  payment.PaymentMethod
+	}{
+		{port.PaymentMethodTypeCreditCard, payment.PaymentMethodCreditCard},
+		{port.PaymentMethodTypeDebitCard, payment.PaymentMethodDebitCard},
+		{port.PaymentMethodTypeBankTransfer, payment.PaymentMethodBankTransfer},
+		{port.PaymentMethodTypeConvenienceStore, payment.PaymentMethodConvenience},
+		{port.PaymentMethodTypeQRCode, payment.PaymentMethodQRCode},
+		{port.PaymentMethodTypeDirectDebit, payment.PaymentMethodDirectDebit},
+		{port.PaymentMethodTypeCarrier, payment.PaymentMethodCarrier},
+		{port.PaymentMethodTypePostpay, payment.PaymentMethodPostpay},
+		{"unknown_type", payment.PaymentMethodCreditCard},
+		{"", payment.PaymentMethodCreditCard},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.input), func(t *testing.T) {
+			got := portMethodToPaymentMethod(tt.input)
+			if got != tt.want {
+				t.Errorf("portMethodToPaymentMethod(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_resolvePaymentMethodType(t *testing.T) {
+	tests := []struct {
+		name         string
+		chargeMethod port.PaymentMethodType
+		inputMethod  payment.PaymentMethod
+		want         payment.PaymentMethod
+	}{
+		{"ChargeResponse takes priority", port.PaymentMethodTypeBankTransfer, payment.PaymentMethodCarrier, payment.PaymentMethodBankTransfer},
+		{"Input used when ChargeResponse empty", "", payment.PaymentMethodConvenience, payment.PaymentMethodConvenience},
+		{"Default to credit_card when both empty", "", "", payment.PaymentMethodCreditCard},
+		{"ChargeResponse QRCode", port.PaymentMethodTypeQRCode, "", payment.PaymentMethodQRCode},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolvePaymentMethodType(tt.chargeMethod, tt.inputMethod)
+			if got != tt.want {
+				t.Errorf("resolvePaymentMethodType(%q, %q) = %q, want %q", tt.chargeMethod, tt.inputMethod, got, tt.want)
+			}
+		})
 	}
 }
