@@ -73,7 +73,11 @@ func (e *BalanceEntry) Reason() BalanceReason { return e.reason }
 // SourceType returns the source type.
 func (e *BalanceEntry) SourceType() BalanceSourceType { return e.sourceType }
 
-// SetSourceType sets the source type (called after construction or by repository).
+// SetSourceType sets the source type. Used by construction helpers and
+// by callers that need to augment a BalanceEntry after NewBalanceEntry.
+//
+// For loading from persistence, prefer FromSnapshot which restores all
+// fields atomically.
 func (e *BalanceEntry) SetSourceType(st BalanceSourceType) { e.sourceType = st }
 
 // SourceID returns the source ID.
@@ -85,8 +89,11 @@ func (e *BalanceEntry) Description() string { return e.description }
 // ExpiresAt returns the expiration time, or nil if no expiration.
 func (e *BalanceEntry) ExpiresAt() *time.Time { return e.expiresAt }
 
-// SetExpiresAt sets the expiration time.
-// Called by repository implementations after loading from persistence.
+// SetExpiresAt sets the expiration time. Used by construction helpers and
+// by callers that need to augment a BalanceEntry after NewBalanceEntry.
+//
+// For loading from persistence, prefer FromSnapshot which restores all
+// fields atomically.
 func (e *BalanceEntry) SetExpiresAt(t *time.Time) { e.expiresAt = t }
 
 // CreatedAt returns the creation time.
@@ -109,7 +116,12 @@ func (e *BalanceEntry) IsFullyConsumed() bool {
 func (e *BalanceEntry) Version() int { return e.version }
 
 // SetVersion sets the version and records it as the loaded version.
-// Called by repository implementations after loading from persistence.
+// Repository implementations call this after a successful save to sync the
+// loaded version with the stored version, so that subsequent saves from the
+// same pointer do not trigger a false version-conflict error.
+//
+// For initial reconstitution from persistence, prefer FromSnapshot which
+// restores version atomically alongside all other fields.
 func (e *BalanceEntry) SetVersion(v int) {
 	e.version = v
 	e.loadedVersion = v
