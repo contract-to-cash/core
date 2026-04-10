@@ -85,10 +85,15 @@ func (g *mockGateway) ListPaymentMethods(_ context.Context, _ string) ([]*port.P
 // --- Mock repos ---
 
 type mockPaymentRepo struct {
-	saved *payment.Payment
+	saved    *payment.Payment
+	saveErr  error            // if set, Save returns this error
+	existing *payment.Payment // if set, FindByIdempotencyKey returns this
 }
 
 func (m *mockPaymentRepo) Save(_ context.Context, p *payment.Payment) error {
+	if m.saveErr != nil {
+		return m.saveErr
+	}
 	m.saved = p
 	return nil
 }
@@ -102,6 +107,9 @@ func (m *mockPaymentRepo) FindByInvoiceID(_ context.Context, _ shared.InvoiceID)
 	return nil, nil
 }
 func (m *mockPaymentRepo) FindByIdempotencyKey(_ context.Context, _ string) (*payment.Payment, error) {
+	if m.existing != nil {
+		return m.existing, nil
+	}
 	return nil, nil
 }
 
@@ -802,4 +810,95 @@ func TestProcessPayment_RequiresAction_DoesNotRecordPaymentOnInvoice(t *testing.
 	if !inv.PaidAmount().IsZero() {
 		t.Errorf("invoice should not have recorded payment, but paidAmount is %v", inv.PaidAmount().Amount())
 	}
+}
+
+func TestProcessPayment_RequiresAction_SaveFailure_ReturnsError(t *testing.T) {
+	// When the pending payment save fails, ProcessPayment must return an error
+	// (not silently ignore it) because the gateway has an active authorization.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	gw := &mockGateway{
+		requiresAction:  true,
+		threeDSRedirect: "https://bank.example.com/3ds",
+	}
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{saveErr: fmt.Errorf("database connection lost")},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-3ds-save-fail",
+	})
+
+	if err == nil {
+		t.Fatal("expected error when pending payment save fails")
+	}
+	if pmt != nil {
+		t.Error("expected nil payment when save fails")
+	}
+	// Should NOT be ErrRequiresAction — this is a system error
+	if errors.Is(err, ErrRequiresAction) {
+		t.Error("save failure should not be wrapped as ErrRequiresAction")
+	}
+}
+
+func TestProcessPayment_RequiresAction_Idempotency_ReturnsCachedPayment(t *testing.T) {
+	// When a pending payment already exists for the same idempotency key,
+	// ProcessPayment should return it without creating a duplicate authorization.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	existingPayment := payment.NewPayment(
+		shared.NewPaymentID(),
+		inv.ID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard,
+		"existing-txn-001",
+		clock.Now(),
+	)
+
+	gw := &mockGateway{
+		requiresAction:  true,
+		threeDSRedirect: "https://bank.example.com/3ds",
+	}
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{existing: existingPayment},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-3ds-retry",
+	})
+
+	// Should return ErrRequiresAction with the existing payment
+	if !errors.Is(err, ErrRequiresAction) {
+		t.Fatalf("expected ErrRequiresAction, got: %v", err)
+	}
+	if pmt == nil {
+		t.Fatal("expected existing payment to be returned")
+	}
+	if pmt.GatewayTransactionID() != "existing-txn-001" {
+		t.Errorf("expected existing transaction ID, got %q", pmt.GatewayTransactionID())
+	}
+	// Gateway should still have been called (we can't prevent that), but
+	// the idempotency key on the ChargeRequest should prevent duplicate auth on the GW side
 }

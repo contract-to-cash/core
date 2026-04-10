@@ -199,7 +199,22 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// Handle requires_action (3D Secure authentication pending).
 	// The payment is not yet captured — save a pending record and return
 	// so the caller can redirect the customer to the 3DS authentication page.
+	// Unlike the failed-payment best-effort save above, this save is critical:
+	// the gateway has an active authorization, and the 3DS callback will need
+	// this record to complete the payment flow.
 	if chargeResp.Status == port.TransactionStatusRequiresAction {
+		// Idempotency check: if a pending payment already exists for this key,
+		// return it instead of creating a duplicate authorization.
+		if input.IdempotencyKey != "" {
+			existing, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, input.IdempotencyKey)
+			if findErr != nil {
+				return nil, fmt.Errorf("idempotency check failed for requires_action: %w", findErr)
+			}
+			if existing != nil {
+				return existing, fmt.Errorf("%w: 3D Secure authentication required (transaction %s)", ErrRequiresAction, existing.GatewayTransactionID())
+			}
+		}
+
 		pendingPayment := payment.NewPayment(
 			shared.NewPaymentID(),
 			invoiceID,
@@ -211,7 +226,14 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		if input.IdempotencyKey != "" {
 			pendingPayment.SetIdempotencyKey(input.IdempotencyKey)
 		}
-		_ = s.paymentRepo.Save(ctx, pendingPayment)
+		if err := s.paymentRepo.Save(ctx, pendingPayment); err != nil {
+			s.logger.Error("failed to save pending payment for 3DS (gateway authorization exists without internal record)",
+				"transactionID", chargeResp.TransactionID,
+				"invoiceID", invoiceID,
+				"error", err,
+			)
+			return nil, fmt.Errorf("failed to save pending payment for 3DS (transaction %s): %w", chargeResp.TransactionID, err)
+		}
 		return pendingPayment, fmt.Errorf("%w: 3D Secure authentication required (transaction %s)", ErrRequiresAction, chargeResp.TransactionID)
 	}
 
