@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -747,12 +748,12 @@ func TestProcessPayment_RequiresAction_ReturnsPendingPayment(t *testing.T) {
 		IdempotencyKey:  "key-3ds",
 	})
 
-	// Should return an error indicating 3DS authentication is required
+	// Should return ErrRequiresAction (sentinel error, usable with errors.Is)
 	if err == nil {
 		t.Fatal("expected error for requires_action status")
 	}
-	if !strings.Contains(err.Error(), "requires_action") {
-		t.Errorf("expected error to mention requires_action, got: %s", err.Error())
+	if !errors.Is(err, ErrRequiresAction) {
+		t.Errorf("expected error to wrap ErrRequiresAction, got: %s", err.Error())
 	}
 
 	// Payment should be saved in pending status (not completed)

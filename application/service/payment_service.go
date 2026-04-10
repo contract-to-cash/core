@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -14,6 +15,13 @@ import (
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/plugin"
 )
+
+// ErrRequiresAction is returned when the payment gateway indicates that
+// additional customer action is required (e.g., 3D Secure authentication).
+// The returned *payment.Payment is in Pending status with the gateway
+// transaction ID set. Callers should check for this error with errors.Is()
+// and redirect the customer to complete authentication.
+var ErrRequiresAction = errors.New("payment requires action")
 
 // ProcessPaymentInput holds the parameters for processing a payment.
 // PaymentMethodID is optional — if empty, the service resolves it via the
@@ -204,7 +212,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			pendingPayment.SetIdempotencyKey(input.IdempotencyKey)
 		}
 		_ = s.paymentRepo.Save(ctx, pendingPayment)
-		return pendingPayment, fmt.Errorf("payment requires_action: 3D Secure authentication required (transaction %s)", chargeResp.TransactionID)
+		return pendingPayment, fmt.Errorf("%w: 3D Secure authentication required (transaction %s)", ErrRequiresAction, chargeResp.TransactionID)
 	}
 
 	// Phase 2: Saga compensation for gateway charge.
