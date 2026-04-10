@@ -31,8 +31,22 @@ import (
 
 // PriceSnapshot is the flat persistence representation of a Price.
 //
-// Note that PricingModel is an interface. Adapters must handle its
-// serialization explicitly (e.g. discriminated union in JSONB).
+// # PricingModel: interface, not deep-copied
+//
+// PricingModel is an interface (FlatPrice, TieredPrice, UsagePrice), so
+// ToSnapshot / FromSnapshot cannot deep-copy it without a type switch on
+// every implementation. Today this is safe because the three built-in
+// implementations are effectively immutable value types, BUT:
+//
+//   - TieredPrice contains a Tiers []PriceTier slice. If a caller mutates
+//     that slice (e.g. append) via the snapshot, the entity is affected.
+//   - Any future PricingModel implementation with mutable internal state
+//     would inherit the same risk.
+//
+// Adapters must handle PricingModel serialization explicitly (e.g. a
+// discriminated union in JSONB). When doing so, prefer constructing a
+// fresh PricingModel from the stored columns rather than retaining and
+// reusing the pointer from the snapshot.
 type PriceSnapshot struct {
 	ID           shared.PriceID
 	ProductID    shared.ProductID

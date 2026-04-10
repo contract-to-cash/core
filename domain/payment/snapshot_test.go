@@ -146,3 +146,53 @@ func TestPayment_ToSnapshot_IsIndependentCopy(t *testing.T) {
 		t.Error("ToSnapshot leaked status reference")
 	}
 }
+
+// TestPayment_PointerIndependence verifies that pointer/map fields
+// (FailureReason, Metadata) are isolated at the Snapshot boundary, in both
+// ToSnapshot and FromSnapshot directions.
+func TestPayment_PointerIndependence(t *testing.T) {
+	t.Parallel()
+
+	// Build a Payment with a failure reason via snapshot round-trip (Fail()
+	// alone cannot set the reason on an already-failed payment we create
+	// freshly for this test — we go through FromSnapshot).
+	reason := "gateway timeout"
+	snap := PaymentSnapshot{
+		ID:                   shared.PaymentID("pay-1"),
+		InvoiceID:            shared.InvoiceID("inv-1"),
+		Amount:               shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		RefundedAmount:       shared.Zero(shared.CurrencyJPY),
+		Method:               PaymentMethodCreditCard,
+		Status:               PaymentStatusFailed,
+		GatewayTransactionID: "tx-1",
+		FailureReason:        &reason,
+		ProcessedAt:          time.Now(),
+		Metadata:             map[string]string{"k": "v"},
+	}
+	p, err := FromSnapshot(snap)
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+
+	// ToSnapshot: mutate snapshot, entity must be unaffected.
+	out := p.ToSnapshot()
+	*out.FailureReason = "mutated"
+	out.Metadata["leak"] = "yes"
+	if p.FailureReason() != nil && *p.FailureReason() == "mutated" {
+		t.Error("ToSnapshot: FailureReason pointer was shared")
+	}
+	if _, leaked := p.Metadata()["leak"]; leaked {
+		t.Error("ToSnapshot: Metadata map was shared")
+	}
+
+	// FromSnapshot: mutate original source snapshot, reconstructed entity
+	// must be unaffected.
+	*snap.FailureReason = "mutated-src"
+	snap.Metadata["leak-src"] = "yes"
+	if p.FailureReason() != nil && *p.FailureReason() == "mutated-src" {
+		t.Error("FromSnapshot: FailureReason pointer was shared")
+	}
+	if _, leaked := p.Metadata()["leak-src"]; leaked {
+		t.Error("FromSnapshot: Metadata map was shared")
+	}
+}

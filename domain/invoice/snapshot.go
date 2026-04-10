@@ -37,6 +37,15 @@
 // only; the entity's own getters may still return internal pointers — that is
 // tracked separately as issue #96.
 //
+// # Map normalization
+//
+// To keep the reconstructed entity safe for downstream callers that assume
+// maps are non-nil, ToSnapshot / FromSnapshot always allocate empty maps
+// (make(map[string]string, 0)) when the source map is nil. Round-tripping a
+// nil metadata map therefore yields a non-nil empty map. This matches the
+// behavior of NewInvoice (which also initializes metadata to an empty map)
+// and avoids nil-pointer surprises in adapter code.
+//
 // See issue #94 for the overall design rationale.
 
 package invoice
@@ -182,7 +191,7 @@ func (inv *Invoice) ToSnapshot() InvoiceSnapshot {
 	}
 }
 
-// FromSnapshot reconstructs an Invoice from a persistence snapshot.
+// InvoiceFromSnapshot reconstructs an Invoice from a persistence snapshot.
 //
 // This function performs only the minimal validation required to detect
 // corrupted DB rows (e.g. empty ID). It deliberately does NOT re-run
@@ -190,8 +199,12 @@ func (inv *Invoice) ToSnapshot() InvoiceSnapshot {
 // recalculation — those were validated when the invoice was first created
 // and may have been computed under rules that have since changed.
 //
+// Named with the Invoice prefix (rather than a bare FromSnapshot) so that it
+// can coexist with CreditNoteFromSnapshot in the same package without
+// ambiguity.
+//
 // For persistence adapters only. See file header warning.
-func FromSnapshot(s InvoiceSnapshot) (*Invoice, error) {
+func InvoiceFromSnapshot(s InvoiceSnapshot) (*Invoice, error) {
 	if s.ID == "" {
 		return nil, shared.NewDomainError(shared.ErrCodeValidation,
 			"invoice snapshot: ID must not be empty")
@@ -204,7 +217,7 @@ func FromSnapshot(s InvoiceSnapshot) (*Invoice, error) {
 			liMeta[k] = v
 		}
 		// Deep-copy *big.Rat so adapters that retain the snapshot after
-		// calling FromSnapshot cannot corrupt the reconstructed entity.
+		// calling InvoiceFromSnapshot cannot corrupt the reconstructed entity.
 		var taxRate *big.Rat
 		if lis.TaxRate != nil {
 			taxRate = new(big.Rat).Set(lis.TaxRate)

@@ -127,3 +127,37 @@ func TestBalanceEntry_ToSnapshot_IsIndependentCopy(t *testing.T) {
 		t.Error("ToSnapshot leaked sourceID reference")
 	}
 }
+
+// TestBalanceEntry_PointerIndependence verifies that ExpiresAt (*time.Time)
+// is isolated at the Snapshot boundary, in both directions.
+func TestBalanceEntry_PointerIndependence(t *testing.T) {
+	t.Parallel()
+
+	expires := time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+	snap := BalanceEntrySnapshot{
+		ID:              shared.BalanceEntryID("bal-1"),
+		AccountID:       shared.AccountID("acc-1"),
+		OriginalAmount:  shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		RemainingAmount: shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
+		Reason:          BalanceReasonGoodwill,
+		ExpiresAt:       &expires,
+		CreatedAt:       time.Now(),
+	}
+	e, err := FromSnapshot(snap)
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+
+	// ToSnapshot: mutate snapshot, entity must be unaffected.
+	out := e.ToSnapshot()
+	*out.ExpiresAt = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	if e.ExpiresAt() != nil && e.ExpiresAt().Year() == 2099 {
+		t.Error("ToSnapshot: ExpiresAt pointer was shared")
+	}
+
+	// FromSnapshot: mutate original snapshot, reconstructed entity must be unaffected.
+	*snap.ExpiresAt = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+	if e.ExpiresAt() != nil && e.ExpiresAt().Year() == 2100 {
+		t.Error("FromSnapshot: ExpiresAt pointer was shared")
+	}
+}

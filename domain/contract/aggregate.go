@@ -636,6 +636,14 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 }
 
 // MarshalSnapshot serializes the aggregate state for snapshot storage.
+//
+// This is the event-sourced snapshot pattern: it returns []byte for storage
+// inside eventstore.Snapshot.State, used alongside event replay to restore
+// aggregate state. It is distinct from the ToSnapshot/FromSnapshot pattern
+// used by state-stored entities (Invoice, Payment, BalanceEntry, etc. — see
+// each domain package's snapshot.go). Do not add ToSnapshot/FromSnapshot to
+// ContractAggregate, and do not add MarshalSnapshot to state-stored
+// entities — the two patterns serve different persistence models.
 func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 	state := contractSnapshotState{
 		ContractID:        a.contractID,

@@ -76,9 +76,9 @@ func TestInvoice_Snapshot_RoundTrip(t *testing.T) {
 	snap.PaidAt = &paidAt
 	snap.VoidReason = ""
 
-	restored, err := FromSnapshot(snap)
+	restored, err := InvoiceFromSnapshot(snap)
 	if err != nil {
-		t.Fatalf("FromSnapshot: %v", err)
+		t.Fatalf("InvoiceFromSnapshot: %v", err)
 	}
 
 	// --- scalar and ID fields ---
@@ -212,9 +212,9 @@ func TestInvoice_FromSnapshot_RestoresRefundedStatus(t *testing.T) {
 		AppliedBalance: shared.Zero(shared.CurrencyJPY),
 	}
 
-	inv, err := FromSnapshot(snap)
+	inv, err := InvoiceFromSnapshot(snap)
 	if err != nil {
-		t.Fatalf("FromSnapshot: %v", err)
+		t.Fatalf("InvoiceFromSnapshot: %v", err)
 	}
 	if inv.Status() != InvoiceStatusRefunded {
 		t.Errorf("expected refunded status, got %s", inv.Status())
@@ -246,9 +246,9 @@ func TestInvoice_FromSnapshot_DoesNotRerunBusinessRules(t *testing.T) {
 		AppliedBalance: shared.Zero(shared.CurrencyJPY),
 	}
 
-	inv, err := FromSnapshot(snap)
+	inv, err := InvoiceFromSnapshot(snap)
 	if err != nil {
-		t.Fatalf("FromSnapshot: %v", err)
+		t.Fatalf("InvoiceFromSnapshot: %v", err)
 	}
 	// The restored Total must be exactly what the snapshot said, not recalculated.
 	if inv.Total().Amount().Cmp(big.NewRat(999, 1)) != 0 {
@@ -265,7 +265,7 @@ func TestInvoice_FromSnapshot_ValidatesID(t *testing.T) {
 	snap := InvoiceSnapshot{
 		ID: shared.InvoiceID(""),
 	}
-	if _, err := FromSnapshot(snap); err == nil {
+	if _, err := InvoiceFromSnapshot(snap); err == nil {
 		t.Error("expected error for empty ID")
 	}
 }
@@ -345,9 +345,9 @@ func TestInvoice_ToSnapshot_PointerIndependence(t *testing.T) {
 	// Manually set paidAt through snapshot round-trip (no public mutator).
 	tmp := inv.ToSnapshot()
 	tmp.PaidAt = &paidAt
-	inv, err = FromSnapshot(tmp)
+	inv, err = InvoiceFromSnapshot(tmp)
 	if err != nil {
-		t.Fatalf("FromSnapshot: %v", err)
+		t.Fatalf("InvoiceFromSnapshot: %v", err)
 	}
 
 	snap := inv.ToSnapshot()
@@ -437,9 +437,9 @@ func TestInvoice_FromSnapshot_PointerIndependence(t *testing.T) {
 		Metadata: map[string]string{"k": "v"},
 	}
 
-	inv, err := FromSnapshot(snap)
+	inv, err := InvoiceFromSnapshot(snap)
 	if err != nil {
-		t.Fatalf("FromSnapshot: %v", err)
+		t.Fatalf("InvoiceFromSnapshot: %v", err)
 	}
 
 	// Mutate the original snapshot's pointers/maps/slices.
@@ -453,24 +453,24 @@ func TestInvoice_FromSnapshot_PointerIndependence(t *testing.T) {
 
 	// The reconstructed invoice must not be affected.
 	if inv.PaidAt() == nil || inv.PaidAt().Year() != 2026 {
-		t.Errorf("FromSnapshot: PaidAt pointer was shared (year=%v)", inv.PaidAt())
+		t.Errorf("InvoiceFromSnapshot: PaidAt pointer was shared (year=%v)", inv.PaidAt())
 	}
 	if inv.PaymentMethodID() == nil || *inv.PaymentMethodID() != "pm-1" {
-		t.Errorf("FromSnapshot: PaymentMethodID pointer was shared: %v", inv.PaymentMethodID())
+		t.Errorf("InvoiceFromSnapshot: PaymentMethodID pointer was shared: %v", inv.PaymentMethodID())
 	}
 	if inv.OriginalInvoiceID() == nil || *inv.OriginalInvoiceID() != shared.InvoiceID("orig") {
-		t.Errorf("FromSnapshot: OriginalInvoiceID pointer was shared: %v", inv.OriginalInvoiceID())
+		t.Errorf("InvoiceFromSnapshot: OriginalInvoiceID pointer was shared: %v", inv.OriginalInvoiceID())
 	}
 	if inv.RevisionOf() == nil || *inv.RevisionOf() != shared.InvoiceID("prev") {
-		t.Errorf("FromSnapshot: RevisionOf pointer was shared: %v", inv.RevisionOf())
+		t.Errorf("InvoiceFromSnapshot: RevisionOf pointer was shared: %v", inv.RevisionOf())
 	}
 	if got := inv.LineItems()[0].TaxRate().RatString(); got == "999" {
-		t.Errorf("FromSnapshot: LineItem.TaxRate pointer was shared: %s", got)
+		t.Errorf("InvoiceFromSnapshot: LineItem.TaxRate pointer was shared: %s", got)
 	}
 	if _, leaked := inv.LineItems()[0].Metadata()["leak"]; leaked {
-		t.Error("FromSnapshot: LineItem.Metadata map was shared")
+		t.Error("InvoiceFromSnapshot: LineItem.Metadata map was shared")
 	}
 	if _, leaked := inv.Metadata()["leak"]; leaked {
-		t.Error("FromSnapshot: Invoice.Metadata map was shared")
+		t.Error("InvoiceFromSnapshot: Invoice.Metadata map was shared")
 	}
 }

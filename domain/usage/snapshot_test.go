@@ -104,3 +104,38 @@ func TestUsageRecord_ToSnapshot_IsIndependentCopy(t *testing.T) {
 		t.Error("ToSnapshot leaked metadata reference")
 	}
 }
+
+// TestUsageRecord_PointerIndependence verifies Metadata map isolation by
+// adding elements to the existing map (not reassigning it), in both
+// ToSnapshot and FromSnapshot directions.
+func TestUsageRecord_PointerIndependence(t *testing.T) {
+	t.Parallel()
+
+	srcMeta := map[string]string{"k": "v"}
+	src := UsageRecordSnapshot{
+		ID:         shared.UsageRecordID("usg-1"),
+		ContractID: shared.ContractID("ctr-1"),
+		MetricName: shared.MetricName("m"),
+		Quantity:   1,
+		Timestamp:  time.Now(),
+		Metadata:   srcMeta,
+	}
+	r, err := FromSnapshot(src)
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+
+	// ToSnapshot: mutate snapshot's Metadata in place, entity must be unaffected.
+	out := r.ToSnapshot()
+	out.Metadata["leak"] = "yes"
+	if _, leaked := r.Metadata()["leak"]; leaked {
+		t.Error("ToSnapshot: Metadata map was shared")
+	}
+
+	// FromSnapshot: mutate the original source map, reconstructed entity
+	// must be unaffected.
+	srcMeta["leak-src"] = "yes"
+	if _, leaked := r.Metadata()["leak-src"]; leaked {
+		t.Error("FromSnapshot: Metadata map was shared")
+	}
+}
