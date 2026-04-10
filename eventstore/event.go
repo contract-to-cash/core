@@ -15,15 +15,16 @@ type DomainEvent interface {
 
 // Event is the persisted representation of a domain event.
 type Event struct {
-	ID            string          `json:"id"`
-	StreamID      string          `json:"stream_id"`
-	Type          EventType       `json:"type"`
-	Version       int             `json:"version"`
-	SchemaVersion int             `json:"schema_version"`
-	Data          json.RawMessage `json:"data"`
-	Metadata      EventMetadata   `json:"metadata"`
-	OccurredAt    time.Time       `json:"occurred_at"`
-	RecordedAt    time.Time       `json:"recorded_at"`
+	ID             string          `json:"id"`
+	StreamID       string          `json:"stream_id"`
+	Type           EventType       `json:"type"`
+	Version        int             `json:"version"`
+	SchemaVersion  int             `json:"schema_version"`
+	Data           json.RawMessage `json:"data"`
+	Metadata       EventMetadata   `json:"metadata"`
+	OccurredAt     time.Time       `json:"occurred_at"`
+	RecordedAt     time.Time       `json:"recorded_at"`
+	GlobalPosition int64           `json:"global_position,omitempty"`
 }
 
 // EventMetadata holds audit and tracing information for an event.

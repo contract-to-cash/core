@@ -185,6 +185,9 @@ func (m *mockEventStore) LoadUntil(_ context.Context, _ string, _ time.Time) ([]
 func (m *mockEventStore) LoadRange(_ context.Context, _ string, _, _ time.Time) ([]eventstore.Event, error) {
 	return nil, nil
 }
+func (m *mockEventStore) LoadAll(_ context.Context, _ int64, _ int) ([]eventstore.Event, error) {
+	return nil, nil
+}
 func (m *mockEventStore) Subscribe(_ context.Context, _ int64) (<-chan eventstore.Event, error) {
 	return nil, nil
 }

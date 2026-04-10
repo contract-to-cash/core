@@ -23,6 +23,12 @@ type Store interface {
 	// LoadRange returns events within a date range (OccurredAt-based).
 	LoadRange(ctx context.Context, streamID string, from, to time.Time) ([]Event, error)
 
+	// LoadAll loads events across all streams ordered by global position.
+	// fromPosition is exclusive (events after this position are returned).
+	// limit controls the maximum number of events returned (for pagination).
+	// A limit <= 0 means no limit.
+	LoadAll(ctx context.Context, fromPosition int64, limit int) ([]Event, error)
+
 	// Subscribe returns a channel that receives events from the given global position.
 	Subscribe(ctx context.Context, fromPosition int64) (<-chan Event, error)
 

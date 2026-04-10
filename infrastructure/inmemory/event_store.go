@@ -3,6 +3,7 @@ package inmemory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -47,6 +48,7 @@ func (s *InMemoryEventStore) Append(_ context.Context, streamID string, events [
 	for i := range events {
 		events[i].RecordedAt = now
 		s.position++
+		events[i].GlobalPosition = s.position
 		s.streams[streamID] = append(s.streams[streamID], events[i])
 	}
 
@@ -115,6 +117,35 @@ func (s *InMemoryEventStore) LoadRange(_ context.Context, streamID string, from,
 		}
 	}
 	return result, nil
+}
+
+// LoadAll loads events across all streams ordered by global position.
+// fromPosition is exclusive (events after this position are returned).
+func (s *InMemoryEventStore) LoadAll(_ context.Context, fromPosition int64, limit int) ([]eventstore.Event, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Collect all events from all streams.
+	var all []eventstore.Event
+	for _, events := range s.streams {
+		for _, e := range events {
+			if e.GlobalPosition > fromPosition {
+				all = append(all, e)
+			}
+		}
+	}
+
+	// Sort by global position.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].GlobalPosition < all[j].GlobalPosition
+	})
+
+	// Apply limit.
+	if limit > 0 && len(all) > limit {
+		all = all[:limit]
+	}
+
+	return all, nil
 }
 
 // Subscribe returns a channel that receives events from the given global position.
