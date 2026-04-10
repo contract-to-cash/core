@@ -158,7 +158,10 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		}
 	}
 
-	// Charge via gateway
+	// Charge via gateway.
+	// NOTE: Charge is called BEFORE the in-transaction idempotency check.
+	// This relies on the gateway honouring IdempotencyKey to prevent duplicate
+	// charges when the same request is retried (e.g. after a transient DB failure).
 	chargeResp, err := s.gateway.Charge(ctx, &port.ChargeRequest{
 		Amount:          amount,
 		CustomerID:      string(inv.AccountID()),
@@ -314,7 +317,9 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("local save failed (gateway charge refunded): %w", err)
 	}
 
-	// Phase 4: AfterCharge hooks (non-fatal, outside transaction)
+	// Phase 4: AfterCharge hooks (non-fatal, outside transaction).
+	// When the idempotency path returned an existing payment, these hooks
+	// still fire. Hook implementations should be idempotent.
 	successCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetAfterChargeHooks() {
 		if hookErr := hook.AfterCharge(successCtx); hookErr != nil {
