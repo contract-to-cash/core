@@ -26,6 +26,7 @@ type mockGateway struct {
 	requiresAction          bool
 	threeDSRedirect         string
 	chargePaymentMethodType port.PaymentMethodType // if set, returned in ChargeResponse
+	chargeStatus            port.TransactionStatus // if set, overrides the default Captured status
 }
 
 func (g *mockGateway) ID() string                                 { return "mock" }
@@ -47,9 +48,13 @@ func (g *mockGateway) Charge(_ context.Context, req *port.ChargeRequest) (*port.
 		}
 		return resp, nil
 	}
+	status := port.TransactionStatusCaptured
+	if g.chargeStatus != "" {
+		status = g.chargeStatus
+	}
 	return &port.ChargeResponse{
 		TransactionID:     "txn-" + req.IdempotencyKey,
-		Status:            port.TransactionStatusCaptured,
+		Status:            status,
 		Amount:            req.Amount,
 		PaymentMethodType: g.chargePaymentMethodType,
 		CreatedAt:         time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
@@ -1174,31 +1179,38 @@ func TestProcessPayment_TxFailure_SagaCompensationFires(t *testing.T) {
 
 func Test_portMethodToPaymentMethod(t *testing.T) {
 	tests := []struct {
-		input port.PaymentMethodType
-		want  payment.PaymentMethod
+		input     port.PaymentMethodType
+		want      payment.PaymentMethod
+		wantKnown bool
 	}{
-		{port.PaymentMethodTypeCreditCard, payment.PaymentMethodCreditCard},
-		{port.PaymentMethodTypeDebitCard, payment.PaymentMethodDebitCard},
-		{port.PaymentMethodTypeBankTransfer, payment.PaymentMethodBankTransfer},
-		{port.PaymentMethodTypeConvenienceStore, payment.PaymentMethodConvenience},
-		{port.PaymentMethodTypeQRCode, payment.PaymentMethodQRCode},
-		{port.PaymentMethodTypeDirectDebit, payment.PaymentMethodDirectDebit},
-		{port.PaymentMethodTypeCarrier, payment.PaymentMethodCarrier},
-		{port.PaymentMethodTypePostpay, payment.PaymentMethodPostpay},
-		{"unknown_type", payment.PaymentMethodCreditCard},
-		{"", payment.PaymentMethodCreditCard},
+		{port.PaymentMethodTypeCreditCard, payment.PaymentMethodCreditCard, true},
+		{port.PaymentMethodTypeDebitCard, payment.PaymentMethodDebitCard, true},
+		{port.PaymentMethodTypeBankTransfer, payment.PaymentMethodBankTransfer, true},
+		{port.PaymentMethodTypeConvenienceStore, payment.PaymentMethodConvenience, true},
+		{port.PaymentMethodTypeQRCode, payment.PaymentMethodQRCode, true},
+		{port.PaymentMethodTypeDirectDebit, payment.PaymentMethodDirectDebit, true},
+		{port.PaymentMethodTypeCarrier, payment.PaymentMethodCarrier, true},
+		{port.PaymentMethodTypePostpay, payment.PaymentMethodPostpay, true},
+		{"unknown_type", payment.PaymentMethodCreditCard, false},
+		{"", payment.PaymentMethodCreditCard, false},
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.input), func(t *testing.T) {
-			got := portMethodToPaymentMethod(tt.input)
+			got, known := portMethodToPaymentMethod(tt.input)
 			if got != tt.want {
 				t.Errorf("portMethodToPaymentMethod(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+			if known != tt.wantKnown {
+				t.Errorf("portMethodToPaymentMethod(%q) known = %v, want %v", tt.input, known, tt.wantKnown)
 			}
 		})
 	}
 }
 
 func Test_resolvePaymentMethodType(t *testing.T) {
+	// resolvePaymentMethodType is a method on PaymentService; create a minimal instance for testing.
+	svc := NewPaymentService(&mockGateway{}, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{}, nil, &mockEventStore{}, plugin.NewRegistry(), newPaymentTestClock())
+
 	tests := []struct {
 		name         string
 		chargeMethod port.PaymentMethodType
@@ -1212,10 +1224,78 @@ func Test_resolvePaymentMethodType(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolvePaymentMethodType(tt.chargeMethod, tt.inputMethod)
+			got := svc.resolvePaymentMethodType(tt.chargeMethod, tt.inputMethod)
 			if got != tt.want {
 				t.Errorf("resolvePaymentMethodType(%q, %q) = %q, want %q", tt.chargeMethod, tt.inputMethod, got, tt.want)
 			}
 		})
+	}
+}
+
+// --- PR #93 review: chargeResp.Status guard ---
+
+func TestProcessPayment_UnexpectedChargeStatus_ReturnsError(t *testing.T) {
+	// When the gateway returns err==nil but a non-success status (not Captured/Succeeded),
+	// ProcessPayment must NOT proceed to the success path and record a completed payment.
+	unexpectedStatuses := []port.TransactionStatus{
+		port.TransactionStatusPending,
+		port.TransactionStatusFailed,
+		port.TransactionStatusCanceled,
+		port.TransactionStatusAuthorized,
+		port.TransactionStatusRefunded,
+		port.TransactionStatusPartiallyRefunded,
+	}
+
+	for _, status := range unexpectedStatuses {
+		t.Run(string(status), func(t *testing.T) {
+			clock := newPaymentTestClock()
+			inv := newSimpleFinalizedInvoice()
+			paymentRepo := &mockPaymentRepo{}
+
+			gw := &mockGateway{chargeStatus: status}
+
+			svc := NewPaymentService(gw, paymentRepo, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+			pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+				PaymentMethodID: "pm-001",
+				Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+				Currency:        shared.CurrencyJPY,
+				IdempotencyKey:  "key-unexpected-" + string(status),
+			})
+
+			if err == nil {
+				t.Fatalf("expected error for unexpected charge status %q, got nil", status)
+			}
+			if pmt != nil {
+				t.Errorf("expected nil payment for unexpected status %q, got payment with status %q", status, pmt.Status())
+			}
+			// Invoice must not be mutated
+			if !inv.PaidAmount().IsZero() {
+				t.Errorf("invoice should not record payment for unexpected status %q", status)
+			}
+		})
+	}
+}
+
+func TestProcessPayment_SucceededStatus_Completes(t *testing.T) {
+	// TransactionStatusSucceeded (in addition to Captured) should be treated as success.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	gw := &mockGateway{chargeStatus: port.TransactionStatusSucceeded}
+
+	svc := NewPaymentService(gw, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-succeeded",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pmt.Status() != payment.PaymentStatusCompleted {
+		t.Errorf("expected completed status, got %q", pmt.Status())
 	}
 }
