@@ -211,7 +211,7 @@ func TestProjectionService_RebuildAll_Pagination(t *testing.T) {
 	}
 
 	// mockEventStore that returns events respecting fromPosition and limit
-	es := &paginatingMockEventStore{events: events}
+	es := &paginatingMockEventStore{mockEventStore: mockEventStore{events: events}}
 
 	svc := NewProjectionService(es, ProjectionOptions{
 		MaxRetries: 1,
@@ -274,26 +274,10 @@ func TestProjectionService_RebuildAll_ProjectorError(t *testing.T) {
 	}
 }
 
-// paginatingMockEventStore respects fromPosition and limit in LoadAll.
+// paginatingMockEventStore embeds mockEventStore and overrides LoadAll
+// to respect fromPosition and limit for pagination testing.
 type paginatingMockEventStore struct {
 	mockEventStore
-	events []eventstore.Event
-}
-
-func (m *paginatingMockEventStore) LoadAll(_ context.Context, fromPosition int64, limit int) ([]eventstore.Event, error) {
-	var result []eventstore.Event
-	for _, e := range m.events {
-		if e.GlobalPosition > fromPosition {
-			result = append(result, e)
-		}
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].GlobalPosition < result[j].GlobalPosition
-	})
-	if limit > 0 && len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
 }
 
 func TestProjectionService_NoLogger_NoPanic(t *testing.T) {

@@ -93,6 +93,9 @@ const defaultBatchSize = 1000
 // Unlike Projector.Rebuild (which delegates rebuilding to each projector),
 // RebuildAll streams events in global position order across all streams,
 // ensuring consistent cross-stream ordering for all registered projectors.
+//
+// Callers are responsible for clearing existing projection data before
+// calling RebuildAll (e.g., TRUNCATE projection tables).
 func (s *ProjectionService) RebuildAll(ctx context.Context) error {
 	batchSize := s.options.BatchSize
 	if batchSize <= 0 {
