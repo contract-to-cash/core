@@ -266,18 +266,14 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	}
 
 	// Phase 3: All state mutations and local writes are atomic within a transaction.
-	// p.Complete() and inv.RecordPayment() are inside RunInTx so that:
-	//   1. In-memory state is only mutated when the transaction will persist it
-	//   2. If RunInTx fails, saga.Compensate() fires (no early return before it)
+	// p.Complete() and inv.RecordPayment() are inside RunInTx so that if the
+	// transaction fails, saga.Compensate() fires (no early return before it).
+	// Note: if RunInTx executes the closure but then rolls back the DB, the
+	// in-memory state of p and inv will remain mutated. This is acceptable
+	// because the caller returns an error and does not reuse these objects.
 	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
-		if completeErr := p.Complete(); completeErr != nil {
-			return fmt.Errorf("failed to complete payment: %w", completeErr)
-		}
-		if recordErr := inv.RecordPayment(amount, s.clock.Now()); recordErr != nil {
-			return fmt.Errorf("failed to record payment on invoice: %w", recordErr)
-		}
-
-		// Idempotency check: if a payment with this key already exists, skip
+		// Idempotency check first: avoid mutating in-memory state if a
+		// payment with this key was already persisted by a prior call.
 		if input.IdempotencyKey != "" {
 			existing, findErr := repos.Payments.FindByIdempotencyKey(txCtx, input.IdempotencyKey)
 			if findErr != nil {
@@ -287,6 +283,13 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 				p = existing
 				return nil
 			}
+		}
+
+		if completeErr := p.Complete(); completeErr != nil {
+			return fmt.Errorf("failed to complete payment: %w", completeErr)
+		}
+		if recordErr := inv.RecordPayment(amount, s.clock.Now()); recordErr != nil {
+			return fmt.Errorf("failed to record payment on invoice: %w", recordErr)
 		}
 
 		if saveErr := repos.Payments.Save(txCtx, p); saveErr != nil {

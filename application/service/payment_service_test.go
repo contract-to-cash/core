@@ -945,6 +945,53 @@ func TestProcessPayment_TxFailure_InvoiceStateNotMutated(t *testing.T) {
 	}
 }
 
+func TestProcessPayment_Idempotency_DoesNotMutateInvoiceForDuplicateKey(t *testing.T) {
+	// When a payment with the same idempotency key already exists, the invoice
+	// must NOT have RecordPayment called (no double accounting).
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	existingPayment := payment.NewPayment(
+		shared.NewPaymentID(),
+		inv.ID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard,
+		"txn-existing",
+		clock.Now(),
+	)
+	_ = existingPayment.Complete()
+
+	svc := NewPaymentService(
+		&mockGateway{},
+		&mockPaymentRepo{existing: existingPayment},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "duplicate-key",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should return the existing payment
+	if pmt.GatewayTransactionID() != "txn-existing" {
+		t.Errorf("expected existing payment, got txn ID %q", pmt.GatewayTransactionID())
+	}
+
+	// Invoice must NOT have been mutated (no double RecordPayment)
+	if !inv.PaidAmount().IsZero() {
+		t.Errorf("invoice paidAmount should be zero for idempotent duplicate, got %v", inv.PaidAmount().Amount())
+	}
+}
+
 func TestProcessPayment_TxFailure_SagaCompensationFires(t *testing.T) {
 	// When RunInTx fails, saga compensation (refund) must be triggered.
 	// Before the fix, if RecordPayment failed outside RunInTx, the function
