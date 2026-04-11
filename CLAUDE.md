@@ -124,13 +124,16 @@ golangci-lint の設定は `.golangci.yml`。`exhaustive` で switch の網羅�
 
 ## 詳細ドキュメント
 
-作業内容に応じて必要なものを参照する:
+常時ロードされるリファレンス（メンタルモデル）:
 
 - @docs/architecture.md — 全体アーキテクチャ概観
 - @docs/decisions/design-decisions.md — 設計決定事項と選択理由
-- @docs/internals/domain-model.md — ドメインモデル詳細仕様
-- @docs/internals/event-sourcing.md — Event Sourcing 詳細仕様
-- @docs/internals/plugin-system.md — プラグインシステム詳細仕様（Hook IF 全 20 種の定義）
-- @docs/internals/payment-gateway.md — Payment Gateway 詳細仕様
-- @docs/internals/metrics-invoicegen.md — メトリクス集計 & 請求書生成 Adapter
-- @docs/guides/integration.md — サービス開発者向け統合ガイド
+
+以下は分量が多いため **必要になったときだけ Read ツールで開く**（自動ロードしない）:
+
+- `docs/internals/domain-model.md` — ドメインモデル詳細仕様
+- `docs/internals/event-sourcing.md` — Event Sourcing 詳細仕様
+- `docs/internals/plugin-system.md` — プラグインシステム詳細仕様（Hook IF 全 20 種の定義）
+- `docs/internals/payment-gateway.md` — Payment Gateway 詳細仕様
+- `docs/internals/metrics-invoicegen.md` — メトリクス集計 & 請求書生成 Adapter
+- `docs/guides/integration.md` — サービス開発者向け統合ガイド
