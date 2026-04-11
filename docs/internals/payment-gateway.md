@@ -1513,6 +1513,138 @@ type RefundInput struct {
 
 ---
 
+## 6.1 Saga 補償と冪等性ストア（Issue #87 対応）
+
+### 6.1.1 解決する課題
+
+`ProcessPayment` は「Gateway Charge 成功 → ローカル DB 保存失敗」時にサガ補償で `Refund` を発火する。このとき、呼び出し元が **同じ `IdempotencyKey`** でリトライすると次の不整合が起きる:
+
+1. Gateway は冪等性ヘッダのキャッシュにより「元の成功レスポンス」をそのまま返す（ただし実際のトランザクションは補償 Refund 済み）
+2. `PaymentService` はこの「成功」をそのまま信じて Payment レコードを completed で保存
+3. **Invoice は "支払済" になるが、Gateway にはお金がない**
+
+これが Issue #87 で報告された競合。業界プラクティスの調査(`docs/research/2026-04-10-payment-idempotency-patterns.md` 参照)からの結論は「補償が発火したキーは**同じ論理オペレーション**としては再利用不可。**新しい effective key**で新規 Charge として実行する」。
+
+### 6.1.2 IdempotencyStore インターフェース
+
+```go
+// application/port/idempotency_store.go
+package port
+
+// IdempotencyStore は補償済みキーと置換 effective key の対応を永続化する。
+type IdempotencyStore interface {
+    // MarkCompensated は (originalKey → effectiveKey) を記録する。
+    // first-call-wins: 同じ originalKey への 2 回目以降の呼び出しは no-op。
+    // 空 originalKey はエラー。
+    MarkCompensated(ctx context.Context, originalKey, effectiveKey string) error
+
+    // ResolveEffectiveKey は originalKey に対応する effective key を返す。
+    // マッピングが存在しない場合は ("", false, nil)。
+    ResolveEffectiveKey(ctx context.Context, originalKey string) (effectiveKey string, ok bool, err error)
+}
+```
+
+### 6.1.3 ProcessPayment のフロー変更
+
+```
+Charge 前:
+  if store != nil && input.IdempotencyKey != "" {
+      if eff, ok := store.ResolveEffectiveKey(input.IdempotencyKey); ok {
+          effectiveKey = eff   // 補償マーカーあり → 新キーで Charge
+      }
+  }
+
+Charge(effectiveKey) → 成功
+  ↓
+Payment.SetIdempotencyKey(effectiveKey)  // DB 側も effective key で一貫管理
+  ↓
+RunInTx:
+  既存の Payment を effectiveKey で検索
+    あり → 既存を返却（冪等）
+    なし → 新規保存
+
+RunInTx 失敗 → Saga 補償 Refund
+  ↓
+  if store != nil && input.IdempotencyKey != "" {
+      newEffectiveKey := newRetryEffectiveKey(input.IdempotencyKey) // originalKey + "-" + ULID
+      store.MarkCompensated(input.IdempotencyKey, newEffectiveKey)
+      // 失敗はログ出力のみ。補償自体は成功済み。
+  }
+```
+
+### 6.1.4 設計ポイント
+
+| 設計判断 | 理由 |
+|---|---|
+| **opt-in** (`WithIdempotencyStore`) | 後方互換。store 未設定なら完全に従来挙動 |
+| **first-call-wins** | 並行リトライでも effective key が収束する。「同じ original key → 同じ effective key」の関係を保証 |
+| **空 key はスキップ** | 空キーはそもそも冪等性が機能しない（gateway 側でも追跡できない）ため store 呼び出し不要 |
+| **MarkCompensated 失敗は非致命的** | 補償自体は成功済み。ここで追加エラーを返すと呼び出し元が本質(local save failed)を見失う。ログ監視で検知 |
+| **3DS (`requires_action`) 経路は影響なし** | 3DS では補償 Refund が発火しないためマーカーは書かれない。既存の pending retry は生キーで引き続き動作 |
+| **Payment.idempotencyKey は effective key** | RunInTx 内冪等性チェックとgateway 側キーを一致させ、2回目 retry でも正しく既存 Payment を返す |
+| **生 input.IdempotencyKey は Refund reason等に使わない** | effective key のみが gateway と DB をつなぐ「実キー」 |
+
+### 6.1.5 業界プラクティスとの整合
+
+| PSP | 挙動 | 本ライブラリの対応 |
+|---|---|---|
+| Stripe | v1: 成功・失敗問わず元レスポンスを 24h キャッシュ / v2: failed request は re-execute | effective key で新規 Charge → v1/v2 どちらでも動作 |
+| Adyen | キー 7日以上保持 / `transient-error: true` で同キー retry 可 | transient-error は将来対応。補償発火時は本実装の新キー戦略で対応 |
+| PayPal | `PayPal-Request-Id` を最大 45 日保持 / 同キー再送で元レスポンス | 同上 |
+| GMO PG | 同キー retry で同じレスポンス | 同上 |
+
+補償発火後の **新キー発行戦略** は全 PSP で安全（gateway は新キーを「別の論理オペレーション」として扱う）。
+
+### 6.1.6 実装例
+
+```go
+// 利用者側セットアップ
+store := postgres.NewPostgresIdempotencyStore(db)  // または inmemory.NewInMemoryIdempotencyStore()
+
+paymentService := service.NewPaymentService(
+    stripeGateway,
+    paymentRepo,
+    invoiceRepo,
+    contractRepo,
+    eventStore,
+    pluginRegistry,
+    clock,
+    service.WithIdempotencyStore(store),  // ★ これ
+    service.WithPaymentTxManager(txm),
+)
+```
+
+### 6.1.7 Postgres 実装の推奨スキーマ
+
+```sql
+CREATE TABLE compensated_idempotency_keys (
+    original_key   TEXT PRIMARY KEY,
+    effective_key  TEXT NOT NULL,
+    compensated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- MarkCompensated(originalKey, effectiveKey)
+INSERT INTO compensated_idempotency_keys (original_key, effective_key)
+VALUES ($1, $2)
+ON CONFLICT (original_key) DO NOTHING;
+
+-- ResolveEffectiveKey(originalKey)
+SELECT effective_key FROM compensated_idempotency_keys WHERE original_key = $1;
+```
+
+プロダクション配備では、Payment repository と同一 DB に置き、可能ならサガ補償トランザクションと同一 tx 内で `INSERT` することで「補償成功 ∧ マーカー記録成功」を atomic に保証する（`TxManager.RunInTx` 内から `store.MarkCompensated` を呼ぶ拡張は future work）。
+
+### 6.1.8 既知の制限
+
+- **呼び出し元の連続 retry (2回以上)**: first-call-wins のため、同じ生キーの複数回 retry は**すべて同じ effective key** に収束する。2回目以降の retry も gateway 側で idempotent replay される(= Stripe v1 なら元の失敗結果、v2 なら再実行)。実運用では 1回の retry で成功することがほとんどなので問題にならないが、恒久的な失敗状況では呼び出し元が新しい生キーで試行する必要がある
+- **TTL 管理**: 本 IF は TTL を強制しない。各実装側で gateway の key 保持期間(Stripe 24h / Adyen 7日 / PayPal 45日)より長く保持する reaper を設定することを推奨
+- **MarkCompensated の DB 書き込み失敗**: 補償は成功しているのでデータ不整合は起きないが、次回リトライで再度 #87 の race が発生しうる。エラーログで監視すること
+- **Effective key の長さ**: `originalKey + "-" + ULID(26 chars)` = original + 27 bytes。各 gateway の idempotency key 長制限(Stripe/PayPal/GMO PG = 255 bytes、**Adyen = 64 bytes**)に合わせて、呼び出し元は生キーを短く保つ必要がある。Adyen を使う場合は生キーを 37 bytes 以内にすること。ライブラリ側での truncation や validation は行わない(gateway 依存のため)が、compensation 時および store resolve 時に 64 bytes を超えた場合は warning ログを emit する
+- **並行 ProcessPayment の成功 race** (別 issue: #97): 同じ `IdempotencyKey` で**両方が成功経路**に入る並行呼び出しの正しさは、**PaymentRepository の `FindByIdempotencyKey` → `Save` の単一 DB transaction 化**に依存する。本ライブラリは `tx.TxManager` 抽象でこれをコンシューマに委譲しており、InMemory 実装はテスト・デモ用途のため真の DB tx 分離を提供しない。プロダクションでは Postgres 等での `SELECT ... FOR UPDATE` または unique 制約に頼ること。並行**失敗** (両方が compensation 発火) の safety は `comp-refund-{txnID}` の決定性で保証されており、integration test で検証済み
+- **Compensation-after-3DS の orphan pending record** (別 issue: #98): 「Call 1 が 3DS requires_action で pending payment を保存 → Call 2 が Captured で tx commit fail → compensation が txn を refund + store がマーカー書き込み → Call 3 が新しい effective key で fresh charge として成功」のシーケンスで、Call 1 の pending payment record は誰も参照しない状態で repo に残る(orphan)。money flow は正しい(gateway 側は refund 済み、local invoice は Call 3 の新 txn で正しく recorded)が、repo に「死んだ pending record」がゴミとして残る。これは reconciliation job の責務とし、本ライブラリのスコープ外とする
+
+---
+
 ## 7. ディレクトリ構成（決済追加後）
 
 ```
@@ -1538,6 +1670,7 @@ github.com/contract-to-cash/core/
 │   │   ├── gateway_types.go    # リクエスト/レスポンス型
 │   │   ├── customer.go         # CustomerGateway IF
 │   │   ├── webhook.go          # WebhookHandler IF
+│   │   ├── idempotency_store.go # IdempotencyStore IF（補償マーカー、#87対応）
 │   │   └── router.go           # GatewayRouter IF
 │   ├── query/
 │   ├── projection/
