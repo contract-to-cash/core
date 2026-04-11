@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/oklog/ulid/v2"
 
@@ -34,14 +33,19 @@ const adyenMaxIdempotencyKeyLen = 64
 // generation is an implementation detail of [PaymentService] — callers must
 // not derive their own retry keys.
 //
+// The ULID timestamp is sourced from the service's injected [shared.Clock],
+// not time.Now(), so tests can reproduce effective keys deterministically
+// and so the CLAUDE.md "no direct time.Now()" rule is respected throughout
+// application code. The entropy source is crypto/rand.
+//
 // Key length note: Stripe permits up to 255 bytes, GMO PG up to 255 bytes,
 // PayPal up to 255 bytes, but Adyen caps idempotency keys at 64 bytes. The
 // suffix adds 27 bytes ("-" + 26-char ULID), so original keys longer than
 // 37 bytes will overflow Adyen's limit. Consumers targeting Adyen must keep
 // their original IdempotencyKey values short. PaymentService emits a
 // warning log when the derived key exceeds adyenMaxIdempotencyKeyLen.
-func newRetryEffectiveKey(originalKey string) string {
-	suffix := ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
+func (s *PaymentService) newRetryEffectiveKey(originalKey string) string {
+	suffix := ulid.MustNew(ulid.Timestamp(s.clock.Now()), rand.Reader).String()
 	return originalKey + "-" + suffix
 }
 
@@ -581,7 +585,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		// that a subsequent retry may hit the same race; operators should
 		// monitor this log line and investigate store health.
 		if s.idempotencyStore != nil && input.IdempotencyKey != "" {
-			newEffectiveKey := newRetryEffectiveKey(input.IdempotencyKey)
+			newEffectiveKey := s.newRetryEffectiveKey(input.IdempotencyKey)
 			if len(newEffectiveKey) > adyenMaxIdempotencyKeyLen {
 				// The derived key exceeds the strictest gateway limit
 				// (Adyen = 64 bytes). Retries against Adyen will fail at

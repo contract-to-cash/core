@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/contract-to-cash/core/application/port"
 	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/contract"
@@ -1773,6 +1775,63 @@ func TestProcessPayment_NoIdempotencyStore_LegacyBehavior(t *testing.T) {
 }
 
 // --- Compensation marker written on failure path ---
+
+func TestProcessPayment_NewRetryEffectiveKey_UsesInjectedClock(t *testing.T) {
+	// CLAUDE.md rule: time.Now() must never be called directly in domain
+	// or application code — the service must obtain time via shared.Clock.
+	// This test pins the invariant for newRetryEffectiveKey: the ULID
+	// timestamp embedded in the generated effective key must correspond
+	// to the injected FixedClock, not to wall-clock time.
+	//
+	// A regression that reverted to `ulid.Timestamp(time.Now())` would
+	// produce a suffix whose ULID timestamp reflects the actual test
+	// execution time (≈2026-04-11). With the Clock-backed fix, the ULID
+	// timestamp is frozen at 2026-01-15 (the FixedClock time) — verifiable
+	// by decoding the ULID and checking its Time() component.
+	clock := newPaymentTestClock() // fixed at 2026-01-15 UTC
+	inv := newSimpleFinalizedInvoice()
+	store := newFakeIdempotencyStore()
+
+	svc := NewPaymentService(
+		&trackingGateway{},
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+		WithIdempotencyStore(store),
+	)
+
+	_, _ = svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-clock",
+	})
+
+	eff := store.mapping["key-clock"]
+	if eff == "" {
+		t.Fatal("expected compensation marker to be written")
+	}
+	// effective key layout: "<original>-<26-char ULID>"
+	const ulidLen = 26
+	if len(eff) < len("key-clock-")+ulidLen {
+		t.Fatalf("unexpected effective key format: %q", eff)
+	}
+	ulidStr := eff[len("key-clock-"):]
+	parsed, err := ulid.Parse(ulidStr)
+	if err != nil {
+		t.Fatalf("failed to parse ULID %q: %v", ulidStr, err)
+	}
+	got := ulid.Time(parsed.Time())
+	want := clock.Now()
+	// ULID time has millisecond precision. Compare at millisecond level.
+	if got.UnixMilli() != want.UnixMilli() {
+		t.Errorf("ULID timestamp must match FixedClock; got %v, want %v", got, want)
+	}
+}
 
 func TestProcessPayment_CompensationFires_MarksKey(t *testing.T) {
 	clock := newPaymentTestClock()
