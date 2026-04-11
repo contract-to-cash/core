@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration test-e2e vet lint fmt check cover bench clean
+.PHONY: build test test-unit test-integration test-e2e test-lint-rules vet lint fmt check cover bench clean
 
 build:
 	go build ./...
@@ -14,6 +14,9 @@ test-integration:
 
 test-e2e:
 	go test ./tests/e2e/... -race -count=1 -v
+
+test-lint-rules:
+	go test ./tests/lintcheck/... -count=1
 
 vet:
 	go vet ./...
