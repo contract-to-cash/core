@@ -111,7 +111,9 @@ BeforeCalculation → 価格計算 → Discount → Subtotal → Tax → Total �
 - golangci-lintの設定: `.golangci.yml` 参照
 - `exhaustive` リンター有効（switchの網羅性チェック）
 - `nolintlint`: `//nolint` には理由と対象リンター指定が必須
+- `forbidigo` リンター有効: `ToSnapshot` / `FromSnapshot` / `CreditNoteFromSnapshot` は persistence adapter 専用。`domain/*/snapshot*.go`, `infrastructure/`, `tests/` 以外から呼び出すと CI が落ちる（issue #100）。`ContractAggregate.MarshalSnapshot` / `LoadFromSnapshot` は event-sourced 用の別 API なので対象外。
 - `examples/` ディレクトリはlint除外
+- 新規 lint ルール追加時は `tests/lintcheck/` に enforcement 検証テストを置く（`make test-lint-rules`）
 
 ## 変更時の注意事項
 

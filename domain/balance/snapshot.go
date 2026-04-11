@@ -22,6 +22,10 @@
 // Application code MUST NOT use these APIs. Use NewBalanceEntry and Consume
 // for normal operations.
 //
+// This scope is enforced in CI: the forbidigo rule in .golangci.yml blocks
+// calls to ToSnapshot / FromSnapshot from any path outside
+// domain/*/snapshot*.go, infrastructure/, and tests/. See issue #100.
+//
 // See issue #94 for the design rationale.
 
 package balance

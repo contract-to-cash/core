@@ -29,6 +29,10 @@
 // Application code and domain services MUST NOT use these APIs. Use NewInvoice
 // and the state-transition methods (Finalize, RecordPayment, Void, ...) instead.
 //
+// This scope is enforced in CI: the forbidigo rule in .golangci.yml blocks
+// calls to ToSnapshot / FromSnapshot / CreditNoteFromSnapshot from any path
+// outside domain/*/snapshot*.go, infrastructure/, and tests/. See issue #100.
+//
 // # Pointer isolation
 //
 // ToSnapshot / FromSnapshot deep-copy pointer fields (*big.Rat, *time.Time,
