@@ -1,159 +1,136 @@
 # Contract-to-Cash Core
 
-SaaS契約課金のOSSライブラリ（Go）。Event Sourcing + Plugin Architectureで契約・請求・決済を管理する。
+SaaS契約課金のOSSライブラリ（Go 1.25）。Event Sourcing + Plugin Architecture で契約・請求・決済を管理する。
+利用者側がリポジトリ実装と決済ゲートウェイを持ち込む「BYO DB / BYO Gateway」型のライブラリ。
 
-## クイックリファレンス
+## 必須コマンド
 
 ```bash
-make build              # ビルド
-make test               # 全テスト（race detector有効）
-make test-unit          # ユニットテスト（tests/除外）
-make test-integration   # 統合テスト
-make lint               # vet + gofmt + golangci-lint
-make check              # build + lint + test（CI相当）
+make check              # build + lint + test（コミット前に必ず通す）
+make test               # go test ./... -race -count=1
+make test-unit          # tests/ 配下を除外した単体テスト
+make test-integration   # tests/integration 配下
+make lint               # vet + gofmt チェック + golangci-lint
 ```
+
+詳細は `Makefile` を参照。`make cover` でカバレッジ、`make bench` でベンチマーク。
 
 ## アーキテクチャ（厳守事項）
 
 ### レイヤー構造（Clean Architecture + DDD）
 
 ```
-domain/          → 純粋なドメインロジック。外部依存ゼロ
-application/     → ユースケース。domainのみに依存
-  service/       →   BillingService, PaymentService, CreditNoteService, SnapshotService
-  port/          →   外部連携IF（PaymentGateway, WebhookHandler等）
-  query/         →   時点再構築クエリ（TemporalQueryService）
-  projection/    →   Projection更新（同期/非同期選択可能）
-  tx/            →   トランザクション管理（TxManager, Saga）
-eventstore/      → Event Sourcing基盤（Store, EventRegistry, Snapshot, Upcaster）
-plugin/          → プラグインシステム基盤（Registry, 20種のHook IF）
-plugins/         → 公式プラグイン実装（coupon, tax, invoicecleanup）
-batch/           → バッチ処理（ContractRenewal等。スケジューラはサービス側の責務）
-infrastructure/  → domain/applicationのインターフェース実装（inmemory/テスト用）
+domain/          純粋なドメインロジック。外部依存は stdlib + ulid のみ
+application/     ユースケース層。domain にのみ依存
+  service/         BillingService, PaymentService, CreditNoteService, SnapshotService
+  port/            外部連携IF（PaymentGateway, WebhookHandler, IdempotencyStore, ...）
+  query/           時点再構築クエリ（TemporalQueryService）
+  projection/      Projection 更新（同期/非同期選択可能）
+  tx/              トランザクション管理（TxManager, Saga）
+eventstore/      Event Sourcing 基盤（Store, EventRegistry, Snapshot, Upcaster）
+plugin/          プラグインシステム基盤（Registry と 20 種の Hook IF）
+plugins/         公式プラグイン実装（coupon, tax, invoicecleanup）
+batch/           バッチ処理ロジック（ContractRenewal 等。スケジューラは利用側）
+infrastructure/  ドメイン IF の実装（現在は inmemory/ のみ。DB 実装は利用者が提供）
 ```
 
 **絶対に守るルール:**
-- `domain/` は外部パッケージに依存してはならない（標準ライブラリ + `ulid` のみ）
-- `application/` は `domain/` のみに依存。`infrastructure/` に依存してはならない
+
+- `domain/` から外部パッケージへの依存は禁止（stdlib + `github.com/oklog/ulid/v2` のみ）
+- `application/` は `domain/` のみに依存。`infrastructure/` には依存しない
 - 依存の方向は常に外→内（Dependency Inversion）
 - インターフェースは `domain/` または `application/port/` に定義し、実装は `infrastructure/` に置く
+- パッケージ間の循環依存を絶対に作らない
 
 ### ドメインモデル
 
 | エンティティ | 種別 | 特記 |
 |---|---|---|
 | Contract | Event Sourced Aggregate | 状態遷移: Draft→Trialing→Active→PastDue/Suspended→Cancelled/Expired |
-| Invoice | Entity | 改訂チェーン（void-and-recreate）対応 |
-| CreditNote | Entity | 行項目レベルの調整 |
-| Payment | Entity | 冪等性キー必須 |
-| Price | Immutable Entity | Flat/Tiered(Graduated,Volume)/Usage の価格モデル |
+| Invoice | Entity | 改訂チェーン（void-and-recreate）対応、2 レベルリンク（original / revisionOf） |
+| CreditNote | Entity | 行項目レベルの調整。draft→issued→applied→refunded/voided |
+| Payment | Entity | 冪等性キー必須、状態遷移あり |
+| Price | Immutable Entity | Flat / Tiered(Graduated, Volume) / Usage の価格モデル |
 | Product | Entity | 「何を売るか」を定義。Price（「どう課金するか」）と分離 |
-| BalanceEntry | Entity | FIFO消費、有効期限対応 |
+| BalanceEntry | Entity | FIFO 消費、有効期限対応、楽観的ロック |
 
-- `contract.BillingCycle` は `pricing.BillingCycle` のエイリアス（定義元は `pricing`）
-- 契約は `CreateContractCommand.PriceID` で Price を指定する
+- 契約は `CreateContractCommand.PriceID` で Price を指定する（旧 `PlanID` は廃止済み）
+- 課金サイクルは `pricing.BillingInterval`（`{unit, count}` の値オブジェクト）が新 API。
+  `BillingCycle`（文字列エイリアス）は後方互換のために残っているが新規コードでは `BillingInterval` を使う
+- `shared.MetricName`（型付き string）を使用。生の string でメトリック名を渡さない
 
 ### Event Sourcing
 
 - イベントは不変・追記のみ（append-only）
-- `EventRegistry` で型安全なデシリアライズ。**新イベント追加時は必ず `Register()` と `Apply()` の両方を更新**
-- `SchemaVersion` フィールドでイベントスキーマのバージョン管理
-- スナップショット: N件ごと（デフォルト100）で最適化
-- 楽観的ロック（version-based）で並行制御
+- `EventRegistry` で型安全なデシリアライズ
+- **新イベントを追加するときは必ず `Register()` と集約の `Apply()` 型 switch の両方を更新する**
+- `SchemaVersion` フィールドで将来的な Upcaster 対応
+- スナップショット: `DefaultSnapshotInterval`（100 イベントごと、変更可能）
+- 並行制御は version-based の楽観的ロック
 
 ### プラグインシステム
 
 コアが会計基準に則った計算順序を構造的に保証する:
+
 ```
 BeforeCalculation → 価格計算 → Discount → Subtotal → Tax → Total → Credit適用 → Invoice生成 → AfterCalculation
 ```
 
-- ISP準拠：必要なHookインターフェースのみ実装。空メソッドの強制実装は不要
-- `Priority` は同一Hook内の実行順序のみ制御（Hook種別間の順序はコアが保証）
+- **ISP 準拠**: 必要な Hook インターフェースのみ実装する。空メソッドの強制実装は不要
+- `Priority` は **同一 Hook 種別内** の実行順序のみを制御する。Hook 種別間の順序はコアが保証する
+- 全 20 種の Hook は 6 カテゴリに分類される（請求計算 3 / 契約ライフサイクル 7 / 支払い 4 / メトリクス 3 / クレジットノート 2 / 請求書生成 1）
 
-**フックカテゴリ一覧（全20種）:**
-
-| カテゴリ | フック | 用途 |
-|---|---|---|
-| 請求計算 | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引・税計算、計算前後処理 |
-| 契約ライフサイクル | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | 契約の各イベントに個別対応 |
-| 支払い | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | 課金前後、失敗時、返金時 |
-| メトリクス | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI収集 |
-| クレジットノート | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | CN発行、請求書差替 |
-| 請求書生成 | `InvoiceGenerationHook` | PDF生成・送付（BuildDocument/AfterRender/AfterDelivery） |
+Hook の完全な一覧と設計意図は @docs/internals/plugin-system.md を参照。
 
 ## コーディング規約
 
-### 必須パターン
-
-- **時刻**: `time.Now()` は絶対に使わない。必ず `shared.Clock` インターフェース経由
-- **金額**: `big.Rat` ベースの `shared.Money` を使用（浮動小数点は使用禁止）
-- **ID生成**: `ulid` を使用（`github.com/oklog/ulid/v2`）
-- **エラー**: `shared.DomainError` + `ErrorCode` で構造化。ビジネスエラーと技術エラーを区別
-- **タイムゾーン**: すべてUTC
-
-### 命名規則
-
-- 型・公開関数: `PascalCase`
-- 非公開フィールド/メソッド: `camelCase`
-- ID型: 具体的な名前（`ContractID`, `InvoiceID` など。汎用 `ID` は使わない）
-- イベント型名: `"domain.action"` 形式（例: `"contract.created"`, `"contract.activated"`）
+- **時刻**: `time.Now()` は使わない。必ず `shared.Clock` IF 経由（テストでは `shared.FixedClock`）
+- **金額**: `big.Rat` ベースの `shared.Money` を使う。浮動小数点演算は禁止
+- **ID 生成**: `github.com/oklog/ulid/v2`。ID 型は具体的な名前（`ContractID`, `InvoiceID` 等）を使い、汎用 `ID` は作らない
+- **エラー**: `shared.DomainError` + `shared.ErrorCode` で構造化。ビジネスエラーと技術エラーを区別する
+- **タイムゾーン**: すべて UTC。ローカルタイムへの変換は表示層の責務
+- **命名**: 公開は `PascalCase`、非公開フィールド/メソッドは `camelCase`
+- **イベント型名**: `"domain.action"` 形式（例: `"contract.created"`, `"contract.activated"`）
 
 ### テスト
 
-- `shared.FixedClock` で時刻を固定化
-- `infrastructure/inmemory/` のリポジトリ実装をテストで使用
-- `-race` フラグを常に有効化
-- テストファイルの配置: ユニットテストは対象パッケージ内、統合テストは `tests/integration/`
+- `-race` で常に実行（`make test` のデフォルト）
+- 時刻は `shared.FixedClock{FixedTime: ...}` で固定
+- リポジトリ依存は `infrastructure/inmemory/` の実装を利用
+- ユニットテストは対象パッケージ内に配置、統合テストは `tests/integration/`、E2E は `tests/e2e/`
 
 ### Lint
 
-- golangci-lintの設定: `.golangci.yml` 参照
-- `exhaustive` リンター有効（switchの網羅性チェック）
-- `nolintlint`: `//nolint` には理由と対象リンター指定が必須
-- `examples/` ディレクトリはlint除外
+golangci-lint の設定は `.golangci.yml`。`exhaustive` で switch の網羅性を強制し、`nolintlint` で `//nolint` に理由を要求している。Claude 側で style を気にする必要はない（lint に任せる）。`examples/` は lint 除外。
 
 ## 変更時の注意事項
 
 ### 破壊的変更の回避
 
-- イベントスキーマの変更は `SchemaVersion` + Upcasterで対応。既存イベントは絶対に変更しない
-- ドメインの状態遷移ルールを変更する場合、既存のイベント履歴からの再構築が壊れないか確認
-- プラグインHookのシグネチャ変更はすべてのプラグイン実装に影響する
+- **イベントスキーマの変更は既存イベントを壊さない**こと。`SchemaVersion` + Upcaster で対応する
+- ドメインの状態遷移ルールを変更する場合、既存のイベント履歴からの再構築が壊れないか確認する
+- プラグイン Hook のシグネチャ変更は全プラグイン実装に影響する
 
-### 追加・変更チェックリスト
+### 変更時のチェックリスト
 
-- [ ] `domain/` に外部依存を持ち込んでいないか
-- [ ] 新しいドメインイベントを `EventRegistry` に登録したか
-- [ ] 新しいドメインイベントを `Apply()` の型スイッチに追加したか
-- [ ] `Money` 演算で通貨の一致を検証しているか
-- [ ] 状態遷移が既存のフローと矛盾しないか
-- [ ] `Clock` インターフェースを使っているか（`time.Now()` を使っていないか）
-- [ ] テストが `-race` で通るか
-- [ ] `ProductID` + `PriceID` を使っているか（`PlanID` は廃止済み）
-
-### 既知の課題（コードレビュー 2026/03/27時点）
-
-**対応推奨（高）:**
-- `NewUsageRecord` / `NewLineItem` が負の `quantity` を受け入れる（バリデーション不足）
-- `UsagePrice.CalculatePrice` が負のusageで負の金額を返す
-- `domain/payment` の状態遷移メソッド（Complete/Fail/MarkRefunded等）が未テスト
-- `application/port/webhook.go` の WebhookProcessor が未テスト
-- `application/query/` の TemporalQueryService が未テスト
-
-**改善推奨（中）:**
-- `BalanceEntry.sourceType` が未型付きstring（タイポが検出されない）
-- `Product.AddFeature/AddUsageMetric` に重複チェックがない
-
-詳細: @docs/internals/codebase-review-20260327.md
+- [ ] `domain/` に外部依存を持ち込んでいない
+- [ ] 新しいドメインイベントを `EventRegistry.Register()` と集約の `Apply()` 両方に追加した
+- [ ] `Money` 演算で通貨一致を検証している
+- [ ] 状態遷移が既存フローと矛盾しない
+- [ ] `shared.Clock` を使っている（`time.Now()` の直接呼び出しがない）
+- [ ] テストが `-race` で通る
+- [ ] `ProductID` + `PriceID` を使っている（`PlanID` は廃止済み）
+- [ ] `make check` が通る
 
 ## 詳細ドキュメント
 
-- @docs/architecture.md - Architecture overview
-- @docs/decisions/design-decisions.md - Design decisions and rationale
-- @docs/internals/domain-model.md - Domain model detailed spec
-- @docs/internals/event-sourcing.md - Event sourcing detailed spec
-- @docs/internals/plugin-system.md - Plugin system detailed spec
-- @docs/internals/payment-gateway.md - Payment gateway detailed spec
-- @docs/internals/metrics-invoicegen.md - Metrics & invoice generation spec
-- @docs/guides/integration.md - Integration guide for service developers
+作業内容に応じて必要なものを参照する:
+
+- @docs/architecture.md — 全体アーキテクチャ概観
+- @docs/decisions/design-decisions.md — 設計決定事項と選択理由
+- @docs/internals/domain-model.md — ドメインモデル詳細仕様
+- @docs/internals/event-sourcing.md — Event Sourcing 詳細仕様
+- @docs/internals/plugin-system.md — プラグインシステム詳細仕様（Hook IF 全 20 種の定義）
+- @docs/internals/payment-gateway.md — Payment Gateway 詳細仕様
+- @docs/internals/metrics-invoicegen.md — メトリクス集計 & 請求書生成 Adapter
+- @docs/guides/integration.md — サービス開発者向け統合ガイド
