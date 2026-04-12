@@ -401,6 +401,46 @@ func TestLoadAll_EmptyStore(t *testing.T) {
 	}
 }
 
+func TestLoadAllNoLimit(t *testing.T) {
+	store := NewInMemoryEventStore(shared.SystemClock{})
+	ctx := context.Background()
+
+	// Create 5 events.
+	for i := 1; i <= 5; i++ {
+		e := makeEvent("s", i, time.Date(2025, 1, i, 0, 0, 0, 0, time.UTC))
+		if err := store.Append(ctx, "s", []eventstore.Event{e}, i-1); err != nil {
+			t.Fatalf("Append failed: %v", err)
+		}
+	}
+
+	// limit=0 means no limit — should return all events.
+	events, err := store.LoadAll(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events with limit=0 (no limit), got %d", len(events))
+	}
+
+	// limit=-1 also means no limit.
+	events, err = store.LoadAll(ctx, 0, -1)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events with limit=-1 (no limit), got %d", len(events))
+	}
+
+	// With fromPosition, still returns remaining events.
+	events, err = store.LoadAll(ctx, 3, 0)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events from position 3 with no limit, got %d", len(events))
+	}
+}
+
 func TestLoadSnapshotBefore(t *testing.T) {
 	store := NewInMemoryEventStore(shared.SystemClock{})
 	ctx := context.Background()
