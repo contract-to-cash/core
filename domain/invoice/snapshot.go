@@ -37,7 +37,7 @@
 //
 // # Pointer isolation
 //
-// ToSnapshot / FromSnapshot deep-copy pointer fields (*big.Rat, *time.Time,
+// ToSnapshot / InvoiceFromSnapshot deep-copy pointer fields (*big.Rat, *time.Time,
 // *string, *shared.InvoiceID) so that mutations to the snapshot do not leak
 // into the entity (and vice versa). This isolation is at the Snapshot boundary
 // only; the entity's own getters may still return internal pointers — that is
@@ -46,7 +46,7 @@
 // # Map normalization
 //
 // To keep the reconstructed entity safe for downstream callers that assume
-// maps are non-nil, ToSnapshot / FromSnapshot always allocate empty maps
+// maps are non-nil, ToSnapshot / InvoiceFromSnapshot always allocate empty maps
 // (make(map[string]string, 0)) when the source map is nil. Round-tripping a
 // nil metadata map therefore yields a non-nil empty map. This matches the
 // behavior of NewInvoice (which also initializes metadata to an empty map)
