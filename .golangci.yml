@@ -5,6 +5,7 @@ linters:
     - bodyclose
     - copyloopvar
     - exhaustive
+    - forbidigo
     - misspell
     - nolintlint
   settings:
@@ -12,6 +13,32 @@ linters:
       check-type-assertions: true
     exhaustive:
       default-signifies-exhaustive: true
+    forbidigo:
+      # Snapshot APIs (ToSnapshot / FromSnapshot / InvoiceFromSnapshot /
+      # CreditNoteFromSnapshot) are reserved for persistence adapters. They
+      # deliberately bypass construction-time invariants and must not be used
+      # by application or domain-service code. See domain/*/snapshot.go
+      # header comments and issue #100.
+      #
+      # Note: ContractAggregate.MarshalSnapshot / LoadFromSnapshot are a
+      # different API (event-sourced aggregate snapshotting coupled to the
+      # eventstore package) and are intentionally NOT forbidden here.
+      #
+      # Pattern note: forbidigo matches against the identifier expression
+      # (e.g. `e.ToSnapshot` or `invoice.FromSnapshot`), not the full call
+      # syntax. The patterns must therefore:
+      #   1. catch method-form   inv.ToSnapshot()            via `\.ToSnapshot$`
+      #   2. catch package-form  invoice.FromSnapshot(...)   via word-boundary
+      #   3. NOT match LoadFromSnapshot (different API) — guaranteed because
+      #      `\b` does not match between two word characters, so the substring
+      #      `FromSnapshot` inside `LoadFromSnapshot` has no leading `\b`.
+      forbid:
+        - pattern: '\.ToSnapshot$'
+          msg: "Snapshot APIs are for persistence adapters only. Use NewXxx and state-transition methods for normal domain operations (see domain/*/snapshot.go header and issue #100)."
+        - pattern: '\b(FromSnapshot|InvoiceFromSnapshot|CreditNoteFromSnapshot)\b'
+          msg: "Snapshot reconstruction APIs are for persistence adapters only (see domain/*/snapshot.go header and issue #100)."
+      analyze-types: false
+      exclude-godoc-examples: true
     govet:
       enable:
         - shadow
@@ -23,6 +50,23 @@ linters:
     rules:
       - linters: [govet]
         text: 'shadow: declaration of "err" shadows declaration at'
+      # Snapshot API definition files — these legitimately implement the
+      # ToSnapshot / FromSnapshot pattern.
+      - path: 'domain/[^/]+/snapshot[^/]*\.go$'
+        linters: [forbidigo]
+      - path: 'domain/invoice/credit_note_snapshot[^/]*\.go$'
+        linters: [forbidigo]
+      # Persistence adapters are the intended consumers of Snapshot APIs.
+      - path: 'infrastructure/'
+        linters: [forbidigo]
+      # Integration tests exercise the snapshot/restore round-trip through
+      # persistence-adapter-like flows. Unit and e2e tests do NOT need access
+      # to Snapshot APIs, so the exclusion is narrow.
+      - path: 'tests/integration/'
+        linters: [forbidigo]
+      # The lintcheck package creates its own temp-dir fixtures and does not
+      # call Snapshot APIs from Go source (only from string literals), so it
+      # does not need an exclusion.
     presets:
       - comments
       - common-false-positives

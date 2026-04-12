@@ -102,6 +102,8 @@ Hook の完全な一覧と設計意図は @docs/internals/plugin-system.md を�
 ### Lint
 
 golangci-lint の設定は `.golangci.yml`。`exhaustive` で switch の網羅性を強制し、`nolintlint` で `//nolint` に理由を要求している。Claude 側で style を気にする必要はない（lint に任せる）。`examples/` は lint 除外。
+- `forbidigo` リンター有効: `ToSnapshot` / `FromSnapshot` / `InvoiceFromSnapshot` / `CreditNoteFromSnapshot` は persistence adapter 専用。`domain/*/snapshot*.go`, `infrastructure/`, `tests/integration/` 以外から呼び出すと CI が落ちる（issue #100）。`ContractAggregate.MarshalSnapshot` / `LoadFromSnapshot` は event-sourced 用の別 API なので対象外（word-boundary `\b` で除外済み）。
+- 新規 lint ルール追加時は `tests/lintcheck/` に enforcement 検証テストを置く（`make test-lint-rules`）
 
 ## 変更時の注意事項
 
