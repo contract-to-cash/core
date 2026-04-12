@@ -165,24 +165,35 @@ func LoadFromSnapshotIsAllowed() error {
 	forbidigoJoined := strings.Join(forbidigoLines, "\n")
 
 	// Positive assertions: every forbidden call site must be flagged. Each
-	// expectation pins a specific identifier to a specific fixture file, so
-	// the test catches both "pattern stops matching" and "violation appears
-	// in the wrong package" regressions.
+	// expectation pins a specific identifier to a specific fixture file on
+	// the SAME LINE of golangci-lint output. Checking file + identifier
+	// separately against the joined output would allow a regression where,
+	// for example, the identifier is flagged in dom/dom.go (the declaration
+	// site) while consumer/consumer.go (the usage site) appears on another
+	// line — the assertion would still pass silently. Requiring same-line
+	// match pins the location precisely and catches exclusion drift.
 	type expected struct {
 		desc       string
 		identifier string // must appear inside backticks in the forbidigo message
-		file       string // must appear as the file path
+		file       string // must appear as the file path prefix on the same line
 	}
 	expectedViolations := []expected{
-		{"method form (intra-package receiver)", "e.ToSnapshot", "consumer/consumer.go"},
+		{"method form on receiver", "e.ToSnapshot", "consumer/consumer.go"},
 		{"cross-package FromSnapshot", "dom.FromSnapshot", "consumer/consumer.go"},
 		{"cross-package InvoiceFromSnapshot", "dom.InvoiceFromSnapshot", "consumer/consumer.go"},
 		{"cross-package CreditNoteFromSnapshot", "dom.CreditNoteFromSnapshot", "consumer/consumer.go"},
 	}
 	for _, exp := range expectedViolations {
 		wantIdent := "`" + exp.identifier + "`"
-		if !strings.Contains(forbidigoJoined, wantIdent) || !strings.Contains(forbidigoJoined, exp.file) {
-			t.Errorf("%s: expected forbidigo to flag %s in %s; forbidigo output was:\n%s",
+		found := false
+		for _, line := range forbidigoLines {
+			if strings.HasPrefix(line, exp.file+":") && strings.Contains(line, wantIdent) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s: expected forbidigo to flag %s in %s (same-line match); forbidigo output was:\n%s",
 				exp.desc, wantIdent, exp.file, forbidigoJoined)
 		}
 	}

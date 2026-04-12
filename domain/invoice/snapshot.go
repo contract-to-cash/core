@@ -2,7 +2,8 @@
 //
 // This file implements the Snapshot / Reconstruct pattern for state-based
 // persistence adapters. It exposes a flat DTO (InvoiceSnapshot / LineItemSnapshot)
-// and dedicated ToSnapshot / FromSnapshot entry points.
+// and dedicated ToSnapshot / InvoiceFromSnapshot entry points. CreditNote uses
+// CreditNoteFromSnapshot, defined in credit_note_snapshot.go in this package.
 //
 // # Relation to ContractAggregate
 //
@@ -30,8 +31,9 @@
 // and the state-transition methods (Finalize, RecordPayment, Void, ...) instead.
 //
 // This scope is enforced in CI: the forbidigo rule in .golangci.yml blocks
-// calls to ToSnapshot / FromSnapshot / CreditNoteFromSnapshot from any path
-// outside domain/*/snapshot*.go, infrastructure/, and tests/. See issue #100.
+// calls to ToSnapshot / InvoiceFromSnapshot / CreditNoteFromSnapshot from any
+// path outside domain/*/snapshot*.go, infrastructure/, and tests/integration/.
+// See issue #100.
 //
 // # Pointer isolation
 //
