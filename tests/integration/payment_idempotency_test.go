@@ -84,6 +84,132 @@ func (g *integrationGateway) ListPaymentMethods(_ context.Context, _ string) ([]
 	return nil, fmt.Errorf("not implemented")
 }
 
+// isolatingInvoiceRepo wraps an invoice.Repository and returns a FRESH
+// (snapshot-round-tripped) invoice instance on every FindByID call. This
+// simulates the per-transaction snapshot isolation a real RDBMS provides,
+// preventing concurrent PaymentService callers from accidentally sharing
+// the same *Invoice pointer via the in-memory repo.
+//
+// Without this isolation, two goroutines that both load "the same" invoice
+// see a single shared pointer whose state is concurrently mutated by
+// RecordPayment — which is not what happens in production (Postgres would
+// hand each tx a fresh row snapshot), and it masks the #97 race behind a
+// pre-existing invariant violation on the invoice.
+type isolatingInvoiceRepo struct {
+	inner invoice.Repository
+}
+
+func (r *isolatingInvoiceRepo) Save(ctx context.Context, inv *invoice.Invoice) error {
+	return r.inner.Save(ctx, inv)
+}
+
+func (r *isolatingInvoiceRepo) FindByID(ctx context.Context, id shared.InvoiceID) (*invoice.Invoice, error) {
+	inv, err := r.inner.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	snap := inv.ToSnapshot()
+	clone, err := invoice.InvoiceFromSnapshot(snap)
+	if err != nil {
+		return nil, err
+	}
+	return clone, nil
+}
+
+func (r *isolatingInvoiceRepo) FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*invoice.Invoice, error) {
+	return r.inner.FindByContractID(ctx, contractID)
+}
+
+func (r *isolatingInvoiceRepo) FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*invoice.Invoice, error) {
+	return r.inner.FindByAccountID(ctx, accountID)
+}
+
+func (r *isolatingInvoiceRepo) FindOverdue(ctx context.Context) ([]*invoice.Invoice, error) {
+	return r.inner.FindOverdue(ctx)
+}
+
+func (r *isolatingInvoiceRepo) FindByStatus(ctx context.Context, status invoice.InvoiceStatus) ([]*invoice.Invoice, error) {
+	return r.inner.FindByStatus(ctx, status)
+}
+
+func (r *isolatingInvoiceRepo) FindByIDAsOf(ctx context.Context, id shared.InvoiceID, asOf time.Time) (*invoice.Invoice, error) {
+	return r.inner.FindByIDAsOf(ctx, id, asOf)
+}
+
+func (r *isolatingInvoiceRepo) FindByContractAndStatus(ctx context.Context, contractID shared.ContractID, status invoice.InvoiceStatus) ([]*invoice.Invoice, error) {
+	return r.inner.FindByContractAndStatus(ctx, contractID, status)
+}
+
+func (r *isolatingInvoiceRepo) FindByContractAndPeriod(ctx context.Context, contractID shared.ContractID, period shared.DateRange) ([]*invoice.Invoice, error) {
+	return r.inner.FindByContractAndPeriod(ctx, contractID, period)
+}
+
+func (r *isolatingInvoiceRepo) FindUnpaidByContract(ctx context.Context, contractID shared.ContractID) ([]*invoice.Invoice, error) {
+	return r.inner.FindUnpaidByContract(ctx, contractID)
+}
+
+// rendezvousPaymentRepo wraps a payment.Repository and blocks every Save
+// call until `expected` callers have entered Save. This deterministically
+// reproduces the #97 concurrent-success race: both racing goroutines pass
+// through FindByIdempotencyKey (observing nil because neither has saved
+// yet) and only then are released to call the inner Save simultaneously.
+// Without a unique-idempotency-key guard, the race would persist two
+// payment records under the same key.
+//
+// After the first `expected` Save calls, subsequent Save calls pass
+// through without blocking so sequential retries after the race can
+// proceed. Other methods (Find*) pass through transparently.
+type rendezvousPaymentRepo struct {
+	inner    payment.Repository
+	barrier  chan struct{}
+	expected int
+	mu       sync.Mutex
+	arrived  int
+	released bool
+}
+
+func newRendezvousPaymentRepo(inner payment.Repository, expected int) *rendezvousPaymentRepo {
+	return &rendezvousPaymentRepo{
+		inner:    inner,
+		barrier:  make(chan struct{}),
+		expected: expected,
+	}
+}
+
+func (r *rendezvousPaymentRepo) wait() {
+	r.mu.Lock()
+	if r.released {
+		r.mu.Unlock()
+		return
+	}
+	r.arrived++
+	if r.arrived >= r.expected {
+		r.released = true
+		close(r.barrier)
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+	<-r.barrier
+}
+
+func (r *rendezvousPaymentRepo) Save(ctx context.Context, p *payment.Payment) error {
+	r.wait()
+	return r.inner.Save(ctx, p)
+}
+
+func (r *rendezvousPaymentRepo) FindByID(ctx context.Context, id shared.PaymentID) (*payment.Payment, error) {
+	return r.inner.FindByID(ctx, id)
+}
+
+func (r *rendezvousPaymentRepo) FindByInvoiceID(ctx context.Context, invoiceID shared.InvoiceID) ([]*payment.Payment, error) {
+	return r.inner.FindByInvoiceID(ctx, invoiceID)
+}
+
+func (r *rendezvousPaymentRepo) FindByIdempotencyKey(ctx context.Context, key string) (*payment.Payment, error) {
+	return r.inner.FindByIdempotencyKey(ctx, key)
+}
+
 // switchableIntegrationTxManager fails the first N RunInTx calls, then
 // delegates to a NoopTxManager backed by real in-memory repositories.
 type switchableIntegrationTxManager struct {
@@ -486,6 +612,144 @@ func TestPaymentIdempotency_Concurrent_CompensationRace_Integration(t *testing.T
 	refreshed, _ := invoiceRepo.FindByID(ctx, inv.ID())
 	if refreshed.PaidAmount().Amount().Cmp(amount.Amount()) != 0 {
 		t.Errorf("expected invoice paid amount %v, got %v", amount.Amount(), refreshed.PaidAmount().Amount())
+	}
+}
+
+// TestPaymentIdempotency_ConcurrentSuccess_Race_Integration reproduces the
+// race described in issue #97: two ProcessPayment goroutines fire with the
+// same IdempotencyKey, both reach the SUCCESS path (tx commits for both
+// without any simulated failure), and the PaymentRepository must reject the
+// duplicate so that only ONE completed payment is persisted and the invoice
+// is recorded as paid exactly once.
+//
+// Without a unique-key constraint in the repository, the interleaving
+//
+//	G1: FindByIdempotencyKey(K) → nil
+//	G2: FindByIdempotencyKey(K) → nil  (G1 hasn't saved yet)
+//	G1: Save(p1) → OK
+//	G2: Save(p2) → OK   ← duplicate, #97 regression
+//
+// is possible because RWMutex is released between find and save.
+//
+// The InMemoryPaymentRepository simulates a Postgres UNIQUE INDEX on
+// idempotency_key. The race-losing goroutine's Save returns a
+// [shared.ErrCodeDuplicateRequest] DomainError, which PaymentService
+// translates into an idempotent-replay (re-reads the winner's record via
+// FindByIdempotencyKey and returns it). Saga compensation MUST NOT fire
+// in this path because the shared gateway transaction backs the winner's
+// legitimate payment and refunding it would undo a successful charge.
+func TestPaymentIdempotency_ConcurrentSuccess_Race_Integration(t *testing.T) {
+	ctx := context.Background()
+	clock := fixedClock()
+
+	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
+	paymentRepo := inmemory.NewInMemoryPaymentRepository()
+
+	amount := moneyJPY(10000)
+	inv := newIntegrationInvoice(t, ctx, invoiceRepo, amount)
+
+	gw := &integrationGateway{}
+
+	// isolatingInvoiceRepo mirrors a real RDBMS's per-tx snapshot
+	// isolation: each FindByID returns a fresh clone so the two
+	// goroutines do not accidentally share a single *Invoice pointer
+	// whose paidAmount would be mutated by the first RecordPayment call.
+	// Without this, the in-memory repo's pointer sharing masks the #97
+	// payment-record race behind a spurious invoice invariant error.
+	isolatedInvoiceRepo := &isolatingInvoiceRepo{inner: invoiceRepo}
+
+	// rendezvousPaymentRepo blocks every Save until both goroutines
+	// have reached it simultaneously. This deterministically reproduces
+	// the dangerous interleaving described in issue #97: both goroutines
+	// observe "no existing payment" via FindByIdempotencyKey (because
+	// neither has saved yet), then both attempt to persist a fresh
+	// payment record under the same key.
+	racedPaymentRepo := newRendezvousPaymentRepo(paymentRepo, 2)
+
+	svc := service.NewPaymentService(
+		gw,
+		racedPaymentRepo,
+		isolatedInvoiceRepo,
+		nil,
+		nil,
+		plugin.NewRegistry(),
+		clock,
+		// NoopTxManager: closure runs without DB-level serialization.
+		// This mirrors the default configuration a consumer would see if
+		// they forget to wire a real TxManager with SELECT FOR UPDATE /
+		// UNIQUE INDEX semantics.
+	)
+
+	input := service.ProcessPaymentInput{
+		PaymentMethodID: "pm-concurrent-success",
+		Amount:          amount,
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "integration-concurrent-success",
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	results := make([]*payment.Payment, 2)
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = svc.ProcessPayment(ctx, inv.ID(), input)
+		}(i)
+	}
+	wg.Wait()
+
+	// Both calls must return the same completed payment. The race loser
+	// is re-routed to the winner via the duplicate-key fallback path.
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: unexpected error: %v", i, err)
+		}
+		if results[i] == nil {
+			t.Fatalf("goroutine %d: nil payment", i)
+		}
+		if results[i].Status() != payment.PaymentStatusCompleted {
+			t.Errorf("goroutine %d: expected Completed, got %q", i, results[i].Status())
+		}
+	}
+	if results[0].ID() != results[1].ID() {
+		t.Errorf("both goroutines must converge on the same payment record; got %q and %q",
+			results[0].ID(), results[1].ID())
+	}
+
+	// Exactly one completed payment must be persisted.
+	persisted, err := paymentRepo.FindByInvoiceID(ctx, inv.ID())
+	if err != nil {
+		t.Fatalf("FindByInvoiceID: %v", err)
+	}
+	completed := 0
+	for _, p := range persisted {
+		if p.Status() == payment.PaymentStatusCompleted {
+			completed++
+		}
+	}
+	if completed != 1 {
+		t.Errorf("expected exactly 1 completed payment, got %d (total persisted=%d)",
+			completed, len(persisted))
+	}
+
+	// Invoice must be recorded as paid exactly once at the full amount
+	// (no double-recording from the race loser's RecordPayment call).
+	refreshed, err := invoiceRepo.FindByID(ctx, inv.ID())
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if refreshed.PaidAmount().Amount().Cmp(amount.Amount()) != 0 {
+		t.Errorf("expected invoice paid amount %v, got %v",
+			amount.Amount(), refreshed.PaidAmount().Amount())
+	}
+
+	// The loser's gateway charge is deduplicated by the gateway itself
+	// (idempotency-key replay returns the same txn), so no refund is
+	// required — saga compensation MUST NOT have fired.
+	if len(gw.refundTxnIDs) != 0 {
+		t.Errorf("saga compensation must not fire on concurrent success race, got refunds: %v",
+			gw.refundTxnIDs)
 	}
 }
 

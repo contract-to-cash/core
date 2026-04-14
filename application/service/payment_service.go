@@ -174,6 +174,35 @@ func NewPaymentService(
 }
 
 // ProcessPayment charges an invoice and records the payment.
+//
+// Concurrency contract (issue #97): under concurrent ProcessPayment calls
+// with the same IdempotencyKey that both reach the success path, the
+// safety of this method depends on the [payment.Repository]'s Save
+// enforcing a unique constraint on idempotency_key. Without it, the
+// interleaving
+//
+//	G1: FindByIdempotencyKey(K) → nil
+//	G2: FindByIdempotencyKey(K) → nil   // G1 hasn't saved yet
+//	G1: Save(p1) → OK
+//	G2: Save(p2) → OK                   // DUPLICATE — invoice double-paid
+//
+// is possible because the pre-save existence check and the write cannot
+// be serialized at the application layer alone. Production deployments
+// MUST implement [payment.Repository] with one of:
+//
+//   - Postgres/MySQL: UNIQUE INDEX on idempotency_key (or SELECT ... FOR
+//     UPDATE inside the TxManager closure).
+//   - DynamoDB: a ConditionExpression that rejects writes when the key
+//     already exists.
+//   - Any other backend: an equivalent compare-and-swap guarantee.
+//
+// When the unique constraint fires, the race-losing Save must return a
+// [shared.DomainError] with code [shared.ErrCodeDuplicateRequest] so
+// ProcessPayment can converge on the winner's record (see the in-tx
+// branch below) rather than firing saga compensation and refunding the
+// shared underlying gateway charge. The InMemoryPaymentRepository
+// simulates this constraint; consumer-provided repositories must
+// replicate the contract.
 func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.InvoiceID, input ProcessPaymentInput) (*payment.Payment, error) {
 	// Load invoice
 	inv, err := s.invoiceRepo.FindByID(ctx, invoiceID)
@@ -557,6 +586,44 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		}
 
 		if saveErr := repos.Payments.Save(txCtx, p); saveErr != nil {
+			// Issue #97: concurrent-success race. The DB's unique-key
+			// guarantee on idempotency_key (Postgres UNIQUE INDEX,
+			// DynamoDB condition expression, in-memory simulation here)
+			// rejects the race loser's insert. When this happens, a
+			// concurrent ProcessPayment call has already persisted the
+			// winning payment record under the same effective key. Both
+			// goroutines share one underlying gateway transaction (the
+			// gateway's own idempotency replay collapsed them), so
+			// refunding via saga compensation would undo the winner's
+			// legitimate charge. Instead we re-read the winner's record
+			// and return it as an idempotent replay.
+			//
+			// This branch only fires on a non-empty effective key — empty
+			// keys cannot collide at the repository layer and must not be
+			// short-circuited here, otherwise a genuine save failure on a
+			// keyless payment would be masked.
+			var domainErr *shared.DomainError
+			if errors.As(saveErr, &domainErr) &&
+				domainErr.Code == shared.ErrCodeDuplicateRequest &&
+				effectiveKey != "" {
+				winner, findErr := repos.Payments.FindByIdempotencyKey(txCtx, effectiveKey)
+				if findErr != nil {
+					return fmt.Errorf("failed to re-read winning payment after duplicate-key race: %w", findErr)
+				}
+				if winner != nil {
+					// Converge on the winner's record. The invoice mutation
+					// on THIS goroutine's copy is discarded by returning
+					// before repos.Invoices.Save — the winner's tx already
+					// persisted the invoice-paid state. Saga compensation
+					// must NOT fire because the underlying gateway charge
+					// is backing the winner.
+					p = winner
+					return nil
+				}
+				// Fall through: duplicate reported but winner cannot be
+				// located. Treat as a genuine save failure so the caller
+				// sees a real error and the saga can compensate.
+			}
 			return fmt.Errorf("failed to save payment: %w", saveErr)
 		}
 		if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {

@@ -26,9 +26,40 @@ func NewInMemoryPaymentRepository() *InMemoryPaymentRepository {
 }
 
 // Save persists a payment.
+//
+// Concurrent-success guard (issue #97): if the payment has a non-empty
+// idempotency key, Save rejects writes that would introduce a SECOND
+// record under the same key (i.e. different PaymentID, same
+// idempotency_key). This simulates the UNIQUE INDEX on idempotency_key
+// that production PaymentRepository implementations are expected to
+// enforce (Postgres: unique constraint or SELECT ... FOR UPDATE inside
+// TxManager; DynamoDB: condition expression; etc.).
+//
+// Same-ID re-saves (e.g. the 3DS Pending → Completed upgrade path) are
+// allowed because they target the existing record, not a duplicate.
+//
+// PaymentService treats the returned [shared.ErrCodeDuplicateRequest]
+// as a race-loser signal and converges on the winning record via
+// FindByIdempotencyKey rather than firing saga compensation — see
+// application/service/payment_service.go.
 func (r *InMemoryPaymentRepository) Save(_ context.Context, p *payment.Payment) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if key := p.IdempotencyKey(); key != "" {
+		for existingID, existing := range r.payments {
+			if existingID == p.ID() {
+				continue
+			}
+			if existing.IdempotencyKey() == key {
+				return shared.NewDomainError(
+					shared.ErrCodeDuplicateRequest,
+					fmt.Sprintf("payment with idempotency_key %q already persisted (existing id=%s, attempted id=%s)",
+						key, existingID, p.ID()),
+				)
+			}
+		}
+	}
 
 	r.payments[p.ID()] = p
 	return nil

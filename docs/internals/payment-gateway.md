@@ -1640,7 +1640,16 @@ SELECT effective_key FROM compensated_idempotency_keys WHERE original_key = $1;
 - **TTL 管理**: 本 IF は TTL を強制しない。各実装側で gateway の key 保持期間(Stripe 24h / Adyen 7日 / PayPal 45日)より長く保持する reaper を設定することを推奨
 - **MarkCompensated の DB 書き込み失敗**: 補償は成功しているのでデータ不整合は起きないが、次回リトライで再度 #87 の race が発生しうる。エラーログで監視すること
 - **Effective key の長さ**: `originalKey + "-" + ULID(26 chars)` = original + 27 bytes。各 gateway の idempotency key 長制限(Stripe/PayPal/GMO PG = 255 bytes、**Adyen = 64 bytes**)に合わせて、呼び出し元は生キーを短く保つ必要がある。Adyen を使う場合は生キーを 37 bytes 以内にすること。ライブラリ側での truncation や validation は行わない(gateway 依存のため)が、compensation 時および store resolve 時に 64 bytes を超えた場合は warning ログを emit する
-- **並行 ProcessPayment の成功 race** (別 issue: #97): 同じ `IdempotencyKey` で**両方が成功経路**に入る並行呼び出しの正しさは、**PaymentRepository の `FindByIdempotencyKey` → `Save` の単一 DB transaction 化**に依存する。本ライブラリは `tx.TxManager` 抽象でこれをコンシューマに委譲しており、InMemory 実装はテスト・デモ用途のため真の DB tx 分離を提供しない。プロダクションでは Postgres 等での `SELECT ... FOR UPDATE` または unique 制約に頼ること。並行**失敗** (両方が compensation 発火) の safety は `comp-refund-{txnID}` の決定性で保証されており、integration test で検証済み
+- **並行 ProcessPayment の成功 race** (#97): 同じ `IdempotencyKey` で**両方が成功経路**に入る並行呼び出しの正しさは、**`payment.Repository.Save` が idempotency_key に対する unique 制約を保証すること**に依存する。プロダクション実装の要件は以下:
+    - **Postgres / MySQL**: `idempotency_key` に UNIQUE INDEX、または `TxManager.RunInTx` 内での `SELECT ... FOR UPDATE`
+    - **DynamoDB**: `ConditionExpression` で key 既存時を拒否
+    - **その他**: 同等の CAS 保証
+
+  制約違反時、`Save` は `shared.DomainError{Code: shared.ErrCodeDuplicateRequest}` を返す契約。`PaymentService.ProcessPayment` はこのエラーを race 敗者のシグナルと解釈し、**`FindByIdempotencyKey` で勝者のレコードを読み直して idempotent replay を返す**(saga compensation は発火させない — 両 goroutine は同一の gateway transaction を共有しており、refund すると勝者の有効な決済が取り消されてしまうため)。
+
+  InMemory 実装 (`infrastructure/inmemory/payment_repository.go`) は unique 制約をシミュレートし、この契約を満たす。統合テスト `TestPaymentIdempotency_ConcurrentSuccess_Race_Integration` で end-to-end を検証済み。
+
+  並行**失敗** (両方が compensation 発火) の safety は `comp-refund-{txnID}` の決定性で別途保証されており、`TestPaymentIdempotency_Concurrent_CompensationRace_Integration` で検証済み。
 - **Compensation-after-3DS の orphan pending record** (別 issue: #98): 「Call 1 が 3DS requires_action で pending payment を保存 → Call 2 が Captured で tx commit fail → compensation が txn を refund + store がマーカー書き込み → Call 3 が新しい effective key で fresh charge として成功」のシーケンスで、Call 1 の pending payment record は誰も参照しない状態で repo に残る(orphan)。money flow は正しい(gateway 側は refund 済み、local invoice は Call 3 の新 txn で正しく recorded)が、repo に「死んだ pending record」がゴミとして残る。これは reconciliation job の責務とし、本ライブラリのスコープ外とする
 
 ---
