@@ -79,3 +79,25 @@ func TestCreditNote_IssuedAt_GetterIsDefensivelyCopied(t *testing.T) {
 		t.Errorf("CreditNote.IssuedAt() leaks internal pointer: got %v, want %v", again, issuedAt)
 	}
 }
+
+// TestCreditNote_IssuedAt_NilBeforeIssue verifies that IssuedAt is nil on
+// a newly created (draft) credit note and the getter does not panic.
+func TestCreditNote_IssuedAt_NilBeforeIssue(t *testing.T) {
+	createdAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	item := NewCreditNoteItem("li-1", "refund", jpy(1000), big.NewRat(10, 100), jpy(100))
+	cn, err := NewCreditNote(
+		shared.NewCreditNoteID(),
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		CreditNoteReasonOrderChange,
+		[]CreditNoteItem{item},
+		createdAt,
+	)
+	if err != nil {
+		t.Fatalf("NewCreditNote: %v", err)
+	}
+	if got := cn.IssuedAt(); got != nil {
+		t.Errorf("expected nil IssuedAt for draft credit note, got %v", got)
+	}
+}

@@ -224,6 +224,58 @@ func TestInvoice_RevisionOf_GetterIsDefensivelyCopied(t *testing.T) {
 
 // --- Invoice.LineItems()[i].TaxRate (reproducing the exact issue example) ---
 
+// --- Nil-safety tests for Invoice pointer getters ---
+
+// TestInvoice_OptionalPointers_NilByDefault verifies that Invoice getters
+// for optional *T fields correctly return nil when unset, and that the
+// defensive-copy wrappers do not panic on nil internals.
+func TestInvoice_OptionalPointers_NilByDefault(t *testing.T) {
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		jpy(10000),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+
+	if got := inv.PaidAt(); got != nil {
+		t.Errorf("expected nil PaidAt, got %v", got)
+	}
+	if got := inv.PaymentMethodID(); got != nil {
+		t.Errorf("expected nil PaymentMethodID, got %v", got)
+	}
+	if got := inv.OriginalInvoiceID(); got != nil {
+		t.Errorf("expected nil OriginalInvoiceID, got %v", got)
+	}
+	if got := inv.RevisionOf(); got != nil {
+		t.Errorf("expected nil RevisionOf, got %v", got)
+	}
+}
+
+// TestWithPaymentMethodID_NilInput verifies that passing nil to
+// WithPaymentMethodID yields a nil PaymentMethodID (not a panic).
+func TestWithPaymentMethodID_NilInput(t *testing.T) {
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		jpy(10000),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		WithPaymentMethodID(nil),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+	if got := inv.PaymentMethodID(); got != nil {
+		t.Errorf("expected nil PaymentMethodID for nil option, got %v", got)
+	}
+}
+
 // TestInvoice_LineItems_TaxRate_DoesNotCorruptOriginal reproduces the
 // issue #96 example:
 //
