@@ -80,8 +80,17 @@ func (p *Payment) Status() PaymentStatus        { return p.status }
 func (p *Payment) GatewayTransactionID() string { return p.gatewayTransactionID }
 func (p *Payment) IdempotencyKey() string       { return p.idempotencyKey }
 func (p *Payment) RefundedAmount() shared.Money { return p.refundedAmount }
-func (p *Payment) FailureReason() *string       { return p.failureReason }
-func (p *Payment) ProcessedAt() time.Time       { return p.processedAt }
+
+// FailureReason returns a defensive copy of the failure reason pointer so
+// callers cannot mutate the payment's internal state (see issue #96).
+func (p *Payment) FailureReason() *string {
+	if p.failureReason == nil {
+		return nil
+	}
+	v := *p.failureReason
+	return &v
+}
+func (p *Payment) ProcessedAt() time.Time { return p.processedAt }
 
 // SetIdempotencyKey sets the idempotency key for deduplication.
 func (p *Payment) SetIdempotencyKey(key string) { p.idempotencyKey = key }

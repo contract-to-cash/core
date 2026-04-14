@@ -1,0 +1,258 @@
+// pointer_isolation_test.go verifies that entity getters and construction
+// options do NOT leak internal pointer state. This aligns invoice-domain
+// entities with the domain/shared/money.go precedent of value-semantics +
+// pointer isolation. See issue #96.
+package invoice
+
+import (
+	"math/big"
+	"testing"
+	"time"
+
+	"github.com/contract-to-cash/core/domain/shared"
+)
+
+// --- LineItem ---
+
+// TestLineItem_TaxRate_GetterIsDefensivelyCopied verifies that mutating the
+// pointer returned by LineItem.TaxRate() does NOT alter the line item's
+// internal state. This matches the Money precedent.
+func TestLineItem_TaxRate_GetterIsDefensivelyCopied(t *testing.T) {
+	taxRate := big.NewRat(10, 100) // 10%
+	li, err := NewLineItem("li-1", "Item", 1, jpy(1000), jpy(1000), taxRate)
+	if err != nil {
+		t.Fatalf("NewLineItem: %v", err)
+	}
+
+	// Attempt to corrupt the internal taxRate via the getter.
+	li.TaxRate().SetInt64(999)
+
+	got := li.TaxRate()
+	if got == nil {
+		t.Fatal("TaxRate must not be nil")
+	}
+	if got.Cmp(big.NewRat(10, 100)) != 0 {
+		t.Errorf("LineItem.TaxRate() leaks internal pointer: got %s, want 10/100", got.RatString())
+	}
+}
+
+// TestLineItem_TaxRate_GetterNilSafe verifies that a nil taxRate is returned
+// as nil (and the getter does not panic).
+func TestLineItem_TaxRate_GetterNilSafe(t *testing.T) {
+	li, err := NewLineItem("li-1", "Item", 1, jpy(1000), jpy(1000), nil)
+	if err != nil {
+		t.Fatalf("NewLineItem: %v", err)
+	}
+	if li.TaxRate() != nil {
+		t.Errorf("expected nil TaxRate, got %v", li.TaxRate())
+	}
+}
+
+// TestNewLineItem_TaxRate_IntakeIsDefensivelyCopied verifies that mutating
+// the caller's taxRate after passing it to NewLineItem does NOT alter the
+// line item's internal state. Pattern C (intake defense).
+func TestNewLineItem_TaxRate_IntakeIsDefensivelyCopied(t *testing.T) {
+	taxRate := big.NewRat(10, 100)
+	li, err := NewLineItem("li-1", "Item", 1, jpy(1000), jpy(1000), taxRate)
+	if err != nil {
+		t.Fatalf("NewLineItem: %v", err)
+	}
+
+	// Mutate the caller-owned rat after construction.
+	taxRate.SetInt64(999)
+
+	got := li.TaxRate()
+	if got == nil {
+		t.Fatal("TaxRate must not be nil")
+	}
+	if got.Cmp(big.NewRat(10, 100)) != 0 {
+		t.Errorf("NewLineItem does not defend taxRate at intake: got %s, want 10/100", got.RatString())
+	}
+}
+
+// --- Invoice.PaidAt ---
+
+func TestInvoice_PaidAt_GetterIsDefensivelyCopied(t *testing.T) {
+	subtotal := jpy(10000)
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		subtotal,
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+	if err := inv.Finalize(); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	paidAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := inv.RecordPayment(subtotal, paidAt); err != nil {
+		t.Fatalf("RecordPayment: %v", err)
+	}
+
+	// Attempt to corrupt the internal paidAt via the getter.
+	got := inv.PaidAt()
+	if got == nil {
+		t.Fatal("PaidAt must not be nil")
+	}
+	*got = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	again := inv.PaidAt()
+	if again == nil || !again.Equal(paidAt) {
+		t.Errorf("Invoice.PaidAt() leaks internal pointer: got %v, want %v", again, paidAt)
+	}
+}
+
+// --- Invoice.PaymentMethodID ---
+
+func TestInvoice_PaymentMethodID_GetterIsDefensivelyCopied(t *testing.T) {
+	id := "pm-visa-1234"
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		jpy(10000),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		WithPaymentMethodID(&id),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+
+	// Corrupt via getter.
+	got := inv.PaymentMethodID()
+	if got == nil {
+		t.Fatal("PaymentMethodID must not be nil")
+	}
+	*got = "pm-hacked"
+
+	again := inv.PaymentMethodID()
+	if again == nil || *again != "pm-visa-1234" {
+		t.Errorf("Invoice.PaymentMethodID() leaks internal pointer: got %v, want pm-visa-1234", again)
+	}
+}
+
+// TestWithPaymentMethodID_IntakeIsDefensivelyCopied verifies that mutating
+// the caller's *string after passing it to WithPaymentMethodID does NOT
+// alter the invoice's internal state. Pattern C.
+func TestWithPaymentMethodID_IntakeIsDefensivelyCopied(t *testing.T) {
+	id := "pm-visa-1234"
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		jpy(10000),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		WithPaymentMethodID(&id),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+
+	// Mutate caller's variable.
+	id = "pm-hacked"
+
+	got := inv.PaymentMethodID()
+	if got == nil || *got != "pm-visa-1234" {
+		t.Errorf("WithPaymentMethodID does not defend at intake: got %v, want pm-visa-1234", got)
+	}
+}
+
+// --- Invoice.OriginalInvoiceID ---
+
+func TestInvoice_OriginalInvoiceID_GetterIsDefensivelyCopied(t *testing.T) {
+	origID := shared.InvoiceID("inv-orig")
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		jpy(10000),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		WithOriginalInvoiceID(origID),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+
+	got := inv.OriginalInvoiceID()
+	if got == nil {
+		t.Fatal("OriginalInvoiceID must not be nil")
+	}
+	*got = shared.InvoiceID("hacked")
+
+	again := inv.OriginalInvoiceID()
+	if again == nil || *again != origID {
+		t.Errorf("Invoice.OriginalInvoiceID() leaks internal pointer: got %v, want %s", again, origID)
+	}
+}
+
+// --- Invoice.RevisionOf ---
+
+func TestInvoice_RevisionOf_GetterIsDefensivelyCopied(t *testing.T) {
+	revOf := shared.InvoiceID("inv-prev")
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		jpy(10000),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		WithRevisionOf(revOf),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+
+	got := inv.RevisionOf()
+	if got == nil {
+		t.Fatal("RevisionOf must not be nil")
+	}
+	*got = shared.InvoiceID("hacked")
+
+	again := inv.RevisionOf()
+	if again == nil || *again != revOf {
+		t.Errorf("Invoice.RevisionOf() leaks internal pointer: got %v, want %s", again, revOf)
+	}
+}
+
+// --- Invoice.LineItems()[i].TaxRate (reproducing the exact issue example) ---
+
+// TestInvoice_LineItems_TaxRate_DoesNotCorruptOriginal reproduces the
+// issue #96 example:
+//
+//	inv.LineItems()[0].TaxRate().SetInt64(999)
+//
+// must NOT mutate the internal state of the invoice's line item.
+func TestInvoice_LineItems_TaxRate_DoesNotCorruptOriginal(t *testing.T) {
+	taxRate := big.NewRat(10, 100)
+	li, err := NewLineItem("li-1", "Item", 1, jpy(1000), jpy(1000), taxRate)
+	if err != nil {
+		t.Fatalf("NewLineItem: %v", err)
+	}
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		jpy(1000),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		WithLineItems([]LineItem{li}),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+
+	inv.LineItems()[0].TaxRate().SetInt64(999)
+
+	got := inv.LineItems()[0].TaxRate()
+	if got == nil || got.Cmp(big.NewRat(10, 100)) != 0 {
+		t.Errorf("Invoice line item TaxRate corrupted via getter chain: got %v", got)
+	}
+}
