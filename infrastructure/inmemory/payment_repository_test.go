@@ -174,8 +174,11 @@ func TestInMemoryPaymentRepository_OverwriteOnDuplicateSave(t *testing.T) {
 
 // TestInMemoryPaymentRepository_Save_DuplicateIdempotencyKey verifies the
 // #97 concurrent-success-race contract: Save rejects a second payment
-// record with the same idempotency_key but a different PaymentID.
-// PaymentService relies on this DomainError to route the race loser to
+// record with the same idempotency_key but a different PaymentID, and
+// the returned error satisfies errors.Is against
+// payment.ErrDuplicateIdempotencyKey and errors.As to a
+// *payment.DuplicateIdempotencyKeyError with populated fields.
+// PaymentService relies on this sentinel to route the race loser to
 // the winner's record instead of firing saga compensation.
 func TestInMemoryPaymentRepository_Save_DuplicateIdempotencyKey(t *testing.T) {
 	repo := NewInMemoryPaymentRepository()
@@ -189,19 +192,28 @@ func TestInMemoryPaymentRepository_Save_DuplicateIdempotencyKey(t *testing.T) {
 	}
 
 	// Second payment with a DIFFERENT ID but the SAME idempotency key
-	// must be rejected with ErrCodeDuplicateRequest.
+	// must be rejected via the payment-scoped sentinel.
 	p2 := newTestPayment(t, invoiceID)
 	p2.SetIdempotencyKey("idem-unique-001")
 	err := repo.Save(ctx, p2)
 	if err == nil {
 		t.Fatal("expected duplicate-key error on second Save, got nil")
 	}
-	var domainErr *shared.DomainError
-	if !errors.As(err, &domainErr) {
-		t.Fatalf("expected *shared.DomainError, got %T: %v", err, err)
+	if !errors.Is(err, payment.ErrDuplicateIdempotencyKey) {
+		t.Errorf("errors.Is(err, ErrDuplicateIdempotencyKey) must be true, got: %v", err)
 	}
-	if domainErr.Code != shared.ErrCodeDuplicateRequest {
-		t.Errorf("expected code %q, got %q", shared.ErrCodeDuplicateRequest, domainErr.Code)
+	var dupErr *payment.DuplicateIdempotencyKeyError
+	if !errors.As(err, &dupErr) {
+		t.Fatalf("expected *DuplicateIdempotencyKeyError, got %T: %v", err, err)
+	}
+	if dupErr.Key != "idem-unique-001" {
+		t.Errorf("expected Key=%q, got %q", "idem-unique-001", dupErr.Key)
+	}
+	if dupErr.ExistingID != p1.ID() {
+		t.Errorf("expected ExistingID=%s, got %s", p1.ID(), dupErr.ExistingID)
+	}
+	if dupErr.AttemptedID != p2.ID() {
+		t.Errorf("expected AttemptedID=%s, got %s", p2.ID(), dupErr.AttemptedID)
 	}
 
 	// Exactly one payment must be persisted for this idempotency key.

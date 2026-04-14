@@ -17,6 +17,12 @@ This guide explains how to integrate Contract Billing Core into your service.
 Contract Billing Core defines repository interfaces in the domain layer. You implement them for your database: `contract.Repository`, `invoice.Repository`, `payment.Repository`, `balance.Repository`, `usage.Repository`, `pricing.PriceRepository`, and `product.Repository`.
 
 > See [Domain Types Reference](../api/domain-types.md) for complete interface definitions.
+>
+> See [Postgres Payment Repository](./postgres-payment-repository.md) for
+> the required error-translation pattern on `payment.Repository.Save` —
+> without it, concurrent `ProcessPayment` calls with the same
+> `IdempotencyKey` can silently refund legitimate gateway charges (see
+> issue #97).
 
 ### Example: PostgreSQL Contract Repository
 

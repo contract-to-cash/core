@@ -21,17 +21,30 @@ import (
 //     already exists.
 //   - Any other backend: an equivalent compare-and-swap guarantee.
 //
-// When the constraint fires, Save MUST return a [shared.DomainError]
-// with code [shared.ErrCodeDuplicateRequest]. PaymentService interprets
-// that error as a concurrent-success race loss and converges on the
+// When the constraint fires, Save MUST return an error that satisfies
+// errors.Is(err, [ErrDuplicateIdempotencyKey]) — typically a
+// [*DuplicateIdempotencyKeyError]. PaymentService catches the sentinel
+// as a concurrent-success race-loss signal and converges on the
 // winner's record via FindByIdempotencyKey rather than firing saga
 // compensation.
+//
+// Migration note for consumer adapters: raw driver errors (e.g.
+// `pgconn.PgError{Code: "23505"}`, `*mysql.MySQLError{Number: 1062}`,
+// DynamoDB `ConditionalCheckFailedException`) MUST be translated to
+// the sentinel before returning to the application layer. A consumer
+// adapter that returns a raw driver error will route the race loser
+// through saga compensation, refunding the winner's legitimate
+// gateway charge (see CHANGELOG entry for v-BREAKING-97).
 type Repository interface {
 	// Save persists a payment.
 	//
 	// If the payment's IdempotencyKey collides with a DIFFERENT persisted
-	// payment (same non-empty key, different ID), Save MUST return a
-	// [shared.DomainError] with code [shared.ErrCodeDuplicateRequest].
+	// payment (same non-empty key, different ID), Save MUST return an
+	// error matching errors.Is(err, [ErrDuplicateIdempotencyKey]).
+	// Implementations are encouraged to return a
+	// [*DuplicateIdempotencyKeyError] so callers can extract the
+	// offending key and involved PaymentIDs via errors.As.
+	//
 	// Same-ID updates (e.g. the 3DS Pending → Completed upgrade path)
 	// MUST be allowed because they target the existing record.
 	Save(ctx context.Context, payment *Payment) error

@@ -148,6 +148,60 @@ func (r *isolatingInvoiceRepo) FindUnpaidByContract(ctx context.Context, contrac
 	return r.inner.FindUnpaidByContract(ctx, contractID)
 }
 
+// recordingAfterChargePlugin implements plugin.AfterChargeHook and
+// captures each invocation's invoice snapshot (status + paidAmount) so
+// tests can assert that the hook observes the post-commit invoice
+// state — critical for the #97 race-loser path where the loser's
+// local invoice clone was mutated but never persisted.
+type recordingAfterChargePlugin struct {
+	mu           sync.Mutex
+	invocations  []recordedAfterChargeInvocation
+	failOnInvoke bool // when true, AfterCharge returns an error
+	failMessage  string
+}
+
+type recordedAfterChargeInvocation struct {
+	PaymentID     shared.PaymentID
+	InvoiceStatus invoice.InvoiceStatus
+	InvoicePaid   shared.Money
+}
+
+func (p *recordingAfterChargePlugin) Name() string    { return "recording-after-charge" }
+func (p *recordingAfterChargePlugin) Version() string { return "1.0.0" }
+func (p *recordingAfterChargePlugin) Priority() int   { return 500 }
+func (p *recordingAfterChargePlugin) Initialize(_ context.Context, _ plugin.Config) error {
+	return nil
+}
+func (p *recordingAfterChargePlugin) Shutdown(_ context.Context) error { return nil }
+
+func (p *recordingAfterChargePlugin) AfterCharge(pctx *plugin.PaymentContext) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	inv := pctx.Invoice()
+	pm := pctx.Payment()
+	inv2 := recordedAfterChargeInvocation{}
+	if pm != nil {
+		inv2.PaymentID = pm.ID()
+	}
+	if inv != nil {
+		inv2.InvoiceStatus = inv.Status()
+		inv2.InvoicePaid = inv.PaidAmount()
+	}
+	p.invocations = append(p.invocations, inv2)
+	if p.failOnInvoke {
+		return fmt.Errorf("%s", p.failMessage)
+	}
+	return nil
+}
+
+func (p *recordingAfterChargePlugin) snapshot() []recordedAfterChargeInvocation {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]recordedAfterChargeInvocation, len(p.invocations))
+	copy(out, p.invocations)
+	return out
+}
+
 // rendezvousPaymentRepo wraps a payment.Repository and blocks every Save
 // call until `expected` callers have entered Save. This deterministically
 // reproduces the #97 concurrent-success race: both racing goroutines pass
@@ -632,12 +686,20 @@ func TestPaymentIdempotency_Concurrent_CompensationRace_Integration(t *testing.T
 // is possible because RWMutex is released between find and save.
 //
 // The InMemoryPaymentRepository simulates a Postgres UNIQUE INDEX on
-// idempotency_key. The race-losing goroutine's Save returns a
-// [shared.ErrCodeDuplicateRequest] DomainError, which PaymentService
-// translates into an idempotent-replay (re-reads the winner's record via
-// FindByIdempotencyKey and returns it). Saga compensation MUST NOT fire
-// in this path because the shared gateway transaction backs the winner's
-// legitimate payment and refunding it would undo a successful charge.
+// idempotency_key. The race-losing goroutine's Save returns an error
+// matching errors.Is against [payment.ErrDuplicateIdempotencyKey]
+// (concretely a [*payment.DuplicateIdempotencyKeyError]), which
+// PaymentService translates into an idempotent-replay (re-reads the
+// winner's record via FindByIdempotencyKey and returns it). Saga
+// compensation MUST NOT fire in this path because the shared gateway
+// transaction backs the winner's legitimate payment and refunding it
+// would undo a successful charge.
+//
+// The test also installs a recording AfterCharge hook to verify the
+// post-convergence invoice re-fetch (see PaymentService.ProcessPayment
+// phase 4): the hook MUST see the invoice in Paid status with the
+// full amount applied, even for the race-loser goroutine whose local
+// invoice clone was mutated but never persisted.
 func TestPaymentIdempotency_ConcurrentSuccess_Race_Integration(t *testing.T) {
 	ctx := context.Background()
 	clock := fixedClock()
@@ -666,13 +728,23 @@ func TestPaymentIdempotency_ConcurrentSuccess_Race_Integration(t *testing.T) {
 	// payment record under the same key.
 	racedPaymentRepo := newRendezvousPaymentRepo(paymentRepo, 2)
 
+	// Recording AfterCharge hook verifies that the post-convergence
+	// invoice re-fetch kicked in: the loser goroutine must see the
+	// invoice in Paid status with the full amount, not the stale
+	// loser-side clone whose RecordPayment mutation was discarded.
+	recorder := &recordingAfterChargePlugin{}
+	reg := plugin.NewRegistry()
+	if regErr := reg.Register(recorder); regErr != nil {
+		t.Fatalf("registry.Register: %v", regErr)
+	}
+
 	svc := service.NewPaymentService(
 		gw,
 		racedPaymentRepo,
 		isolatedInvoiceRepo,
 		nil,
 		nil,
-		plugin.NewRegistry(),
+		reg,
 		clock,
 		// NoopTxManager: closure runs without DB-level serialization.
 		// This mirrors the default configuration a consumer would see if
@@ -750,6 +822,32 @@ func TestPaymentIdempotency_ConcurrentSuccess_Race_Integration(t *testing.T) {
 	if len(gw.refundTxnIDs) != 0 {
 		t.Errorf("saga compensation must not fire on concurrent success race, got refunds: %v",
 			gw.refundTxnIDs)
+	}
+
+	// AfterCharge hook MUST have fired for BOTH goroutines, and BOTH
+	// invocations MUST have observed the invoice in Paid status at the
+	// full amount — i.e. the post-convergence invoice re-fetch must
+	// have replaced the race-loser's stale local clone. Without the
+	// re-fetch, one invocation would see the loser's mutated-but-
+	// unsaved state (paidAmount == amount but paidAt / status possibly
+	// inconsistent with the winner's commit, or — if the loser's
+	// clone was discarded at a different point — not Paid at all).
+	invocations := recorder.snapshot()
+	if len(invocations) != 2 {
+		t.Fatalf("expected AfterCharge to fire twice, got %d", len(invocations))
+	}
+	for i, rec := range invocations {
+		if rec.InvoiceStatus != invoice.InvoiceStatusPaid {
+			t.Errorf("invocation %d: expected invoice status Paid, got %q", i, rec.InvoiceStatus)
+		}
+		if rec.InvoicePaid.Amount().Cmp(amount.Amount()) != 0 {
+			t.Errorf("invocation %d: expected invoice paid=%v, got %v",
+				i, amount.Amount(), rec.InvoicePaid.Amount())
+		}
+		if rec.PaymentID != results[0].ID() {
+			t.Errorf("invocation %d: expected PaymentID %s (winner), got %s",
+				i, results[0].ID(), rec.PaymentID)
+		}
 	}
 }
 

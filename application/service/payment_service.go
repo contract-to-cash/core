@@ -196,13 +196,15 @@ func NewPaymentService(
 //     already exists.
 //   - Any other backend: an equivalent compare-and-swap guarantee.
 //
-// When the unique constraint fires, the race-losing Save must return a
-// [shared.DomainError] with code [shared.ErrCodeDuplicateRequest] so
+// When the unique constraint fires, the race-losing Save must return
+// an error matching errors.Is(err, [payment.ErrDuplicateIdempotencyKey])
+// (typically a [*payment.DuplicateIdempotencyKeyError]) so
 // ProcessPayment can converge on the winner's record (see the in-tx
 // branch below) rather than firing saga compensation and refunding the
 // shared underlying gateway charge. The InMemoryPaymentRepository
-// simulates this constraint; consumer-provided repositories must
-// replicate the contract.
+// simulates this constraint; consumer-provided repositories MUST
+// translate raw driver errors (e.g. Postgres 23505) to the sentinel
+// before returning — see docs/guides/postgres-payment-repository.md.
 func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.InvoiceID, input ProcessPaymentInput) (*payment.Payment, error) {
 	// Load invoice
 	inv, err := s.invoiceRepo.FindByID(ctx, invoiceID)
@@ -510,6 +512,17 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// Note: if RunInTx executes the closure but then rolls back the DB, the
 	// in-memory state of p and inv will remain mutated. This is acceptable
 	// because the caller returns an error and does not reuse these objects.
+	//
+	// racedLoser is set to true by the #97 concurrent-success convergence
+	// path when this goroutine lost the race against another ProcessPayment
+	// call with the same IdempotencyKey. When set, the closure returns nil
+	// with p pointing at the WINNER's record, but `inv` here is still the
+	// loser's local copy whose in-memory state was mutated by
+	// RecordPayment and never persisted — the winner's tx committed the
+	// authoritative invoice-paid state. We re-fetch the invoice AFTER
+	// RunInTx returns so the AfterCharge hooks see a fresh snapshot
+	// consistent with the winner's payment.
+	var racedLoser bool
 	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
 		// Idempotency check first: avoid mutating in-memory state if a
 		// payment with the effective key was already persisted by a prior call.
@@ -589,40 +602,44 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			// Issue #97: concurrent-success race. The DB's unique-key
 			// guarantee on idempotency_key (Postgres UNIQUE INDEX,
 			// DynamoDB condition expression, in-memory simulation here)
-			// rejects the race loser's insert. When this happens, a
-			// concurrent ProcessPayment call has already persisted the
-			// winning payment record under the same effective key. Both
-			// goroutines share one underlying gateway transaction (the
-			// gateway's own idempotency replay collapsed them), so
-			// refunding via saga compensation would undo the winner's
-			// legitimate charge. Instead we re-read the winner's record
-			// and return it as an idempotent replay.
+			// rejects the race loser's insert and surfaces as
+			// [payment.ErrDuplicateIdempotencyKey] (possibly wrapped
+			// inside a *payment.DuplicateIdempotencyKeyError). When
+			// this happens, a concurrent ProcessPayment call has
+			// already persisted the winning payment record under the
+			// same effective key. Both goroutines share one underlying
+			// gateway transaction (the gateway's own idempotency
+			// replay collapsed them), so refunding via saga
+			// compensation would undo the winner's legitimate charge.
+			// Instead we re-read the winner's record and mark this
+			// call as a race-loser so the post-tx invoice re-fetch
+			// kicks in.
 			//
-			// This branch only fires on a non-empty effective key — empty
-			// keys cannot collide at the repository layer and must not be
-			// short-circuited here, otherwise a genuine save failure on a
-			// keyless payment would be masked.
-			var domainErr *shared.DomainError
-			if errors.As(saveErr, &domainErr) &&
-				domainErr.Code == shared.ErrCodeDuplicateRequest &&
-				effectiveKey != "" {
+			// This branch only fires on a non-empty effective key —
+			// empty keys cannot collide at the repository layer, and a
+			// duplicate-key error with an empty effective key is
+			// therefore spurious and must NOT be routed through the
+			// winner-convergence path.
+			if errors.Is(saveErr, payment.ErrDuplicateIdempotencyKey) && effectiveKey != "" {
 				winner, findErr := repos.Payments.FindByIdempotencyKey(txCtx, effectiveKey)
 				if findErr != nil {
 					return fmt.Errorf("failed to re-read winning payment after duplicate-key race: %w", findErr)
 				}
 				if winner != nil {
-					// Converge on the winner's record. The invoice mutation
-					// on THIS goroutine's copy is discarded by returning
-					// before repos.Invoices.Save — the winner's tx already
-					// persisted the invoice-paid state. Saga compensation
-					// must NOT fire because the underlying gateway charge
-					// is backing the winner.
+					// Converge on the winner's record. The invoice
+					// mutation on THIS goroutine's copy is discarded
+					// by returning before repos.Invoices.Save — the
+					// winner's tx already persisted the invoice-paid
+					// state. Saga compensation must NOT fire because
+					// the underlying gateway charge is backing the
+					// winner.
 					p = winner
+					racedLoser = true
 					return nil
 				}
-				// Fall through: duplicate reported but winner cannot be
-				// located. Treat as a genuine save failure so the caller
-				// sees a real error and the saga can compensate.
+				// Fall through: duplicate reported but winner cannot
+				// be located. Treat as a genuine save failure so the
+				// caller sees a real error and the saga can compensate.
 			}
 			return fmt.Errorf("failed to save payment: %w", saveErr)
 		}
@@ -677,6 +694,27 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		}
 
 		return nil, fmt.Errorf("local save failed (gateway charge refunded): %w", err)
+	}
+
+	// Issue #97: on the race-loser path, `inv` is still the pre-convergence
+	// local clone whose paidAmount/status were mutated by RecordPayment
+	// and never persisted. The winner's tx holds the authoritative
+	// invoice state, so we re-fetch before firing hooks to prevent
+	// plugins from observing a stale (loser-side) snapshot. Re-fetch
+	// failures are logged and the stale copy is used as a fallback —
+	// the payment itself succeeded, so we must not fail ProcessPayment
+	// over a hook-input read error.
+	if racedLoser {
+		refreshed, refErr := s.invoiceRepo.FindByID(ctx, invoiceID)
+		if refErr != nil {
+			s.logger.Warn("invoice re-fetch after duplicate-key convergence failed; AfterCharge hooks will see a possibly-stale local copy",
+				"paymentID", p.ID(),
+				"invoiceID", invoiceID,
+				"error", refErr,
+			)
+		} else {
+			inv = refreshed
+		}
 	}
 
 	// Phase 4: AfterCharge hooks (non-fatal, outside transaction).
