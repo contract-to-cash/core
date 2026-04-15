@@ -39,9 +39,9 @@
 //
 // ToSnapshot / InvoiceFromSnapshot deep-copy pointer fields (*big.Rat, *time.Time,
 // *string, *shared.InvoiceID) so that mutations to the snapshot do not leak
-// into the entity (and vice versa). This isolation is at the Snapshot boundary
-// only; the entity's own getters may still return internal pointers — that is
-// tracked separately as issue #96.
+// into the entity (and vice versa). The entity's own getters (e.g.
+// LineItem.TaxRate(), Invoice.PaidAt()) also defensively copy returned
+// pointers — see issue #96.
 //
 // # Map normalization
 //
@@ -110,11 +110,9 @@ type InvoiceSnapshot struct {
 
 // ToSnapshot returns a flat, independent copy of the invoice's internal state.
 // Mutating the returned snapshot (including its nested pointer and map
-// fields) does NOT affect the invoice at the Snapshot boundary.
-//
-// Note: this isolation is at the Snapshot boundary only. The entity's own
-// getters (e.g. LineItem.TaxRate()) may still return internal pointers;
-// that's a separate concern tracked as issue #96.
+// fields) does NOT affect the invoice at the Snapshot boundary. The entity's
+// own getters also defensively copy pointer fields (see issue #96), so the
+// two isolation boundaries compose.
 //
 // For persistence adapters only. See file header warning.
 func (inv *Invoice) ToSnapshot() InvoiceSnapshot {

@@ -305,9 +305,8 @@ func TestInvoice_ToSnapshot_IsIndependentCopy(t *testing.T) {
 // at the Snapshot boundary are isolated: mutating the snapshot's pointer
 // fields (directly or transitively) must not affect the source invoice.
 //
-// Note: this tests the Snapshot boundary only. The entity's own getters
-// (e.g. LineItem.TaxRate()) still return internal pointers; that's a
-// separate concern tracked as its own issue.
+// Note: this tests the Snapshot boundary. Entity-getter pointer isolation
+// is tested independently in pointer_isolation_test.go (see issue #96).
 func TestInvoice_ToSnapshot_PointerIndependence(t *testing.T) {
 	t.Parallel()
 
