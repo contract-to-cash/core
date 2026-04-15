@@ -86,15 +86,33 @@ func (e *BalanceEntry) SourceID() string { return e.sourceID }
 // Description returns the description.
 func (e *BalanceEntry) Description() string { return e.description }
 
-// ExpiresAt returns the expiration time, or nil if no expiration.
-func (e *BalanceEntry) ExpiresAt() *time.Time { return e.expiresAt }
+// ExpiresAt returns a defensive copy of the expiration time pointer, or
+// nil if no expiration is set. Mutating the returned pointer does NOT
+// affect the entry's internal state (see issue #96).
+func (e *BalanceEntry) ExpiresAt() *time.Time {
+	if e.expiresAt == nil {
+		return nil
+	}
+	v := *e.expiresAt
+	return &v
+}
 
 // SetExpiresAt sets the expiration time. Used by construction helpers and
 // by callers that need to augment a BalanceEntry after NewBalanceEntry.
+// The pointer is defensively copied so callers may safely mutate their
+// own *time.Time after this call (see issue #96). Passing nil clears the
+// expiration.
 //
 // For loading from persistence, prefer FromSnapshot which restores all
 // fields atomically.
-func (e *BalanceEntry) SetExpiresAt(t *time.Time) { e.expiresAt = t }
+func (e *BalanceEntry) SetExpiresAt(t *time.Time) {
+	if t == nil {
+		e.expiresAt = nil
+		return
+	}
+	v := *t
+	e.expiresAt = &v
+}
 
 // CreatedAt returns the creation time.
 func (e *BalanceEntry) CreatedAt() time.Time { return e.createdAt }

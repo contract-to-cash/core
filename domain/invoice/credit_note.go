@@ -40,12 +40,18 @@ type CreditNoteItem struct {
 }
 
 // NewCreditNoteItem creates a new CreditNoteItem.
+// The taxRate pointer is defensively copied so mutations to the caller's
+// *big.Rat do not leak into the item (see issue #96).
 func NewCreditNoteItem(invoiceLineItemID, description string, amount shared.Money, taxRate *big.Rat, taxAmount shared.Money) CreditNoteItem {
+	var ownedTaxRate *big.Rat
+	if taxRate != nil {
+		ownedTaxRate = new(big.Rat).Set(taxRate)
+	}
 	return CreditNoteItem{
 		invoiceLineItemID: invoiceLineItemID,
 		description:       description,
 		amount:            amount,
-		taxRate:           taxRate,
+		taxRate:           ownedTaxRate,
 		taxAmount:         taxAmount,
 	}
 }
@@ -53,8 +59,16 @@ func NewCreditNoteItem(invoiceLineItemID, description string, amount shared.Mone
 func (i CreditNoteItem) InvoiceLineItemID() string { return i.invoiceLineItemID }
 func (i CreditNoteItem) Description() string       { return i.description }
 func (i CreditNoteItem) Amount() shared.Money      { return i.amount }
-func (i CreditNoteItem) TaxRate() *big.Rat         { return i.taxRate }
-func (i CreditNoteItem) TaxAmount() shared.Money   { return i.taxAmount }
+
+// TaxRate returns a defensive copy of the tax rate so callers cannot
+// mutate the item's internal state (see issue #96).
+func (i CreditNoteItem) TaxRate() *big.Rat {
+	if i.taxRate == nil {
+		return nil
+	}
+	return new(big.Rat).Set(i.taxRate)
+}
+func (i CreditNoteItem) TaxAmount() shared.Money { return i.taxAmount }
 
 // CreditNote represents a credit note entity that adjusts a previously issued invoice.
 type CreditNote struct {
@@ -215,5 +229,14 @@ func (cn *CreditNote) TaxAmount() shared.Money    { return cn.taxAmount }
 func (cn *CreditNote) Total() shared.Money        { return cn.total }
 func (cn *CreditNote) CreditAmount() shared.Money { return cn.creditAmount }
 func (cn *CreditNote) RefundAmount() shared.Money { return cn.refundAmount }
-func (cn *CreditNote) IssuedAt() *time.Time       { return cn.issuedAt }
-func (cn *CreditNote) CreatedAt() time.Time       { return cn.createdAt }
+
+// IssuedAt returns a defensive copy of the issued-at timestamp pointer so
+// callers cannot mutate the credit note's internal state (see issue #96).
+func (cn *CreditNote) IssuedAt() *time.Time {
+	if cn.issuedAt == nil {
+		return nil
+	}
+	v := *cn.issuedAt
+	return &v
+}
+func (cn *CreditNote) CreatedAt() time.Time { return cn.createdAt }

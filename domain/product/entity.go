@@ -66,10 +66,24 @@ func (p *Product) Status() ProductStatus { return p.status }
 // CreatedAt returns the creation timestamp.
 func (p *Product) CreatedAt() time.Time { return p.createdAt }
 
-// Features returns a copy of the product's features.
+// Features returns a deep copy of the product's features.
+// Feature.Limit is a *int64 and is defensively copied so mutations via
+// the returned slice cannot corrupt the product's internal state
+// (see issue #96).
 func (p *Product) Features() []Feature {
 	cp := make([]Feature, len(p.features))
-	copy(cp, p.features)
+	for i, f := range p.features {
+		var limit *int64
+		if f.Limit != nil {
+			v := *f.Limit
+			limit = &v
+		}
+		cp[i] = Feature{
+			Name:     f.Name,
+			Included: f.Included,
+			Limit:    limit,
+		}
+	}
 	return cp
 }
 
@@ -91,14 +105,24 @@ func (p *Product) Metadata() map[string]string {
 
 // AddFeature adds a feature to the product.
 // If a feature with the same name already exists, it is replaced.
+// Feature.Limit is defensively copied at intake so callers may safely
+// mutate their own *int64 after this call (see issue #96).
 func (p *Product) AddFeature(f Feature) {
+	owned := Feature{
+		Name:     f.Name,
+		Included: f.Included,
+	}
+	if f.Limit != nil {
+		v := *f.Limit
+		owned.Limit = &v
+	}
 	for i, existing := range p.features {
-		if existing.Name == f.Name {
-			p.features[i] = f
+		if existing.Name == owned.Name {
+			p.features[i] = owned
 			return
 		}
 	}
-	p.features = append(p.features, f)
+	p.features = append(p.features, owned)
 }
 
 // AddUsageMetric adds a usage metric to the product.

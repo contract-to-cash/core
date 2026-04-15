@@ -46,10 +46,16 @@ func WithPriceID(id shared.PriceID) LineItemOption {
 
 // NewLineItem creates a new LineItem.
 // Returns an error if quantity is negative.
+// The taxRate pointer is defensively copied so mutations to the caller's
+// *big.Rat do not leak into the line item (see issue #96).
 func NewLineItem(id, description string, quantity int64, unitPrice, amount shared.Money, taxRate *big.Rat, opts ...LineItemOption) (LineItem, error) {
 	if quantity < 0 {
 		return LineItem{}, shared.NewDomainError(shared.ErrCodeValidation,
 			fmt.Sprintf("line item quantity must not be negative: %d", quantity))
+	}
+	var ownedTaxRate *big.Rat
+	if taxRate != nil {
+		ownedTaxRate = new(big.Rat).Set(taxRate)
 	}
 	li := LineItem{
 		id:          id,
@@ -57,7 +63,7 @@ func NewLineItem(id, description string, quantity int64, unitPrice, amount share
 		quantity:    quantity,
 		unitPrice:   unitPrice,
 		amount:      amount,
-		taxRate:     taxRate,
+		taxRate:     ownedTaxRate,
 		metadata:    make(map[string]string),
 	}
 	for _, opt := range opts {
@@ -71,7 +77,15 @@ func (li LineItem) Description() string     { return li.description }
 func (li LineItem) Quantity() int64         { return li.quantity }
 func (li LineItem) UnitPrice() shared.Money { return li.unitPrice }
 func (li LineItem) Amount() shared.Money    { return li.amount }
-func (li LineItem) TaxRate() *big.Rat       { return li.taxRate }
+
+// TaxRate returns a defensive copy of the tax rate so callers cannot
+// mutate the line item's internal state (see issue #96).
+func (li LineItem) TaxRate() *big.Rat {
+	if li.taxRate == nil {
+		return nil
+	}
+	return new(big.Rat).Set(li.taxRate)
+}
 func (li LineItem) PriceID() shared.PriceID { return li.priceID }
 func (li LineItem) Metadata() map[string]string {
 	cp := make(map[string]string, len(li.metadata))
@@ -314,7 +328,16 @@ func (inv *Invoice) Status() InvoiceStatus           { return inv.status }
 func (inv *Invoice) BillingPeriod() shared.DateRange { return inv.billingPeriod }
 func (inv *Invoice) IssueDate() time.Time            { return inv.issueDate }
 func (inv *Invoice) DueDate() time.Time              { return inv.dueDate }
-func (inv *Invoice) PaidAt() *time.Time              { return inv.paidAt }
+
+// PaidAt returns a defensive copy of the paid-at timestamp pointer so
+// callers cannot mutate the invoice's internal state (see issue #96).
+func (inv *Invoice) PaidAt() *time.Time {
+	if inv.paidAt == nil {
+		return nil
+	}
+	v := *inv.paidAt
+	return &v
+}
 func (inv *Invoice) Metadata() map[string]string {
 	cp := make(map[string]string, len(inv.metadata))
 	for k, v := range inv.metadata {
@@ -359,11 +382,27 @@ func (inv *Invoice) VoidWithReason(reason string) error {
 	return nil
 }
 
-// OriginalInvoiceID returns the original invoice ID (for reissued invoices).
-func (inv *Invoice) OriginalInvoiceID() *shared.InvoiceID { return inv.originalInvoiceID }
+// OriginalInvoiceID returns a defensive copy of the original invoice ID
+// pointer (for reissued invoices). Mutating the returned pointer does NOT
+// affect the invoice's internal state (see issue #96).
+func (inv *Invoice) OriginalInvoiceID() *shared.InvoiceID {
+	if inv.originalInvoiceID == nil {
+		return nil
+	}
+	v := *inv.originalInvoiceID
+	return &v
+}
 
-// RevisionOf returns the invoice ID this invoice is a revision of.
-func (inv *Invoice) RevisionOf() *shared.InvoiceID { return inv.revisionOf }
+// RevisionOf returns a defensive copy of the revision-parent ID pointer.
+// Mutating the returned pointer does NOT affect the invoice's internal
+// state (see issue #96).
+func (inv *Invoice) RevisionOf() *shared.InvoiceID {
+	if inv.revisionOf == nil {
+		return nil
+	}
+	v := *inv.revisionOf
+	return &v
+}
 
 // VoidReason returns the reason this invoice was voided.
 func (inv *Invoice) VoidReason() string { return inv.voidReason }
@@ -383,13 +422,28 @@ func (inv *Invoice) SetOriginalInvoiceID(id shared.InvoiceID) {
 	inv.originalInvoiceID = &id
 }
 
-// PaymentMethodID returns the invoice-level payment method ID override.
-func (inv *Invoice) PaymentMethodID() *string { return inv.paymentMethodID }
+// PaymentMethodID returns a defensive copy of the invoice-level payment
+// method ID pointer. Mutating the returned pointer does NOT affect the
+// invoice's internal state (see issue #96).
+func (inv *Invoice) PaymentMethodID() *string {
+	if inv.paymentMethodID == nil {
+		return nil
+	}
+	v := *inv.paymentMethodID
+	return &v
+}
 
 // WithPaymentMethodID sets the payment method ID on the invoice.
+// The pointer is defensively copied so callers may safely mutate their
+// own *string after construction (see issue #96).
 func WithPaymentMethodID(id *string) InvoiceOption {
 	return func(inv *Invoice) {
-		inv.paymentMethodID = id
+		if id == nil {
+			inv.paymentMethodID = nil
+			return
+		}
+		v := *id
+		inv.paymentMethodID = &v
 	}
 }
 
