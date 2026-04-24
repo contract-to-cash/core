@@ -19,3 +19,28 @@ type SuspensionConfiguration struct {
 	ExtendContract  bool                      `json:"extend_contract"`
 	Reason          string                    `json:"reason"`
 }
+
+// clone returns a deep copy of the configuration, including the ResumeDate
+// pointer. Returns nil if the receiver is nil.
+func (c *SuspensionConfiguration) clone() *SuspensionConfiguration {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	if c.ResumeDate != nil {
+		t := *c.ResumeDate
+		cp.ResumeDate = &t
+	}
+	return &cp
+}
+
+// cloneValue returns a deep copy of the configuration by value.
+// Use when the caller holds a value (not a pointer) and needs intake defense.
+func (c SuspensionConfiguration) cloneValue() SuspensionConfiguration {
+	cp := c
+	if c.ResumeDate != nil {
+		t := *c.ResumeDate
+		cp.ResumeDate = &t
+	}
+	return cp
+}

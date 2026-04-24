@@ -87,10 +87,12 @@ func (c *Contract) Interval() BillingInterval { return c.interval }
 func (c *Contract) CurrentPeriod() shared.DateRange { return c.currentPeriod }
 
 // TrialConfig returns the trial configuration, if any.
-func (c *Contract) TrialConfig() *TrialConfiguration { return c.trialConfig }
+// The returned value is a deep copy — mutating it does not affect the entity.
+func (c *Contract) TrialConfig() *TrialConfiguration { return c.trialConfig.clone() }
 
 // SuspensionConfig returns the suspension configuration, if any.
-func (c *Contract) SuspensionConfig() *SuspensionConfiguration { return c.suspensionConfig }
+// The returned value is a deep copy — mutating it does not affect the entity.
+func (c *Contract) SuspensionConfig() *SuspensionConfiguration { return c.suspensionConfig.clone() }
 
 // Price returns the current price.
 func (c *Contract) Price() shared.Money { return c.price }
@@ -99,7 +101,15 @@ func (c *Contract) Price() shared.Money { return c.price }
 func (c *Contract) BasePrice() shared.Money { return c.basePrice }
 
 // PaymentMethodID returns the contract-level payment method ID.
-func (c *Contract) PaymentMethodID() *string { return c.paymentMethodID }
+// The returned pointer is a defensive copy — mutating the pointee does not
+// affect the entity.
+func (c *Contract) PaymentMethodID() *string {
+	if c.paymentMethodID == nil {
+		return nil
+	}
+	v := *c.paymentMethodID
+	return &v
+}
 
 // Metadata returns the contract metadata.
 func (c *Contract) Metadata() map[string]string {
