@@ -69,7 +69,11 @@ func main() {
 		"tax":                 {"priority": plugin.PriorityLow},
 		"server-provisioning": {"priority": plugin.PriorityNormal},
 	}))
-	defer registry.ShutdownAll(ctx)
+	defer func() {
+		if err := registry.ShutdownAll(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "shutdown plugins: %v\n", err)
+		}
+	}()
 
 	metadata := eventstore.EventMetadata{UserID: "customer-tanaka"}
 	contractID := shared.NewContractID()
