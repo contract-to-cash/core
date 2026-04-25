@@ -38,6 +38,37 @@ A repository that returns raw driver errors (e.g. `pgconn.PgError{Code:
 transaction and undoing the winner's legitimate payment. This is a silent
 regression; the code compiles cleanly.
 
+## Postgres aborted-transaction handling
+
+A note specific to Postgres-backed adapters: when the partial UNIQUE INDEX
+fires inside `RunInTx`, Postgres aborts the surrounding transaction
+(`in_failed_sql_transaction`, SQLSTATE `25P02`). Every subsequent query on
+the same connection — including a "look up the winner" `SELECT` — fails
+until the tx is rolled back.
+
+`PaymentService.ProcessPayment` knows about this and is structured so
+adapters do **not** need to defend with `SAVEPOINT`s:
+
+1. The `RunInTx` closure returns an internal sentinel
+   (`errDuplicateKeyRaceSignal`) the moment your `Save` returns
+   `payment.ErrDuplicateIdempotencyKey`.
+2. `RunInTx` rolls the failed transaction back. The connection leaves
+   `in_failed_sql_transaction` and is safe to use again.
+3. `PaymentService` then re-reads the winner via the OUTER context — a
+   fresh transaction — using `s.paymentRepo.FindByIdempotencyKey(ctx, key)`.
+
+What this means for your adapter implementation:
+
+- **Required**: translate the unique-violation to the sentinel and
+  return it as quickly as possible from `Save`. Do not perform any
+  follow-up queries on the failed tx.
+- **Not required**: `SAVEPOINT save_payment` / `RELEASE` / `ROLLBACK TO
+  SAVEPOINT` around the conflicting `INSERT`. Adding a SAVEPOINT is
+  harmless but does not change correctness.
+- **Not required**: a separate "fetch the winner" query inside `Save`.
+  `PaymentService` performs the convergence read on a fresh tx after
+  `RunInTx` returns.
+
 ## Schema
 
 ```sql
@@ -150,12 +181,16 @@ func (r *Repo) Save(ctx context.Context, p *payment.Payment) error {
         return &payment.DuplicateIdempotencyKeyError{
             Key:         p.IdempotencyKey(),
             AttemptedID: p.ID(),
-            // ExistingID is optional. Leave zero for performance; or
-            // fill it via a follow-up SELECT inside the same tx when
-            // operational diagnostics need the winner's ID. Do NOT
-            // issue the SELECT outside the tx — a concurrent refund
-            // could change the state between the failed INSERT and
-            // the lookup.
+            // ExistingID is optional. Leave zero — once the INSERT
+            // fails, the surrounding tx is in
+            // in_failed_sql_transaction state and any follow-up query
+            // on the same connection errors with 25P02. Do NOT try to
+            // fill ExistingID via a SELECT here; PaymentService reads
+            // the winner via the outer ctx after RunInTx rolls this
+            // tx back, which is the correct place to surface the
+            // winner's PaymentID. If you need the ExistingID for
+            // diagnostics, expose it through your application logs
+            // from the convergence path, not from Save.
         }
     }
     return fmt.Errorf("save payment %s: %w", p.ID(), err)
@@ -262,7 +297,15 @@ if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 /* ER_DUP_ENTRY */ {
 2. **Unit test** `Save` allows same-ID re-saves (update path).
 3. **Unit test** `Save` does NOT translate unrelated unique-constraint
    violations (if you add other unique indexes in the future).
-4. **Concurrency test**: spin up two goroutines that both call
+4. **Aborted-tx test (Postgres-specific)**: inside a single `RunInTx`
+   closure, intentionally provoke a duplicate-key `Save`, then verify
+   that subsequent queries on the same `txCtx` would fail (25P02).
+   `PaymentService` works around this by exiting the closure
+   immediately on the sentinel — your adapter only has to make sure
+   `Save` returns the sentinel without first issuing any follow-up
+   queries that would also fail. The library covers this contract end-
+   to-end with `TestPaymentIdempotency_ConcurrentSuccess_AbortedTxSimulation_Integration`.
+5. **Concurrency test**: spin up two goroutines that both call
    `PaymentService.ProcessPayment` with the same `IdempotencyKey`.
    Assert:
    - Both return the same `*Payment` (same ID).

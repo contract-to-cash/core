@@ -56,6 +56,19 @@ func (s *PaymentService) newRetryEffectiveKey(originalKey string) string {
 // and redirect the customer to complete authentication.
 var ErrRequiresAction = errors.New("payment requires action")
 
+// errDuplicateKeyRaceSignal is an internal sentinel returned from the
+// ProcessPayment RunInTx closure when [payment.Repository.Save] reports
+// a duplicate idempotency-key collision. It instructs the outer code to
+// roll back the in-flight transaction (so storage backends like Postgres
+// exit the in_failed_sql_transaction state caused by the unique-violation)
+// and re-read the winning payment record in a FRESH transaction context.
+// Reading the winner inside the still-failed tx is unsafe on Postgres —
+// every subsequent query would error with 25P02 and falsely route the
+// race-loser through saga compensation, refunding the winner's charge.
+//
+// This sentinel is package-private; consumers cannot observe it.
+var errDuplicateKeyRaceSignal = errors.New("duplicate idempotency key race; converge on winner via fresh tx")
+
 // ProcessPaymentInput holds the parameters for processing a payment.
 // PaymentMethodID is optional — if empty, the service resolves it via the
 // hierarchical fallback chain: Invoice → Contract → Customer.
@@ -175,10 +188,20 @@ func NewPaymentService(
 
 // ProcessPayment charges an invoice and records the payment.
 //
-// Concurrency contract (issue #97): under concurrent ProcessPayment calls
-// with the same IdempotencyKey that both reach the success path, the
-// safety of this method depends on the [payment.Repository]'s Save
-// enforcing a unique constraint on idempotency_key. Without it, the
+// SECURITY-CRITICAL — concurrency contract (issue #97).
+//
+// Under concurrent ProcessPayment calls with the SAME IdempotencyKey
+// that both reach the success path, the safety of this method depends
+// on TWO independent guarantees that consumers must wire correctly. If
+// either is violated, the failure mode is silent: the code compiles,
+// the happy path passes, and the regression only manifests under
+// concurrency in production.
+//
+// 1. STORAGE UNIQUENESS — [payment.Repository.Save] MUST reject a write
+// whose non-empty idempotency_key collides with a different existing
+// PaymentID, surfacing the collision as an error matching
+// errors.Is(err, [payment.ErrDuplicateIdempotencyKey]) (typically a
+// [*payment.DuplicateIdempotencyKeyError]). Without this, the
 // interleaving
 //
 //	G1: FindByIdempotencyKey(K) → nil
@@ -196,15 +219,39 @@ func NewPaymentService(
 //     already exists.
 //   - Any other backend: an equivalent compare-and-swap guarantee.
 //
-// When the unique constraint fires, the race-losing Save must return
-// an error matching errors.Is(err, [payment.ErrDuplicateIdempotencyKey])
-// (typically a [*payment.DuplicateIdempotencyKeyError]) so
-// ProcessPayment can converge on the winner's record (see the in-tx
-// branch below) rather than firing saga compensation and refunding the
-// shared underlying gateway charge. The InMemoryPaymentRepository
-// simulates this constraint; consumer-provided repositories MUST
-// translate raw driver errors (e.g. Postgres 23505) to the sentinel
-// before returning — see docs/guides/postgres-payment-repository.md.
+// Consumer-provided repositories MUST translate raw driver errors (e.g.
+// Postgres 23505) to the sentinel before returning — a raw driver error
+// will route the race-loser through saga compensation and refund the
+// winner's legitimate charge. See docs/guides/postgres-payment-repository.md.
+// The InMemoryPaymentRepository simulates this constraint and is the
+// canonical reference behaviour.
+//
+// 2. GATEWAY-LEVEL IDEMPOTENCY REPLAY — when both goroutines call the
+// payment gateway concurrently with the same effective key, the gateway
+// MUST collapse them into a SINGLE underlying transaction (Stripe,
+// Adyen, Braintree, GMO PG, and PayPal all support this when the
+// IdempotencyKey is forwarded — see [port.PaymentGateway.Charge]). The
+// race-loser convergence path in this method intentionally DOES NOT
+// fire saga compensation: a refund would unwind the winner's legitimate
+// charge. That choice is only safe because the gateway has merged the
+// two charge attempts into one. If the consumer disables idempotent
+// replay at the gateway, forgets to forward the key, or routes the
+// goroutines through different gateway accounts, the two charge
+// attempts produce TWO real authorisations — and refusing to compensate
+// becomes a double-charge. Verify gateway-side idempotency on every
+// supported gateway before deploying.
+//
+// On a duplicate-key save error inside the RunInTx closure, the closure
+// returns an internal sentinel that rolls the transaction back and
+// re-reads the winning payment record in a FRESH transaction context
+// (issue #97 review follow-up). Reading the winner inside the still-
+// failed tx is unsafe on Postgres because the unique-violation puts the
+// connection into in_failed_sql_transaction (SQLSTATE 25P02), which
+// would silently route the race-loser through saga compensation. If the
+// fresh-tx read returns nil because the winner's commit is not yet
+// visible (read-replica lag, MVCC ordering), ProcessPayment returns a
+// transient [shared.ErrCodeConflict] error so the caller can retry
+// instead of compensating against a real charge.
 func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.InvoiceID, input ProcessPaymentInput) (*payment.Payment, error) {
 	// Load invoice
 	inv, err := s.invoiceRepo.FindByID(ctx, invoiceID)
@@ -515,11 +562,18 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	//
 	// racedLoser is set to true by the #97 concurrent-success convergence
 	// path when this goroutine lost the race against another ProcessPayment
-	// call with the same IdempotencyKey. When set, the closure returns nil
-	// with p pointing at the WINNER's record, but `inv` here is still the
-	// loser's local copy whose in-memory state was mutated by
-	// RecordPayment and never persisted — the winner's tx committed the
-	// authoritative invoice-paid state. We re-fetch the invoice AFTER
+	// call with the same IdempotencyKey. When set, the post-RunInTx
+	// duplicate-key handler reassigns p to the WINNER's record (read in
+	// a fresh tx, see the errDuplicateKeyRaceSignal branch), but `inv`
+	// here is still the loser's local copy whose in-memory state was
+	// mutated by RecordPayment and never persisted. The winner's tx is
+	// expected to hold the authoritative invoice-paid state; under
+	// snapshot-isolation backends the winner's commit may not yet be
+	// visible to this goroutine when the convergence read happens, so
+	// the post-tx invoice re-fetch may temporarily observe a stale
+	// (pre-paid) snapshot. The AfterCharge hooks must therefore tolerate
+	// stale invoice state on the race-loser path — we re-fetch the
+	// invoice AFTER
 	// RunInTx returns so the AfterCharge hooks see a fresh snapshot
 	// consistent with the winner's payment.
 	var racedLoser bool
@@ -611,9 +665,18 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			// gateway transaction (the gateway's own idempotency
 			// replay collapsed them), so refunding via saga
 			// compensation would undo the winner's legitimate charge.
-			// Instead we re-read the winner's record and mark this
-			// call as a race-loser so the post-tx invoice re-fetch
-			// kicks in.
+			//
+			// Why we surface a sentinel and exit the tx instead of
+			// re-reading the winner here: on Postgres a unique-
+			// violation aborts the surrounding transaction
+			// (in_failed_sql_transaction / SQLSTATE 25P02). Every
+			// subsequent query — including FindByIdempotencyKey on
+			// txCtx — would error, and the application layer would
+			// fall through to saga.Compensate and refund the winner's
+			// charge. The post-RunInTx handler instead re-reads the
+			// winner using the OUTER ctx after the failed tx is
+			// rolled back, which is safe across Postgres, MySQL,
+			// DynamoDB, and the in-memory backend.
 			//
 			// This branch only fires on a non-empty effective key —
 			// empty keys cannot collide at the repository layer, and a
@@ -621,25 +684,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			// therefore spurious and must NOT be routed through the
 			// winner-convergence path.
 			if errors.Is(saveErr, payment.ErrDuplicateIdempotencyKey) && effectiveKey != "" {
-				winner, findErr := repos.Payments.FindByIdempotencyKey(txCtx, effectiveKey)
-				if findErr != nil {
-					return fmt.Errorf("failed to re-read winning payment after duplicate-key race: %w", findErr)
-				}
-				if winner != nil {
-					// Converge on the winner's record. The invoice
-					// mutation on THIS goroutine's copy is discarded
-					// by returning before repos.Invoices.Save — the
-					// winner's tx already persisted the invoice-paid
-					// state. Saga compensation must NOT fire because
-					// the underlying gateway charge is backing the
-					// winner.
-					p = winner
-					racedLoser = true
-					return nil
-				}
-				// Fall through: duplicate reported but winner cannot
-				// be located. Treat as a genuine save failure so the
-				// caller sees a real error and the saga can compensate.
+				return errDuplicateKeyRaceSignal
 			}
 			return fmt.Errorf("failed to save payment: %w", saveErr)
 		}
@@ -648,6 +693,56 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		}
 		return nil
 	})
+
+	// Issue #97 review follow-up: duplicate-key race convergence on a
+	// FRESH transaction context. By the time we reach this branch, the
+	// in-flight tx has already been rolled back by RunInTx (the closure
+	// returned errDuplicateKeyRaceSignal), so on Postgres the connection
+	// is no longer in in_failed_sql_transaction state and the outer ctx
+	// is safe to query. We rely on s.paymentRepo (NOT repos.Payments,
+	// which is tx-scoped) to read the winner's record.
+	if errors.Is(err, errDuplicateKeyRaceSignal) {
+		winner, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, effectiveKey)
+		if findErr != nil {
+			// Fresh-tx read also failed — this is a genuine
+			// infrastructure problem (the winner exists but we
+			// cannot prove it). Fall through to saga compensation
+			// because we cannot guarantee the gateway charge is
+			// owned by a persisted payment record.
+			s.logger.Error("duplicate-key race detected; fresh-tx winner read failed (compensation will fire)",
+				"effectiveKey", effectiveKey,
+				"invoiceID", invoiceID,
+				"error", findErr,
+			)
+			err = fmt.Errorf("duplicate-key race: fresh-tx winner read failed: %w", findErr)
+		} else if winner == nil {
+			// The unique-violation fired but the winner's record
+			// is not yet visible — typically read-replica lag, MVCC
+			// snapshot ordering, or a winner whose tx has not
+			// committed yet. Refusing to compensate here is the
+			// safe choice: the winner's gateway charge is real and
+			// must not be refunded just because we cannot see the
+			// local record yet. Return a transient conflict so the
+			// caller retries (a follow-up call usually finds the
+			// winner via the pre-charge idempotency check).
+			s.logger.Warn("duplicate-key race detected but winner not yet visible on fresh tx; returning transient conflict",
+				"effectiveKey", effectiveKey,
+				"invoiceID", invoiceID,
+			)
+			return nil, shared.NewDomainError(
+				shared.ErrCodeConflict,
+				fmt.Sprintf("duplicate idempotency key %q detected but winner not yet visible; retry the operation", effectiveKey),
+			)
+		} else {
+			// Converge on the winner's record. Saga compensation
+			// must NOT fire because the underlying gateway charge
+			// is backing the winner.
+			p = winner
+			racedLoser = true
+			err = nil
+		}
+	}
+
 	if err != nil {
 		// Local save failed — compensate by refunding the gateway charge
 		if compErr := saga.Compensate(ctx); compErr != nil {

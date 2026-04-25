@@ -1645,9 +1645,15 @@ SELECT effective_key FROM compensated_idempotency_keys WHERE original_key = $1;
     - **DynamoDB**: `ConditionExpression` で key 既存時を拒否
     - **その他**: 同等の CAS 保証
 
-  制約違反時、`Save` は `shared.DomainError{Code: shared.ErrCodeDuplicateRequest}` を返す契約。`PaymentService.ProcessPayment` はこのエラーを race 敗者のシグナルと解釈し、**`FindByIdempotencyKey` で勝者のレコードを読み直して idempotent replay を返す**(saga compensation は発火させない — 両 goroutine は同一の gateway transaction を共有しており、refund すると勝者の有効な決済が取り消されてしまうため)。
+  制約違反時、`Save` は `errors.Is(err, payment.ErrDuplicateIdempotencyKey)` を満たすエラー(典型的には `*payment.DuplicateIdempotencyKeyError`)を返す契約。`shared.ErrCodeDuplicateRequest` は使わない — その shared コードはコードベース内の他の duplicate-request 用途(usage record 等)で使われており、payment 用途と混同するとサガ補償が暴発しうる。詳細な根拠は `domain/payment/errors.go` の `WHY A PAYMENT-SCOPED SENTINEL` コメント参照。
 
-  InMemory 実装 (`infrastructure/inmemory/payment_repository.go`) は unique 制約をシミュレートし、この契約を満たす。統合テスト `TestPaymentIdempotency_ConcurrentSuccess_Race_Integration` で end-to-end を検証済み。
+  `PaymentService.ProcessPayment` はこのエラーを race 敗者のシグナルと解釈し、**RunInTx クロージャ内では何もせず内部 sentinel `errDuplicateKeyRaceSignal` を返してトランザクションを ROLLBACK させ、その後 OUTER ctx (= 新しい tx) で `FindByIdempotencyKey` を呼んで勝者のレコードを取得する**。saga compensation は発火させない — 両 goroutine は同一の gateway transaction を共有しており、refund すると勝者の有効な決済が取り消されてしまうため。
+
+  失敗 tx 内で `FindByIdempotencyKey` を呼ばない理由は重要：Postgres の UNIQUE 違反は接続を `in_failed_sql_transaction` 状態(SQLSTATE 25P02)にし、同 tx 上の後続クエリは全て失敗する。失敗 tx 内で勝者を読みに行く設計だと、その読み出しも失敗 → 通常エラー扱い → `saga.Compensate` 発火 → 勝者の charge を refund、というサイレント・リグレッションになる。アダプタ実装者が Postgres 等で `Save` 失敗時に SAVEPOINT を張って outer tx を生かす必要は **無い**(application 側で fresh-tx 読み出しに切り替えているため)。
+
+  Fresh-tx 読み出しで勝者がまだ visible でない場合(read-replica lag、MVCC スナップショット順序など)は、`shared.ErrCodeConflict` の transient エラーを返してリトライを促す。この場合も saga compensation は発火させない(勝者の gateway charge は実在し、refund してはならないため)。
+
+  InMemory 実装 (`infrastructure/inmemory/payment_repository.go`) は unique 制約をシミュレートし、この契約を満たす。統合テスト `TestPaymentIdempotency_ConcurrentSuccess_Race_Integration` および `TestPaymentIdempotency_ConcurrentSuccess_AbortedTxSimulation_Integration` (Postgres aborted-tx シミュレーション) で end-to-end を検証済み。
 
   並行**失敗** (両方が compensation 発火) の safety は `comp-refund-{txnID}` の決定性で別途保証されており、`TestPaymentIdempotency_Concurrent_CompensationRace_Integration` で検証済み。
 - **Compensation-after-3DS の orphan pending record** (別 issue: #98): 「Call 1 が 3DS requires_action で pending payment を保存 → Call 2 が Captured で tx commit fail → compensation が txn を refund + store がマーカー書き込み → Call 3 が新しい effective key で fresh charge として成功」のシーケンスで、Call 1 の pending payment record は誰も参照しない状態で repo に残る(orphan)。money flow は正しい(gateway 側は refund 済み、local invoice は Call 3 の新 txn で正しく recorded)が、repo に「死んだ pending record」がゴミとして残る。これは reconciliation job の責務とし、本ライブラリのスコープ外とする

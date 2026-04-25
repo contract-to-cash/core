@@ -154,10 +154,8 @@ func (r *isolatingInvoiceRepo) FindUnpaidByContract(ctx context.Context, contrac
 // state — critical for the #97 race-loser path where the loser's
 // local invoice clone was mutated but never persisted.
 type recordingAfterChargePlugin struct {
-	mu           sync.Mutex
-	invocations  []recordedAfterChargeInvocation
-	failOnInvoke bool // when true, AfterCharge returns an error
-	failMessage  string
+	mu          sync.Mutex
+	invocations []recordedAfterChargeInvocation
 }
 
 type recordedAfterChargeInvocation struct {
@@ -188,9 +186,6 @@ func (p *recordingAfterChargePlugin) AfterCharge(pctx *plugin.PaymentContext) er
 		inv2.InvoicePaid = inv.PaidAmount()
 	}
 	p.invocations = append(p.invocations, inv2)
-	if p.failOnInvoke {
-		return fmt.Errorf("%s", p.failMessage)
-	}
 	return nil
 }
 
@@ -892,5 +887,353 @@ func TestPaymentIdempotency_NoStore_LegacyPath_Integration(t *testing.T) {
 	}
 	if len(gw.refundTxnIDs) != 0 {
 		t.Errorf("expected no refunds in the happy path, got %v", gw.refundTxnIDs)
+	}
+}
+
+// --- Postgres in_failed_sql_transaction (25P02) regression test ---
+//
+// abortedTxKey is a context-value key used by abortedTxRepoWrapper to
+// distinguish "inside an in-flight tx" from "fresh ctx after rollback."
+// abortedTxSimulatingTxManager attaches a fresh marker per RunInTx call.
+type abortedTxKey struct{}
+
+type abortedTxState struct {
+	mu     sync.Mutex
+	failed bool
+}
+
+func (s *abortedTxState) markFailed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failed = true
+}
+
+func (s *abortedTxState) isFailed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failed
+}
+
+func abortedStateFromCtx(ctx context.Context) *abortedTxState {
+	s, _ := ctx.Value(abortedTxKey{}).(*abortedTxState)
+	return s
+}
+
+// errAbortedTx mirrors Postgres's behaviour after a unique-violation aborts
+// the surrounding tx (SQLSTATE 25P02). Once a Save on a tx-scoped ctx
+// returns ErrDuplicateIdempotencyKey, every subsequent call on that ctx —
+// including FindByIdempotencyKey — fails with errAbortedTx until the tx
+// ends. Calls on a fresh outer ctx remain healthy.
+var errAbortedTx = errors.New("simulated 25P02: in_failed_sql_transaction")
+
+// abortedTxRepoWrapper wraps a payment.Repository to simulate Postgres's
+// aborted-tx state. The PR #117 review BLOCKER was: the original code
+// re-read the winner via FindByIdempotencyKey on the SAME txCtx after a
+// duplicate-key Save, which Postgres would reject with 25P02 and route
+// the loser through saga.Compensate (refunding the winner's charge).
+// The fix exits the closure on a sentinel and re-reads on the outer ctx
+// instead. This wrapper exercises the regression deterministically.
+type abortedTxRepoWrapper struct {
+	inner payment.Repository
+}
+
+func (r *abortedTxRepoWrapper) failedOrInner(ctx context.Context, errPrefix string) error {
+	if state := abortedStateFromCtx(ctx); state != nil && state.isFailed() {
+		return fmt.Errorf("%s: %w", errPrefix, errAbortedTx)
+	}
+	return nil
+}
+
+func (r *abortedTxRepoWrapper) Save(ctx context.Context, p *payment.Payment) error {
+	if err := r.failedOrInner(ctx, "save"); err != nil {
+		return err
+	}
+	err := r.inner.Save(ctx, p)
+	if err != nil && errors.Is(err, payment.ErrDuplicateIdempotencyKey) {
+		if state := abortedStateFromCtx(ctx); state != nil {
+			state.markFailed()
+		}
+	}
+	return err
+}
+
+func (r *abortedTxRepoWrapper) FindByID(ctx context.Context, id shared.PaymentID) (*payment.Payment, error) {
+	if err := r.failedOrInner(ctx, "find by id"); err != nil {
+		return nil, err
+	}
+	return r.inner.FindByID(ctx, id)
+}
+
+func (r *abortedTxRepoWrapper) FindByInvoiceID(ctx context.Context, invoiceID shared.InvoiceID) ([]*payment.Payment, error) {
+	if err := r.failedOrInner(ctx, "find by invoice id"); err != nil {
+		return nil, err
+	}
+	return r.inner.FindByInvoiceID(ctx, invoiceID)
+}
+
+func (r *abortedTxRepoWrapper) FindByIdempotencyKey(ctx context.Context, key string) (*payment.Payment, error) {
+	if err := r.failedOrInner(ctx, "find by idempotency key"); err != nil {
+		return nil, err
+	}
+	return r.inner.FindByIdempotencyKey(ctx, key)
+}
+
+// abortedTxSimulatingTxManager decorates each txCtx with a fresh
+// abortedTxState so the wrapped repo can distinguish in-tx calls from
+// outer-ctx calls. RunInTx returns the closure's error verbatim; it does
+// not roll back any abortedTxState — by construction each invocation
+// gets a brand-new state, so once RunInTx returns, the caller's outer
+// ctx no longer carries the marker and is treated as a fresh tx.
+type abortedTxSimulatingTxManager struct {
+	repos tx.Repos
+}
+
+func (m *abortedTxSimulatingTxManager) RunInTx(ctx context.Context, fn func(context.Context, tx.Repos) error) error {
+	state := &abortedTxState{}
+	txCtx := context.WithValue(ctx, abortedTxKey{}, state)
+	return fn(txCtx, m.repos)
+}
+
+// TestPaymentIdempotency_ConcurrentSuccess_AbortedTxSimulation_Integration
+// reproduces the Postgres in_failed_sql_transaction regression vector
+// surfaced in the PR #117 review:
+//
+//   - Two goroutines reach the in-tx Save with the same effective key.
+//   - The race-losing Save returns ErrDuplicateIdempotencyKey.
+//   - On Postgres, the unique-violation puts the surrounding tx into
+//     in_failed_sql_transaction (SQLSTATE 25P02). Any subsequent query
+//     on the same connection — including FindByIdempotencyKey — fails.
+//   - The original implementation called FindByIdempotencyKey on txCtx
+//     immediately after the failed Save, so on Postgres the loser's
+//     find would error, the closure would return the error, and
+//     saga.Compensate would refund the winner's legitimate charge.
+//
+// With the fix, the closure exits on errDuplicateKeyRaceSignal as soon as
+// the duplicate-key Save lands, RunInTx unwinds the failed tx, and the
+// outer code re-reads the winner via the outer ctx where the wrapper's
+// failed-state marker is absent. The race-loser converges, no refund is
+// issued, and the invoice is paid exactly once.
+func TestPaymentIdempotency_ConcurrentSuccess_AbortedTxSimulation_Integration(t *testing.T) {
+	ctx := context.Background()
+	clock := fixedClock()
+
+	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
+	paymentRepo := inmemory.NewInMemoryPaymentRepository()
+
+	amount := moneyJPY(7777)
+	inv := newIntegrationInvoice(t, ctx, invoiceRepo, amount)
+
+	gw := &integrationGateway{}
+
+	isolatedInvoiceRepo := &isolatingInvoiceRepo{inner: invoiceRepo}
+	racedPaymentRepo := newRendezvousPaymentRepo(paymentRepo, 2)
+	abortedRepo := &abortedTxRepoWrapper{inner: racedPaymentRepo}
+
+	// The custom TxManager decorates txCtx so that an in-tx Save returning
+	// ErrDuplicateIdempotencyKey turns subsequent in-tx calls into
+	// errAbortedTx. The outer ctx (used by the post-RunInTx fresh-tx
+	// FindByIdempotencyKey) is never marked.
+	txm := &abortedTxSimulatingTxManager{
+		repos: tx.Repos{Payments: abortedRepo, Invoices: isolatedInvoiceRepo},
+	}
+
+	recorder := &recordingAfterChargePlugin{}
+	reg := plugin.NewRegistry()
+	if regErr := reg.Register(recorder); regErr != nil {
+		t.Fatalf("registry.Register: %v", regErr)
+	}
+
+	svc := service.NewPaymentService(
+		gw,
+		abortedRepo,
+		isolatedInvoiceRepo,
+		nil,
+		nil,
+		reg,
+		clock,
+		service.WithPaymentTxManager(txm),
+	)
+
+	input := service.ProcessPaymentInput{
+		PaymentMethodID: "pm-aborted-tx-sim",
+		Amount:          amount,
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "integration-aborted-tx-sim",
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	results := make([]*payment.Payment, 2)
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = svc.ProcessPayment(ctx, inv.ID(), input)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: unexpected error under aborted-tx simulation: %v", i, err)
+		}
+		if results[i] == nil {
+			t.Fatalf("goroutine %d: nil payment", i)
+		}
+		if results[i].Status() != payment.PaymentStatusCompleted {
+			t.Errorf("goroutine %d: expected Completed, got %q", i, results[i].Status())
+		}
+	}
+	if results[0].ID() != results[1].ID() {
+		t.Errorf("both goroutines must converge on the same payment record (aborted-tx simulation); got %q and %q",
+			results[0].ID(), results[1].ID())
+	}
+
+	if len(gw.refundTxnIDs) != 0 {
+		t.Fatalf("saga compensation must not fire under aborted-tx simulation; got refunds: %v",
+			gw.refundTxnIDs)
+	}
+
+	persisted, err := paymentRepo.FindByInvoiceID(ctx, inv.ID())
+	if err != nil {
+		t.Fatalf("FindByInvoiceID: %v", err)
+	}
+	completed := 0
+	for _, p := range persisted {
+		if p.Status() == payment.PaymentStatusCompleted {
+			completed++
+		}
+	}
+	if completed != 1 {
+		t.Errorf("expected exactly 1 completed payment under aborted-tx simulation, got %d (total=%d)",
+			completed, len(persisted))
+	}
+
+	refreshed, err := invoiceRepo.FindByID(ctx, inv.ID())
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if refreshed.PaidAmount().Amount().Cmp(amount.Amount()) != 0 {
+		t.Errorf("expected invoice paid amount %v, got %v",
+			amount.Amount(), refreshed.PaidAmount().Amount())
+	}
+}
+
+// TestPaymentIdempotency_PendingThenCompleted_3DSUpgrade_Integration
+// covers the 3DS Pending → Completed upgrade path that the PR #117
+// review flagged as untested. The first ProcessPayment call hits the
+// requires_action branch and saves a Pending payment under the
+// effective key. The second call with the SAME key sees the gateway
+// return Captured (the customer finished 3DS), enters the in-tx
+// branch, finds the existing Pending record via the in-tx
+// FindByIdempotencyKey, upgrades it to Completed, and records the
+// payment on the invoice.
+//
+// The two calls must converge on a single PaymentID (the Pending
+// record's), exactly one row must be persisted, and no
+// duplicate-key path or saga compensation must fire.
+func TestPaymentIdempotency_PendingThenCompleted_3DSUpgrade_Integration(t *testing.T) {
+	ctx := context.Background()
+	clock := fixedClock()
+
+	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
+	paymentRepo := inmemory.NewInMemoryPaymentRepository()
+
+	amount := moneyJPY(4321)
+	inv := newIntegrationInvoice(t, ctx, invoiceRepo, amount)
+
+	// First Charge → requires_action, second Charge → captured (3DS done).
+	// Both Charge calls share the same gateway-side transaction id, mirroring
+	// real Stripe/Adyen idempotency-key replay semantics.
+	gw := &integrationGateway{
+		chargeResponses: []port.ChargeResponse{
+			{
+				TransactionID: "txn-3ds-upgrade",
+				Status:        port.TransactionStatusRequiresAction,
+				Amount:        amount,
+				CreatedAt:     time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+			},
+			{
+				TransactionID: "txn-3ds-upgrade",
+				Status:        port.TransactionStatusCaptured,
+				Amount:        amount,
+				CreatedAt:     time.Date(2026, 3, 1, 0, 0, 1, 0, time.UTC),
+			},
+		},
+	}
+
+	svc := service.NewPaymentService(
+		gw,
+		paymentRepo,
+		invoiceRepo,
+		nil,
+		nil,
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	input := service.ProcessPaymentInput{
+		PaymentMethodID: "pm-3ds",
+		Amount:          amount,
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "integration-3ds-upgrade",
+	}
+
+	// Call 1: requires_action → Pending record persisted, ErrRequiresAction
+	// is returned alongside the payment.
+	pending, err := svc.ProcessPayment(ctx, inv.ID(), input)
+	if !errors.Is(err, service.ErrRequiresAction) {
+		t.Fatalf("expected ErrRequiresAction on first call, got: %v", err)
+	}
+	if pending == nil {
+		t.Fatal("expected pending payment record from first call")
+	}
+	if pending.Status() != payment.PaymentStatusPending {
+		t.Fatalf("expected Pending, got %q", pending.Status())
+	}
+
+	// Call 2: gateway now returns Captured. The in-tx FindByIdempotencyKey
+	// must find the Pending record from Call 1 and upgrade it to Completed.
+	completed, err := svc.ProcessPayment(ctx, inv.ID(), input)
+	if err != nil {
+		t.Fatalf("expected second call to succeed, got: %v", err)
+	}
+	if completed == nil {
+		t.Fatal("expected completed payment from second call")
+	}
+	if completed.Status() != payment.PaymentStatusCompleted {
+		t.Errorf("expected Completed, got %q", completed.Status())
+	}
+	if completed.ID() != pending.ID() {
+		t.Errorf("upgrade path must converge on the Pending record's ID; got pending=%s, completed=%s",
+			pending.ID(), completed.ID())
+	}
+
+	// Exactly one persisted record, in Completed state.
+	persisted, err := paymentRepo.FindByInvoiceID(ctx, inv.ID())
+	if err != nil {
+		t.Fatalf("FindByInvoiceID: %v", err)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("expected exactly 1 persisted payment, got %d", len(persisted))
+	}
+	if persisted[0].Status() != payment.PaymentStatusCompleted {
+		t.Errorf("persisted payment must be Completed, got %q", persisted[0].Status())
+	}
+
+	// No saga compensation — the second call upgraded the existing record
+	// rather than creating a duplicate.
+	if len(gw.refundTxnIDs) != 0 {
+		t.Errorf("3DS upgrade must not fire saga compensation; got refunds: %v", gw.refundTxnIDs)
+	}
+
+	// Invoice reflects the Captured payment.
+	refreshed, err := invoiceRepo.FindByID(ctx, inv.ID())
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if refreshed.PaidAmount().Amount().Cmp(amount.Amount()) != 0 {
+		t.Errorf("expected invoice paid %v, got %v",
+			amount.Amount(), refreshed.PaidAmount().Amount())
 	}
 }
