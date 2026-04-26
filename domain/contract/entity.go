@@ -103,13 +103,7 @@ func (c *Contract) BasePrice() shared.Money { return c.basePrice }
 // PaymentMethodID returns the contract-level payment method ID.
 // The returned pointer is a defensive copy — mutating the pointee does not
 // affect the entity.
-func (c *Contract) PaymentMethodID() *string {
-	if c.paymentMethodID == nil {
-		return nil
-	}
-	v := *c.paymentMethodID
-	return &v
-}
+func (c *Contract) PaymentMethodID() *string { return shared.PtrCopy(c.paymentMethodID) }
 
 // Metadata returns the contract metadata.
 func (c *Contract) Metadata() map[string]string {

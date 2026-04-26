@@ -125,13 +125,7 @@ func (a *ContractAggregate) SuspensionConfig() *SuspensionConfiguration {
 // PaymentMethodID returns the contract-level payment method ID.
 // The returned pointer is a defensive copy — mutating the pointee does not
 // affect the aggregate.
-func (a *ContractAggregate) PaymentMethodID() *string {
-	if a.paymentMethodID == nil {
-		return nil
-	}
-	v := *a.paymentMethodID
-	return &v
-}
+func (a *ContractAggregate) PaymentMethodID() *string { return shared.PtrCopy(a.paymentMethodID) }
 
 // Price returns the current price.
 func (a *ContractAggregate) Price() shared.Money { return a.price }
@@ -152,11 +146,7 @@ func (a *ContractAggregate) CancelAtPeriodEnd() bool { return a.cancelAtPeriodEn
 // The returned pointer is a defensive copy — mutating the pointee does not
 // affect the aggregate.
 func (a *ContractAggregate) PendingPriceID() *shared.PriceID {
-	if a.pendingPriceID == nil {
-		return nil
-	}
-	v := *a.pendingPriceID
-	return &v
+	return shared.PtrCopy(a.pendingPriceID)
 }
 
 // HasPendingChange returns whether there is a pending price change.
@@ -326,8 +316,13 @@ func (a *ContractAggregate) changePriceImmediate(newPriceID shared.PriceID, pror
 		OldPriceID: a.priceID,
 		NewPriceID: newPriceID,
 		Policy:     ChangePolicyImmediate,
-		Proration:  proration,
-		ChangedAt:  a.Clock().Now(),
+		// Intake defense: deep-copy the caller-owned PlanChangeProration so a
+		// post-call mutation by the caller cannot rewrite the event payload
+		// after RaiseEvent. Money fields inside PlanChangeProration are
+		// effectively immutable from outside the shared package, so a shallow
+		// struct copy via shared.PtrCopy is sufficient.
+		Proration: shared.PtrCopy(proration),
+		ChangedAt: a.Clock().Now(),
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -380,16 +375,10 @@ func (a *ContractAggregate) ChangePaymentMethod(paymentMethodID *string, metadat
 
 	// Intake defense: deep-copy the caller-owned pointer so that a post-call
 	// mutation by the caller cannot rewrite the event payload.
-	var newPM *string
-	if paymentMethodID != nil {
-		v := *paymentMethodID
-		newPM = &v
-	}
-
 	event := &PaymentMethodChangedEvent{
 		ContractID:         a.contractID,
 		OldPaymentMethodID: a.paymentMethodID,
-		NewPaymentMethodID: newPM,
+		NewPaymentMethodID: shared.PtrCopy(paymentMethodID),
 		ChangedAt:          a.Clock().Now(),
 	}
 
@@ -587,14 +576,15 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 
 	case *ContractSuspendedEvent:
 		a.status = ContractStatusSuspended
-		cfg := &SuspensionConfiguration{
+		// Build the value form first (so cloneValue's deep-copy of ResumeDate
+		// runs once, no extra construct-then-clone indirection) and take the
+		// address of the resulting independent copy.
+		cfg := SuspensionConfiguration{
 			BillingBehavior: e.BillingBehavior,
 			ResumeDate:      e.ResumeDate,
 			Reason:          e.Reason,
-		}
-		// Deep-copy the pointer so the aggregate owns its ResumeDate
-		// independently of the event payload.
-		a.suspensionConfig = cfg.clone()
+		}.cloneValue()
+		a.suspensionConfig = &cfg
 		a.updatedAt = e.SuspendedAt
 
 	case *ContractResumedEvent:
@@ -647,12 +637,7 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *PaymentMethodChangedEvent:
 		// Deep-copy the pointer so the aggregate owns its paymentMethodID
 		// independently of the event payload.
-		if e.NewPaymentMethodID != nil {
-			v := *e.NewPaymentMethodID
-			a.paymentMethodID = &v
-		} else {
-			a.paymentMethodID = nil
-		}
+		a.paymentMethodID = shared.PtrCopy(e.NewPaymentMethodID)
 		a.updatedAt = e.ChangedAt
 
 	case *ContractRenewedEvent:
@@ -792,23 +777,13 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	// or reuse the state value).
 	a.trialConfig = state.TrialConfig.clone()
 	a.suspensionConfig = state.SuspensionConfig.clone()
-	if state.PaymentMethodID != nil {
-		v := *state.PaymentMethodID
-		a.paymentMethodID = &v
-	} else {
-		a.paymentMethodID = nil
-	}
+	a.paymentMethodID = shared.PtrCopy(state.PaymentMethodID)
 	a.priceID = state.PriceID
 	a.price = state.Price
 	a.basePrice = state.BasePrice
 	a.autoRenew = state.AutoRenew
 	a.cancelAtPeriodEnd = state.CancelAtPeriodEnd
-	if state.PendingPriceID != nil {
-		v := *state.PendingPriceID
-		a.pendingPriceID = &v
-	} else {
-		a.pendingPriceID = nil
-	}
+	a.pendingPriceID = shared.PtrCopy(state.PendingPriceID)
 	a.metadata = state.Metadata
 	a.createdAt = state.CreatedAt
 	a.updatedAt = state.UpdatedAt

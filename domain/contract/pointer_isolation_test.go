@@ -13,13 +13,11 @@ import (
 	"github.com/contract-to-cash/core/eventstore"
 )
 
-func fixedClock() shared.Clock {
-	return shared.FixedClock{FixedTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)}
-}
-
+// newTestClock is defined in aggregate_test.go and reused here to keep
+// the package-internal test fixtures aligned (issue #109 review NIT).
 func newActiveAggregate(t *testing.T) *ContractAggregate {
 	t.Helper()
-	clock := fixedClock()
+	clock := newTestClock()
 	agg := NewContractAggregate(shared.NewContractID(), clock)
 	metadata := eventstore.EventMetadata{UserID: "test"}
 	if err := agg.Create(CreateContractCommand{
@@ -113,7 +111,7 @@ func TestAggregate_PendingPriceID_NilSafe(t *testing.T) {
 // --- TrialConfig ---
 
 func TestAggregate_TrialConfig_GetterIsDefensivelyCopied(t *testing.T) {
-	clock := fixedClock()
+	clock := newTestClock()
 	agg := NewContractAggregate(shared.NewContractID(), clock)
 	if err := agg.Create(CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
@@ -155,7 +153,7 @@ func TestAggregate_TrialConfig_GetterIsDefensivelyCopied(t *testing.T) {
 }
 
 func TestAggregate_TrialConfig_IntakeIsDefensivelyCopied(t *testing.T) {
-	clock := fixedClock()
+	clock := newTestClock()
 	agg := NewContractAggregate(shared.NewContractID(), clock)
 	if err := agg.Create(CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
@@ -272,7 +270,7 @@ func TestAggregate_LoadFromSnapshot_IsolatesPointerState(t *testing.T) {
 		t.Fatalf("MarshalSnapshot: %v", err)
 	}
 
-	restored := NewContractAggregate(src.ContractID(), fixedClock())
+	restored := NewContractAggregate(src.ContractID(), newTestClock())
 	if err := restored.LoadFromSnapshot(eventstore.Snapshot{State: data, Version: src.Version()}); err != nil {
 		t.Fatalf("LoadFromSnapshot: %v", err)
 	}
@@ -291,5 +289,199 @@ func TestAggregate_LoadFromSnapshot_IsolatesPointerState(t *testing.T) {
 	}
 	if got := restored.PendingPriceID(); got == nil || *got != "price-new" {
 		t.Errorf("LoadFromSnapshot aliasing: PendingPriceID got %v, want price-new", got)
+	}
+}
+
+// TestAggregate_LoadFromSnapshot_IsolatesTrialConfig closes the gap
+// flagged in the PR #120 review: the original snapshot round-trip test
+// only exercised PaymentMethodID and PendingPriceID, so a regression in
+// the LoadFromSnapshot deep-copy of TrialConfig.ConversionReminderDays
+// (slice) would only have been caught indirectly via the getter-defense
+// test on the live aggregate.
+func TestAggregate_LoadFromSnapshot_IsolatesTrialConfig(t *testing.T) {
+	clock := newTestClock()
+	src := NewContractAggregate(shared.NewContractID(), clock)
+	if err := src.Create(CreateContractCommand{
+		AccountID:    shared.NewAccountID(),
+		PriceID:      shared.NewPriceID(),
+		ContractType: ContractTypeSubscription,
+		BillingCycle: BillingCycleMonthly,
+		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := src.StartTrial(TrialConfiguration{
+		TrialEndDate:           clock.Now().AddDate(0, 0, 14),
+		AutoConvert:            true,
+		ConversionReminderDays: []int{7, 3, 1},
+	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
+		t.Fatalf("StartTrial: %v", err)
+	}
+
+	data, err := src.MarshalSnapshot()
+	if err != nil {
+		t.Fatalf("MarshalSnapshot: %v", err)
+	}
+
+	restored := NewContractAggregate(src.ContractID(), newTestClock())
+	if err := restored.LoadFromSnapshot(eventstore.Snapshot{State: data, Version: src.Version()}); err != nil {
+		t.Fatalf("LoadFromSnapshot: %v", err)
+	}
+
+	if tc := restored.TrialConfig(); tc != nil && len(tc.ConversionReminderDays) > 0 {
+		tc.ConversionReminderDays[0] = 999
+		tc.AutoConvert = false
+	}
+
+	again := restored.TrialConfig()
+	if again == nil {
+		t.Fatal("TrialConfig must survive snapshot round-trip")
+	}
+	if len(again.ConversionReminderDays) == 0 || again.ConversionReminderDays[0] != 7 {
+		t.Errorf("LoadFromSnapshot aliasing: TrialConfig.ConversionReminderDays[0] = %v, want 7", again.ConversionReminderDays)
+	}
+	if !again.AutoConvert {
+		t.Error("LoadFromSnapshot aliasing: TrialConfig.AutoConvert mutated via getter")
+	}
+}
+
+// TestAggregate_LoadFromSnapshot_IsolatesSuspensionConfig is the
+// SuspensionConfig.ResumeDate (*time.Time) counterpart to the TrialConfig
+// snapshot test above (PR #120 review MINOR follow-up).
+func TestAggregate_LoadFromSnapshot_IsolatesSuspensionConfig(t *testing.T) {
+	src := newActiveAggregate(t)
+	originalResume := time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC)
+	if err := src.Suspend(SuspensionConfiguration{
+		BillingBehavior: SuspensionBillingDefer,
+		ResumeDate:      &originalResume,
+		Reason:          "snapshot-isolation",
+	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+
+	data, err := src.MarshalSnapshot()
+	if err != nil {
+		t.Fatalf("MarshalSnapshot: %v", err)
+	}
+
+	restored := NewContractAggregate(src.ContractID(), newTestClock())
+	if err := restored.LoadFromSnapshot(eventstore.Snapshot{State: data, Version: src.Version()}); err != nil {
+		t.Fatalf("LoadFromSnapshot: %v", err)
+	}
+
+	if sc := restored.SuspensionConfig(); sc != nil && sc.ResumeDate != nil {
+		*sc.ResumeDate = time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+		sc.Reason = "hacked"
+	}
+
+	again := restored.SuspensionConfig()
+	if again == nil {
+		t.Fatal("SuspensionConfig must survive snapshot round-trip")
+	}
+	if again.ResumeDate == nil || !again.ResumeDate.Equal(originalResume) {
+		t.Errorf("LoadFromSnapshot aliasing: SuspensionConfig.ResumeDate got %v, want %v", again.ResumeDate, originalResume)
+	}
+	if again.Reason != "snapshot-isolation" {
+		t.Errorf("LoadFromSnapshot aliasing: SuspensionConfig.Reason mutated to %q", again.Reason)
+	}
+}
+
+// --- Contract (state-stored entity) getter defense ---
+//
+// PR #120 review MINOR: the pointer-isolation test suite exercises only
+// ContractAggregate. Contract (the state-stored entity used by snapshots,
+// projections, and read models) has parallel getter-defense logic on
+// PaymentMethodID / TrialConfig / SuspensionConfig that should also be
+// covered, even though Contract has no public constructor today. These
+// tests build the entity package-internally so that future factories
+// cannot regress the defense without test churn.
+
+func TestContract_PaymentMethodID_GetterIsDefensivelyCopied(t *testing.T) {
+	pm := "pm-entity-original"
+	c := &Contract{paymentMethodID: &pm}
+
+	got := c.PaymentMethodID()
+	if got == nil {
+		t.Fatal("Contract.PaymentMethodID must not be nil")
+	}
+	*got = "pm-entity-hacked"
+
+	if again := c.PaymentMethodID(); again == nil || *again != "pm-entity-original" {
+		t.Errorf("Contract.PaymentMethodID() leaks internal pointer: got %v, want pm-entity-original", again)
+	}
+}
+
+func TestContract_PaymentMethodID_NilSafe(t *testing.T) {
+	c := &Contract{}
+	if got := c.PaymentMethodID(); got != nil {
+		t.Errorf("expected nil PaymentMethodID, got %v", got)
+	}
+}
+
+func TestContract_TrialConfig_GetterIsDefensivelyCopied(t *testing.T) {
+	c := &Contract{trialConfig: &TrialConfiguration{
+		TrialEndDate:           time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
+		AutoConvert:            true,
+		ConversionReminderDays: []int{7, 3, 1},
+	}}
+
+	got := c.TrialConfig()
+	if got == nil {
+		t.Fatal("Contract.TrialConfig must not be nil")
+	}
+	got.AutoConvert = false
+	got.ConversionReminderDays[0] = 999
+
+	again := c.TrialConfig()
+	if again == nil {
+		t.Fatal("TrialConfig must not be nil on second read")
+	}
+	if !again.AutoConvert {
+		t.Error("Contract.TrialConfig() leaks struct fields: AutoConvert mutated")
+	}
+	if again.ConversionReminderDays[0] != 7 {
+		t.Errorf("Contract.TrialConfig() leaks slice: got ConversionReminderDays[0]=%d, want 7", again.ConversionReminderDays[0])
+	}
+}
+
+func TestContract_TrialConfig_NilSafe(t *testing.T) {
+	c := &Contract{}
+	if got := c.TrialConfig(); got != nil {
+		t.Errorf("expected nil TrialConfig, got %v", got)
+	}
+}
+
+func TestContract_SuspensionConfig_GetterIsDefensivelyCopied(t *testing.T) {
+	resume := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	c := &Contract{suspensionConfig: &SuspensionConfiguration{
+		BillingBehavior: SuspensionBillingSkip,
+		ResumeDate:      &resume,
+		Reason:          "entity-test",
+	}}
+
+	got := c.SuspensionConfig()
+	if got == nil || got.ResumeDate == nil {
+		t.Fatal("Contract.SuspensionConfig / ResumeDate must not be nil")
+	}
+	got.Reason = "hacked"
+	*got.ResumeDate = time.Date(2099, 12, 31, 0, 0, 0, 0, time.UTC)
+
+	again := c.SuspensionConfig()
+	if again == nil {
+		t.Fatal("SuspensionConfig must not be nil on second read")
+	}
+	if again.Reason != "entity-test" {
+		t.Errorf("Contract.SuspensionConfig() leaks struct fields: Reason mutated to %q", again.Reason)
+	}
+	if again.ResumeDate == nil || !again.ResumeDate.Equal(resume) {
+		t.Errorf("Contract.SuspensionConfig() leaks ResumeDate pointee: got %v, want %v", again.ResumeDate, resume)
+	}
+}
+
+func TestContract_SuspensionConfig_NilSafe(t *testing.T) {
+	c := &Contract{}
+	if got := c.SuspensionConfig(); got != nil {
+		t.Errorf("expected nil SuspensionConfig, got %v", got)
 	}
 }
