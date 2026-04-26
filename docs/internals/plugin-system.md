@@ -1247,44 +1247,67 @@ func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID string) 
     return s.invoiceRepo.Save(ctx, inv)
 }
 
-// ProcessPriceChange 価格変更時のクレジット処理
-// PlanChangeProration.AdjustmentAmount < 0 の場合、BalancePolicy に従い分岐
-func (s *BillingService) ProcessPriceChange(ctx context.Context, contractID shared.ContractID, newPriceID shared.PriceID) error {
-    // 1. 日割り計算
-    proration, err := s.calculator.CalculateProration(ctx, contractID, newPriceID)
-    if err != nil {
-        return fmt.Errorf("proration calculation failed: %w", err)
-    }
-
-    c, err := s.contractRepo.FindByID(ctx, contractID)
+// 価格変更時の精算は利用者アプリケーション側でオーケストレートする。
+// 本ライブラリは日割り計算 API を提供しないため、PlanChangeProration の
+// 値（CreditAmount / ChargeAmount / AdjustmentAmount）は呼び出し側で
+// 算出し、以下のように使い分ける:
+//
+//   1. 状態遷移: ContractAggregate.ChangePrice に proration を渡して
+//      PriceChangedEvent を発火（ChangePolicyImmediate の場合）
+//   2. AdjustmentAmount > 0（アップグレード）:
+//        BillingService.GenerateProrationInvoice で請求書生成
+//   3. AdjustmentAmount < 0（ダウングレード）:
+//        balance.BalancePolicy の設定に従ってクレジット台帳または返金で精算
+//   4. AdjustmentAmount = 0: 精算不要
+//
+// 利用者側の薄いラッパー例:
+func ApplyPriceChange(
+    ctx context.Context,
+    billing *service.BillingService,
+    contracts contract.Repository,
+    balances balance.Repository,
+    gateway port.PaymentGateway,
+    cfg balance.BalanceConfig,
+    contractID shared.ContractID,
+    newPriceID shared.PriceID,
+    proration contract.PlanChangeProration, // 利用者側で算出
+    metadata eventstore.EventMetadata,
+) error {
+    // 1. 状態遷移
+    agg, err := contracts.FindByID(ctx, contractID)
     if err != nil {
         return err
     }
-    accountID := c.AccountID()
+    if err := agg.ChangePrice(newPriceID, contract.ChangePolicyImmediate, &proration, metadata); err != nil {
+        return err
+    }
+    if err := contracts.Save(ctx, agg); err != nil {
+        return err
+    }
 
     // 2. AdjustmentAmount の符号で分岐
-    if proration.AdjustmentAmount.IsNegative() {
+    switch {
+    case proration.AdjustmentAmount.IsNegative():
         // ダウングレード: BalancePolicy に従う
-        switch s.balanceConfig.DowngradePolicy {
+        switch cfg.DowngradePolicy {
         case balance.BalancePolicyLedger:
-            // クレジット台帳に積む
-            entry := balance.NewBalanceEntry(accountID, proration.AdjustmentAmount.Negate(), balance.BalanceReasonProration)
-            if err := s.balanceRepo.Save(ctx, entry); err != nil {
+            entry := balance.NewBalanceEntry(agg.AccountID(), proration.AdjustmentAmount.Negate(), balance.BalanceReasonProration)
+            if err := balances.Save(ctx, entry); err != nil {
                 return fmt.Errorf("credit entry save failed: %w", err)
             }
         case balance.BalancePolicyRefund:
-            // 即時返金
-            if err := s.gateway.Refund(ctx, &port.RefundRequest{Amount: proration.AdjustmentAmount.Negate()}); err != nil {
+            if _, err := gateway.Refund(ctx, &port.RefundRequest{Amount: proration.AdjustmentAmount.Negate()}); err != nil {
                 return fmt.Errorf("refund failed: %w", err)
             }
         case balance.BalancePolicyNone:
             // 何もしない
         }
-    } else if !proration.AdjustmentAmount.IsZero() {
+    case !proration.AdjustmentAmount.IsZero():
         // アップグレード: 差額のみ請求
-        // 請求書を生成して決済
+        if _, err := billing.GenerateProrationInvoice(ctx, contractID, proration); err != nil {
+            return fmt.Errorf("proration invoice generation failed: %w", err)
+        }
     }
-
     return nil
 }
 

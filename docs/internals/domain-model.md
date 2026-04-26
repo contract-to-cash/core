@@ -842,8 +842,14 @@ type ProrationConfig struct {
 
 // PlanChangeProration は価格変更時の日割り計算結果を保持する値オブジェクト。
 // AdjustmentAmount = ChargeAmount - CreditAmount で、符号がアップグレード/
-// ダウングレード/同額のいずれかを示す。実際の計算は
-// application/service.BillingService.ProcessPriceChange が担う（§9 参照）。
+// ダウングレード/同額のいずれかを示す。値そのものの算出は呼び出し側
+// (利用者アプリケーション側) の責務で、本ライブラリには日割り計算 API は
+// 含まれない。算出後の使い道:
+//   - アップグレード (Adjustment > 0): application/service.BillingService.
+//     GenerateProrationInvoice に渡して請求書を生成
+//   - ダウングレード (Adjustment < 0): BalancePolicy に従って処理 (§10.6)
+//   - 状態遷移自体: domain/contract.ContractAggregate.ChangePrice に渡して
+//     PriceChangedEvent を発火
 type PlanChangeProration struct {
     CreditAmount     shared.Money
     ChargeAmount     shared.Money
@@ -1615,8 +1621,13 @@ type Repository interface {
 | 役割 | 配置 | 主な型・メソッド |
 |------|------|------------------|
 | 請求書生成（契約タイプ別の subtotal 算出 → Hook → Invoice 永続化） | `application/service/billing_service.go` | `BillingService.GenerateInvoice` / `calculateSubtotal` |
-| 価格変更時の日割り計算 | `application/service/billing_service.go` | `BillingService.ProcessPriceChange` |
+| 既存請求書の再生成（プラン変更後の差し替え等） | `application/service/billing_service.go` | `BillingService.RegenerateInvoice` |
+| 価格変更（アップグレード）の日割り請求書生成 | `application/service/billing_service.go` | `BillingService.GenerateProrationInvoice`（`AdjustmentAmount > 0` 専用、ダウングレード/同額は別経路） |
+| 価格変更の状態遷移（イベント発火） | `domain/contract` | `ContractAggregate.ChangePrice`（受け取った `PlanChangeProration` を `PriceChangedEvent` に載せる） |
 | 日割り計算結果の値オブジェクト | `domain/contract` | `PlanChangeProration`（§3.7 参照） |
+| 日割り値そのものの算出 | 利用者アプリケーション側 | 本ライブラリは API を提供しない（旧契約と新価格・残日数から `CreditAmount` / `ChargeAmount` を計算する責務は呼び出し側） |
+
+ダウングレード（`AdjustmentAmount < 0`）の精算はクレジット台帳経由で処理する。`BalancePolicy` の分岐は §10.6 を参照。
 
 過去には「`domain/billing.Calculator` ドメインサービス」案を検討したが、
 
