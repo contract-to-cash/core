@@ -1268,6 +1268,7 @@ func ApplyPriceChange(
     balances balance.Repository,
     gateway port.PaymentGateway,
     cfg balance.BalanceConfig,
+    clock shared.Clock,
     contractID shared.ContractID,
     newPriceID shared.PriceID,
     proration contract.PlanChangeProration, // 利用者側で算出
@@ -1291,12 +1292,18 @@ func ApplyPriceChange(
         // ダウングレード: BalancePolicy に従う
         switch cfg.DowngradePolicy {
         case balance.BalancePolicyLedger:
-            entry := balance.NewBalanceEntry(agg.AccountID(), proration.AdjustmentAmount.Negate(), balance.BalanceReasonProration)
+            entry := balance.NewBalanceEntry(
+                agg.AccountID(),
+                proration.AdjustmentAmount.Negate(),
+                balance.BalanceReasonProration,
+                clock.Now(),
+            )
             if err := balances.Save(ctx, entry); err != nil {
                 return fmt.Errorf("credit entry save failed: %w", err)
             }
         case balance.BalancePolicyRefund:
-            if _, err := gateway.Refund(ctx, &port.RefundRequest{Amount: proration.AdjustmentAmount.Negate()}); err != nil {
+            refundAmt := proration.AdjustmentAmount.Negate()
+            if _, err := gateway.Refund(ctx, &port.RefundRequest{Amount: &refundAmt}); err != nil {
                 return fmt.Errorf("refund failed: %w", err)
             }
         case balance.BalancePolicyNone:
