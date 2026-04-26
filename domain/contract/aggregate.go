@@ -113,13 +113,19 @@ func (a *ContractAggregate) GetInterval() BillingInterval { return a.interval }
 func (a *ContractAggregate) CurrentPeriod() shared.DateRange { return a.currentPeriod }
 
 // TrialConfig returns the trial configuration.
-func (a *ContractAggregate) TrialConfig() *TrialConfiguration { return a.trialConfig }
+// The returned value is a deep copy — mutating it does not affect the aggregate.
+func (a *ContractAggregate) TrialConfig() *TrialConfiguration { return a.trialConfig.clone() }
 
 // SuspensionConfig returns the suspension configuration.
-func (a *ContractAggregate) SuspensionConfig() *SuspensionConfiguration { return a.suspensionConfig }
+// The returned value is a deep copy — mutating it does not affect the aggregate.
+func (a *ContractAggregate) SuspensionConfig() *SuspensionConfiguration {
+	return a.suspensionConfig.clone()
+}
 
 // PaymentMethodID returns the contract-level payment method ID.
-func (a *ContractAggregate) PaymentMethodID() *string { return a.paymentMethodID }
+// The returned pointer is a defensive copy — mutating the pointee does not
+// affect the aggregate.
+func (a *ContractAggregate) PaymentMethodID() *string { return shared.PtrCopy(a.paymentMethodID) }
 
 // Price returns the current price.
 func (a *ContractAggregate) Price() shared.Money { return a.price }
@@ -137,7 +143,11 @@ func (a *ContractAggregate) AutoRenew() bool { return a.autoRenew }
 func (a *ContractAggregate) CancelAtPeriodEnd() bool { return a.cancelAtPeriodEnd }
 
 // PendingPriceID returns the pending price ID to apply at next renewal.
-func (a *ContractAggregate) PendingPriceID() *shared.PriceID { return a.pendingPriceID }
+// The returned pointer is a defensive copy — mutating the pointee does not
+// affect the aggregate.
+func (a *ContractAggregate) PendingPriceID() *shared.PriceID {
+	return shared.PtrCopy(a.pendingPriceID)
+}
 
 // HasPendingChange returns whether there is a pending price change.
 func (a *ContractAggregate) HasPendingChange() bool { return a.pendingPriceID != nil }
@@ -226,6 +236,10 @@ func (a *ContractAggregate) Suspend(config SuspensionConfiguration, metadata eve
 			fmt.Sprintf("cannot suspend contract: current status is %s", a.status))
 	}
 
+	// Intake defense: deep-copy the caller-owned ResumeDate pointer so that a
+	// post-call mutation by the caller cannot rewrite the event payload.
+	config = config.cloneValue()
+
 	event := &ContractSuspendedEvent{
 		ContractID:      a.contractID,
 		SuspendedAt:     a.Clock().Now(),
@@ -302,8 +316,13 @@ func (a *ContractAggregate) changePriceImmediate(newPriceID shared.PriceID, pror
 		OldPriceID: a.priceID,
 		NewPriceID: newPriceID,
 		Policy:     ChangePolicyImmediate,
-		Proration:  proration,
-		ChangedAt:  a.Clock().Now(),
+		// Intake defense: deep-copy the caller-owned PlanChangeProration so a
+		// post-call mutation by the caller cannot rewrite the event payload
+		// after RaiseEvent. Money fields inside PlanChangeProration are
+		// effectively immutable from outside the shared package, so a shallow
+		// struct copy via shared.PtrCopy is sufficient.
+		Proration: shared.PtrCopy(proration),
+		ChangedAt: a.Clock().Now(),
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -354,10 +373,12 @@ func (a *ContractAggregate) ChangePaymentMethod(paymentMethodID *string, metadat
 			fmt.Sprintf("cannot change payment method: current status is %s", a.status))
 	}
 
+	// Intake defense: deep-copy the caller-owned pointer so that a post-call
+	// mutation by the caller cannot rewrite the event payload.
 	event := &PaymentMethodChangedEvent{
 		ContractID:         a.contractID,
 		OldPaymentMethodID: a.paymentMethodID,
-		NewPaymentMethodID: paymentMethodID,
+		NewPaymentMethodID: shared.PtrCopy(paymentMethodID),
 		ChangedAt:          a.Clock().Now(),
 	}
 
@@ -373,6 +394,11 @@ func (a *ContractAggregate) StartTrial(config TrialConfiguration, metadata event
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot start trial: current status is %s", a.status))
 	}
+
+	// Intake defense: deep-copy the caller-owned ConversionReminderDays slice
+	// so that a post-call mutation by the caller cannot rewrite the event
+	// payload.
+	config = config.cloneValue()
 
 	event := &TrialStartedEvent{
 		ContractID:  a.contractID,
@@ -550,11 +576,15 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 
 	case *ContractSuspendedEvent:
 		a.status = ContractStatusSuspended
-		a.suspensionConfig = &SuspensionConfiguration{
+		// Build the value form first (so cloneValue's deep-copy of ResumeDate
+		// runs once, no extra construct-then-clone indirection) and take the
+		// address of the resulting independent copy.
+		cfg := SuspensionConfiguration{
 			BillingBehavior: e.BillingBehavior,
 			ResumeDate:      e.ResumeDate,
 			Reason:          e.Reason,
-		}
+		}.cloneValue()
+		a.suspensionConfig = &cfg
 		a.updatedAt = e.SuspendedAt
 
 	case *ContractResumedEvent:
@@ -577,7 +607,10 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.updatedAt = e.ChangedAt
 
 	case *PriceChangeScheduledEvent:
-		a.pendingPriceID = &e.NewPriceID // priceID unchanged
+		// Copy the value so the aggregate's pendingPriceID does not alias the
+		// event field.
+		pending := e.NewPriceID
+		a.pendingPriceID = &pending // priceID unchanged
 		a.updatedAt = e.ScheduledAt
 
 	case *PriceChangeUnscheduledEvent:
@@ -586,7 +619,10 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 
 	case *TrialStartedEvent:
 		a.status = ContractStatusTrialing
-		a.trialConfig = &e.TrialConfig
+		// Deep-copy the slice inside TrialConfiguration so the aggregate owns
+		// its ConversionReminderDays independently of the event payload.
+		cfg := e.TrialConfig.cloneValue()
+		a.trialConfig = &cfg
 		a.updatedAt = e.StartedAt
 
 	case *TrialEndedEvent:
@@ -599,7 +635,9 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.updatedAt = e.EndedAt
 
 	case *PaymentMethodChangedEvent:
-		a.paymentMethodID = e.NewPaymentMethodID
+		// Deep-copy the pointer so the aggregate owns its paymentMethodID
+		// independently of the event payload.
+		a.paymentMethodID = shared.PtrCopy(e.NewPaymentMethodID)
 		a.updatedAt = e.ChangedAt
 
 	case *ContractRenewedEvent:
@@ -734,15 +772,18 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 		a.interval = pricing.BillingCycleToInterval(state.BillingCycle)
 	}
 	a.currentPeriod = state.CurrentPeriod
-	a.trialConfig = state.TrialConfig
-	a.suspensionConfig = state.SuspensionConfig
-	a.paymentMethodID = state.PaymentMethodID
+	// Deep-copy pointer fields so the aggregate does not alias the local
+	// snapshot state struct (defense against future refactors that may retain
+	// or reuse the state value).
+	a.trialConfig = state.TrialConfig.clone()
+	a.suspensionConfig = state.SuspensionConfig.clone()
+	a.paymentMethodID = shared.PtrCopy(state.PaymentMethodID)
 	a.priceID = state.PriceID
 	a.price = state.Price
 	a.basePrice = state.BasePrice
 	a.autoRenew = state.AutoRenew
 	a.cancelAtPeriodEnd = state.CancelAtPeriodEnd
-	a.pendingPriceID = state.PendingPriceID
+	a.pendingPriceID = shared.PtrCopy(state.PendingPriceID)
 	a.metadata = state.Metadata
 	a.createdAt = state.CreatedAt
 	a.updatedAt = state.UpdatedAt
