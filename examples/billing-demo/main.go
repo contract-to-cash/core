@@ -57,7 +57,11 @@ func main() {
 	if err := registry.InitializeAll(ctx, configs); err != nil {
 		fatal("initialize plugins", err)
 	}
-	defer registry.ShutdownAll(ctx)
+	defer func() {
+		if err := registry.ShutdownAll(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "shutdown plugins: %v\n", err)
+		}
+	}()
 
 	// ── 3. Create a subscription contract (¥3,000/month) ──
 	fmt.Println("=== Contract-to-Cash Demo (Payment-Gated Provisioning) ===")

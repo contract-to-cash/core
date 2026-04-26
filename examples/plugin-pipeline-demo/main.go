@@ -73,7 +73,11 @@ func main() {
 		"tax":              {"priority": plugin.PriorityLow},
 	}
 	must("init plugins", registry.InitializeAll(ctx, configs))
-	defer registry.ShutdownAll(ctx)
+	defer func() {
+		if err := registry.ShutdownAll(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "shutdown plugins: %v\n", err)
+		}
+	}()
 
 	fmt.Println("  Registered Plugins:")
 	fmt.Println("    [Priority 0]   audit-log        (InvoiceLifecycleHook)")
