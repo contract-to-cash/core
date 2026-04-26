@@ -31,7 +31,6 @@ type ProrationConfig struct {
 }
 
 // PlanChangeProration holds the result of a proration calculation for a plan change.
-// This mirrors billing.ProrationResult but lives in the contract domain to avoid circular dependencies.
 type PlanChangeProration struct {
 	CreditAmount     shared.Money `json:"credit_amount"`
 	ChargeAmount     shared.Money `json:"charge_amount"`

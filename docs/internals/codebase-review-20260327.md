@@ -118,7 +118,7 @@ core/
 
 | パッケージ | カバレッジ | 評価 |
 |-----------|-----------|------|
-| domain/billing | 100.0% | ★★★ |
+| domain/billing | 100.0% | ★★★ [^billing-removed] |
 | domain/product | 100.0% | ★★★ |
 | domain/usage | 90.9% | ★★★ |
 | plugins/coupon | 87.4% | ★★★ |
@@ -138,6 +138,8 @@ core/
 | application/port | 0.0% | ☆☆☆ |
 | application/projection | 0.0% | ☆☆☆ |
 | application/query | 0.0% | ☆☆☆ |
+
+[^billing-removed]: `domain/billing` パッケージは PR #118（Issue #110）で削除済み。`Calculator` IF / `ProrationResult` 構造体は実装も呼び出しも存在しなかったため、デッドコードとして除去された。請求計算の責務は `application/service.BillingService` に集約されている（`domain-model.md` §9 参照）。本表は調査日 2026-03-27 時点のスナップショットなので行は残置する。
 
 ---
 
