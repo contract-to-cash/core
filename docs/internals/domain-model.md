@@ -840,8 +840,10 @@ type ProrationConfig struct {
     RoundingMode RoundingMode
 }
 
-// PlanChangeProration は価格変更時の日割り計算結果を保持する。
-// billing.ProrationResult と同等だが、循環依存回避のため contract ドメイン内で定義。
+// PlanChangeProration は価格変更時の日割り計算結果を保持する値オブジェクト。
+// AdjustmentAmount = ChargeAmount - CreditAmount で、符号がアップグレード/
+// ダウングレード/同額のいずれかを示す。実際の計算は
+// application/service.BillingService.ProcessPriceChange が担う（§9 参照）。
 type PlanChangeProration struct {
     CreditAmount     shared.Money
     ChargeAmount     shared.Money
@@ -1606,53 +1608,27 @@ type Repository interface {
 }
 ```
 
-## 9. ドメインサービス
+## 9. 請求計算の責務配置
 
-### 9.1 請求計算サービス
+請求計算は **アプリケーション層の `BillingService` が担う**。専用のドメインサービスは置かない。
 
-```go
-// domain/billing/service.go
-package billing
+| 役割 | 配置 | 主な型・メソッド |
+|------|------|------------------|
+| 請求書生成（契約タイプ別の subtotal 算出 → Hook → Invoice 永続化） | `application/service/billing_service.go` | `BillingService.GenerateInvoice` / `calculateSubtotal` |
+| 価格変更時の日割り計算 | `application/service/billing_service.go` | `BillingService.ProcessPriceChange` |
+| 日割り計算結果の値オブジェクト | `domain/contract` | `PlanChangeProration`（§3.7 参照） |
 
-import (
-    "context"
-    "time"
+過去には「`domain/billing.Calculator` ドメインサービス」案を検討したが、
 
-    "github.com/contract-to-cash/core/domain/shared"
-)
+- `Calculator` IF を実装する適当なエンティティが存在せず、`BillingService` が `Repository` ・ `Plugin Registry` ・ `TxManager` と協調する以上、その配置はアプリケーション層が自然
+- ドメイン層に `contract` ・ `invoice` 双方を参照する独立サービスを置くと、レイヤ依存が逆転する場面が多くメリットが薄い
+- 日割り結果型 `PlanChangeProration` だけを `domain/contract` 配下に置く方が、Aggregate のメソッドから直接返せて取り回しが良い
 
-// Calculator 請求計算ドメインサービス
-// contract と invoice を橋渡しする（両方のドメインを参照してよい唯一のドメインサービス）
-// Clock IF を DI で受け取り、日割り計算等の時刻判定に使用する
-type Calculator interface {
-    // GenerateInvoice 契約から請求書を生成
-    GenerateInvoice(ctx context.Context, contractID shared.ContractID) error
+という理由で、`domain/billing` パッケージは **採用せず削除した**（PR #118 / Issue #110）。
 
-    // CalculateProration 日割り計算
-    CalculateProration(ctx context.Context, contractID shared.ContractID, newPrice shared.Money) (*ProrationResult, error)
-}
-
-type ProrationResult struct {
-    CreditAmount     shared.Money // 旧価格残日数分（内訳記録用）
-    ChargeAmount     shared.Money // 新価格残日数分（内訳記録用）
-    AdjustmentAmount shared.Money // 日割り調整額（ChargeAmount - CreditAmount）
-    // AdjustmentAmount > 0: 追加請求（アップグレード）
-    // AdjustmentAmount < 0: 次回請求からクレジット差引（ダウングレード）
-    // AdjustmentAmount = 0: 精算不要
-    EffectiveDate time.Time
-}
-
-// NewProrationResult CreditとChargeからAdjustmentAmountを自動算出
-func NewProrationResult(credit, charge shared.Money, effectiveDate time.Time) (*ProrationResult, error)
-// 決済時の動作:
-//   アップグレード（Adjustment > 0）→ AdjustmentAmount のみ1回請求
-//   ダウングレード（Adjustment < 0）→ BalancePolicy に従って処理（後述）
-//   同額価格変更（Adjustment = 0）→ 決済なし
-```
-
-> **注**: 旧 `domain/contract/engine.go`（`Engine`, `SubscriptionEngine`, `UsageBasedEngine`）は
+> **注**: 旧 `domain/contract/engine.go`（`Engine`, `SubscriptionEngine`, `UsageBasedEngine`）も
 > 削除済み。契約タイプ別の処理ロジックは `application/service/billing_service.go` の
-> `calculateSubtotal()` に移動している（`plugin-system.md` セクション8参照）。
+> `calculateSubtotal()` に集約されている（`plugin-system.md` セクション8参照）。
 
 ## 10. クレジット台帳（Credit Ledger）
 
@@ -1713,7 +1689,7 @@ type BalanceEntry struct {
     remainingAmount shared.Money      // 未使用残高
     reason          BalanceReason      // 発生理由
     sourceType      string            // 発生元の種類（"proration", "manual", "refund_conversion"）
-    sourceID        string            // 発生元ID（ProrationResult ID, 管理者操作ID等）
+    sourceID        string            // 発生元ID（PlanChangeProration ID, 管理者操作ID等）
     description     string            // 説明（「Pro価格→Basic価格への日割り調整」等）
     expiresAt       *time.Time        // 有効期限（nil = 無期限）
     createdAt       time.Time
@@ -1872,7 +1848,7 @@ func (s *BillingService) applyCredits(ctx context.Context, tx *sql.Tx, invoice *
 ### 10.6 ダウングレード時のフロー（BalancePolicy別）
 
 ```
-ProrationResult.AdjustmentAmount < 0（ダウングレード）
+PlanChangeProration.AdjustmentAmount < 0（ダウングレード）
   |
   +-- BalancePolicyLedger（デフォルト）
   |   -> BalanceEntry 作成（reason: proration）

@@ -1248,7 +1248,7 @@ func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID string) 
 }
 
 // ProcessPriceChange 価格変更時のクレジット処理
-// ProrationResult.AdjustmentAmount < 0 の場合、BalancePolicy に従い分岐
+// PlanChangeProration.AdjustmentAmount < 0 の場合、BalancePolicy に従い分岐
 func (s *BillingService) ProcessPriceChange(ctx context.Context, contractID shared.ContractID, newPriceID shared.PriceID) error {
     // 1. 日割り計算
     proration, err := s.calculator.CalculateProration(ctx, contractID, newPriceID)

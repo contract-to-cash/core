@@ -645,8 +645,10 @@ type Invoice struct {
 
 #### Engine の除去と billing ドメインサービスの導入
 
+> **採用結果（追記 2026-04）**: 本提案のうち `Engine` 除去と `application/service` への計算ロジック移動は採用したが、`domain/billing.Calculator` ドメインサービス自体は **採用せず削除した**（PR #118 / Issue #110）。`Calculator` IF を実装する適当なエンティティが無く、`BillingService` がリポジトリ・プラグインレジストリ・トランザクションマネージャと協調する以上、その配置はアプリケーション層が自然と判断したため。日割り計算結果型のみ `domain/contract.PlanChangeProration` として contract ドメインに残している。詳細は `docs/internals/domain-model.md` §9 を参照。
+
 ```go
-// domain/billing/service.go
+// domain/billing/service.go  ← 一度導入したが PR #118 で削除済み
 package billing
 
 // Calculator 請求計算ドメインサービス
@@ -666,7 +668,7 @@ type ProrationResult struct {
 }
 ```
 
-`domain/contract/engine.go` は削除する。`SubscriptionEngine`, `UsageBasedEngine` のロジックは `application/service/` に移動し、`billing.Calculator` を実装する。
+`domain/contract/engine.go` は削除する。`SubscriptionEngine`, `UsageBasedEngine` のロジックは `application/service/` に移動する（当初は `billing.Calculator` 実装として配置する案だったが、最終的に `application/service.BillingService` のメソッドに直接配置する形で着地した）。
 
 #### 改善後の依存グラフ
 
