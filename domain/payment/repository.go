@@ -7,7 +7,46 @@ import (
 )
 
 // Repository defines the persistence interface for payments.
+//
+// Concurrency contract (issue #97): implementations MUST enforce a unique
+// constraint on idempotency_key so that concurrent ProcessPayment calls
+// with the same key cannot persist two distinct payment records. The
+// application-layer FindByIdempotencyKey / Save pair cannot serialize
+// on its own — the guarantee has to come from the storage backend.
+//
+// Recommended implementations:
+//   - Postgres / MySQL: a UNIQUE INDEX on idempotency_key (or a
+//     SELECT ... FOR UPDATE inside the TxManager.RunInTx closure).
+//   - DynamoDB: a ConditionExpression that rejects the put when the key
+//     already exists.
+//   - Any other backend: an equivalent compare-and-swap guarantee.
+//
+// When the constraint fires, Save MUST return an error that satisfies
+// errors.Is(err, [ErrDuplicateIdempotencyKey]) — typically a
+// [*DuplicateIdempotencyKeyError]. PaymentService catches the sentinel
+// as a concurrent-success race-loss signal and converges on the
+// winner's record via FindByIdempotencyKey rather than firing saga
+// compensation.
+//
+// Migration note for consumer adapters: raw driver errors (e.g.
+// `pgconn.PgError{Code: "23505"}`, `*mysql.MySQLError{Number: 1062}`,
+// DynamoDB `ConditionalCheckFailedException`) MUST be translated to
+// the sentinel before returning to the application layer. A consumer
+// adapter that returns a raw driver error will route the race loser
+// through saga compensation, refunding the winner's legitimate
+// gateway charge (see CHANGELOG entry for v-BREAKING-97).
 type Repository interface {
+	// Save persists a payment.
+	//
+	// If the payment's IdempotencyKey collides with a DIFFERENT persisted
+	// payment (same non-empty key, different ID), Save MUST return an
+	// error matching errors.Is(err, [ErrDuplicateIdempotencyKey]).
+	// Implementations are encouraged to return a
+	// [*DuplicateIdempotencyKeyError] so callers can extract the
+	// offending key and involved PaymentIDs via errors.As.
+	//
+	// Same-ID updates (e.g. the 3DS Pending → Completed upgrade path)
+	// MUST be allowed because they target the existing record.
 	Save(ctx context.Context, payment *Payment) error
 	FindByID(ctx context.Context, id shared.PaymentID) (*Payment, error)
 	FindByInvoiceID(ctx context.Context, invoiceID shared.InvoiceID) ([]*Payment, error)

@@ -2,6 +2,7 @@ package inmemory
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -168,5 +169,113 @@ func TestInMemoryPaymentRepository_OverwriteOnDuplicateSave(t *testing.T) {
 	}
 	if found.Status() != payment.PaymentStatusCompleted {
 		t.Errorf("expected status completed after overwrite, got %s", found.Status())
+	}
+}
+
+// TestInMemoryPaymentRepository_Save_DuplicateIdempotencyKey verifies the
+// #97 concurrent-success-race contract: Save rejects a second payment
+// record with the same idempotency_key but a different PaymentID, and
+// the returned error satisfies errors.Is against
+// payment.ErrDuplicateIdempotencyKey and errors.As to a
+// *payment.DuplicateIdempotencyKeyError with populated fields.
+// PaymentService relies on this sentinel to route the race loser to
+// the winner's record instead of firing saga compensation.
+func TestInMemoryPaymentRepository_Save_DuplicateIdempotencyKey(t *testing.T) {
+	repo := NewInMemoryPaymentRepository()
+	ctx := context.Background()
+
+	invoiceID := shared.NewInvoiceID()
+	p1 := newTestPayment(t, invoiceID)
+	p1.SetIdempotencyKey("idem-unique-001")
+	if err := repo.Save(ctx, p1); err != nil {
+		t.Fatalf("first Save failed: %v", err)
+	}
+
+	// Second payment with a DIFFERENT ID but the SAME idempotency key
+	// must be rejected via the payment-scoped sentinel.
+	p2 := newTestPayment(t, invoiceID)
+	p2.SetIdempotencyKey("idem-unique-001")
+	err := repo.Save(ctx, p2)
+	if err == nil {
+		t.Fatal("expected duplicate-key error on second Save, got nil")
+	}
+	if !errors.Is(err, payment.ErrDuplicateIdempotencyKey) {
+		t.Errorf("errors.Is(err, ErrDuplicateIdempotencyKey) must be true, got: %v", err)
+	}
+	var dupErr *payment.DuplicateIdempotencyKeyError
+	if !errors.As(err, &dupErr) {
+		t.Fatalf("expected *DuplicateIdempotencyKeyError, got %T: %v", err, err)
+	}
+	if dupErr.Key != "idem-unique-001" {
+		t.Errorf("expected Key=%q, got %q", "idem-unique-001", dupErr.Key)
+	}
+	if dupErr.ExistingID != p1.ID() {
+		t.Errorf("expected ExistingID=%s, got %s", p1.ID(), dupErr.ExistingID)
+	}
+	if dupErr.AttemptedID != p2.ID() {
+		t.Errorf("expected AttemptedID=%s, got %s", p2.ID(), dupErr.AttemptedID)
+	}
+
+	// Exactly one payment must be persisted for this idempotency key.
+	found, err := repo.FindByIdempotencyKey(ctx, "idem-unique-001")
+	if err != nil {
+		t.Fatalf("FindByIdempotencyKey: %v", err)
+	}
+	if found == nil || found.ID() != p1.ID() {
+		t.Errorf("expected to find winner %s, got %+v", p1.ID(), found)
+	}
+}
+
+// TestInMemoryPaymentRepository_Save_SameIDReSaveAllowed ensures the
+// same-ID re-save path (e.g. the 3DS Pending → Completed upgrade) is
+// not blocked by the duplicate-key guard.
+func TestInMemoryPaymentRepository_Save_SameIDReSaveAllowed(t *testing.T) {
+	repo := NewInMemoryPaymentRepository()
+	ctx := context.Background()
+
+	p := newTestPayment(t, shared.NewInvoiceID())
+	p.SetIdempotencyKey("idem-reuse-001")
+	if err := repo.Save(ctx, p); err != nil {
+		t.Fatalf("first Save failed: %v", err)
+	}
+
+	// Upgrade the same instance to Completed and re-save.
+	if err := p.Complete(); err != nil {
+		t.Fatalf("Complete failed: %v", err)
+	}
+	if err := repo.Save(ctx, p); err != nil {
+		t.Errorf("same-ID re-save must succeed, got: %v", err)
+	}
+
+	found, err := repo.FindByID(ctx, p.ID())
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if found.Status() != payment.PaymentStatusCompleted {
+		t.Errorf("expected Completed after upgrade, got %q", found.Status())
+	}
+}
+
+// TestInMemoryPaymentRepository_Save_EmptyKeyNotEnforced verifies that the
+// unique guard only applies to NON-empty idempotency keys. Legacy
+// payments without a key must not be reported as duplicates of one
+// another — there is no race to protect against there.
+func TestInMemoryPaymentRepository_Save_EmptyKeyNotEnforced(t *testing.T) {
+	repo := NewInMemoryPaymentRepository()
+	ctx := context.Background()
+
+	invoiceID := shared.NewInvoiceID()
+	p1 := newTestPayment(t, invoiceID)
+	p2 := newTestPayment(t, invoiceID)
+	if p1.IdempotencyKey() != "" || p2.IdempotencyKey() != "" {
+		t.Fatalf("precondition: fresh payments must have empty idempotency key; got %q / %q",
+			p1.IdempotencyKey(), p2.IdempotencyKey())
+	}
+
+	if err := repo.Save(ctx, p1); err != nil {
+		t.Fatalf("first Save failed: %v", err)
+	}
+	if err := repo.Save(ctx, p2); err != nil {
+		t.Errorf("empty-key Save must be allowed, got: %v", err)
 	}
 }
