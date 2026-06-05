@@ -54,6 +54,19 @@ func (s *ProjectionService) RegisterProjector(p Projector) {
 
 // Start begins processing events from the event store subscription.
 // It blocks until the context is cancelled.
+//
+// Failure semantics (IMPORTANT):
+//   - SyncMode=true: a projector failure (after MaxRetries) aborts Start and
+//     returns the error, so the caller can stop and retry — at-least-once within
+//     the caller's control.
+//   - SyncMode=false (async): a projector failure is logged and SKIPPED; the
+//     loop advances to the next event. There is no built-in dead-letter queue or
+//     checkpoint, so a permanently-failing event leaves the read model
+//     divergent until a full RebuildAll. Choose SyncMode for at-least-once
+//     delivery, or run RebuildAll to recover from divergence. The reliability of
+//     the underlying subscription is a property of the consumer's eventstore.Store
+//     implementation (the in-memory reference store is best-effort — see its
+//     Subscribe doc).
 func (s *ProjectionService) Start(ctx context.Context) error {
 	eventCh, err := s.eventStore.Subscribe(ctx, 0)
 	if err != nil {

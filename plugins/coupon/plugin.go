@@ -137,6 +137,13 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 	total := zero
 	now := p.clock.Now()
 	for _, c := range coupons {
+		// Defensive validity check: even though the repository is given `At` and
+		// is expected to filter, repo filtering is optional — re-check the
+		// validity window and global usage limit here (review M4).
+		if !c.IsValid(now) {
+			continue
+		}
+
 		// Check minimum purchase amount
 		if c.minAmount != nil && subtotal.Amount().Cmp(c.minAmount.Amount()) < 0 {
 			continue
@@ -154,6 +161,14 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		}
 
 		discount := c.CalculateDiscount(subtotal)
+
+		// Skip fixed-amount coupons denominated in a different currency from the
+		// invoice rather than aborting the entire calculation downstream when
+		// total.Add hits a currency mismatch (review W6). Percentage discounts
+		// are derived from the subtotal and always match.
+		if discount.Currency() != currency {
+			continue
+		}
 
 		// Cap individual discount at subtotal
 		if discount.GreaterThan(subtotal) {

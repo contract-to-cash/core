@@ -577,7 +577,11 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// RunInTx returns so the AfterCharge hooks see a fresh snapshot
 	// consistent with the winner's payment.
 	var racedLoser bool
-	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+	// tx.Run (not raw RunInTx) so this stamps the transaction onto the context
+	// and joins an outer transaction when one is active (review M2). The
+	// duplicate-key convergence below re-reads the winner on the OUTER ctx (which
+	// tx.Run leaves unstamped), so it remains a fresh read at the top level.
+	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
 		// Idempotency check first: avoid mutating in-memory state if a
 		// payment with the effective key was already persisted by a prior call.
 		//
@@ -860,8 +864,10 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		refundAmount = remaining
 	}
 
-	// Phase 3: local save in transaction
-	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+	// Phase 3: local save in transaction. tx.Run (not raw RunInTx) so this joins
+	// an outer transaction if the caller already started one, and stamps the tx
+	// onto the context for any nested tx.Run (review M2).
+	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
 		if refundErr := p.RecordRefund(refundAmount); refundErr != nil {
 			return refundErr
 		}

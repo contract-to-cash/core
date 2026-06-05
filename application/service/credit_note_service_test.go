@@ -14,6 +14,7 @@ import (
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/shared"
+	"github.com/contract-to-cash/core/infrastructure/inmemory"
 	"github.com/contract-to-cash/core/plugin"
 )
 
@@ -708,6 +709,67 @@ func TestReissueInvoice_UsesSingleTransaction(t *testing.T) {
 	}
 	if innerTx.count != 0 {
 		t.Errorf("expected inner billing to join the outer transaction (0 inner tx), got %d", innerTx.count)
+	}
+}
+
+// TestReissueInvoice_AppliesCreditsViaJoinedTransaction guards review M1/W1: when
+// the inner BillingService joins the outer CreditNoteService transaction, it must
+// still apply credits even though the outer manager only wired the Invoices repo.
+// tx.Run fills the missing Balances repo from the billing manager on join.
+func TestReissueInvoice_AppliesCreditsViaJoinedTransaction(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	period := currentPeriodOf(agg)
+
+	originalInv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(10000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+		invoice.WithBillingPeriod(period),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
+	cnRepo := &mockCreditNoteRepo{}
+
+	// Seed a 3000 JPY credit for the account.
+	balRepo := inmemory.NewInMemoryBalanceRepository(clock)
+	entry := balance.NewBalanceEntry(agg.AccountID(), jpy(3000), balance.BalanceReasonGoodwill, clock.Now())
+	if err := balRepo.Save(context.Background(), entry); err != nil {
+		t.Fatalf("failed to seed balance: %v", err)
+	}
+
+	// BillingService HAS the balance repo (its default tx manager carries Balances).
+	billingSvc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+		WithBalanceRepo(balRepo),
+	)
+
+	// CreditNoteService's tx manager LACKS Balances (only Invoices).
+	svc := NewCreditNoteService(invRepo, cnRepo, plugin.NewRegistry(), clock,
+		WithBillingService(billingSvc),
+		WithCreditNoteTxManager(tx.NewNoopTxManager(tx.Repos{Invoices: invRepo})),
+	)
+
+	replacement, err := svc.ReissueInvoice(context.Background(), originalInv.ID(), "billing error")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The 3000 credit must have been applied on the replacement, proving the
+	// joined transaction received the Balances repo via fallback.
+	if replacement.AppliedBalance().Amount().Cmp(big.NewRat(3000, 1)) != 0 {
+		t.Errorf("expected 3000 credit applied on reissued invoice, got %s",
+			replacement.AppliedBalance().Amount().RatString())
 	}
 }
 

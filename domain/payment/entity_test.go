@@ -234,6 +234,26 @@ func TestPayment_RecordRefund_FullRefund(t *testing.T) {
 	}
 }
 
+// TestPayment_RecordRefund_NegativeAmount_Rejected guards a financial invariant:
+// a negative refund would otherwise DECREASE the cumulative refunded total and
+// could flip status refunded -> partially_refunded. See review M3.
+func TestPayment_RecordRefund_NegativeAmount_Rejected(t *testing.T) {
+	p := newTestPayment()
+	completePayment(t, p)
+
+	neg := shared.NewMoney(big.NewRat(-1000, 1), shared.CurrencyJPY)
+	err := p.RecordRefund(neg)
+	if err == nil {
+		t.Fatal("expected error for negative refund amount, got nil")
+	}
+	if p.RefundedAmount().Amount().Sign() != 0 {
+		t.Errorf("refunded amount changed after rejected refund: %s", p.RefundedAmount().Amount().RatString())
+	}
+	if p.Status() != PaymentStatusCompleted {
+		t.Errorf("status changed after rejected refund: %s", p.Status())
+	}
+}
+
 func TestPayment_RecordRefund_PartialRefund(t *testing.T) {
 	p := newTestPayment()
 	completePayment(t, p)
@@ -541,16 +561,15 @@ func TestPayment_RecordRefund_ZeroAmount(t *testing.T) {
 	completePayment(t, p)
 
 	zero := shared.NewMoney(big.NewRat(0, 1), shared.CurrencyJPY)
+	// A zero refund is meaningless and previously flipped status from completed
+	// to partially_refunded (a spurious state change). RecordRefund now rejects
+	// non-positive amounts, so the payment must be left untouched (review M3).
 	err := p.RecordRefund(zero)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for zero refund amount, got nil")
 	}
-	// NOTE: Zero refund changes status from completed to partially_refunded
-	// because cumulative refunded (0) < payment amount (5000) hits the else branch.
-	// This is arguably a design issue (zero refund shouldn't trigger a state change),
-	// but it reflects the current implementation. Consider adding a guard in RecordRefund.
-	if p.Status() != PaymentStatusPartiallyRefunded {
-		t.Errorf("expected partially_refunded after zero refund, got %s", p.Status())
+	if p.Status() != PaymentStatusCompleted {
+		t.Errorf("expected status unchanged (completed) after rejected zero refund, got %s", p.Status())
 	}
 	if !p.RefundedAmount().IsZero() {
 		t.Errorf("expected refundedAmount to be zero, got %s", p.RefundedAmount().Amount().RatString())

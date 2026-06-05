@@ -104,6 +104,60 @@ func newTestCoupon(id CouponID, code string, ct CouponType, value *big.Rat, appl
 	)
 }
 
+// TestCouponPlugin_DefensivelySkipsExpiredCoupon guards review M4: even if a repo
+// returns an expired/exhausted coupon, the plugin must defensively skip it via
+// IsValid rather than apply it and record a redemption.
+func TestCouponPlugin_DefensivelySkipsExpiredCoupon(t *testing.T) {
+	expired := NewCoupon(
+		"c-exp", "OLD10", CouponTypePercentage, big.NewRat(10, 100), shared.CurrencyJPY,
+		nil, nil,
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), // expired before testClock (2026-06-01)
+		nil, 0, nil,
+	)
+	repo := newMockRepo(expired)
+	p := NewCouponPlugin(repo, testClock)
+
+	ctx := newTestContext(shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY))
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !discount.IsZero() {
+		t.Errorf("expected no discount for expired coupon, got %s", discount.Amount().RatString())
+	}
+	if repo.saveRedemptionCall != 0 {
+		t.Errorf("expected no redemption recorded for expired coupon, got %d", repo.saveRedemptionCall)
+	}
+}
+
+// TestCouponPlugin_SkipsForeignCurrencyFixedCoupon guards review W6: a fixed-amount
+// coupon denominated in a different currency from the invoice must be skipped, not
+// abort the whole invoice calculation with a currency-mismatch error.
+func TestCouponPlugin_SkipsForeignCurrencyFixedCoupon(t *testing.T) {
+	usdCoupon := NewCoupon(
+		"c-usd", "USD5", CouponTypeFixed, big.NewRat(5, 1), shared.CurrencyUSD,
+		nil, nil,
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
+		nil, 0, nil,
+	)
+	repo := newMockRepo(usdCoupon)
+	p := NewCouponPlugin(repo, testClock)
+
+	ctx := newTestContext(shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY))
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("expected no error (coupon should be skipped), got %v", err)
+	}
+	if discount.Currency() != shared.CurrencyJPY || !discount.IsZero() {
+		t.Errorf("expected zero JPY discount, got %s %s", discount.Amount().RatString(), discount.Currency())
+	}
+	if repo.saveRedemptionCall != 0 {
+		t.Errorf("expected no redemption for foreign-currency coupon, got %d", repo.saveRedemptionCall)
+	}
+}
+
 func TestCouponPlugin_PercentageDiscount(t *testing.T) {
 	coupon := newTestCoupon("c1", "SAVE10", CouponTypePercentage, big.NewRat(10, 100), nil)
 	repo := newMockRepo(coupon)

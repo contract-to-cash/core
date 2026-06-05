@@ -152,6 +152,12 @@ func (e *BalanceEntry) LoadedVersion() int { return e.loadedVersion }
 // Consume reduces the remaining amount by the given amount and increments the version.
 // Returns the actually consumed amount (may be less than requested if insufficient balance).
 func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error) {
+	// Guard the financial invariant: a negative amount would subtract a
+	// negative below and inflate the remaining balance (create credit).
+	if amount.IsNegative() {
+		return shared.Money{}, shared.NewDomainError(shared.ErrCodeValidation,
+			"consume amount must not be negative")
+	}
 	available := e.remainingAmount
 	consumed, err := available.Min(amount)
 	if err != nil {
