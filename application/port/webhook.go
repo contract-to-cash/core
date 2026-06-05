@@ -196,9 +196,14 @@ func (p *WebhookProcessor) ProcessWebhook(
 			break
 		}
 		if attempt < p.config.MaxRetries {
-			// Exponential backoff with jitter to prevent thundering herd
+			// Exponential backoff with jitter to prevent thundering herd.
+			// Guard against base/10 == 0 (sub-10ns backoff): rand.Int63n panics
+			// on a non-positive argument (review #2).
 			base := p.config.RetryBackoff * time.Duration(1<<uint(attempt))
-			jitter := time.Duration(rand.Int63n(int64(base / 10)))
+			var jitter time.Duration
+			if jitterMax := int64(base / 10); jitterMax > 0 {
+				jitter = time.Duration(rand.Int63n(jitterMax))
+			}
 			delay := base + jitter
 			select {
 			case <-ctx.Done():
