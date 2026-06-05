@@ -16,12 +16,18 @@ const (
 )
 
 // RoundingMode defines how monetary rounding is performed.
-type RoundingMode string
+//
+// It aliases shared.RoundingMode so that a proration calculator can apply the
+// configured mode directly via Money.Round (e.g.
+// adjustment.Round(2, cfg.RoundingMode)). Proration itself is computed by the
+// consumer-provided billing.BillingCalculationService; this config carries the
+// rounding policy through to that implementation.
+type RoundingMode = shared.RoundingMode
 
 const (
-	RoundingUp     RoundingMode = "up"
-	RoundingDown   RoundingMode = "down"
-	RoundingHalfUp RoundingMode = "half_up"
+	RoundingUp     = shared.RoundUp
+	RoundingDown   = shared.RoundDown
+	RoundingHalfUp = shared.RoundHalfUp
 )
 
 // ProrationConfig holds proration settings.

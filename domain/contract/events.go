@@ -24,6 +24,8 @@ const (
 	EventTypeCancellationUnscheduled eventstore.EventType = "contract.cancellation_unscheduled"
 	EventTypePriceChangeScheduled    eventstore.EventType = "contract.price_change_scheduled"
 	EventTypePriceChangeUnscheduled  eventstore.EventType = "contract.price_change_unscheduled"
+	EventTypeContractPastDue         eventstore.EventType = "contract.past_due"
+	EventTypeContractRecovered       eventstore.EventType = "contract.recovered"
 )
 
 // ContractCreatedEvent is raised when a new contract is created.
@@ -196,3 +198,22 @@ type CancellationUnscheduledEvent struct {
 func (e *CancellationUnscheduledEvent) EventType() eventstore.EventType {
 	return EventTypeCancellationUnscheduled
 }
+
+// ContractPastDueEvent is raised when an active contract enters the past_due
+// state, typically after a payment failure drives dunning.
+type ContractPastDueEvent struct {
+	ContractID shared.ContractID `json:"contract_id"`
+	Reason     string            `json:"reason"`
+	MarkedAt   time.Time         `json:"marked_at"`
+}
+
+func (e *ContractPastDueEvent) EventType() eventstore.EventType { return EventTypeContractPastDue }
+
+// ContractRecoveredEvent is raised when a past_due contract returns to active,
+// typically after a successful payment.
+type ContractRecoveredEvent struct {
+	ContractID  shared.ContractID `json:"contract_id"`
+	RecoveredAt time.Time         `json:"recovered_at"`
+}
+
+func (e *ContractRecoveredEvent) EventType() eventstore.EventType { return EventTypeContractRecovered }

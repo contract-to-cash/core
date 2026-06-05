@@ -52,6 +52,44 @@ func (m *NoopTxManager) RunInTx(ctx context.Context, fn func(context.Context, Re
 	return fn(ctx, m.r)
 }
 
+// txReposKey is the context key under which an in-progress transaction's repos
+// are stored, enabling nested Run calls to join the outer transaction.
+type txReposKey struct{}
+
+// Run executes fn within a transaction managed by mgr.
+//
+// If ctx already carries an in-progress transaction (because an outer Run is
+// active), fn JOINS that transaction using the existing transaction-scoped
+// repos instead of opening a new, independent one. This prevents two separate
+// transactions when one transactional service calls another (e.g.
+// CreditNoteService.ReissueInvoice invoking BillingService.GenerateInvoice) —
+// see review #4. In that nested case mgr is not used.
+//
+// Consumers implementing a real database TxManager get correct single-transaction
+// atomicity for nested service calls for free, provided the same propagated ctx
+// is threaded through (which the core services do).
+func Run(ctx context.Context, mgr TxManager, fn func(ctx context.Context, repos Repos) error) error {
+	if existing, ok := reposFromContext(ctx); ok {
+		// Already inside a transaction — join it.
+		return fn(ctx, existing)
+	}
+	return mgr.RunInTx(ctx, func(txCtx context.Context, repos Repos) error {
+		return fn(withRepos(txCtx, repos), repos)
+	})
+}
+
+// withRepos stamps the transaction-scoped repos onto ctx so nested Run calls can
+// detect and join the active transaction.
+func withRepos(ctx context.Context, repos Repos) context.Context {
+	return context.WithValue(ctx, txReposKey{}, repos)
+}
+
+// reposFromContext returns the active transaction's repos, if any.
+func reposFromContext(ctx context.Context) (Repos, bool) {
+	r, ok := ctx.Value(txReposKey{}).(Repos)
+	return r, ok
+}
+
 // RetryOnConflict retries fn up to maxRetries times when ErrVersionConflict
 // is returned. Non-conflict errors are returned immediately without retry.
 // No backoff is applied — optimistic lock conflicts resolve on immediate retry.

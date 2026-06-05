@@ -119,18 +119,48 @@ func NewCreditNote(
 		return nil, shared.NewDomainError(shared.ErrCodeValidation, "credit note must have at least one item")
 	}
 
+	// All item amounts (and their taxes) must share a single currency. Mixing
+	// currencies would otherwise silently corrupt the totals and let an
+	// over-credit slip past the caller's "exceeds invoice total" guard, since
+	// Money.GreaterThan returns false on a currency mismatch (see review #2).
 	currency := items[0].amount.Currency()
 	subtotal := shared.Zero(currency)
 	taxAmount := shared.Zero(currency)
 
 	for _, item := range items {
-		s, _ := subtotal.Add(item.amount)
+		if item.amount.Currency() != currency {
+			return nil, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+				fmt.Sprintf("credit note items must share a single currency: got %s and %s",
+					currency, item.amount.Currency()))
+		}
+		s, err := subtotal.Add(item.amount)
+		if err != nil {
+			return nil, err
+		}
 		subtotal = s
-		ta, _ := taxAmount.Add(item.taxAmount)
+
+		// A zero-value (empty-currency) tax means "no tax"; normalise it to the
+		// base currency so it contributes zero rather than triggering a mismatch.
+		itemTax := item.taxAmount
+		if itemTax.IsZero() {
+			itemTax = shared.Zero(currency)
+		}
+		if itemTax.Currency() != currency {
+			return nil, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+				fmt.Sprintf("credit note item tax currency %s does not match item currency %s",
+					itemTax.Currency(), currency))
+		}
+		ta, err := taxAmount.Add(itemTax)
+		if err != nil {
+			return nil, err
+		}
 		taxAmount = ta
 	}
 
-	total, _ := subtotal.Add(taxAmount)
+	total, err := subtotal.Add(taxAmount)
+	if err != nil {
+		return nil, err
+	}
 
 	cn := &CreditNote{
 		id:           id,

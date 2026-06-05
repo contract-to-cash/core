@@ -28,6 +28,8 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 	r.Register(&CancellationUnscheduledEvent{})
 	r.Register(&PriceChangeScheduledEvent{})
 	r.Register(&PriceChangeUnscheduledEvent{})
+	r.Register(&ContractPastDueEvent{})
+	r.Register(&ContractRecoveredEvent{})
 	return r
 }()
 
@@ -283,6 +285,46 @@ func (a *ContractAggregate) Cancel(reason string, metadata eventstore.EventMetad
 		ContractID:  a.contractID,
 		CancelledAt: a.Clock().Now(),
 		Reason:      reason,
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// MarkPastDue transitions an active contract to past_due, e.g. when a payment
+// failure starts the dunning process. From past_due the contract can recover
+// (RecoverFromPastDue), be suspended (max retries reached), or be cancelled.
+func (a *ContractAggregate) MarkPastDue(reason string, metadata eventstore.EventMetadata) error {
+	if a.status != ContractStatusActive {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot mark past due: current status is %s", a.status))
+	}
+
+	event := &ContractPastDueEvent{
+		ContractID: a.contractID,
+		Reason:     reason,
+		MarkedAt:   a.Clock().Now(),
+	}
+
+	if err := a.Apply(event); err != nil {
+		return err
+	}
+	return a.RaiseEvent(event, metadata)
+}
+
+// RecoverFromPastDue transitions a past_due contract back to active, e.g. after
+// a successful payment clears the outstanding balance.
+func (a *ContractAggregate) RecoverFromPastDue(metadata eventstore.EventMetadata) error {
+	if a.status != ContractStatusPastDue {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot recover from past due: current status is %s", a.status))
+	}
+
+	event := &ContractRecoveredEvent{
+		ContractID:  a.contractID,
+		RecoveredAt: a.Clock().Now(),
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -664,6 +706,14 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *CancellationUnscheduledEvent:
 		a.cancelAtPeriodEnd = false
 		a.updatedAt = e.UnscheduledAt
+
+	case *ContractPastDueEvent:
+		a.status = ContractStatusPastDue
+		a.updatedAt = e.MarkedAt
+
+	case *ContractRecoveredEvent:
+		a.status = ContractStatusActive
+		a.updatedAt = e.RecoveredAt
 
 	default:
 		return shared.NewDomainError(shared.ErrCodeUnknownEvent,

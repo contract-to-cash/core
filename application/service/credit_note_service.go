@@ -108,18 +108,45 @@ func (s *CreditNoteService) CreateCreditNote(
 			"credit note must have at least one item")
 	}
 
-	// Validate that credit note total does not exceed original invoice total
-	var itemSubtotal, itemTax shared.Money
-	currency := items[0].Amount().Currency()
-	itemSubtotal = shared.Zero(currency)
-	itemTax = shared.Zero(currency)
+	// Validate that credit note total does not exceed original invoice total.
+	// The credit note must be denominated in the invoice's currency: otherwise
+	// the over-credit comparison below (Money.GreaterThan) silently returns false
+	// on a currency mismatch and an arbitrarily large foreign total slips through
+	// (review #2). Anchor the currency on the invoice, not on items[0].
+	currency := inv.Total().Currency()
+	itemSubtotal := shared.Zero(currency)
+	itemTax := shared.Zero(currency)
 	for _, item := range items {
-		s, _ := itemSubtotal.Add(item.Amount())
+		if item.Amount().Currency() != currency {
+			return nil, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+				fmt.Sprintf("credit note item currency %s does not match invoice currency %s",
+					item.Amount().Currency(), currency))
+		}
+		s, err := itemSubtotal.Add(item.Amount())
+		if err != nil {
+			return nil, fmt.Errorf("failed to sum credit note item amounts: %w", err)
+		}
 		itemSubtotal = s
-		ta, _ := itemTax.Add(item.TaxAmount())
+
+		itemTaxAmt := item.TaxAmount()
+		if itemTaxAmt.IsZero() {
+			itemTaxAmt = shared.Zero(currency)
+		}
+		if itemTaxAmt.Currency() != currency {
+			return nil, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+				fmt.Sprintf("credit note item tax currency %s does not match invoice currency %s",
+					itemTaxAmt.Currency(), currency))
+		}
+		ta, err := itemTax.Add(itemTaxAmt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to sum credit note item taxes: %w", err)
+		}
 		itemTax = ta
 	}
-	cnTotal, _ := itemSubtotal.Add(itemTax)
+	cnTotal, err := itemSubtotal.Add(itemTax)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute credit note total: %w", err)
+	}
 	if cnTotal.GreaterThan(inv.Total()) {
 		return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
 			fmt.Sprintf("credit note total %s exceeds invoice total %s",
@@ -241,12 +268,14 @@ func (s *CreditNoteService) ReissueInvoice(ctx context.Context, originalInvoiceI
 		rootID = *original.OriginalInvoiceID()
 	}
 
-	// All writes are atomic within a transaction.
-	// Note: BillingService.GenerateInvoice uses its own RunInTx internally.
-	// With NoopTxManager this nests transparently. Real DB implementations
-	// must support savepoints or reuse the outer transaction.
+	// All writes are atomic within a SINGLE transaction. tx.Run stamps the
+	// transaction onto the context, and the inner
+	// BillingService.GenerateInvoice (also via tx.Run) detects and JOINS it
+	// rather than opening an independent nested transaction — so the void of the
+	// original and the creation of the replacement commit or roll back together
+	// even on real DB implementations (review #4).
 	var replacement *invoice.Invoice
-	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
 		// Void the original inside the transaction so in-memory state
 		// is only mutated when the transaction will persist it.
 		if voidErr := original.VoidWithReason(reason); voidErr != nil {

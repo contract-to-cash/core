@@ -179,6 +179,96 @@ func TestNewCreditNote_NilItems_ReturnsError(t *testing.T) {
 	}
 }
 
+func usd(amount int64) shared.Money {
+	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyUSD)
+}
+
+// TestNewCreditNote_MixedItemCurrencies_ReturnsError ensures item amounts with
+// inconsistent currencies are rejected rather than silently dropped. Previously
+// Money.Add errors were discarded, understating subtotal/total (see review #2).
+func TestNewCreditNote_MixedItemCurrencies_ReturnsError(t *testing.T) {
+	cn, err := NewCreditNote(
+		shared.NewCreditNoteID(),
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		CreditNoteReasonOrderChange,
+		[]CreditNoteItem{
+			NewCreditNoteItem("li-1", "JPY item", jpy(5000), big.NewRat(10, 100), jpy(500)),
+			NewCreditNoteItem("li-2", "USD item", usd(40), big.NewRat(10, 100), usd(4)),
+		},
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
+	)
+	if err == nil {
+		t.Fatal("expected error for mixed item currencies, got nil")
+	}
+	if cn != nil {
+		t.Error("expected nil credit note on currency mismatch")
+	}
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected DomainError, got %T", err)
+	}
+	if domainErr.Code != shared.ErrCodeCurrencyMismatch {
+		t.Errorf("expected error code %s, got %s", shared.ErrCodeCurrencyMismatch, domainErr.Code)
+	}
+}
+
+// TestNewCreditNote_MismatchedTaxCurrency_ReturnsError ensures a tax amount in a
+// different currency from the item amount is rejected.
+func TestNewCreditNote_MismatchedTaxCurrency_ReturnsError(t *testing.T) {
+	_, err := NewCreditNote(
+		shared.NewCreditNoteID(),
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		CreditNoteReasonOrderChange,
+		[]CreditNoteItem{
+			NewCreditNoteItem("li-1", "Mismatched tax", jpy(5000), big.NewRat(10, 100), usd(5)),
+		},
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
+	)
+	if err == nil {
+		t.Fatal("expected error for mismatched tax currency, got nil")
+	}
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected DomainError, got %T", err)
+	}
+	if domainErr.Code != shared.ErrCodeCurrencyMismatch {
+		t.Errorf("expected error code %s, got %s", shared.ErrCodeCurrencyMismatch, domainErr.Code)
+	}
+}
+
+// TestNewCreditNote_ZeroValueTaxIsNormalized ensures an item with a zero-value
+// (empty-currency) tax amount is treated as zero tax in the base currency rather
+// than triggering a spurious currency mismatch.
+func TestNewCreditNote_ZeroValueTaxIsNormalized(t *testing.T) {
+	cn, err := NewCreditNote(
+		shared.NewCreditNoteID(),
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		CreditNoteReasonOrderChange,
+		[]CreditNoteItem{
+			NewCreditNoteItem("li-1", "No tax", jpy(5000), nil, shared.Money{}),
+		},
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cn.TaxAmount().Amount().Sign() != 0 {
+		t.Errorf("expected zero tax, got %s", cn.TaxAmount().Amount().RatString())
+	}
+	if cn.Total().Amount().Cmp(big.NewRat(5000, 1)) != 0 {
+		t.Errorf("expected total 5000, got %s", cn.Total().Amount().RatString())
+	}
+	if cn.TaxAmount().Currency() != shared.CurrencyJPY {
+		t.Errorf("expected tax currency JPY, got %s", cn.TaxAmount().Currency())
+	}
+}
+
 // --- CreditNoteItem tests ---
 
 func TestNewCreditNoteItem(t *testing.T) {

@@ -443,9 +443,12 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 	// Generate invoice ID upfront (needed for CreditApplication records)
 	invoiceID := shared.NewInvoiceID()
 
-	// All writes are atomic within a transaction.
+	// All writes are atomic within a transaction. tx.Run joins an outer
+	// transaction if one is already active (e.g. when invoked from
+	// CreditNoteService.ReissueInvoice) instead of opening an independent
+	// nested one — see review #4.
 	var inv *invoice.Invoice
-	err = s.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
 		// Apply credits (FIFO, skip expired)
 		appliedBalance := shared.Zero(currency)
 		if repos.Balances != nil {
