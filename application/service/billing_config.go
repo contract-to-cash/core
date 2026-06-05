@@ -42,6 +42,12 @@ func WithCollectionMethod(m CollectionMethod) BillingConfigOption {
 	return func(c *BillingConfig) { c.CollectionMethod = m }
 }
 
+// WithAllowPartialPayment sets whether generated invoices accept partial
+// payments. Default false (a payment must settle the full amount due).
+func WithAllowPartialPayment(allow bool) BillingConfigOption {
+	return func(c *BillingConfig) { c.AllowPartialPayment = allow }
+}
+
 // NewBillingConfig creates a validated BillingConfig with documented defaults.
 // Options override the defaults. Returns an error if any value is invalid.
 //

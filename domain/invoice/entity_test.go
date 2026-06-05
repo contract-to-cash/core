@@ -1,6 +1,7 @@
 package invoice
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -246,6 +247,7 @@ func TestInvoice_RecordPayment_CumulativeOverpayment(t *testing.T) {
 		subtotal,
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
+		WithAllowPartialPayment(true),
 	)
 
 	if err := inv.Finalize(); err != nil {
@@ -288,6 +290,54 @@ func TestInvoice_RecordPayment_CumulativeOverpayment(t *testing.T) {
 	}
 }
 
+// TestInvoice_RecordPayment_PartialRejectedWhenNotAllowed guards review #1: when
+// allowPartialPay is false (the default), a payment that leaves a balance must be
+// rejected — the documented opt-in business rule (design-decisions 3.1).
+func TestInvoice_RecordPayment_PartialRejectedWhenNotAllowed(t *testing.T) {
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	inv := mustNewInvoice(t,
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		subtotal,
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		// allowPartialPay defaults to false (no WithAllowPartialPayment)
+	)
+	if err := inv.Finalize(); err != nil {
+		t.Fatalf("finalize failed: %v", err)
+	}
+
+	// Validate must reject too (pre-charge gate).
+	if err := inv.ValidatePayment(shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)); err == nil {
+		t.Fatal("expected ValidatePayment to reject partial payment when not allowed")
+	}
+
+	err := inv.RecordPayment(shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY), time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected error for partial payment when allowPartialPay is false")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) || domErr.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected business_rule_violation, got %v", err)
+	}
+	// Invoice must be unchanged.
+	if inv.Status() != InvoiceStatusFinalized {
+		t.Errorf("expected status unchanged (finalized), got %s", inv.Status())
+	}
+	if inv.PaidAmount().Amount().Sign() != 0 {
+		t.Errorf("expected no payment recorded, paidAmount=%s", inv.PaidAmount().Amount().RatString())
+	}
+
+	// A FULL payment must still be accepted even when partial is disallowed.
+	if err := inv.RecordPayment(subtotal, time.Now().UTC()); err != nil {
+		t.Fatalf("full payment should be accepted: %v", err)
+	}
+	if inv.Status() != InvoiceStatusPaid {
+		t.Errorf("expected paid after full payment, got %s", inv.Status())
+	}
+}
+
 func TestInvoice_RecordPayment_Partial(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	inv := mustNewInvoice(t,
@@ -297,6 +347,7 @@ func TestInvoice_RecordPayment_Partial(t *testing.T) {
 		subtotal,
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
+		WithAllowPartialPayment(true),
 	)
 
 	if err := inv.Finalize(); err != nil {

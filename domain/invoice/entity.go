@@ -271,6 +271,15 @@ func (inv *Invoice) ValidatePayment(amount shared.Money) error {
 				amount.Amount().RatString(), inv.amountDue.Amount().RatString(), inv.paidAmount.Amount().RatString()))
 	}
 
+	// Partial-payment opt-in (design-decisions 3.1): unless allowPartialPay is
+	// set, a payment must settle the full amount due in one go. A payment that
+	// would leave a non-zero balance (newPaid < amountDue) is rejected.
+	if !inv.allowPartialPay && inv.amountDue.GreaterThan(newPaid) {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("partial payment not allowed: payment of %s leaves a balance on amount due %s",
+				amount.Amount().RatString(), inv.amountDue.Amount().RatString()))
+	}
+
 	return nil
 }
 
