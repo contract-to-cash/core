@@ -183,6 +183,41 @@ func TestWebhookProcessor_DeduplicatorError(t *testing.T) {
 	}
 }
 
+// TestWebhookProcessor_SubTenNanoBackoff_NoPanic guards review #2: a tiny but
+// valid (non-negative) RetryBackoff makes base/10 == 0 on the first retry, and
+// rand.Int63n(0) panics. The retry loop must not panic for any config that
+// passes Validate().
+func TestWebhookProcessor_SubTenNanoBackoff_NoPanic(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	event := &WebhookEvent{ID: "evt_jitter", Type: WebhookEventPaymentFailed, CreatedAt: now}
+	cfg := defaultConfig()
+	cfg.MaxRetries = 2
+	cfg.RetryBackoff = 1 // 1ns: base/10 == 0 on the first retry
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config should be valid: %v", err)
+	}
+
+	callCount := 0
+	handler := func(_ context.Context, _ *WebhookEvent) error {
+		callCount++
+		return &WebhookRetryableError{Err: fmt.Errorf("temporary failure")}
+	}
+	p := newTestProcessor(
+		&mockWebhookHandler{event: event},
+		&mockDeduplicator{},
+		&mockDLQ{},
+		shared.FixedClock{FixedTime: now},
+		cfg,
+	)
+
+	// Must not panic; retries should still run and exhaust.
+	_ = p.ProcessWebhook(context.Background(), &WebhookRequest{}, handler)
+	if callCount != cfg.MaxRetries+1 {
+		t.Fatalf("expected handler called %d times, got %d", cfg.MaxRetries+1, callCount)
+	}
+}
+
 func TestWebhookProcessor_RetryableError_Exhausted(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	event := &WebhookEvent{

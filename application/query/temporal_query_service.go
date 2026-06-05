@@ -39,28 +39,41 @@ func NewTemporalQueryService(eventStore eventstore.Store, clock shared.Clock) *T
 func (s *TemporalQueryService) GetContractAsOf(ctx context.Context, contractID shared.ContractID, asOf time.Time) (*contract.ContractAggregate, error) {
 	streamID := string(contractID)
 
-	// Try to load a snapshot before the requested time
-	snapshot, err := s.eventStore.LoadSnapshotBefore(ctx, streamID, asOf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load snapshot: %w", err)
-	}
-
-	agg := contract.NewContractAggregate(contractID, s.clock)
-
-	if snapshot != nil {
-		if err = agg.LoadFromSnapshot(*snapshot); err != nil {
-			return nil, fmt.Errorf("failed to load from snapshot: %w", err)
-		}
-	}
-
-	// Load events up to the requested time
+	// Load events that OCCURRED at or before the requested time (OccurredAt-bounded).
 	events, err := s.eventStore.LoadUntil(ctx, streamID, asOf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load events: %w", err)
 	}
 
-	// If we restored from snapshot, only replay events after the snapshot version
-	if snapshot != nil {
+	// The highest event version within the asOf horizon. A snapshot may only be
+	// used as an optimization if it does not cover any event beyond this horizon.
+	var maxVersionAsOf int
+	for _, e := range events {
+		if e.Version > maxVersionAsOf {
+			maxVersionAsOf = e.Version
+		}
+	}
+
+	// Try to load a snapshot before the requested time.
+	snapshot, err := s.eventStore.LoadSnapshotBefore(ctx, streamID, asOf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load snapshot: %w", err)
+	}
+
+	// Consistency guard (review W7): snapshots are selected by CreatedAt
+	// (wall-clock) while events are bounded by OccurredAt. Only use the snapshot
+	// if it does not cover events beyond the asOf event horizon; otherwise it
+	// would leak state from events that occurred after asOf (possible with
+	// backdated/out-of-order events). In that case replay from scratch.
+	useSnapshot := snapshot != nil && snapshot.Version <= maxVersionAsOf
+
+	agg := contract.NewContractAggregate(contractID, s.clock)
+
+	if useSnapshot {
+		if err = agg.LoadFromSnapshot(*snapshot); err != nil {
+			return nil, fmt.Errorf("failed to load from snapshot: %w", err)
+		}
+		// Only replay events after the snapshot version.
 		var afterSnapshot []eventstore.Event
 		for _, e := range events {
 			if e.Version > snapshot.Version {

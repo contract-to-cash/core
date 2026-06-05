@@ -50,6 +50,24 @@ func TestTieredPrice_Graduated_ExactBoundary(t *testing.T) {
 	}
 }
 
+// TestTieredPrice_Graduated_OverflowAboveLastFiniteTier guards review M2: when
+// usage exceeds the capacity of all (finite) tiers, graduated pricing must still
+// charge the overflow units at the last tier's rate rather than silently drop
+// them (revenue loss). This mirrors volume mode's last-tier fallback.
+func TestTieredPrice_Graduated_OverflowAboveLastFiniteTier(t *testing.T) {
+	tp := TieredPrice{
+		Tiers: makeTiers(), // tier1: <=10 @100, tier2: <=20 @80
+		Mode:  TieredPricingGraduated,
+	}
+
+	// usage=25 -> 10*100 + 10*80 + 5*80(overflow at last tier) = 1000+800+400 = 2200
+	result := tp.CalculatePrice(25)
+	expected := new(big.Rat).SetInt64(2200)
+	if result.Amount().Cmp(expected) != 0 {
+		t.Errorf("graduated overflow: expected 2200, got %s", result.Amount().RatString())
+	}
+}
+
 func TestTieredPrice_Volume(t *testing.T) {
 	tp := TieredPrice{
 		Tiers: makeTiers(),

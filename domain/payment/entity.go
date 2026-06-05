@@ -156,6 +156,12 @@ func (p *Payment) RecordRefund(amount shared.Money) error {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot refund payment: current status is %s", p.status))
 	}
+	// Guard the financial invariant: a non-positive refund would decrease the
+	// cumulative refunded total and could flip status back to partially_refunded.
+	if amount.IsNegative() || amount.IsZero() {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"refund amount must be positive")
+	}
 	newTotal, err := p.refundedAmount.Add(amount)
 	if err != nil {
 		return fmt.Errorf("failed to calculate refund total: %w", err)

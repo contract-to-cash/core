@@ -144,7 +144,20 @@ func (s *InMemoryEventStore) LoadAll(_ context.Context, fromPosition int64, limi
 	return result, nil
 }
 
-// Subscribe returns a channel that receives events from the given global position.
+// Subscribe returns a channel that receives events appended after subscription.
+//
+// Reference-implementation limitations (NOT suitable for production durability):
+//   - fromPosition is IGNORED: this is a live-only feed; historical events with a
+//     GlobalPosition at or after fromPosition are NOT replayed. Use LoadAll (or
+//     ProjectionService.RebuildAll) to catch up from a position, then Subscribe
+//     for the live tail.
+//   - Delivery is best-effort: if a subscriber's buffered channel is full (slow
+//     consumer), Append DROPS the event for that subscriber rather than blocking
+//     the writer (see Append). Combined with the ignored fromPosition, missed
+//     events are only recoverable via a full RebuildAll.
+//
+// A production eventstore.Store should honour fromPosition (replay-then-tail) and
+// provide durable, lossless delivery.
 func (s *InMemoryEventStore) Subscribe(_ context.Context, _ int64) (<-chan eventstore.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

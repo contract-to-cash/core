@@ -132,7 +132,11 @@ func newTestEnv() *testEnv {
 	billingSvc := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo,
 		balance.BalanceConfig{}, priceRepo, productRepo, registry,
-		service.BillingConfig{DaysUntilDue: 30}, clock,
+		// AllowPartialPayment opts generated invoices into partial payments so the
+		// partial_payment runbook can pay in installments (the partial-payment
+		// opt-in is now enforced — see design-decisions 3.1). Full payments in the
+		// other runbooks are unaffected.
+		service.BillingConfig{DaysUntilDue: 30, AllowPartialPayment: true}, clock,
 		service.WithBalanceRepo(balanceRepo),
 	)
 

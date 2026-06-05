@@ -166,9 +166,18 @@ type Invoice struct {
 **ステータス：**
 - `partial_paid` ステータスを追加
 
+**強制（オプトイン）：**
+- 部分入金は **明示的なオプトイン制**。`Invoice.allowPartialPay` が false（既定）の場合、
+  `Invoice.ValidatePayment` / `RecordPayment` は残高を残す入金（`amountDue` 未満）を
+  `business_rule_violation` で拒否する。全額一括入金のみ許可。
+- 生成フローでのオプトインは `BillingConfig.AllowPartialPayment`（または
+  `service.WithAllowPartialPayment(true)`）で設定し、`BillingService.GenerateInvoice` が
+  生成請求書の `allowPartialPay` に伝播する。低レベルでは `invoice.WithAllowPartialPayment(true)`。
+
 **理由：**
 - B2B取引では部分入金が発生しうる
 - 残高を同一請求書で管理することで追跡が容易
+- 既定で全額入金を要求し、部分入金は利用者が意図的に許可した請求書のみに限定する
 
 ### 3.2 バッチ処理
 

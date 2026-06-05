@@ -92,6 +92,21 @@ func (p TieredPrice) calculateGraduated(usage int64) shared.Money {
 		prevUpTo = tier.UpTo
 	}
 
+	// Overflow guard: if usage exceeds the capacity of all finite tiers (no
+	// unlimited final tier with UpTo==0), charge the remaining units at the last
+	// tier's rate instead of silently dropping them (review M2). This mirrors
+	// calculateVolume's last-tier fallback.
+	if remaining > 0 {
+		lastTier := p.Tiers[len(p.Tiers)-1]
+		factor := new(big.Rat).SetInt64(remaining)
+		overflow := lastTier.UnitPrice.Multiply(factor)
+		var err error
+		total, err = total.Add(overflow)
+		if err != nil {
+			return shared.Zero(currency)
+		}
+	}
+
 	return total
 }
 

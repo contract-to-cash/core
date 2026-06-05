@@ -206,6 +206,42 @@ func priceRepoFor(p *pricing.Price) *mockPriceRepo {
 
 // --- Tests ---
 
+// TestGenerateInvoice_AllowPartialPaymentThreaded guards review #1: BillingConfig
+// AllowPartialPayment must be propagated onto the generated invoice so consumers
+// have an opt-in path for partial payments through the normal flow.
+func TestGenerateInvoice_AllowPartialPaymentThreaded(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+
+	// Default config: partial NOT allowed -> invoice flag false.
+	svcDefault := NewBillingService(
+		&mockContractRepo{agg: agg}, &mockInvoiceRepo{}, &mockUsageRepo{},
+		balance.BalanceConfig{}, priceRepoFor(priceEntity), &mockProductRepo{},
+		plugin.NewRegistry(), BillingConfig{DaysUntilDue: 30}, clock,
+	)
+	invDefault, err := svcDefault.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if invDefault.AllowPartialPay() {
+		t.Error("expected AllowPartialPay false by default")
+	}
+
+	// Opt-in config: invoice flag true.
+	svcOptIn := NewBillingService(
+		&mockContractRepo{agg: agg}, &mockInvoiceRepo{}, &mockUsageRepo{},
+		balance.BalanceConfig{}, priceRepoFor(priceEntity), &mockProductRepo{},
+		plugin.NewRegistry(), BillingConfig{DaysUntilDue: 30, AllowPartialPayment: true}, clock,
+	)
+	invOptIn, err := svcOptIn.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !invOptIn.AllowPartialPay() {
+		t.Error("expected AllowPartialPay true when BillingConfig.AllowPartialPayment is set")
+	}
+}
+
 func TestGenerateInvoice_SubscriptionBasic(t *testing.T) {
 	clock := newTestClock()
 	price := jpy(10000)

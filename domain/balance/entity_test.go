@@ -102,6 +102,47 @@ func TestBalanceEntry_Consume_IncrementsVersion(t *testing.T) {
 	}
 }
 
+// TestBalanceEntry_Consume_NegativeAmount_Rejected guards a financial invariant:
+// a negative consume would otherwise subtract a negative and INFLATE the
+// remaining balance (create credit out of thin air). See review C1.
+func TestBalanceEntry_Consume_NegativeAmount_Rejected(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+
+	neg := shared.NewMoney(new(big.Rat).SetInt64(-500), shared.CurrencyJPY)
+	_, err := entry.Consume(neg)
+	if err == nil {
+		t.Fatal("expected error consuming a negative amount, got nil")
+	}
+	var domErr *shared.DomainError
+	if !errorsAsBalance(err, &domErr) || domErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected validation error, got %v", err)
+	}
+	// Balance must be unchanged.
+	if entry.RemainingAmount().Amount().Cmp(big.NewRat(1000, 1)) != 0 {
+		t.Errorf("balance changed after rejected consume: %s", entry.RemainingAmount().Amount().RatString())
+	}
+	if entry.Version() != 0 {
+		t.Errorf("version changed after rejected consume: %d", entry.Version())
+	}
+}
+
+func errorsAsBalance(err error, target **shared.DomainError) bool {
+	for err != nil {
+		if de, ok := err.(*shared.DomainError); ok {
+			*target = de
+			return true
+		}
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
+}
+
 func TestBalanceEntry_Consume_ZeroAmountDoesNotIncrementVersion(t *testing.T) {
 	accountID := shared.NewAccountID()
 	amount := shared.NewMoney(new(big.Rat).SetInt64(0), shared.CurrencyJPY)

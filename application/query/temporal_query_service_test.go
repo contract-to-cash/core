@@ -154,6 +154,40 @@ func TestGetContractAsOf_WithoutSnapshot(t *testing.T) {
 	}
 }
 
+// TestGetContractAsOf_IgnoresSnapshotCoveringPostAsOfEvents guards review W7:
+// snapshot selection is by CreatedAt while events are bounded by OccurredAt. If a
+// (backdated) snapshot was physically created before asOf but covers an event that
+// OCCURRED after asOf, applying it would leak post-asOf state. The service must
+// detect this (snapshot.Version beyond the asOf event horizon) and replay from
+// scratch instead.
+func TestGetContractAsOf_IgnoresSnapshotCoveringPostAsOfEvents(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: t0}
+	store := inmemory.NewInMemoryEventStore(clock)
+	svc := NewTemporalQueryService(store, clock)
+	ctx := context.Background()
+	contractID := shared.ContractID("contract-backdated-snap")
+
+	// Create occurred at t1, Activate occurred at t3.
+	setupContractWithCreateAndActivate(t, store, contractID, t1, t3)
+
+	// A snapshot at version 2 (Active) but with CreatedAt backdated to t0 (before
+	// the asOf below). Under a monotonic clock this is impossible, but a
+	// misbehaving/consumer event store could produce it — the query must be robust.
+	snap := createSnapshotFromAggregate(t, contractID, store, t0)
+	if err := store.SaveSnapshot(ctx, snap); err != nil {
+		t.Fatalf("SaveSnapshot failed: %v", err)
+	}
+
+	// asOf = t2 is between Create (t1) and Activate (t3). The contract was Draft.
+	agg, err := svc.GetContractAsOf(ctx, contractID, t2)
+	if err != nil {
+		t.Fatalf("GetContractAsOf failed: %v", err)
+	}
+	if agg.Status() != contract.ContractStatusDraft {
+		t.Errorf("expected status draft at t2 (snapshot covering the t3 activate must be ignored), got %s", agg.Status())
+	}
+}
+
 func TestGetContractAsOf_WithSnapshot(t *testing.T) {
 	clock := shared.FixedClock{FixedTime: t0}
 	store := inmemory.NewInMemoryEventStore(clock)
