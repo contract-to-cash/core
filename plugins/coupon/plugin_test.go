@@ -569,6 +569,39 @@ func TestCouponPlugin_StackingWithMultipleCoupons(t *testing.T) {
 	}
 }
 
+// TestCouponPlugin_ZeroMaxCouponsMeansUnlimited guards W1: an explicit
+// maxCouponsPerInvoice of 0 must mean "no limit" (matching the documented
+// reference implementation's `> 0` sentinel), NOT "apply zero coupons".
+// Regression: the slice-truncation form silently zeroed out all discounts.
+func TestCouponPlugin_ZeroMaxCouponsMeansUnlimited(t *testing.T) {
+	coupon1 := newTestCoupon("c1", "FIRST10", CouponTypePercentage, big.NewRat(10, 100), nil)
+	coupon2 := newTestCoupon("c2", "SECOND5", CouponTypePercentage, big.NewRat(5, 100), nil)
+
+	repo := newMockRepo(coupon1, coupon2)
+	p := NewCouponPlugin(repo, testClock)
+	_ = p.Initialize(context.Background(), plugin.Config{
+		"allowStacking":        true,
+		"maxCouponsPerInvoice": 0, // 0 = unlimited
+	})
+
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContext(subtotal)
+
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 0 = no limit: both coupons applied (10% + 5% = 1500), not zeroed out.
+	expected := big.NewRat(1500, 1)
+	if discount.Amount().Cmp(expected) != 0 {
+		t.Errorf("expected discount 1500 (0=unlimited), got %s", discount.Amount().RatString())
+	}
+	if got := len(ctx.AppliedDiscounts()); got != 2 {
+		t.Errorf("expected 2 applied discounts, got %d", got)
+	}
+}
+
 func TestCouponPlugin_FindApplicableError(t *testing.T) {
 	repo := newMockRepo()
 	repo.findApplicableErr = fmt.Errorf("db connection failed")
