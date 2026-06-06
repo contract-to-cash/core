@@ -127,8 +127,11 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		coupons = coupons[:1]
 	}
 
-	// 4. Apply MaxCouponsPerInvoice limit
-	if len(coupons) > p.config.MaxCouponsPerInvoice {
+	// 4. Apply MaxCouponsPerInvoice limit.
+	// A value of 0 means "no limit" (matches the documented reference
+	// implementation's `> 0` sentinel); without this guard, 0 would truncate
+	// coupons to an empty slice and silently zero out all discounts (W1).
+	if p.config.MaxCouponsPerInvoice > 0 && len(coupons) > p.config.MaxCouponsPerInvoice {
 		coupons = coupons[:p.config.MaxCouponsPerInvoice]
 	}
 
