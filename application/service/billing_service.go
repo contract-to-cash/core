@@ -320,8 +320,9 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 // Only the AdjustmentAmount (charge - credit) is billed; CreditAmount and ChargeAmount
 // are recorded in line items for traceability.
 func (s *BillingService) GenerateProrationInvoice(ctx context.Context, contractID shared.ContractID, proration contract.PlanChangeProration) (*invoice.Invoice, error) {
-	// Load contract aggregate
-	agg, err := s.contractRepo.FindByID(ctx, contractID)
+	// Load contract aggregate (tx-scoped when inside a transaction, symmetric with
+	// GenerateInvoice/RegenerateInvoice)
+	agg, err := s.contractRepoFor(ctx).FindByID(ctx, contractID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load contract: %w", err)
 	}
