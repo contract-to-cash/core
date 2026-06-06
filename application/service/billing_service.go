@@ -140,11 +140,34 @@ type pipelineInput struct {
 	extraOpts  []invoice.InvoiceOption
 }
 
+// invoiceRepoFor returns the transaction-scoped invoice repository when ctx
+// carries an active transaction, falling back to the field repo otherwise. Reads
+// issued during a transaction (e.g. the duplicate-invoice check) must use the
+// tx-scoped repo so they observe writes made earlier in the same transaction —
+// e.g. the void written by CreditNoteService.ReissueInvoice before it calls
+// GenerateInvoice. A field-repo read runs on a separate connection on a real DB
+// and would miss the uncommitted void, wrongly raising a conflict.
+func (s *BillingService) invoiceRepoFor(ctx context.Context) invoice.Repository {
+	if repos, ok := tx.ReposFromContext(ctx); ok && repos.Invoices != nil {
+		return repos.Invoices
+	}
+	return s.invoiceRepo
+}
+
+// contractRepoFor returns the transaction-scoped contract repository when ctx
+// carries an active transaction, falling back to the field repo otherwise.
+func (s *BillingService) contractRepoFor(ctx context.Context) contract.Repository {
+	if repos, ok := tx.ReposFromContext(ctx); ok && repos.Contracts != nil {
+		return repos.Contracts
+	}
+	return s.contractRepo
+}
+
 // GenerateInvoice generates an invoice for a contract and billing period.
 // It follows a 14-step calculation flow with plugin hooks.
 func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) (*invoice.Invoice, error) {
-	// Step 1: Load contract aggregate
-	agg, err := s.contractRepo.FindByID(ctx, contractID)
+	// Step 1: Load contract aggregate (tx-scoped when inside a transaction)
+	agg, err := s.contractRepoFor(ctx).FindByID(ctx, contractID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load contract: %w", err)
 	}
@@ -720,11 +743,15 @@ func (s *BillingService) applyBalances(ctx context.Context, balanceRepo balance.
 }
 
 // checkDuplicateInvoice prevents duplicate invoice generation based on contract state.
+// Reads go through the transaction-scoped invoice repo (when a transaction is
+// active) so a void written earlier in the same transaction is visible — see
+// invoiceRepoFor.
 func (s *BillingService) checkDuplicateInvoice(ctx context.Context, agg *contract.ContractAggregate, billingPeriod shared.DateRange) error {
+	invoiceRepo := s.invoiceRepoFor(ctx)
 	switch {
 	case agg.Status() == contract.ContractStatusDraft:
 		// Draft contracts: only one draft invoice allowed
-		existing, err := s.invoiceRepo.FindByContractAndStatus(ctx, agg.ContractID(), invoice.InvoiceStatusDraft)
+		existing, err := invoiceRepo.FindByContractAndStatus(ctx, agg.ContractID(), invoice.InvoiceStatusDraft)
 		if err != nil {
 			return fmt.Errorf("failed to check existing draft invoices: %w", err)
 		}
@@ -735,7 +762,7 @@ func (s *BillingService) checkDuplicateInvoice(ctx context.Context, agg *contrac
 
 	case agg.GetContractType() == contract.ContractTypeOneTime:
 		// One-time contracts: only one invoice ever
-		existing, err := s.invoiceRepo.FindByContractID(ctx, agg.ContractID())
+		existing, err := invoiceRepo.FindByContractID(ctx, agg.ContractID())
 		if err != nil {
 			return fmt.Errorf("failed to check existing invoices: %w", err)
 		}
@@ -748,7 +775,7 @@ func (s *BillingService) checkDuplicateInvoice(ctx context.Context, agg *contrac
 
 	default:
 		// Subscription/usage-based: one invoice per billing period
-		existing, err := s.invoiceRepo.FindByContractAndPeriod(ctx, agg.ContractID(), billingPeriod)
+		existing, err := invoiceRepo.FindByContractAndPeriod(ctx, agg.ContractID(), billingPeriod)
 		if err != nil {
 			return fmt.Errorf("failed to check existing invoices for period: %w", err)
 		}

@@ -3071,3 +3071,49 @@ func TestProcessPayment_ExistingFailed_ReturnsError(t *testing.T) {
 		t.Errorf("expected nil payment on Failed-existing error, got %+v", pmt)
 	}
 }
+
+// --- Refund pre-flight validation (review: gateway must not fire on invalid refund) ---
+
+// TestRefund_InvalidAmount_DoesNotCallGateway verifies that a refund which
+// fails domain validation (amount exceeds the payment) is rejected BEFORE the
+// irreversible gateway refund is invoked. Otherwise money moves at the gateway
+// and the local save fails, forcing manual reconciliation.
+func TestRefund_InvalidAmount_DoesNotCallGateway(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	paymentRepo := &mockPaymentRepo{}
+	gw := &spyGateway{}
+
+	svc := NewPaymentService(
+		gw,
+		paymentRepo,
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-refund-validate",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error seeding payment: %v", err)
+	}
+
+	// Attempt to refund more than the payment amount → must be rejected up front.
+	overAmount := shared.NewMoney(big.NewRat(20000, 1), shared.CurrencyJPY)
+	err = svc.Refund(context.Background(), pmt.ID(), RefundInput{
+		Amount: &overAmount,
+		Reason: port.RefundReasonRequestedByCustomer,
+	})
+	if err == nil {
+		t.Fatal("expected error for over-refund, got nil")
+	}
+	if gw.refundCalled {
+		t.Error("gateway Refund must NOT be called when the refund fails validation")
+	}
+}

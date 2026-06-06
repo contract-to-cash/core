@@ -147,10 +147,37 @@ func (s *CreditNoteService) CreateCreditNote(
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute credit note total: %w", err)
 	}
-	if cnTotal.GreaterThan(inv.Total()) {
+	// Aggregate previously-issued (non-voided) credit notes for this invoice so the
+	// cumulative credited amount cannot exceed the invoice total. Checking only this
+	// credit note against the invoice total would let multiple individually-valid
+	// credit notes collectively over-credit the customer.
+	existingCNs, err := s.creditNoteRepo.FindByInvoiceID(ctx, invoiceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load existing credit notes: %w", err)
+	}
+	creditedSoFar := shared.Zero(currency)
+	for _, existing := range existingCNs {
+		if existing.Status() == invoice.CreditNoteStatusVoided {
+			continue
+		}
+		// Defensive: a credit note in a different currency cannot be summed; the
+		// per-note currency guard above prevents creating such notes, so skip.
+		if existing.Total().Currency() != currency {
+			continue
+		}
+		creditedSoFar, err = creditedSoFar.Add(existing.Total())
+		if err != nil {
+			return nil, fmt.Errorf("failed to aggregate existing credit notes: %w", err)
+		}
+	}
+	cumulative, err := creditedSoFar.Add(cnTotal)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute cumulative credit total: %w", err)
+	}
+	if cumulative.GreaterThan(inv.Total()) {
 		return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
-			fmt.Sprintf("credit note total %s exceeds invoice total %s",
-				cnTotal.Amount().RatString(), inv.Total().Amount().RatString()))
+			fmt.Sprintf("cumulative credit note total %s exceeds invoice total %s",
+				cumulative.Amount().RatString(), inv.Total().Amount().RatString()))
 	}
 
 	var opts []invoice.CreditNoteOption

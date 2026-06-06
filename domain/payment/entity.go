@@ -151,7 +151,13 @@ func (p *Payment) MarkChargedBack() error {
 // refunded amount does not exceed the original payment amount.
 // This replaces MarkRefunded/MarkPartiallyRefunded for new code — the old
 // methods are retained for backward compatibility but RecordRefund is preferred.
-func (p *Payment) RecordRefund(amount shared.Money) error {
+// ValidateRefund checks whether a refund of the given amount is permitted
+// WITHOUT mutating the payment. Callers that perform an irreversible side effect
+// before recording the refund (e.g. invoking a payment gateway) must run this
+// pre-flight check first, so that a preventable error (non-refundable state,
+// non-positive amount, currency mismatch, or over-refund) is surfaced before any
+// money moves. RecordRefund applies the same checks transactionally.
+func (p *Payment) ValidateRefund(amount shared.Money) error {
 	if p.status != PaymentStatusCompleted && p.status != PaymentStatusPartiallyRefunded {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot refund payment: current status is %s", p.status))
@@ -169,6 +175,18 @@ func (p *Payment) RecordRefund(amount shared.Money) error {
 	if newTotal.Amount().Cmp(p.amount.Amount()) > 0 {
 		return shared.NewDomainError(shared.ErrCodeBusinessRule,
 			"refund amount exceeds payment amount")
+	}
+	return nil
+}
+
+func (p *Payment) RecordRefund(amount shared.Money) error {
+	if err := p.ValidateRefund(amount); err != nil {
+		return err
+	}
+	// Safe after ValidateRefund: currencies match and the total is within bounds.
+	newTotal, err := p.refundedAmount.Add(amount)
+	if err != nil {
+		return fmt.Errorf("failed to calculate refund total: %w", err)
 	}
 	p.refundedAmount = newTotal
 	// Status derived from cumulative total

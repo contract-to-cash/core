@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
@@ -1691,4 +1692,51 @@ func (p *tenPercentTaxPlugin) CalculateTax(ctx *plugin.CalculationContext) (shar
 	afterDiscount := ctx.SubtotalAfterDiscount()
 	rate := new(big.Rat).SetFrac64(10, 100)
 	return afterDiscount.Multiply(rate), nil
+}
+
+// TestGenerateInvoice_DuplicateCheck_UsesTxScopedRepo verifies that when
+// GenerateInvoice runs inside an active transaction (as CreditNoteService.
+// ReissueInvoice invokes it), the duplicate-invoice check reads through the
+// transaction-scoped repository — not the service's field repository. On a real
+// DB the void written earlier in the same transaction is uncommitted and
+// invisible to a separate-connection field-repo read, which would wrongly raise
+// a conflict and break void-and-recreate. Here the field repo reports a
+// conflicting invoice while the tx-scoped repo is clean; generation must succeed.
+func TestGenerateInvoice_DuplicateCheck_UsesTxScopedRepo(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	conflicting := newPaidInvoice(agg.AccountID(), agg.ContractID())
+	fieldInvRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{conflicting}}
+
+	cleanInvRepo := &mockInvoiceRepo{}
+	mgr := tx.NewNoopTxManager(tx.Repos{
+		Contracts: &mockContractRepo{agg: agg},
+		Invoices:  cleanInvRepo,
+	})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		fieldInvRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+		WithBillingTxManager(mgr),
+	)
+
+	err := tx.Run(context.Background(), mgr, func(txCtx context.Context, _ tx.Repos) error {
+		_, genErr := svc.GenerateInvoice(txCtx, agg.ContractID(), period)
+		return genErr
+	})
+	if err != nil {
+		t.Fatalf("duplicate check should read tx-scoped repo and not conflict: %v", err)
+	}
+	if cleanInvRepo.saved == nil {
+		t.Error("expected the generated invoice to be saved through the tx-scoped repo")
+	}
 }

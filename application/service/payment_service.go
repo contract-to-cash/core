@@ -841,17 +841,6 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		return fmt.Errorf("failed to load payment: %w", err)
 	}
 
-	refundReq := &port.RefundRequest{
-		TransactionID: p.GatewayTransactionID(),
-		Amount:        input.Amount,
-		Reason:        input.Reason,
-	}
-
-	_, err = s.gateway.Refund(ctx, refundReq)
-	if err != nil {
-		return fmt.Errorf("gateway refund failed: %w", err)
-	}
-
 	// Determine refund amount: if not specified, refund the remaining unrefunded amount.
 	var refundAmount shared.Money
 	if input.Amount != nil {
@@ -862,6 +851,26 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 			return fmt.Errorf("failed to calculate remaining refund amount: %w", subErr)
 		}
 		refundAmount = remaining
+	}
+
+	// Pre-flight validation BEFORE the irreversible gateway refund. A refund that
+	// fails domain validation (non-refundable state, non-positive amount, currency
+	// mismatch, or over-refund) must be rejected up front — otherwise money moves
+	// at the gateway and the subsequent local RecordRefund fails, forcing manual
+	// reconciliation.
+	if err = p.ValidateRefund(refundAmount); err != nil {
+		return fmt.Errorf("refund validation failed: %w", err)
+	}
+
+	refundReq := &port.RefundRequest{
+		TransactionID: p.GatewayTransactionID(),
+		Amount:        input.Amount,
+		Reason:        input.Reason,
+	}
+
+	_, err = s.gateway.Refund(ctx, refundReq)
+	if err != nil {
+		return fmt.Errorf("gateway refund failed: %w", err)
 	}
 
 	// Phase 3: local save in transaction. tx.Run (not raw RunInTx) so this joins
