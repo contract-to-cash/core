@@ -131,6 +131,17 @@ func reposFromContext(ctx context.Context) (Repos, bool) {
 	return r, ok
 }
 
+// ReposFromContext exposes the active transaction's transaction-scoped repos, if
+// any. Services that perform READS inside a transaction (e.g. duplicate checks or
+// loading an aggregate that a caller mutated earlier in the same transaction)
+// must route those reads through these repos rather than their own field repos:
+// on a real DB the field repos run on a separate connection and cannot see the
+// transaction's uncommitted writes. Returns false when no transaction is active,
+// in which case callers fall back to their field repos.
+func ReposFromContext(ctx context.Context) (Repos, bool) {
+	return reposFromContext(ctx)
+}
+
 // RetryOnConflict retries fn up to maxRetries times when ErrVersionConflict
 // is returned. Non-conflict errors are returned immediately without retry.
 // No backoff is applied — optimistic lock conflicts resolve on immediate retry.

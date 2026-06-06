@@ -205,6 +205,91 @@ func TestCreateCreditNote_ExceedsInvoiceTotal_Rejected(t *testing.T) {
 	}
 }
 
+// cnListRepo is a credit-note repo whose FindByInvoiceID returns a preset list,
+// used to exercise the cumulative over-credit guard across multiple credit notes.
+type cnListRepo struct {
+	mockCreditNoteRepo
+	existing []*invoice.CreditNote
+}
+
+func (m *cnListRepo) FindByInvoiceID(_ context.Context, _ shared.InvoiceID) ([]*invoice.CreditNote, error) {
+	return m.existing, nil
+}
+
+// TestCreateCreditNote_CumulativeExceedsInvoiceTotal_Rejected guards against
+// over-crediting via multiple credit notes that are each within the invoice
+// total but collectively exceed it. An existing 8000 credit note plus a new
+// 5000 one would total 13000 against an 11000 invoice and must be rejected.
+func TestCreateCreditNote_CumulativeExceedsInvoiceTotal_Rejected(t *testing.T) {
+	accountID := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	paidInv := newPaidInvoice(accountID, contractID) // total = 11000
+
+	existingCN, err := invoice.NewCreditNote(
+		shared.NewCreditNoteID(),
+		paidInv.ID(),
+		accountID,
+		contractID,
+		invoice.CreditNoteReasonOther,
+		[]invoice.CreditNoteItem{
+			invoice.NewCreditNoteItem("li-1", "First credit", jpy(8000), big.NewRat(0, 1), jpy(0)),
+		},
+		time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("failed to build existing credit note: %v", err)
+	}
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{paidInv.ID(): paidInv}}
+	cnRepo := &cnListRepo{existing: []*invoice.CreditNote{existingCN}}
+	svc := newCreditNoteService(invRepo, cnRepo, nil, nil)
+
+	items := []invoice.CreditNoteItem{
+		invoice.NewCreditNoteItem("li-2", "Second credit", jpy(5000), big.NewRat(0, 1), jpy(0)),
+	}
+
+	_, err = svc.CreateCreditNote(context.Background(), paidInv.ID(), invoice.CreditNoteReasonOther, items, "")
+	if err == nil {
+		t.Fatal("expected error when cumulative credit notes exceed invoice total")
+	}
+}
+
+// TestCreateCreditNote_CumulativeWithinTotal_Allowed confirms the cumulative
+// guard does not reject a second credit note that stays within the invoice total
+// (8000 existing + 2000 new = 10000 <= 11000).
+func TestCreateCreditNote_CumulativeWithinTotal_Allowed(t *testing.T) {
+	accountID := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	paidInv := newPaidInvoice(accountID, contractID) // total = 11000
+
+	existingCN, err := invoice.NewCreditNote(
+		shared.NewCreditNoteID(),
+		paidInv.ID(),
+		accountID,
+		contractID,
+		invoice.CreditNoteReasonOther,
+		[]invoice.CreditNoteItem{
+			invoice.NewCreditNoteItem("li-1", "First credit", jpy(8000), big.NewRat(0, 1), jpy(0)),
+		},
+		time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("failed to build existing credit note: %v", err)
+	}
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{paidInv.ID(): paidInv}}
+	cnRepo := &cnListRepo{existing: []*invoice.CreditNote{existingCN}}
+	svc := newCreditNoteService(invRepo, cnRepo, nil, nil)
+
+	items := []invoice.CreditNoteItem{
+		invoice.NewCreditNoteItem("li-2", "Second credit", jpy(2000), big.NewRat(0, 1), jpy(0)),
+	}
+
+	if _, err := svc.CreateCreditNote(context.Background(), paidInv.ID(), invoice.CreditNoteReasonOther, items, ""); err != nil {
+		t.Fatalf("did not expect error for cumulative credit within invoice total: %v", err)
+	}
+}
+
 // TestCreateCreditNote_ForeignCurrencyItem_Rejected guards against the review #2
 // bypass: a credit note whose items are in a different currency from the invoice
 // must be rejected. Previously the over-credit guard used Money.GreaterThan,
