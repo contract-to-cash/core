@@ -26,7 +26,7 @@ func NewEventRegistry() *EventRegistry {
 // Goroutine-safe.
 func (r *EventRegistry) Register(event DomainEvent) {
 	t := reflect.TypeOf(event)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	r.mu.Lock()
