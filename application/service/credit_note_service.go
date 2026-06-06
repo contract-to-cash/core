@@ -86,6 +86,16 @@ var creditNoteEligibleStatuses = map[invoice.InvoiceStatus]bool{
 }
 
 // CreateCreditNote creates a new credit note in draft status for an existing invoice.
+//
+// The cumulative over-credit guard (existing non-voided credit notes + this one
+// must not exceed the invoice total) is evaluated read-then-write without a
+// surrounding transaction, because CreditNoteRepository is not part of tx.Repos.
+// Under concurrency this is therefore a check-then-act: two simultaneous calls
+// for the same invoice can both observe the pre-existing total and both pass the
+// cap. Consumers that must guarantee the invariant under concurrent issuance are
+// responsible for serializing CreateCreditNote per invoice (e.g. an advisory/row
+// lock on the invoice, or a DB constraint). A transactional cumulative cap is
+// tracked separately (see issue for CreditNote transactional integrity).
 func (s *CreditNoteService) CreateCreditNote(
 	ctx context.Context,
 	invoiceID shared.InvoiceID,

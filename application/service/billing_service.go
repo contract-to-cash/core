@@ -225,8 +225,9 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 // The regenerated invoice is linked to the voided invoice via RevisionOf/OriginalInvoiceID
 // to maintain the audit trail.
 func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) (*invoice.Invoice, error) {
-	// Load contract aggregate
-	agg, err := s.contractRepo.FindByID(ctx, contractID)
+	// Load contract aggregate (tx-scoped when inside a transaction, so reads see
+	// writes made earlier in the same transaction — symmetry with GenerateInvoice)
+	agg, err := s.contractRepoFor(ctx).FindByID(ctx, contractID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load contract: %w", err)
 	}
@@ -250,7 +251,9 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 
 	// Fetch existing invoices for the period once — used for both voided-check
 	// and duplicate prevention (avoids a redundant FindByContractAndPeriod call).
-	existing, err := s.invoiceRepo.FindByContractAndPeriod(ctx, contractID, billingPeriod)
+	// Tx-scoped when inside a transaction so the void written earlier in the same
+	// transaction is visible.
+	existing, err := s.invoiceRepoFor(ctx).FindByContractAndPeriod(ctx, contractID, billingPeriod)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check existing invoices: %w", err)
 	}
