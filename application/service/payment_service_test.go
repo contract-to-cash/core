@@ -3117,3 +3117,105 @@ func TestRefund_InvalidAmount_DoesNotCallGateway(t *testing.T) {
 		t.Error("gateway Refund must NOT be called when the refund fails validation")
 	}
 }
+
+// --- OnPaymentProcessed metrics hook ---
+
+type onPaymentProcessedSpyPlugin struct {
+	called   bool
+	received *payment.Payment
+	err      error // if set, OnPaymentProcessed returns this error
+}
+
+func (p *onPaymentProcessedSpyPlugin) Name() string    { return "payment-processed-spy" }
+func (p *onPaymentProcessedSpyPlugin) Version() string { return "1.0.0" }
+func (p *onPaymentProcessedSpyPlugin) Initialize(_ context.Context, _ plugin.Config) error {
+	return nil
+}
+func (p *onPaymentProcessedSpyPlugin) Shutdown(_ context.Context) error { return nil }
+func (p *onPaymentProcessedSpyPlugin) Priority() int                    { return 500 }
+func (p *onPaymentProcessedSpyPlugin) OnPaymentProcessed(_ *plugin.Context, pay *payment.Payment) error {
+	p.called = true
+	p.received = pay
+	return p.err
+}
+
+func TestProcessPayment_FiresOnPaymentProcessedHook(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+	spy := &onPaymentProcessedSpyPlugin{}
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(spy)
+
+	svc := NewPaymentService(&mockGateway{}, &mockPaymentRepo{}, invRepo, nil, &mockEventStore{}, registry, clock)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "idem-metrics-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !spy.called {
+		t.Fatal("expected OnPaymentProcessed hook to be called on success path")
+	}
+	if spy.received == nil || spy.received.ID() != p.ID() {
+		t.Error("OnPaymentProcessed hook received wrong payment")
+	}
+	if spy.received.Status() != payment.PaymentStatusCompleted {
+		t.Errorf("hook saw payment status %s, want completed", spy.received.Status())
+	}
+}
+
+func TestProcessPayment_OnPaymentProcessedHookErrorIsNonFatal(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+	spy := &onPaymentProcessedSpyPlugin{err: errors.New("metrics backend down")}
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(spy)
+
+	svc := NewPaymentService(&mockGateway{}, &mockPaymentRepo{}, invRepo, nil, &mockEventStore{}, registry, clock)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "idem-metrics-2",
+	})
+	if err != nil {
+		t.Fatalf("hook error must be non-fatal, got: %v", err)
+	}
+	if p == nil || p.Status() != payment.PaymentStatusCompleted {
+		t.Error("payment must complete despite metrics hook failure")
+	}
+}
+
+func TestProcessPayment_OnPaymentProcessedNotFiredOnGatewayFailure(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+	spy := &onPaymentProcessedSpyPlugin{}
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(spy)
+
+	svc := NewPaymentService(&mockGateway{failCharge: true}, &mockPaymentRepo{}, invRepo, nil, &mockEventStore{}, registry, clock)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "idem-metrics-3",
+	})
+	if err == nil {
+		t.Fatal("expected gateway failure error")
+	}
+	if spy.called {
+		t.Error("OnPaymentProcessed must not fire when the charge fails")
+	}
+}
