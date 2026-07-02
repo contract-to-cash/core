@@ -565,28 +565,38 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 // is already finalized and saved, so failures are logged and do not fail
 // the finalization.
 func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.InvoiceID) (*invoice.Invoice, error) {
-	inv, err := s.invoiceRepoFor(ctx).FindByID(ctx, invoiceID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load invoice: %w", err)
-	}
-	if inv == nil {
-		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
-			fmt.Sprintf("invoice %s not found", invoiceID))
-	}
+	// Load, check and transition INSIDE the transaction (same in-tx re-check
+	// pattern as PaymentService.ProcessPayment): a check-then-act split across
+	// the tx boundary would let two concurrent calls both observe the draft
+	// state and double-finalize — firing OnInvoiceIssued twice. In-tx, the
+	// loser of the race re-reads the already-finalized row and Finalize
+	// rejects it with an invalid_state_transition domain error.
+	// tx.Run joins an outer transaction if one is already active.
+	var inv *invoice.Invoice
+	err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		loaded, findErr := repos.Invoices.FindByID(txCtx, invoiceID)
+		if findErr != nil {
+			return fmt.Errorf("failed to load invoice: %w", findErr)
+		}
+		if loaded == nil {
+			return shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("invoice %s not found", invoiceID))
+		}
 
-	// Finalize enforces the draft→finalized transition; any other status
-	// is rejected with an invalid_state_transition domain error.
-	if err := inv.Finalize(); err != nil {
-		return nil, err
-	}
+		// Finalize enforces the draft→finalized transition; any other status
+		// is rejected with an invalid_state_transition domain error.
+		if finalizeErr := loaded.Finalize(); finalizeErr != nil {
+			return finalizeErr
+		}
 
-	// Persist within a transaction. tx.Run joins an outer transaction if one
-	// is already active.
-	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
-		return repos.Invoices.Save(txCtx, inv)
+		if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
+			return fmt.Errorf("failed to save finalized invoice: %w", saveErr)
+		}
+		inv = loaded
+		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to save finalized invoice: %w", err)
+		return nil, err
 	}
 
 	// Post-commit metrics hooks — non-fatal.

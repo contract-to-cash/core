@@ -1805,6 +1805,7 @@ func TestRegenerateInvoice_UsesTxScopedReads(t *testing.T) {
 // onInvoiceIssuedSpyPlugin records OnInvoiceIssued invocations.
 type onInvoiceIssuedSpyPlugin struct {
 	called   bool
+	calls    int
 	received *invoice.Invoice
 	err      error // if set, OnInvoiceIssued returns this error
 }
@@ -1816,6 +1817,7 @@ func (p *onInvoiceIssuedSpyPlugin) Shutdown(_ context.Context) error            
 func (p *onInvoiceIssuedSpyPlugin) Priority() int                                       { return 500 }
 func (p *onInvoiceIssuedSpyPlugin) OnInvoiceIssued(_ *plugin.Context, inv *invoice.Invoice) error {
 	p.called = true
+	p.calls++
 	p.received = inv
 	return p.err
 }
@@ -1926,6 +1928,38 @@ func TestFinalizeInvoice_NonDraftRejected(t *testing.T) {
 	}
 	if spy.called {
 		t.Error("OnInvoiceIssued must not fire when finalization is rejected")
+	}
+}
+
+// TestFinalizeInvoice_SecondCallRejected locks the in-tx check-then-act:
+// the load and the draft→finalized transition happen inside the transaction,
+// so a repeat call re-reads the already-finalized invoice and is rejected —
+// OnInvoiceIssued fires exactly once, never twice.
+func TestFinalizeInvoice_SecondCallRejected(t *testing.T) {
+	inv := newDraftInvoiceForFinalize(t)
+	invRepo := &mockInvoiceRepo{byID: inv}
+	spy := &onInvoiceIssuedSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("failed to register spy plugin: %v", err)
+	}
+
+	svc := newFinalizeTestService(invRepo, registry)
+
+	if _, err := svc.FinalizeInvoice(context.Background(), inv.ID()); err != nil {
+		t.Fatalf("first finalize failed: %v", err)
+	}
+
+	_, err := svc.FinalizeInvoice(context.Background(), inv.ID())
+	if err == nil {
+		t.Fatal("second finalize must be rejected")
+	}
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) || domainErr.Code != shared.ErrCodeInvalidStateTransition {
+		t.Errorf("expected invalid_state_transition domain error, got: %v", err)
+	}
+	if spy.calls != 1 {
+		t.Errorf("OnInvoiceIssued calls: got %d, want exactly 1", spy.calls)
 	}
 }
 

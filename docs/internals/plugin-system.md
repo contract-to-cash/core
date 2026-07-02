@@ -1280,22 +1280,31 @@ func (s *BillingService) calculateUsageCharge(
 // GracePeriod経過後に呼び出す。確定後は変更不可。
 // 保存成功後に OnInvoiceIssuedHook（メトリクス）を発火する（フックエラーは非致命・ログのみ）。
 func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.InvoiceID) (*invoice.Invoice, error) {
-    inv, err := s.invoiceRepoFor(ctx).FindByID(ctx, invoiceID)
-    if err != nil {
-        return nil, fmt.Errorf("failed to load invoice: %w", err)
-    }
+    // 読み込み・draft検査・状態遷移・保存を同一トランザクション内で行う
+    // （check-then-act を tx 境界で分割しない）。並行呼び出しの敗者は
+    // finalized 済みの行を読んで invalid_state_transition で拒否されるため、
+    // 二重 finalize と OnInvoiceIssued の二重発火は起きない。
+    var inv *invoice.Invoice
+    err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+        loaded, findErr := repos.Invoices.FindByID(txCtx, invoiceID)
+        if findErr != nil {
+            return fmt.Errorf("failed to load invoice: %w", findErr)
+        }
 
-    // draft以外は invalid_state_transition の DomainError で拒否される
-    if err := inv.Finalize(); err != nil {
-        return nil, err
-    }
+        // draft以外は invalid_state_transition の DomainError で拒否される
+        if finalizeErr := loaded.Finalize(); finalizeErr != nil {
+            return finalizeErr
+        }
 
-    // 保存（トランザクション内。フックより先に永続化する）
-    err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
-        return repos.Invoices.Save(txCtx, inv)
+        // 保存（フックより先に永続化する）
+        if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
+            return fmt.Errorf("failed to save finalized invoice: %w", saveErr)
+        }
+        inv = loaded
+        return nil
     })
     if err != nil {
-        return nil, fmt.Errorf("failed to save finalized invoice: %w", err)
+        return nil, err
     }
 
     // 保存後のメトリクスフック（非致命）
