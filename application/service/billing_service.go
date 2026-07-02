@@ -553,6 +553,57 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 	return inv, nil
 }
 
+// FinalizeInvoice transitions a draft invoice to finalized and fires the
+// OnInvoiceIssued metrics hooks. Callers typically invoke this after
+// BillingConfig.GracePeriod has elapsed since GenerateInvoice, during which
+// late usage records can be absorbed and InvoiceLifecycleHooks can adjust
+// the draft. Finalized invoices are immutable.
+//
+// The save happens BEFORE the hooks fire (same policy as the post-commit
+// hooks in batch/contract_renewal.go) so plugins are never notified about
+// an invoice that was not persisted. Hook errors are non-fatal: the invoice
+// is already finalized and saved, so failures are logged and do not fail
+// the finalization.
+func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.InvoiceID) (*invoice.Invoice, error) {
+	inv, err := s.invoiceRepoFor(ctx).FindByID(ctx, invoiceID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load invoice: %w", err)
+	}
+	if inv == nil {
+		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
+			fmt.Sprintf("invoice %s not found", invoiceID))
+	}
+
+	// Finalize enforces the draft→finalized transition; any other status
+	// is rejected with an invalid_state_transition domain error.
+	if err := inv.Finalize(); err != nil {
+		return nil, err
+	}
+
+	// Persist within a transaction. tx.Run joins an outer transaction if one
+	// is already active.
+	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		return repos.Invoices.Save(txCtx, inv)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to save finalized invoice: %w", err)
+	}
+
+	// Post-commit metrics hooks — non-fatal.
+	pluginCtx := plugin.NewContext(ctx)
+	for _, hook := range s.registry.GetOnInvoiceIssuedHooks() {
+		if hookErr := hook.OnInvoiceIssued(pluginCtx, inv); hookErr != nil {
+			s.logger.Warn("OnInvoiceIssued hook failed",
+				"hook", hook.Name(),
+				"invoiceID", invoiceID,
+				"error", hookErr,
+			)
+		}
+	}
+
+	return inv, nil
+}
+
 // calculateSubtotal calculates the subtotal based on the Price entity.
 // It validates that the billing period matches the contract's current period,
 // loads the Price entity, and delegates to usage charge calculation if needed.
