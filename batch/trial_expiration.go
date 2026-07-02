@@ -21,6 +21,12 @@ import (
 //   - AutoConvert=true  → EndTrial(converted=true)  → contract becomes Active
 //   - AutoConvert=false → EndTrial(converted=false) → contract becomes Cancelled
 //
+// When AutoConvert=true and RequirePaymentMethod=true but the contract has no
+// payment method registered, conversion is blocked and recorded as a failure
+// in the BatchResult: the contract stays Trialing (no hooks fire) and will not
+// convert until a payment method is registered or RequirePaymentMethod is
+// cleared (design-decisions.md section 2.1).
+//
 // After a successful save, OnContractTrialEndHook and OnContractChangeHook
 // (ChangeType=trial_end) fire as non-fatal post-commit notifications.
 type TrialExpirationProcessor struct {
@@ -169,12 +175,15 @@ func (p *TrialExpirationProcessor) processOne(ctx context.Context, agg *contract
 	// without conversion and the contract is cancelled.
 	converted := cfg.AutoConvert
 
-	// Operational hint: converting without a registered payment method will
-	// make the first invoice uncollectable via charge_automatically.
+	// RequirePaymentMethod gate (design-decisions 2.1: 支払い方法事前登録必須):
+	// auto-conversion without a registered payment method is BLOCKED — the
+	// contract stays Trialing, no hooks fire, and the batch records this
+	// contract as a failure (subject to ContinueOnError). The contract will
+	// keep failing on subsequent runs until the operator either registers a
+	// payment method or clears RequirePaymentMethod.
 	if converted && cfg.RequirePaymentMethod && agg.PaymentMethodID() == nil {
-		p.logger.Warn("auto-converting trial despite RequirePaymentMethod with no payment method registered",
-			"contractID", agg.ContractID(),
-		)
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"cannot auto-convert trial: RequirePaymentMethod is set but no payment method is registered")
 	}
 
 	if dryRun {

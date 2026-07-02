@@ -353,6 +353,133 @@ func TestTrialExpirationProcessor_Concurrent(t *testing.T) {
 	}
 }
 
+// --- RequirePaymentMethod gate ---
+
+// newTrialingContractRequiringPM creates a trialing contract with
+// AutoConvert=true and RequirePaymentMethod=true. If paymentMethodID is
+// non-empty it is registered on the contract.
+func newTrialingContractRequiringPM(id string, paymentMethodID string) *contract.ContractAggregate {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	agg := contract.NewContractAggregate(shared.ContractID(id), clock)
+
+	cmd := contract.CreateContractCommand{
+		AccountID:    shared.AccountID("a1"),
+		ContractType: contract.ContractTypeSubscription,
+		BillingCycle: contract.BillingCycleMonthly,
+		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:    true,
+	}
+	meta := eventstore.EventMetadata{UserID: "test"}
+	if err := agg.Create(cmd, meta); err != nil {
+		panic("failed to create contract: " + err.Error())
+	}
+	if err := agg.StartTrial(contract.TrialConfiguration{
+		TrialEndDate:         time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+		AutoConvert:          true,
+		RequirePaymentMethod: true,
+	}, meta); err != nil {
+		panic("failed to start trial: " + err.Error())
+	}
+	if paymentMethodID != "" {
+		if err := agg.ChangePaymentMethod(&paymentMethodID, meta); err != nil {
+			panic("failed to change payment method: " + err.Error())
+		}
+	}
+	return agg
+}
+
+// TestTrialExpirationProcessor_RequirePaymentMethod_BlocksConversion locks the
+// design-decisions 2.1 behavior: RequirePaymentMethod=true with no registered
+// payment method must NOT auto-convert. The contract stays Trialing, no hooks
+// fire, and the batch records the contract as a failure.
+func TestTrialExpirationProcessor_RequirePaymentMethod_BlocksConversion(t *testing.T) {
+	agg := newTrialingContractRequiringPM("c-no-pm", "")
+	repo := &mockTrialRepo{contracts: []*contract.ContractAggregate{agg}}
+	spy := &trialEndSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("failed to register spy plugin: %v", err)
+	}
+
+	processor := NewTrialExpirationProcessor(repo, registry, trialProcessorClock(), nil, nil)
+
+	result, err := processor.Process(context.Background(), BatchOptions{ContinueOnError: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Total != 1 || result.Succeeded != 0 || result.Failed != 1 {
+		t.Errorf("result: got %+v, want Total=1 Succeeded=0 Failed=1", result)
+	}
+	var domainErr *shared.DomainError
+	if len(result.Errors) != 1 || !errors.As(result.Errors[0], &domainErr) ||
+		domainErr.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected business_rule_violation error, got: %v", result.Errors)
+	}
+	if agg.Status() != contract.ContractStatusTrialing {
+		t.Errorf("status: got %s, want trialing (conversion must be blocked)", agg.Status())
+	}
+	if len(repo.saved) != 0 {
+		t.Errorf("saved count: got %d, want 0", len(repo.saved))
+	}
+	if spy.trialEndCalls != 0 || spy.changeCalls != 0 {
+		t.Errorf("hooks must not fire when conversion is blocked: trialEnd=%d change=%d",
+			spy.trialEndCalls, spy.changeCalls)
+	}
+}
+
+// TestTrialExpirationProcessor_RequirePaymentMethod_DryRunDetects verifies the
+// gate is also validated in dry-run mode so operators see the failure without
+// side effects.
+func TestTrialExpirationProcessor_RequirePaymentMethod_DryRunDetects(t *testing.T) {
+	agg := newTrialingContractRequiringPM("c-no-pm", "")
+	repo := &mockTrialRepo{contracts: []*contract.ContractAggregate{agg}}
+
+	processor := NewTrialExpirationProcessor(repo, nil, trialProcessorClock(), nil, nil)
+
+	result, err := processor.Process(context.Background(), BatchOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("Failed: got %d, want 1 (dry run must detect the missing payment method)", result.Failed)
+	}
+	if agg.Status() != contract.ContractStatusTrialing {
+		t.Errorf("status: got %s, want trialing", agg.Status())
+	}
+	if len(repo.saved) != 0 {
+		t.Errorf("saved count: got %d, want 0 (dry run)", len(repo.saved))
+	}
+}
+
+// TestTrialExpirationProcessor_RequirePaymentMethod_WithPM_Converts verifies
+// that a registered payment method satisfies the gate and conversion proceeds.
+func TestTrialExpirationProcessor_RequirePaymentMethod_WithPM_Converts(t *testing.T) {
+	agg := newTrialingContractRequiringPM("c-with-pm", "pm-visa-1234")
+	repo := &mockTrialRepo{contracts: []*contract.ContractAggregate{agg}}
+	spy := &trialEndSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("failed to register spy plugin: %v", err)
+	}
+
+	processor := NewTrialExpirationProcessor(repo, registry, trialProcessorClock(), nil, nil)
+
+	result, err := processor.Process(context.Background(), BatchOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Succeeded != 1 || result.Failed != 0 {
+		t.Errorf("result: got %+v, want Succeeded=1 Failed=0", result)
+	}
+	if agg.Status() != contract.ContractStatusActive {
+		t.Errorf("status: got %s, want active", agg.Status())
+	}
+	if spy.trialEndCalls != 1 {
+		t.Errorf("OnContractTrialEnd calls: got %d, want 1", spy.trialEndCalls)
+	}
+}
+
 // newTrialingContractWithEnd creates a trialing contract with a custom trial end date.
 func newTrialingContractWithEnd(id string, autoConvert bool, trialEnd time.Time) *contract.ContractAggregate {
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
