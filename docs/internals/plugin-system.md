@@ -685,6 +685,14 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 | `OnContractTrialEndHook` | `batch.TrialExpirationProcessor`（保存後、非致命） |
 | `OnContractChangeHook` | `batch.ContractRenewalProcessor`（renewed/cancelled）、`batch.TrialExpirationProcessor`（trial_end） |
 
+> **発火タイミングの注意**: コアが「保存後」に発火するフック（`OnInvoiceIssuedHook` /
+> `AfterChargeHook` / `OnPaymentProcessedHook` 等）は、呼び出し側が自前のトランザクション内から
+> サービスメソッドを呼んだ場合、`tx.Run` が外側トランザクションにジョインするため
+> **外側コミットの前**に発火する。外側をロールバックすると「保存されていないのに通知済み」に
+> なるため、外側をロールバックし得る場合はサービス呼び出しをトランザクション外で行うこと。
+> また、冪等リプレイの収束（同一冪等キーへの並行リクエスト等）により同一エンティティに対して
+> 複数回発火し得るため、メトリクス系フックは対象 ID でのデデュープを前提に実装する。
+
 **統合者が発火するフック（5種）**
 
 契約の Create / Activate / Suspend / Resume / Cancel はコアにアプリケーション

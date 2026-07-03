@@ -41,12 +41,17 @@ type OnContractChangeHook interface {
 }
 
 // OnInvoiceIssuedHook is called when an invoice is issued, for metrics/analytics.
+// Implementations must be idempotent (deduplicate by invoice ID): retries and
+// idempotent-replay convergence can deliver the same invoice more than once.
 type OnInvoiceIssuedHook interface {
 	Plugin
 	OnInvoiceIssued(ctx *Context, invoice *invoice.Invoice) error
 }
 
 // OnPaymentProcessedHook is called when a payment is processed, for metrics/analytics.
+// Implementations must be idempotent (deduplicate by payment ID): concurrent
+// requests converging on the same idempotency key can deliver the same
+// payment more than once.
 type OnPaymentProcessedHook interface {
 	Plugin
 	OnPaymentProcessed(ctx *Context, payment *payment.Payment) error

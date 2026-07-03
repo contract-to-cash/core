@@ -564,6 +564,13 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 // an invoice that was not persisted. Hook errors are non-fatal: the invoice
 // is already finalized and saved, so failures are logged and do not fail
 // the finalization.
+//
+// Nested-transaction caveat: tx.Run joins an outer transaction if the
+// caller's ctx already carries one, and returns without committing it. In
+// that case the hooks fire before the OUTER commit — if the caller then
+// rolls back, plugins were notified about an invoice that was never
+// persisted. Call FinalizeInvoice outside your own transactions, or defer
+// hook-dependent side effects until the outer commit succeeds.
 func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.InvoiceID) (*invoice.Invoice, error) {
 	// Load, check and transition INSIDE the transaction (same in-tx re-check
 	// pattern as PaymentService.ProcessPayment): a check-then-act split across
