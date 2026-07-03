@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on `main`, or on manual `workflow_dispatch` with an explicit tag input.
   Runs build + test + lint before tagging.
 
+### Fixed
+
+- Release workflow: the `resolve` job no longer fails on `main` pushes that
+  carry no versioned `## [x.y.z]` heading. `grep` matching zero lines returns
+  exit 1, which under `set -e -o pipefail` aborted the step before the
+  skip branch; the no-op path now exits cleanly.
+
 ### ⚠ BREAKING CHANGES
 
 #### `payment.Repository.Save` must return a typed duplicate-key error (#97)

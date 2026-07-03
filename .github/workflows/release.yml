@@ -57,8 +57,10 @@ jobs:
           # 1. dispatch で明示指定があればそれを使う。無ければ CHANGELOG から抽出。
           tag="${INPUT_TAG:-}"
           if [ -z "$tag" ]; then
-            # CHANGELOG.md の最初の `## [x.y.z]` 見出し（Unreleased を除く）を拾う
-            version=$(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+[^]]*\]' CHANGELOG.md \
+            # CHANGELOG.md の最初の `## [x.y.z]` 見出し（Unreleased を除く）を拾う。
+            # 1件もマッチしないのは正常ケース（Unreleased のみ等）なので、
+            # `set -e -o pipefail` 下で grep の exit 1 に殺されないよう `|| true` で握り潰す。
+            version=$( { grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+[^]]*\]' CHANGELOG.md || true; } \
               | head -1 | sed -E 's/^## \[([^]]+)\].*/\1/')
             if [ -z "$version" ]; then
               echo "CHANGELOG.md にバージョン見出し (## [x.y.z]) がありません。リリースをスキップします。"
