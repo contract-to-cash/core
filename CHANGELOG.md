@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Release workflow (`.github/workflows/release.yml`): tags and publishes a
+  GitHub Release when a versioned `## [x.y.z]` section lands in `CHANGELOG.md`
+  on `main`, or on manual `workflow_dispatch` with an explicit tag input.
+  Runs build + test + lint before tagging.
+
 ### ⚠ BREAKING CHANGES
 
 #### `payment.Repository.Save` must return a typed duplicate-key error (#97)
