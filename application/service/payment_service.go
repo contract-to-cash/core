@@ -830,6 +830,26 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		}
 	}
 
+	// OnPaymentProcessed metrics hooks (non-fatal, outside transaction).
+	// Fired alongside AfterCharge on the success path; the pre-charge
+	// idempotent-replay short-circuit above intentionally skips these,
+	// consistent with AfterCharge not firing there either. Two caveats,
+	// both shared with AfterCharge: when ProcessPayment runs inside a
+	// caller-supplied transaction the hooks fire before the outer commit,
+	// and duplicate-key convergence (the raced-loser path above) can fire
+	// them more than once for the same payment ID — implementations must
+	// deduplicate by payment ID.
+	metricsCtx := plugin.NewContext(ctx)
+	for _, hook := range s.registry.GetOnPaymentProcessedHooks() {
+		if hookErr := hook.OnPaymentProcessed(metricsCtx, p); hookErr != nil {
+			s.logger.Warn("OnPaymentProcessed hook failed",
+				"paymentID", p.ID(),
+				"invoiceID", invoiceID,
+				"error", hookErr,
+			)
+		}
+	}
+
 	return p, nil
 }
 

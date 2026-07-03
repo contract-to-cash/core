@@ -771,6 +771,10 @@ type TrialConfiguration struct {
 }
 ```
 
+`RequirePaymentMethod=true` の場合、支払い方法が未登録の契約は
+`batch.TrialExpirationProcessor` が自動変換をブロックし、失敗として記録する
+（契約は Trialing のまま。支払い方法を登録するか `RequirePaymentMethod` を外すまで変換されない）。
+
 ### 3.6 一時停止設定
 
 ```go

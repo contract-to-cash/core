@@ -553,6 +553,74 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 	return inv, nil
 }
 
+// FinalizeInvoice transitions a draft invoice to finalized and fires the
+// OnInvoiceIssued metrics hooks. Callers typically invoke this after
+// BillingConfig.GracePeriod has elapsed since GenerateInvoice, during which
+// late usage records can be absorbed and InvoiceLifecycleHooks can adjust
+// the draft. Finalized invoices are immutable.
+//
+// The save happens BEFORE the hooks fire (same policy as the post-commit
+// hooks in batch/contract_renewal.go) so plugins are never notified about
+// an invoice that was not persisted. Hook errors are non-fatal: the invoice
+// is already finalized and saved, so failures are logged and do not fail
+// the finalization.
+//
+// Nested-transaction caveat: tx.Run joins an outer transaction if the
+// caller's ctx already carries one, and returns without committing it. In
+// that case the hooks fire before the OUTER commit — if the caller then
+// rolls back, plugins were notified about an invoice that was never
+// persisted. Call FinalizeInvoice outside your own transactions, or defer
+// hook-dependent side effects until the outer commit succeeds.
+func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.InvoiceID) (*invoice.Invoice, error) {
+	// Load, check and transition INSIDE the transaction (same in-tx re-check
+	// pattern as PaymentService.ProcessPayment): a check-then-act split across
+	// the tx boundary would let two concurrent calls both observe the draft
+	// state and double-finalize — firing OnInvoiceIssued twice. In-tx, the
+	// loser of the race re-reads the already-finalized row and Finalize
+	// rejects it with an invalid_state_transition domain error.
+	// tx.Run joins an outer transaction if one is already active.
+	var inv *invoice.Invoice
+	err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		loaded, findErr := repos.Invoices.FindByID(txCtx, invoiceID)
+		if findErr != nil {
+			return fmt.Errorf("failed to load invoice: %w", findErr)
+		}
+		if loaded == nil {
+			return shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("invoice %s not found", invoiceID))
+		}
+
+		// Finalize enforces the draft→finalized transition; any other status
+		// is rejected with an invalid_state_transition domain error.
+		if finalizeErr := loaded.Finalize(); finalizeErr != nil {
+			return finalizeErr
+		}
+
+		if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
+			return fmt.Errorf("failed to save finalized invoice: %w", saveErr)
+		}
+		inv = loaded
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Post-commit metrics hooks — non-fatal.
+	pluginCtx := plugin.NewContext(ctx)
+	for _, hook := range s.registry.GetOnInvoiceIssuedHooks() {
+		if hookErr := hook.OnInvoiceIssued(pluginCtx, inv); hookErr != nil {
+			s.logger.Warn("OnInvoiceIssued hook failed",
+				"hook", hook.Name(),
+				"invoiceID", invoiceID,
+				"error", hookErr,
+			)
+		}
+	}
+
+	return inv, nil
+}
+
 // calculateSubtotal calculates the subtotal based on the Price entity.
 // It validates that the billing period matches the contract's current period,
 // loads the Price entity, and delegates to usage charge calculation if needed.

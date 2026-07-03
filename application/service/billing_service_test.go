@@ -49,6 +49,7 @@ func (m *mockContractRepo) FindDueForRenewal(_ context.Context, _ time.Time) ([]
 
 type mockInvoiceRepo struct {
 	saved              *invoice.Invoice
+	byID               *invoice.Invoice   // returned by FindByID
 	existingByContract []*invoice.Invoice // returned by FindByContractID
 	existingByStatus   []*invoice.Invoice // returned by FindByContractAndStatus
 	existingByPeriod   []*invoice.Invoice // returned by FindByContractAndPeriod
@@ -59,7 +60,7 @@ func (m *mockInvoiceRepo) Save(_ context.Context, inv *invoice.Invoice) error {
 	return nil
 }
 func (m *mockInvoiceRepo) FindByID(_ context.Context, _ shared.InvoiceID) (*invoice.Invoice, error) {
-	return nil, nil
+	return m.byID, nil
 }
 func (m *mockInvoiceRepo) FindByContractID(_ context.Context, _ shared.ContractID) ([]*invoice.Invoice, error) {
 	return m.existingByContract, nil
@@ -1796,5 +1797,181 @@ func TestRegenerateInvoice_UsesTxScopedReads(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("regeneration should read tx-scoped repos and find the voided invoice: %v", err)
+	}
+}
+
+// --- FinalizeInvoice / OnInvoiceIssued hook ---
+
+// onInvoiceIssuedSpyPlugin records OnInvoiceIssued invocations.
+type onInvoiceIssuedSpyPlugin struct {
+	called   bool
+	calls    int
+	received *invoice.Invoice
+	err      error // if set, OnInvoiceIssued returns this error
+}
+
+func (p *onInvoiceIssuedSpyPlugin) Name() string                                        { return "invoice-issued-spy" }
+func (p *onInvoiceIssuedSpyPlugin) Version() string                                     { return "1.0.0" }
+func (p *onInvoiceIssuedSpyPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *onInvoiceIssuedSpyPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *onInvoiceIssuedSpyPlugin) Priority() int                                       { return 500 }
+func (p *onInvoiceIssuedSpyPlugin) OnInvoiceIssued(_ *plugin.Context, inv *invoice.Invoice) error {
+	p.called = true
+	p.calls++
+	p.received = inv
+	return p.err
+}
+
+func newDraftInvoiceForFinalize(t *testing.T) *invoice.Invoice {
+	t.Helper()
+	inv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		jpy(10000), jpy(0), jpy(0),
+		invoice.WithStatus(invoice.InvoiceStatusDraft),
+	)
+	if err != nil {
+		t.Fatalf("failed to create draft invoice: %v", err)
+	}
+	return inv
+}
+
+func newFinalizeTestService(invRepo *mockInvoiceRepo, registry *plugin.Registry) *BillingService {
+	return NewBillingService(
+		&mockContractRepo{}, invRepo, &mockUsageRepo{},
+		balance.BalanceConfig{}, &mockPriceRepo{}, &mockProductRepo{},
+		registry, BillingConfig{DaysUntilDue: 30}, newTestClock(),
+	)
+}
+
+func TestFinalizeInvoice_FiresOnInvoiceIssuedHook(t *testing.T) {
+	inv := newDraftInvoiceForFinalize(t)
+	invRepo := &mockInvoiceRepo{byID: inv}
+	spy := &onInvoiceIssuedSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("failed to register spy plugin: %v", err)
+	}
+
+	svc := newFinalizeTestService(invRepo, registry)
+
+	got, err := svc.FinalizeInvoice(context.Background(), inv.ID())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Status() != invoice.InvoiceStatusFinalized {
+		t.Errorf("status: got %s, want finalized", got.Status())
+	}
+	if invRepo.saved == nil {
+		t.Error("expected finalized invoice to be saved")
+	}
+	if !spy.called {
+		t.Fatal("expected OnInvoiceIssued hook to be called")
+	}
+	if spy.received == nil || spy.received.ID() != inv.ID() {
+		t.Error("OnInvoiceIssued hook received wrong invoice")
+	}
+	// Hook must fire AFTER finalization: the invoice it sees is finalized.
+	if spy.received.Status() != invoice.InvoiceStatusFinalized {
+		t.Errorf("hook saw invoice status %s, want finalized", spy.received.Status())
+	}
+}
+
+func TestFinalizeInvoice_HookErrorIsNonFatal(t *testing.T) {
+	inv := newDraftInvoiceForFinalize(t)
+	invRepo := &mockInvoiceRepo{byID: inv}
+	spy := &onInvoiceIssuedSpyPlugin{err: errors.New("metrics backend down")}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("failed to register spy plugin: %v", err)
+	}
+
+	svc := newFinalizeTestService(invRepo, registry)
+
+	got, err := svc.FinalizeInvoice(context.Background(), inv.ID())
+	if err != nil {
+		t.Fatalf("hook error must be non-fatal, got: %v", err)
+	}
+	if got.Status() != invoice.InvoiceStatusFinalized {
+		t.Errorf("status: got %s, want finalized", got.Status())
+	}
+	if invRepo.saved == nil {
+		t.Error("expected finalized invoice to be saved despite hook error")
+	}
+}
+
+func TestFinalizeInvoice_NonDraftRejected(t *testing.T) {
+	inv := newDraftInvoiceForFinalize(t)
+	if err := inv.Finalize(); err != nil {
+		t.Fatalf("setup finalize failed: %v", err)
+	}
+	invRepo := &mockInvoiceRepo{byID: inv}
+	spy := &onInvoiceIssuedSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("failed to register spy plugin: %v", err)
+	}
+
+	svc := newFinalizeTestService(invRepo, registry)
+
+	_, err := svc.FinalizeInvoice(context.Background(), inv.ID())
+	if err == nil {
+		t.Fatal("expected error finalizing a non-draft invoice")
+	}
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) || domainErr.Code != shared.ErrCodeInvalidStateTransition {
+		t.Errorf("expected invalid_state_transition domain error, got: %v", err)
+	}
+	if invRepo.saved != nil {
+		t.Error("non-draft invoice must not be saved")
+	}
+	if spy.called {
+		t.Error("OnInvoiceIssued must not fire when finalization is rejected")
+	}
+}
+
+// TestFinalizeInvoice_SecondCallRejected locks the in-tx check-then-act:
+// the load and the draft→finalized transition happen inside the transaction,
+// so a repeat call re-reads the already-finalized invoice and is rejected —
+// OnInvoiceIssued fires exactly once, never twice.
+func TestFinalizeInvoice_SecondCallRejected(t *testing.T) {
+	inv := newDraftInvoiceForFinalize(t)
+	invRepo := &mockInvoiceRepo{byID: inv}
+	spy := &onInvoiceIssuedSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("failed to register spy plugin: %v", err)
+	}
+
+	svc := newFinalizeTestService(invRepo, registry)
+
+	if _, err := svc.FinalizeInvoice(context.Background(), inv.ID()); err != nil {
+		t.Fatalf("first finalize failed: %v", err)
+	}
+
+	_, err := svc.FinalizeInvoice(context.Background(), inv.ID())
+	if err == nil {
+		t.Fatal("second finalize must be rejected")
+	}
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) || domainErr.Code != shared.ErrCodeInvalidStateTransition {
+		t.Errorf("expected invalid_state_transition domain error, got: %v", err)
+	}
+	if spy.calls != 1 {
+		t.Errorf("OnInvoiceIssued calls: got %d, want exactly 1", spy.calls)
+	}
+}
+
+func TestFinalizeInvoice_NotFound(t *testing.T) {
+	svc := newFinalizeTestService(&mockInvoiceRepo{}, plugin.NewRegistry())
+
+	_, err := svc.FinalizeInvoice(context.Background(), shared.NewInvoiceID())
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) || domainErr.Code != shared.ErrCodeNotFound {
+		t.Errorf("expected not_found domain error, got: %v", err)
 	}
 }

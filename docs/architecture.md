@@ -242,7 +242,23 @@ All hooks follow ISP (Interface Segregation Principle). Implement only the hooks
 | **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |
 | **Invoice generation** | `InvoiceGenerationHook` | PDF generation, delivery |
 
-### 6.2 Billing Pipeline
+### 6.2 Hook Firing Responsibility
+
+Not every hook is fired by the core. Of the 20 hook interfaces, 14 are invoked
+automatically by core services/batch processors; the rest are fired by the
+integrator or by an adapter (see `docs/internals/plugin-system.md` section 5.3
+for the per-hook detail):
+
+| Fired by | Hooks | Where |
+|----------|-------|-------|
+| **Core** (14) | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook`, `OnInvoiceIssuedHook` | `BillingService` (billing pipeline; `FinalizeInvoice` fires OnInvoiceIssued) |
+| | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentProcessedHook`, `OnPaymentFailedHook`, `OnRefundHook` | `PaymentService` |
+| | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | `CreditNoteService` |
+| | `OnContractRenewHook`, `OnContractTrialEndHook`, `OnContractChangeHook` | `batch.ContractRenewalProcessor`, `batch.TrialExpirationProcessor` |
+| **Integrator** (5) | `OnContractCreate/Activate/Suspend/Resume/Cancel Hook` | Contract lifecycle operations call aggregate methods directly (no core application service), so the integrator fires the matching hooks. Reference: `examples/hosting-integration-demo/main.go` |
+| **Adapter** (1) | `InvoiceGenerationHook` | Invoice rendering/delivery is out of core scope; the consumer's invoice-generation adapter fires BuildDocument/AfterRender/AfterDelivery (see `docs/internals/metrics-invoicegen.md`) |
+
+### 6.3 Billing Pipeline
 
 The core structurally guarantees the accounting-correct calculation order. Plugin `Priority` values only control execution order *within* the same hook type.
 

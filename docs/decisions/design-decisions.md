@@ -275,7 +275,7 @@ type EventMetadata struct {
 9. 計算後処理（InvoiceLifecycleHook.AfterCalculation）
 ```
 
-> このフロー順序は `architecture.md` セクション5.2 および `plugin-system.md` セクション5.1 と同一。
+> このフロー順序は `architecture.md` セクション6.3 および `plugin-system.md` セクション5.1 と同一。
 
 **理由：**
 - 会計上正しい計算順序を保証

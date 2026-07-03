@@ -633,7 +633,7 @@ Priority値に依存しないため、プラグイン登録順のミスで会計
 9. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
 ```
 
-> **注**: このフロー順序は `architecture.md` セクション5.2 と同一。
+> **注**: このフロー順序は `architecture.md` セクション6.3 と同一。
 
 ### 5.2 Priority の役割（同一フック内の順序制御）
 
@@ -659,6 +659,58 @@ func (p *CouponPlugin) Priority() int { return PriorityNormal }
 
 フック種別間の順序（DiscountHook → TaxHook）はコアが制御するため、
 TaxPluginのPriorityをどう設定してもDiscountHookより先に実行されることはない。
+
+### 5.3 Hook発火責任（誰がフックを呼ぶか）
+
+全20種のフックのうち、コアが自動発火するのは14種。残りは統合者（サービス開発者）
+またはアダプタが発火する。プラグインを書く前に、実装するフックが「誰に呼ばれるか」を
+この表で確認すること。
+
+**コアが自動発火するフック（14種）**
+
+| Hook | 発火箇所 |
+|------|---------|
+| `DiscountHook` | `BillingService` 請求パイプライン（GenerateInvoice / RegenerateInvoice / GenerateProrationInvoice） |
+| `TaxHook` | 同上 |
+| `InvoiceLifecycleHook` | 同上（BeforeCalculation / AfterCalculation） |
+| `OnInvoiceIssuedHook` | `BillingService.FinalizeInvoice`（確定保存後、非致命） |
+| `BeforeChargeHook` | `PaymentService.ProcessPayment`（ゲートウェイ課金前） |
+| `AfterChargeHook` | `PaymentService.ProcessPayment`（成功パス、非致命） |
+| `OnPaymentProcessedHook` | `PaymentService.ProcessPayment`（成功パス、非致命） |
+| `OnPaymentFailedHook` | `PaymentService.ProcessPayment`（ゲートウェイ失敗時、非致命） |
+| `OnRefundHook` | `PaymentService.Refund`（非致命） |
+| `OnCreditNoteIssuedHook` | `CreditNoteService`（発行後、非致命） |
+| `OnInvoiceRevisedHook` | `CreditNoteService.ReissueInvoice`（非致命） |
+| `OnContractRenewHook` | `batch.ContractRenewalProcessor`（保存後、非致命） |
+| `OnContractTrialEndHook` | `batch.TrialExpirationProcessor`（保存後、非致命） |
+| `OnContractChangeHook` | `batch.ContractRenewalProcessor`（renewed/cancelled）、`batch.TrialExpirationProcessor`（trial_end） |
+
+> **発火タイミングの注意**: コアが「保存後」に発火するフック（`OnInvoiceIssuedHook` /
+> `AfterChargeHook` / `OnPaymentProcessedHook` 等）は、呼び出し側が自前のトランザクション内から
+> サービスメソッドを呼んだ場合、`tx.Run` が外側トランザクションにジョインするため
+> **外側コミットの前**に発火する。外側をロールバックすると「保存されていないのに通知済み」に
+> なるため、外側をロールバックし得る場合はサービス呼び出しをトランザクション外で行うこと。
+> また、冪等リプレイの収束（同一冪等キーへの並行リクエスト等）により同一エンティティに対して
+> 複数回発火し得るため、メトリクス系フックは対象 ID でのデデュープを前提に実装する。
+
+**統合者が発火するフック（5種）**
+
+契約の Create / Activate / Suspend / Resume / Cancel はコアにアプリケーション
+サービスが存在しない（集約メソッドを統合者コードが直接呼ぶ）ため、対応するフックも
+統合者が発火する:
+
+- `OnContractCreateHook` / `OnContractActivateHook` / `OnContractSuspendHook` /
+  `OnContractResumeHook` / `OnContractCancelHook`
+
+実装リファレンス: `examples/hosting-integration-demo/main.go`（集約の状態遷移を
+実行 → 保存 → `registry.GetOnContract*Hooks()` をループして発火するパターン）。
+
+**アダプタが発火するフック（1種）**
+
+- `InvoiceGenerationHook`（BuildDocument / AfterRender / AfterDelivery）—
+  請求書のレンダリング・送付パイプラインはコアのスコープ外。
+  `docs/internals/metrics-invoicegen.md` の請求書生成アダプタ（利用者実装）が
+  各フェーズで発火する。
 
 ## 6. クーポンプラグイン実装例
 
@@ -1234,17 +1286,44 @@ func (s *BillingService) calculateUsageCharge(
 
 // FinalizeInvoice 請求書を確定する
 // GracePeriod経過後に呼び出す。確定後は変更不可。
-func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID string) error {
-    inv, err := s.invoiceRepo.FindByID(ctx, shared.InvoiceID(invoiceID))
+// 保存成功後に OnInvoiceIssuedHook（メトリクス）を発火する（フックエラーは非致命・ログのみ）。
+func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.InvoiceID) (*invoice.Invoice, error) {
+    // 読み込み・draft検査・状態遷移・保存を同一トランザクション内で行う
+    // （check-then-act を tx 境界で分割しない）。並行呼び出しの敗者は
+    // finalized 済みの行を読んで invalid_state_transition で拒否されるため、
+    // 二重 finalize と OnInvoiceIssued の二重発火は起きない。
+    var inv *invoice.Invoice
+    err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+        loaded, findErr := repos.Invoices.FindByID(txCtx, invoiceID)
+        if findErr != nil {
+            return fmt.Errorf("failed to load invoice: %w", findErr)
+        }
+
+        // draft以外は invalid_state_transition の DomainError で拒否される
+        if finalizeErr := loaded.Finalize(); finalizeErr != nil {
+            return finalizeErr
+        }
+
+        // 保存（フックより先に永続化する）
+        if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
+            return fmt.Errorf("failed to save finalized invoice: %w", saveErr)
+        }
+        inv = loaded
+        return nil
+    })
     if err != nil {
-        return err
-    }
-    if inv.Status() != invoice.InvoiceStatusDraft {
-        return fmt.Errorf("invoice %s is not in draft status", invoiceID)
+        return nil, err
     }
 
-    inv.Finalize()
-    return s.invoiceRepo.Save(ctx, inv)
+    // 保存後のメトリクスフック（非致命）
+    pluginCtx := plugin.NewContext(ctx)
+    for _, hook := range s.registry.GetOnInvoiceIssuedHooks() {
+        if hookErr := hook.OnInvoiceIssued(pluginCtx, inv); hookErr != nil {
+            s.logger.Warn("OnInvoiceIssued hook failed", "hook", hook.Name(), "error", hookErr)
+        }
+    }
+
+    return inv, nil
 }
 
 // ProcessPriceChange 価格変更時のクレジット処理
@@ -1342,9 +1421,10 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
     p.Initialize(context.Background(), plugin.Config{})
 
     // CalculationContext を使用（型安全）
-    c := &contract.Contract{/* ... */}
-    ctx := plugin.NewCalculationContext(context.Background(), c)
-    ctx.SetSubtotal(shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY))
+    // NewCalculationContext は (ctx, *contract.ContractAggregate, subtotal) の3引数
+    var c *contract.ContractAggregate // テスト用の集約を構築する
+    ctx := plugin.NewCalculationContext(context.Background(), c,
+        shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY))
 
     discount, err := p.CalculateDiscount(ctx)
     if err != nil {

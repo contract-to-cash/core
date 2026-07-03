@@ -79,6 +79,9 @@ BeforeCalculation → 価格計算 → Discount → Subtotal → Tax → Total �
 - **ISP 準拠**: 必要な Hook インターフェースのみ実装する。空メソッドの強制実装は不要
 - `Priority` は **同一 Hook 種別内** の実行順序のみを制御する。Hook 種別間の順序はコアが保証する
 - 全 20 種の Hook は 6 カテゴリに分類される（請求計算 3 / 契約ライフサイクル 7 / 支払い 4 / メトリクス 3 / クレジットノート 2 / 請求書生成 1）
+- **発火責任は非対称**: コアが自動発火するのは 14 種のみ。契約ライフサイクル 5 種
+  （Create/Activate/Suspend/Resume/Cancel）は統合者、`InvoiceGenerationHook` はアダプタが発火する
+  （詳細は plugin-system.md セクション 5.3 の発火責任表）
 
 Hook の完全な一覧と設計意図は @docs/internals/plugin-system.md を参照。
 
