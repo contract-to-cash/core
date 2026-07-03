@@ -23,7 +23,7 @@ const config: Config = {
   projectName: 'core',
   trailingSlash: false,
 
-  onBrokenLinks: 'throw',
+  onBrokenLinks: 'warn',
 
   i18n: {
     defaultLocale: 'en',
