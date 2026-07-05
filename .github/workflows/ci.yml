@@ -11,8 +11,13 @@ permissions:
 
 jobs:
   test:
-    name: Test
+    name: Test (library module)
     runs-on: ubuntu-latest
+    # GOWORK=off keeps this job on the library module only. tests/e2e/ is a
+    # separate module (with runn + its heavy transitive deps); without this,
+    # workspace mode would resolve and download that graph here too.
+    env:
+      GOWORK: off
     steps:
       - uses: actions/checkout@v4
 
@@ -39,9 +44,32 @@ jobs:
           name: coverage
           path: coverage.out
 
+  e2e:
+    name: E2E (tests/e2e module)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tests/e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache: true
+          cache-dependency-path: tests/e2e/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run e2e tests with race detector
+        run: go test ./... -race -count=1 -v
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    env:
+      GOWORK: off
     steps:
       - uses: actions/checkout@v4
 
