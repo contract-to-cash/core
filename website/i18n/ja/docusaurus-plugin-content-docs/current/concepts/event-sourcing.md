@@ -46,12 +46,12 @@ type Event struct {
 }
 
 type EventMetadata struct {
-    UserID        string   // 操作を実行した人（必須）
-    CorrelationID string   // リクエストトレーシング
-    CausationID   string   // 因果イベントチェーン
-    IPAddress     *string  // オプション
-    UserAgent     *string  // オプション
+    UserID    string   // 操作を実行した人（必須）
+    IPAddress *string  // オプション
+    UserAgent *string  // オプション
 }
+// 注: CorrelationID / CausationID は未活用のため Issue #116（Option B）で削除。
+// 具体的な利用者が現れた段階で非破壊的に再導入する。
 ```
 
 ## 時間旅行クエリ
