@@ -22,8 +22,13 @@ type CouponPlugin struct {
 	clock    shared.Clock
 }
 
-// Compile-time interface check.
-var _ plugin.DiscountHook = (*CouponPlugin)(nil)
+// Compile-time interface checks.
+// The plugin computes discounts (DiscountHook, side-effect-free) and persists
+// redemptions/usage inside the billing transaction (TransactionalDiscountHook).
+var (
+	_ plugin.DiscountHook              = (*CouponPlugin)(nil)
+	_ plugin.TransactionalDiscountHook = (*CouponPlugin)(nil)
+)
 
 // NewCouponPlugin creates a new CouponPlugin with the given repository and clock.
 func NewCouponPlugin(repo CouponRepository, clock shared.Clock) *CouponPlugin {
@@ -178,32 +183,26 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 			discount = subtotal
 		}
 
-		// 6. Record redemption first (audit trail), then usage counter.
-		// This ordering is intentional: if redemption save fails, usage count
-		// is not incremented, avoiding phantom usage without an audit record.
-		redemption := NewRedemption(
-			RedemptionID(shared.GenerateID()),
-			c.id,
-			c.Code(),
-			c.codeType,
-			accountID,
-			ctx.ContractID(),
-			now,
-		)
-		if err := p.repo.SaveRedemption(ctx.Context(), redemption); err != nil {
-			return zero, fmt.Errorf("coupon: save redemption: %w", err)
-		}
-
-		// 7. Record usage (increment global counter)
-		if err := p.repo.RecordUsage(ctx.Context(), c.id, ctx.ContractID()); err != nil {
-			return zero, fmt.Errorf("coupon: record usage: %w", err)
-		}
-
-		// 8. Record discount in calculation context
+		// 6. Record the applied discount (intent only — NO durable side effects).
+		//
+		// The redemption and usage-counter writes were moved out of this
+		// calculation phase (issue #123): they used to run through a repo that is
+		// not part of the billing transaction, so a later billing failure (tax,
+		// credit application, invoice save, ...) left a phantom redemption and an
+		// inflated usage counter that were never rolled back. CalculateDiscount is
+		// now pure; the durable writes happen in CommitDiscounts, which the core
+		// invokes inside the billing transaction after the invoice is saved.
+		//
+		// Reference carries the coupon ID so CommitDiscounts can reconstruct exactly
+		// which coupon to persist without holding mutable per-request state on this
+		// shared plugin instance. Together with ContractID it is the idempotency key.
 		ctx.RecordDiscount(plugin.AppliedDiscount{
 			PluginName: p.Name(),
 			Code:       c.Code(),
 			Amount:     discount,
+			AccountID:  accountID,
+			ContractID: ctx.ContractID(),
+			Reference:  string(c.id),
 		})
 
 		sum, err := total.Add(discount)
@@ -225,4 +224,60 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 	}
 
 	return total, nil
+}
+
+// CommitDiscounts persists the durable side effects of the coupon discounts that
+// CalculateDiscount recorded: a redemption audit record plus the global usage
+// counter increment for each applied coupon.
+//
+// The core calls this from inside the billing transaction, after the invoice has
+// been saved, so these writes commit or roll back atomically with the invoice
+// (issue #123): if any earlier billing step failed, the transaction never reaches
+// this method and no phantom redemption is left behind.
+//
+// Idempotency: the writes are keyed by (couponID, contractID). SaveRedemption and
+// RecordUsage are required to be no-ops when a record already exists for that pair
+// (see CouponRepository), so a retried or replayed commit — e.g. an optimistic-lock
+// retry of the surrounding transaction — does not double-count. Redemption is
+// written before usage (same ordering rationale as before): the audit record
+// precedes the counter increment.
+func (p *CouponPlugin) CommitDiscounts(txCtx context.Context, applied []plugin.AppliedDiscount) error {
+	now := p.clock.Now()
+	for _, d := range applied {
+		if d.PluginName != p.Name() {
+			continue
+		}
+		couponID := CouponID(d.Reference)
+		if couponID == "" {
+			// No coupon reference to persist against — skip defensively rather
+			// than fabricate a redemption for an unidentifiable coupon.
+			continue
+		}
+
+		// codeType is descriptive metadata on the redemption record; look it up
+		// best-effort. A missing/errored lookup must not block the commit, so fall
+		// back to the shared default. The (couponID, contractID) idempotency key
+		// does not depend on it.
+		codeType := CodeTypeShared
+		if c, err := p.repo.FindByCode(txCtx, d.Code); err == nil && c != nil {
+			codeType = c.CodeType()
+		}
+
+		redemption := NewRedemption(
+			RedemptionID(shared.GenerateID()),
+			couponID,
+			d.Code,
+			codeType,
+			d.AccountID,
+			d.ContractID,
+			now,
+		)
+		if err := p.repo.SaveRedemption(txCtx, redemption); err != nil {
+			return fmt.Errorf("coupon: save redemption: %w", err)
+		}
+		if err := p.repo.RecordUsage(txCtx, couponID, d.ContractID); err != nil {
+			return fmt.Errorf("coupon: record usage: %w", err)
+		}
+	}
+	return nil
 }

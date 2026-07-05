@@ -160,9 +160,43 @@ type DiscountHook interface {
 
     // CalculateDiscount 割引額を計算して返す
     // ctx.Subtotal() で基本料金を参照可能
+    //
+    // 【重要】副作用禁止（純粋計算）。このフックは請求トランザクションが開く前に
+    // 実行されるため、ここで永続書き込みを行うと後続失敗時にロールバックされない
+    // （issue #123）。永続的な副作用は下記 TransactionalDiscountHook で行う。
     CalculateDiscount(ctx *CalculationContext) (shared.Money, error)
 }
 ```
+
+#### 3.1.1 TransactionalDiscountHook（割引の永続的副作用）
+
+割引適用に伴い永続レコード（クーポンの redemption / usage カウンタ等）を書き込む必要がある
+プラグインは、`DiscountHook` に加えて `TransactionalDiscountHook` を実装する。コアは請求書保存**後**の
+`tx.Run` クロージャ内で `CommitDiscounts` を発火するため、これらの書き込みは請求書と同一
+トランザクションでコミット/ロールバックされる。
+
+```go
+// TransactionalDiscountHook 割引に付随する永続的副作用のコミット（任意実装）
+type TransactionalDiscountHook interface {
+    Plugin
+
+    // CommitDiscounts 請求トランザクション内（請求書保存後）でコアが発火する。
+    // txCtx はアクティブなトランザクションを ctx 伝播で運ぶ（実 DB アダプタは
+    // context 上の querier で join、inmemory はプロセス内）。
+    // applied は当該請求書で全 DiscountHook が記録した AppliedDiscount 全件。
+    // 実装は自分の記録のみ（AppliedDiscount.PluginName 一致）を対象にする。
+    // 冪等リプレイで複数回発火し得るため、安定キーで冪等に実装すること。
+    CommitDiscounts(txCtx context.Context, applied []AppliedDiscount) error
+}
+```
+
+- `CalculateDiscount` は割引額を計算し、意図を `CalculationContext.RecordDiscount(AppliedDiscount{...})` で宣言するのみ。
+- `AppliedDiscount` は `PluginName` / `Code` / `Amount` に加え、コミット時に永続化対象を再構築するための
+  任意フィールド `AccountID` / `ContractID` / `Reference`（プラグイン固有の安定 ID。coupon は couponID）を持つ。
+- 中間ステップ（TaxHook / クレジット充当 / 請求書構築 / `AfterCalculation` / 請求書保存）が失敗すると
+  `CommitDiscounts` に到達しないため、redemption / usage は永続化されない（受け入れ基準）。
+- これは**追加的な契約**（デフォルト実装ありの拡張）であり、`TransactionalDiscountHook` を実装しない
+  既存の `DiscountHook` は従来どおり動作する（コミットフェーズがないだけ）。
 
 ### 3.2 税計算フック
 
@@ -631,9 +665,16 @@ Priority値に依存しないため、プラグイン登録順のミスで会計
 7. クレジット台帳からの充当（コア）          ← 残高があれば税込合計から差引
 8. 請求書をdraft状態で生成 → GracePeriod後にfinalize
 9. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
+10. 請求書保存（コア）
+11. TransactionalDiscountHook.CommitDiscounts() ← 割引の永続的副作用（redemption/usage）を確定
 ```
 
 > **注**: このフロー順序は `architecture.md` セクション6.3 と同一。
+>
+> ステップ 7〜11 は同一トランザクション（`tx.Run`）内で実行される。ステップ 3 の割引計算は
+> 副作用禁止（純粋計算）で、その永続的副作用はステップ 11 の `CommitDiscounts` に集約される。
+> これにより、ステップ 5〜10 のいずれかで失敗しても redemption / usage は永続化されない
+> （issue #123。詳細は §3.1.1）。
 
 ### 5.2 Priority の役割（同一フック内の順序制御）
 
@@ -666,11 +707,15 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 またはアダプタが発火する。プラグインを書く前に、実装するフックが「誰に呼ばれるか」を
 この表で確認すること。
 
+（`TransactionalDiscountHook` は `DiscountHook` の任意拡張（コミットフェーズ）であり、
+上記 20 種とは別枠。コアが `BillingService` 請求パイプラインの請求書保存後に発火する。§3.1.1 参照。）
+
 **コアが自動発火するフック（14種）**
 
 | Hook | 発火箇所 |
 |------|---------|
 | `DiscountHook` | `BillingService` 請求パイプライン（GenerateInvoice / RegenerateInvoice / GenerateProrationInvoice） |
+| `TransactionalDiscountHook`（拡張） | 同パイプラインの `tx.Run` 内・請求書保存後に `CommitDiscounts` を発火（同一トランザクション） |
 | `TaxHook` | 同上 |
 | `InvoiceLifecycleHook` | 同上（BeforeCalculation / AfterCalculation） |
 | `OnInvoiceIssuedHook` | `BillingService.FinalizeInvoice`（確定保存後、非致命） |
@@ -803,14 +848,43 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
         }
 
         // 型安全な割引記録（metadata[string]interface{} ではない）
+        // 副作用は禁止。永続化に必要な識別子（couponID/account/contract）を
+        // AppliedDiscount に載せ、CommitDiscounts で確定する。
         ctx.RecordDiscount(plugin.AppliedDiscount{
             PluginName: p.Name(),
             Code:       coupon.Code(),
             Amount:     discount,
+            AccountID:  contract.AccountID(),
+            ContractID: contract.ContractID(),
+            Reference:  string(coupon.ID()), // couponID（冪等キーの一部）
         })
     }
 
     return totalDiscount, nil
+}
+
+// CommitDiscounts TransactionalDiscountHookの実装
+// コアが請求トランザクション内（請求書保存後）で発火する。
+// redemption / usage の永続化を (couponID, contractID) 冪等キーで行う。
+func (p *CouponPlugin) CommitDiscounts(txCtx context.Context, applied []plugin.AppliedDiscount) error {
+    now := p.clock.Now()
+    for _, d := range applied {
+        if d.PluginName != p.Name() || d.Reference == "" {
+            continue // 自分の記録のみ・識別子必須
+        }
+        couponID := CouponID(d.Reference)
+        redemption := NewRedemption(RedemptionID(shared.GenerateID()), couponID,
+            d.Code, /* codeType */ CodeTypeShared, d.AccountID, d.ContractID, now)
+        // SaveRedemption / RecordUsage は (couponID, contractID) で冪等
+        // （リトライ・リプレイでの二重計上を防ぐ）
+        if err := p.repo.SaveRedemption(txCtx, redemption); err != nil {
+            return err
+        }
+        if err := p.repo.RecordUsage(txCtx, couponID, d.ContractID); err != nil {
+            return err
+        }
+    }
+    return nil
 }
 ```
 

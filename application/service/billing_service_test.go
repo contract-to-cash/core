@@ -53,9 +53,13 @@ type mockInvoiceRepo struct {
 	existingByContract []*invoice.Invoice // returned by FindByContractID
 	existingByStatus   []*invoice.Invoice // returned by FindByContractAndStatus
 	existingByPeriod   []*invoice.Invoice // returned by FindByContractAndPeriod
+	saveErr            error              // if set, Save returns this error (and does not record)
 }
 
 func (m *mockInvoiceRepo) Save(_ context.Context, inv *invoice.Invoice) error {
+	if m.saveErr != nil {
+		return m.saveErr
+	}
 	m.saved = inv
 	return nil
 }
@@ -1820,6 +1824,144 @@ func (p *onInvoiceIssuedSpyPlugin) OnInvoiceIssued(_ *plugin.Context, inv *invoi
 	p.calls++
 	p.received = inv
 	return p.err
+}
+
+// --- TransactionalDiscountHook wiring (issue #123) ---
+
+// txDiscountSpyPlugin implements DiscountHook (side-effect-free) and
+// TransactionalDiscountHook. CalculateDiscount only records intent; CommitDiscounts
+// stands in for a plugin's durable redemption/usage writes and counts how many
+// times the core actually reached the commit step.
+type txDiscountSpyPlugin struct {
+	discount    shared.Money
+	commitCalls int
+	committed   []plugin.AppliedDiscount
+}
+
+func (p *txDiscountSpyPlugin) Name() string                                        { return "tx_discount_spy" }
+func (p *txDiscountSpyPlugin) Version() string                                     { return "1.0.0" }
+func (p *txDiscountSpyPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *txDiscountSpyPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *txDiscountSpyPlugin) Priority() int                                       { return 100 }
+func (p *txDiscountSpyPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) {
+	ctx.RecordDiscount(plugin.AppliedDiscount{
+		PluginName: p.Name(),
+		Code:       "SPY",
+		Amount:     p.discount,
+		ContractID: ctx.ContractID(),
+		Reference:  "spy-coupon",
+	})
+	return p.discount, nil
+}
+func (p *txDiscountSpyPlugin) CommitDiscounts(_ context.Context, applied []plugin.AppliedDiscount) error {
+	p.commitCalls++
+	p.committed = append(p.committed, applied...)
+	return nil
+}
+
+// failingTaxPlugin is a TaxHook that always errors, standing in for any billing
+// step that fails after discount calculation.
+type failingTaxPlugin struct{}
+
+func (p *failingTaxPlugin) Name() string                                        { return "failing_tax" }
+func (p *failingTaxPlugin) Version() string                                     { return "1.0.0" }
+func (p *failingTaxPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *failingTaxPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *failingTaxPlugin) Priority() int                                       { return 100 }
+func (p *failingTaxPlugin) CalculateTax(_ *plugin.CalculationContext) (shared.Money, error) {
+	return shared.Money{}, errors.New("tax computation failed")
+}
+
+// TestGenerateInvoice_CommitDiscountsAfterSave verifies the happy path: the core
+// invokes TransactionalDiscountHook.CommitDiscounts exactly once, after the invoice
+// is saved, passing the discounts recorded during calculation.
+func TestGenerateInvoice_CommitDiscountsAfterSave(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	invRepo := &mockInvoiceRepo{}
+
+	spy := &txDiscountSpyPlugin{discount: jpy(1000)}
+	registry := plugin.NewRegistry()
+	_ = registry.Register(spy)
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg}, invRepo, &mockUsageRepo{},
+		balance.BalanceConfig{}, priceRepoFor(priceEntity), &mockProductRepo{},
+		registry, BillingConfig{DaysUntilDue: 30}, clock,
+	)
+
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if invRepo.saved == nil {
+		t.Fatal("expected invoice to be saved")
+	}
+	if spy.commitCalls != 1 {
+		t.Errorf("expected CommitDiscounts called once, got %d", spy.commitCalls)
+	}
+	if len(spy.committed) != 1 || spy.committed[0].Reference != "spy-coupon" {
+		t.Errorf("expected the recorded discount passed to CommitDiscounts, got %+v", spy.committed)
+	}
+}
+
+// TestGenerateInvoice_IntermediateFailure_NoDiscountCommit is the issue #123
+// regression guard: when a billing step after discount calculation fails, the core
+// must NOT reach the discount-commit step, so no durable redemption/usage is
+// persisted. Covered failures: a TaxHook error (before the tx opens) and an
+// invoice Save error (inside the tx, before commit).
+func TestGenerateInvoice_IntermediateFailure_NoDiscountCommit(t *testing.T) {
+	clock := newTestClock()
+
+	t.Run("tax hook failure", func(t *testing.T) {
+		agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+		invRepo := &mockInvoiceRepo{}
+		spy := &txDiscountSpyPlugin{discount: jpy(1000)}
+
+		registry := plugin.NewRegistry()
+		_ = registry.Register(spy)
+		_ = registry.Register(&failingTaxPlugin{})
+
+		svc := NewBillingService(
+			&mockContractRepo{agg: agg}, invRepo, &mockUsageRepo{},
+			balance.BalanceConfig{}, priceRepoFor(priceEntity), &mockProductRepo{},
+			registry, BillingConfig{DaysUntilDue: 30}, clock,
+		)
+
+		_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+		if err == nil {
+			t.Fatal("expected error from failing tax hook")
+		}
+		if spy.commitCalls != 0 {
+			t.Errorf("discount must not be committed when a later step fails, got %d commits", spy.commitCalls)
+		}
+		if invRepo.saved != nil {
+			t.Error("no invoice should have been saved")
+		}
+	})
+
+	t.Run("invoice save failure", func(t *testing.T) {
+		agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+		invRepo := &mockInvoiceRepo{saveErr: errors.New("db save failed")}
+		spy := &txDiscountSpyPlugin{discount: jpy(1000)}
+
+		registry := plugin.NewRegistry()
+		_ = registry.Register(spy)
+
+		svc := NewBillingService(
+			&mockContractRepo{agg: agg}, invRepo, &mockUsageRepo{},
+			balance.BalanceConfig{}, priceRepoFor(priceEntity), &mockProductRepo{},
+			registry, BillingConfig{DaysUntilDue: 30}, clock,
+		)
+
+		_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+		if err == nil {
+			t.Fatal("expected error from failing invoice save")
+		}
+		if spy.commitCalls != 0 {
+			t.Errorf("discount must not be committed when invoice save fails, got %d commits", spy.commitCalls)
+		}
+	})
 }
 
 func newDraftInvoiceForFinalize(t *testing.T) *invoice.Invoice {
