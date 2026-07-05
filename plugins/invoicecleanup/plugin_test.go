@@ -8,6 +8,7 @@ import (
 
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -63,7 +64,7 @@ func TestOnContractCancel_VoidsDraftAndFinalized(t *testing.T) {
 	_ = agg.Create(contract.CreateContractCommand{
 		AccountID:    accountID,
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        jpy(10000),
 		BasePrice:    jpy(10000),
 	}, eventstore.EventMetadata{UserID: "test"})
@@ -106,7 +107,7 @@ func TestOnContractCancel_NoInvoices(t *testing.T) {
 	_ = agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        jpy(1000),
 		BasePrice:    jpy(1000),
 	}, eventstore.EventMetadata{UserID: "test"})

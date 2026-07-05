@@ -288,7 +288,7 @@ func contractToResponse(agg *contract.ContractAggregate) contractResponse {
 		AccountID:         string(agg.AccountID()),
 		Status:            string(agg.Status()),
 		ContractType:      string(agg.GetContractType()),
-		BillingCycle:      string(agg.GetBillingCycle()),
+		BillingCycle:      string(agg.GetInterval().ToBillingCycle()),
 		Price:             agg.Price().Int64(),
 		CancelAtPeriodEnd: agg.CancelAtPeriodEnd(),
 	}
@@ -324,7 +324,7 @@ func handleCreateContract(env *testEnv) http.HandlerFunc {
 			AccountID:    shared.AccountID(req.AccountID),
 			PriceID:      price.ID(),
 			ContractType: contract.ContractType(req.ContractType),
-			BillingCycle: contract.BillingCycle(req.BillingCycle),
+			Interval:     pricing.BillingCycleToInterval(pricing.BillingCycle(req.BillingCycle)),
 			Price:        moneyJPY(req.Price),
 			BasePrice:    moneyJPY(req.Price),
 			AutoRenew:    autoRenew,
@@ -858,7 +858,7 @@ func handleRenewContract(env *testEnv) http.HandlerFunc {
 			return
 		}
 
-		if err := agg.Renew(agg.GetBillingCycle(), emptyMetadata()); err != nil {
+		if err := agg.RenewWithInterval(agg.GetInterval(), emptyMetadata()); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
@@ -956,7 +956,7 @@ func handleChangePrice(env *testEnv) http.HandlerFunc {
 			currentPrice.ProductID(),
 			moneyJPY(req.NewPrice),
 			shared.CurrencyJPY,
-			pricing.BillingCycle(agg.GetBillingCycle()),
+			agg.GetInterval().ToBillingCycle(),
 			nil,
 			env.clock.Now(),
 		)

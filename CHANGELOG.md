@@ -6,6 +6,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING**: dropped the deprecated `BillingCycle` backward-compat
+  scaffolding from the contract domain before v1.0 (#111). Removed:
+  `CreateContractCommand.BillingCycle` (use `Interval BillingInterval`),
+  `ContractAggregate.GetBillingCycle()` (use `GetInterval()`),
+  `ContractAggregate.Renew(BillingCycle, …)` (use `RenewWithInterval(BillingInterval, …)`),
+  the `billing_cycle`/`old_billing_cycle`/`new_billing_cycle` fields on
+  `ContractCreatedEvent`/`ContractRenewedEvent`, the `billing_cycle` field on the
+  `ContractState` snapshot, the `Contract.BillingCycle()` entity getter, and the
+  `type BillingCycle = pricing.BillingCycle` alias plus the re-exported
+  `BillingCycleDaily/Weekly/Monthly/Yearly` constants in `domain/contract`.
+  The `pricing.BillingCycle` string type, its constants, `BillingCycleToInterval`,
+  and `BillingInterval.ToBillingCycle` remain in the `pricing` package for `Price`
+  construction, display formatting, and adapter code reading third-party strings.
+- Migrate call sites: set `Interval: pricing.Monthly()` (or `Daily/Weekly/Yearly/`
+  `Quarterly/SemiAnnual`) instead of `BillingCycle`, and read `GetInterval()`.
+
+### Changed
+
+- **Event Sourcing / on-disk schema**: contract event payloads and the contract
+  snapshot no longer carry `billing_cycle`. Historical events that recorded only
+  `billing_cycle` are migrated on read by new upcasters
+  (`ContractCreatedEventUpcaster`, `ContractRenewedEventUpcaster`) which convert
+  `billing_cycle` → `interval` and bump the event `SchemaVersion` to 2. Legacy
+  contract snapshots (schema_version 0/1) are converted to an interval on
+  `LoadFromSnapshot`; new snapshots record `schema_version: 2`. No data migration
+  is required — existing streams and snapshots replay correctly.
+
 ### Added
 
 - Release workflow (`.github/workflows/release.yml`): tags and publishes a

@@ -52,7 +52,7 @@ erDiagram
         ProductID productID FK
         Money amount
         Currency currency
-        BillingCycle billingCycle "daily | weekly | monthly | yearly"
+        BillingInterval interval "{unit, count} 例: {month, 3}"
         PricingModel pricingModel "flat | tiered | usage"
         PriceStatus status "active | archived"
     }
@@ -63,7 +63,7 @@ erDiagram
         PriceID priceID FK
         ContractStatus status "draft | trialing | active | past_due | suspended | cancelled | expired"
         ContractType contractType "one_time | subscription | usage_based"
-        BillingCycle billingCycle
+        BillingInterval interval
         DateRange currentPeriod
         Money price
         bool autoRenew

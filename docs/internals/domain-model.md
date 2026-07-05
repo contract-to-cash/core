@@ -52,7 +52,7 @@ erDiagram
         ProductID productID FK
         Money amount
         Currency currency
-        BillingCycle billingCycle "daily | weekly | monthly | yearly"
+        BillingInterval interval "{unit, count} 例: {month, 3}"
         PricingModel pricingModel "flat | tiered | usage"
         PriceStatus status "active | archived"
         timestamp createdAt
@@ -64,7 +64,7 @@ erDiagram
         PriceID priceID FK
         ContractStatus status "draft | trialing | active | past_due | suspended | cancelled | expired"
         ContractType contractType "one_time | subscription | usage_based"
-        BillingCycle billingCycle
+        BillingInterval interval
         DateRange currentPeriod
         Money price
         Money basePrice
@@ -473,24 +473,17 @@ const (
     ContractTypeUsageBased ContractType = "usage_based"
 )
 
-// BillingCycle は pricing.BillingCycle のエイリアス。
-// 新規コードでは pricing.BillingCycle を直接使用すること。
-type BillingCycle = pricing.BillingCycle
-
-// 後方互換のため pricing パッケージの定数を再エクスポート
-const (
-    BillingCycleDaily   = pricing.BillingCycleDaily
-    BillingCycleWeekly  = pricing.BillingCycleWeekly
-    BillingCycleMonthly = pricing.BillingCycleMonthly
-    BillingCycleYearly  = pricing.BillingCycleYearly
-)
+// BillingInterval は pricing.BillingInterval のエイリアス。
+// 課金サイクルは常に BillingInterval（{unit, count}）で表現する。
+// 旧 BillingCycle 文字列スキャフォールディングは #111 で撤去済み。
+type BillingInterval = pricing.BillingInterval
 
 type Contract struct {
     id               shared.ContractID
     accountID        shared.AccountID
     status           ContractStatus
     contractType     ContractType
-    billingCycle     BillingCycle
+    interval         BillingInterval
     currentPeriod    shared.DateRange
     trialConfig      *TrialConfiguration
     suspensionConfig *SuspensionConfiguration
@@ -521,7 +514,7 @@ type CreateContractCommand struct {
     AccountID      shared.AccountID
     PriceID        shared.PriceID
     ContractType   ContractType
-    BillingCycle   BillingCycle
+    Interval       BillingInterval
     Price          shared.Money
     BasePrice      shared.Money
     AutoRenew      bool
@@ -535,7 +528,7 @@ type ContractAggregate struct {
     accountID         shared.AccountID
     status            ContractStatus
     contractType      ContractType
-    billingCycle      BillingCycle
+    interval          BillingInterval
     currentPeriod     shared.DateRange
     trialConfig       *TrialConfiguration
     suspensionConfig  *SuspensionConfiguration
@@ -564,7 +557,7 @@ func (a *ContractAggregate) UnscheduleChange(reason string, metadata eventstore.
 func (a *ContractAggregate) ChangePaymentMethod(paymentMethodID *string, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) StartTrial(config TrialConfiguration, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMetadata) error
-func (a *ContractAggregate) Renew(newBillingCycle BillingCycle, metadata eventstore.EventMetadata) error
+func (a *ContractAggregate) RenewWithInterval(newInterval BillingInterval, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) ScheduleCancellation(reason string, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) UnscheduleCancellation(metadata eventstore.EventMetadata) error
 
@@ -579,7 +572,7 @@ func (a *ContractAggregate) ContractID() shared.ContractID
 func (a *ContractAggregate) AccountID() shared.AccountID
 func (a *ContractAggregate) Status() ContractStatus
 func (a *ContractAggregate) GetContractType() ContractType
-func (a *ContractAggregate) GetBillingCycle() BillingCycle
+func (a *ContractAggregate) GetInterval() BillingInterval
 func (a *ContractAggregate) CurrentPeriod() shared.DateRange
 func (a *ContractAggregate) TrialConfig() *TrialConfiguration
 func (a *ContractAggregate) SuspensionConfig() *SuspensionConfiguration
@@ -627,7 +620,7 @@ type ContractCreatedEvent struct {
     PriceID      shared.PriceID
     Price        shared.Money
     BasePrice    shared.Money
-    BillingCycle BillingCycle
+    Interval     BillingInterval
     ContractType ContractType
     AutoRenew    bool
     CreatedAt    time.Time
@@ -712,8 +705,8 @@ type ContractRenewedEvent struct {
     OldPriceID      shared.PriceID
     NewPriceID      shared.PriceID
     PriceChanged    bool
-    OldBillingCycle BillingCycle
-    NewBillingCycle BillingCycle
+    OldInterval     BillingInterval
+    NewInterval     BillingInterval
     RenewedAt       time.Time
 }
 

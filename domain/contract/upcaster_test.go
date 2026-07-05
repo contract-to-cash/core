@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 )
@@ -186,7 +187,7 @@ func TestContractUpcasterChain_Integration(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        oldPrice,
 		BasePrice:    oldPrice,
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -215,7 +216,7 @@ func TestLoadFromHistory_UpcastsV1PriceChangedEvent(t *testing.T) {
 		PriceID:      shared.PriceID("price-001"),
 		Price:        shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -238,6 +239,191 @@ func TestLoadFromHistory_UpcastsV1PriceChangedEvent(t *testing.T) {
 	if agg.Version() != 2 {
 		t.Errorf("expected version 2, got %d", agg.Version())
 	}
+}
+
+func TestContractCreatedEventUpcaster_BillingCycleToInterval(t *testing.T) {
+	u := &ContractCreatedEventUpcaster{}
+
+	if !u.CanUpcast(EventTypeContractCreated, 1) {
+		t.Error("expected CanUpcast=true for ContractCreated v1")
+	}
+	if u.CanUpcast(EventTypeContractCreated, 2) {
+		t.Error("expected CanUpcast=false for ContractCreated v2")
+	}
+
+	// Historical payload carrying only billing_cycle, no interval.
+	legacy := map[string]interface{}{
+		"contract_id":   "c1",
+		"account_id":    "acc-1",
+		"price_id":      "price-1",
+		"billing_cycle": "yearly",
+		"contract_type": "subscription",
+		"created_at":    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	data, _ := json.Marshal(legacy)
+	event := eventstore.Event{Type: EventTypeContractCreated, SchemaVersion: 1, Data: data}
+
+	result, err := u.Upcast(event)
+	if err != nil {
+		t.Fatalf("Upcast failed: %v", err)
+	}
+	if result.SchemaVersion != 2 {
+		t.Errorf("expected SchemaVersion=2, got %d", result.SchemaVersion)
+	}
+
+	domainEvent, err := contractEventRegistry.Deserialize(result.Type, result.Data)
+	if err != nil {
+		t.Fatalf("deserialize failed: %v", err)
+	}
+	created, ok := domainEvent.(*ContractCreatedEvent)
+	if !ok {
+		t.Fatalf("expected *ContractCreatedEvent, got %T", domainEvent)
+	}
+	if !created.Interval.Equals(pricing.Yearly()) {
+		t.Errorf("expected interval yearly from billing_cycle, got %s", created.Interval)
+	}
+}
+
+func TestContractCreatedEventUpcaster_PreservesExistingInterval(t *testing.T) {
+	u := &ContractCreatedEventUpcaster{}
+
+	// Payload already carries an interval (quarterly); billing_cycle is empty/absent.
+	// The upcaster must NOT overwrite the richer interval.
+	created := &ContractCreatedEvent{
+		ContractID:   shared.ContractID("c1"),
+		AccountID:    shared.AccountID("acc-1"),
+		Interval:     pricing.Quarterly(),
+		ContractType: ContractTypeSubscription,
+		CreatedAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	data, _ := json.Marshal(created)
+	event := eventstore.Event{Type: EventTypeContractCreated, SchemaVersion: 1, Data: data}
+
+	result, err := u.Upcast(event)
+	if err != nil {
+		t.Fatalf("Upcast failed: %v", err)
+	}
+
+	domainEvent, _ := contractEventRegistry.Deserialize(result.Type, result.Data)
+	got, ok := domainEvent.(*ContractCreatedEvent)
+	if !ok {
+		t.Fatalf("expected *ContractCreatedEvent, got %T", domainEvent)
+	}
+	if !got.Interval.Equals(pricing.Quarterly()) {
+		t.Errorf("expected interval preserved as quarterly, got %s", got.Interval)
+	}
+}
+
+func TestContractRenewedEventUpcaster_BillingCyclesToIntervals(t *testing.T) {
+	u := &ContractRenewedEventUpcaster{}
+
+	if !u.CanUpcast(EventTypeContractRenewed, 1) {
+		t.Error("expected CanUpcast=true for ContractRenewed v1")
+	}
+
+	legacy := map[string]interface{}{
+		"contract_id":       "c1",
+		"old_price_id":      "price-A",
+		"new_price_id":      "price-A",
+		"price_changed":     false,
+		"old_billing_cycle": "monthly",
+		"new_billing_cycle": "yearly",
+		"renewed_at":        time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}
+	data, _ := json.Marshal(legacy)
+	event := eventstore.Event{Type: EventTypeContractRenewed, SchemaVersion: 1, Data: data}
+
+	result, err := u.Upcast(event)
+	if err != nil {
+		t.Fatalf("Upcast failed: %v", err)
+	}
+	if result.SchemaVersion != 2 {
+		t.Errorf("expected SchemaVersion=2, got %d", result.SchemaVersion)
+	}
+
+	domainEvent, err := contractEventRegistry.Deserialize(result.Type, result.Data)
+	if err != nil {
+		t.Fatalf("deserialize failed: %v", err)
+	}
+	renewed, ok := domainEvent.(*ContractRenewedEvent)
+	if !ok {
+		t.Fatalf("expected *ContractRenewedEvent, got %T", domainEvent)
+	}
+	if !renewed.OldInterval.Equals(pricing.Monthly()) {
+		t.Errorf("expected old interval monthly, got %s", renewed.OldInterval)
+	}
+	if !renewed.NewInterval.Equals(pricing.Yearly()) {
+		t.Errorf("expected new interval yearly, got %s", renewed.NewInterval)
+	}
+}
+
+// TestLoadFromHistory_UpcastsLegacyBillingCyclePayloads verifies that a full
+// event stream persisted with only the deprecated billing_cycle fields replays
+// correctly into the interval-based aggregate.
+func TestLoadFromHistory_UpcastsLegacyBillingCyclePayloads(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	createLegacy := map[string]interface{}{
+		"contract_id":   "test-contract-001",
+		"account_id":    "acc-001",
+		"price_id":      "price-001",
+		"price":         map[string]interface{}{"amount": "1000/1", "currency": "JPY"},
+		"base_price":    map[string]interface{}{"amount": "1000/1", "currency": "JPY"},
+		"billing_cycle": "monthly",
+		"contract_type": "subscription",
+		"auto_renew":    true,
+		"created_at":    now,
+	}
+	createData, _ := json.Marshal(createLegacy)
+
+	activated := &ContractActivatedEvent{
+		ContractID:    shared.ContractID("test-contract-001"),
+		ActivatedAt:   now,
+		CurrentPeriod: mustDateRange(t, now, now.AddDate(0, 1, 0)),
+	}
+	activatedData, _ := json.Marshal(activated)
+
+	renewLegacy := map[string]interface{}{
+		"contract_id":       "test-contract-001",
+		"old_period":        map[string]interface{}{"start": now.AddDate(0, 1, 0), "end": now.AddDate(0, 2, 0)},
+		"new_period":        map[string]interface{}{"start": now.AddDate(0, 2, 0), "end": now.AddDate(1, 2, 0)},
+		"old_price_id":      "price-001",
+		"new_price_id":      "price-001",
+		"price_changed":     false,
+		"old_billing_cycle": "monthly",
+		"new_billing_cycle": "yearly",
+		"renewed_at":        now.AddDate(0, 2, 0),
+	}
+	renewData, _ := json.Marshal(renewLegacy)
+
+	events := []eventstore.Event{
+		{Type: EventTypeContractCreated, SchemaVersion: 1, Data: createData},
+		{Type: EventTypeContractActivated, SchemaVersion: 1, Data: activatedData},
+		{Type: EventTypeContractRenewed, SchemaVersion: 1, Data: renewData},
+	}
+
+	agg := NewContractAggregate(shared.ContractID("test-contract-001"), newTestClock())
+	if err := agg.LoadFromHistory(events); err != nil {
+		t.Fatalf("LoadFromHistory with legacy billing_cycle payloads failed: %v", err)
+	}
+
+	// After creation the interval should have been recovered as monthly, then
+	// updated to yearly by the renewal.
+	if !agg.GetInterval().Equals(pricing.Yearly()) {
+		t.Errorf("expected interval yearly after legacy replay, got %s", agg.GetInterval())
+	}
+	if agg.Status() != ContractStatusActive {
+		t.Errorf("expected active after legacy replay, got %s", agg.Status())
+	}
+}
+
+func mustDateRange(t *testing.T, start, end time.Time) shared.DateRange {
+	t.Helper()
+	r, err := shared.NewDateRange(start, end)
+	if err != nil {
+		t.Fatalf("NewDateRange failed: %v", err)
+	}
+	return r
 }
 
 func TestUpcasterChain_SkipsNonPriceEvents(t *testing.T) {

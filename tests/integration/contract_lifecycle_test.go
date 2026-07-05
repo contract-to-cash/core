@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/domain/contract"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -25,7 +26,7 @@ func TestContractFullLifecycle(t *testing.T) {
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-lifecycle"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        moneyJPY(3000),
 		BasePrice:    moneyJPY(3000),
 	}, emptyMetadata())
@@ -88,7 +89,7 @@ func TestTrialLifecycle(t *testing.T) {
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-trial"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        moneyJPY(1000),
 		BasePrice:    moneyJPY(1000),
 	}, emptyMetadata())
@@ -126,7 +127,7 @@ func TestTrialLifecycleNotConverted(t *testing.T) {
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-trial-no"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        moneyJPY(1000),
 		BasePrice:    moneyJPY(1000),
 	}, emptyMetadata())
@@ -165,7 +166,7 @@ func TestEventReplayReconstructsState(t *testing.T) {
 	err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acc-replay"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        moneyJPY(7500),
 		BasePrice:    moneyJPY(7500),
 	}, emptyMetadata())
@@ -229,7 +230,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 		_ = agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID("acc-x"),
 			ContractType: contract.ContractTypeSubscription,
-			BillingCycle: contract.BillingCycleMonthly,
+			Interval:     pricing.Monthly(),
 			Price:        moneyJPY(1000),
 			BasePrice:    moneyJPY(1000),
 		}, emptyMetadata())
@@ -247,7 +248,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 		_ = agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID("acc-x"),
 			ContractType: contract.ContractTypeSubscription,
-			BillingCycle: contract.BillingCycleMonthly,
+			Interval:     pricing.Monthly(),
 			Price:        moneyJPY(1000),
 			BasePrice:    moneyJPY(1000),
 		}, emptyMetadata())
@@ -266,7 +267,7 @@ func TestInvalidStateTransitions(t *testing.T) {
 		_ = agg.Create(contract.CreateContractCommand{
 			AccountID:    shared.AccountID("acc-x"),
 			ContractType: contract.ContractTypeSubscription,
-			BillingCycle: contract.BillingCycleMonthly,
+			Interval:     pricing.Monthly(),
 			Price:        moneyJPY(1000),
 			BasePrice:    moneyJPY(1000),
 		}, emptyMetadata())

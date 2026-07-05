@@ -96,7 +96,7 @@ func main() {
 		AccountID:    shared.AccountID("acct-vip-001"),
 		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        moneyJPY(10000),
 		BasePrice:    moneyJPY(10000),
 	}, eventstore.EventMetadata{UserID: "admin"}))

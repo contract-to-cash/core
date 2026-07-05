@@ -34,8 +34,7 @@ type ContractCreatedEvent struct {
 	AccountID    shared.AccountID  `json:"account_id"`
 	PriceID      shared.PriceID    `json:"price_id"`
 	Price        shared.Money      `json:"price"`
-	BillingCycle BillingCycle      `json:"billing_cycle"`      // Deprecated: kept for backward compat
-	Interval     BillingInterval   `json:"interval,omitempty"` // New: flexible billing interval
+	Interval     BillingInterval   `json:"interval,omitempty"` // Flexible billing interval
 	ContractType ContractType      `json:"contract_type"`
 	BasePrice    shared.Money      `json:"base_price"`
 	AutoRenew    bool              `json:"auto_renew"`
@@ -154,17 +153,15 @@ func (e *PaymentMethodChangedEvent) EventType() eventstore.EventType {
 
 // ContractRenewedEvent is raised when a contract is renewed for a new billing period.
 type ContractRenewedEvent struct {
-	ContractID      shared.ContractID `json:"contract_id"`
-	OldPeriod       shared.DateRange  `json:"old_period"`
-	NewPeriod       shared.DateRange  `json:"new_period"`
-	OldPriceID      shared.PriceID    `json:"old_price_id"`
-	NewPriceID      shared.PriceID    `json:"new_price_id"`
-	PriceChanged    bool              `json:"price_changed"`
-	OldBillingCycle BillingCycle      `json:"old_billing_cycle,omitempty"` // Deprecated: kept for backward compat
-	NewBillingCycle BillingCycle      `json:"new_billing_cycle,omitempty"` // Deprecated: kept for backward compat
-	OldInterval     BillingInterval   `json:"old_interval,omitempty"`      // Previous billing interval
-	NewInterval     BillingInterval   `json:"new_interval,omitempty"`      // New billing interval
-	RenewedAt       time.Time         `json:"renewed_at"`
+	ContractID   shared.ContractID `json:"contract_id"`
+	OldPeriod    shared.DateRange  `json:"old_period"`
+	NewPeriod    shared.DateRange  `json:"new_period"`
+	OldPriceID   shared.PriceID    `json:"old_price_id"`
+	NewPriceID   shared.PriceID    `json:"new_price_id"`
+	PriceChanged bool              `json:"price_changed"`
+	OldInterval  BillingInterval   `json:"old_interval,omitempty"` // Previous billing interval
+	NewInterval  BillingInterval   `json:"new_interval,omitempty"` // New billing interval
+	RenewedAt    time.Time         `json:"renewed_at"`
 }
 
 func (e *ContractRenewedEvent) EventType() eventstore.EventType { return EventTypeContractRenewed }

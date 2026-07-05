@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 )
@@ -24,7 +25,7 @@ func buildEventHistory(n int, clock shared.Clock) []eventstore.Event {
 		PriceID:      shared.PriceID("bench-price"),
 		Price:        shared.NewMoney(big.NewRat(9800, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(9800, 1), shared.CurrencyJPY),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		AutoRenew:    true,
 		CreatedAt:    now,

@@ -90,7 +90,7 @@ func main() {
 		AccountID:    accountID,
 		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        moneyJPY(5000),
 		BasePrice:    moneyJPY(5000),
 		AutoRenew:    true,
@@ -157,7 +157,7 @@ func main() {
 	gateway.failNext = true            // simulate payment failure
 
 	agg, _ = contractRepo.FindByID(ctx, contractID)
-	must("renew", agg.Renew(agg.GetBillingCycle(), metadata))
+	must("renew", agg.RenewWithInterval(agg.GetInterval(), metadata))
 	must("save", contractRepo.Save(ctx, agg))
 
 	inv2, _ := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())

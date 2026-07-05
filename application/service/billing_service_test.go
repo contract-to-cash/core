@@ -169,7 +169,7 @@ func newTestContractAggregateWithPriceID(clock shared.Clock, contractType contra
 		AccountID:    shared.NewAccountID(),
 		PriceID:      priceID,
 		ContractType: contractType,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        price,
 		BasePrice:    price,
 	}, eventstore.EventMetadata{UserID: "test"})
@@ -453,7 +453,7 @@ func newDraftContractAggregateWithPrice(clock shared.Clock, price shared.Money) 
 		AccountID:    shared.NewAccountID(),
 		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        price,
 		BasePrice:    price,
 	}, eventstore.EventMetadata{UserID: "test"})

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/domain/contract"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/plugin"
@@ -671,7 +672,7 @@ func createTestAggregateWithType(t *testing.T, accountID shared.AccountID, ct co
 		IdempotencyKey: shared.GenerateID(),
 		AccountID:      accountID,
 		ContractType:   ct,
-		BillingCycle:   contract.BillingCycleMonthly,
+		Interval:       pricing.Monthly(),
 		Price:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
 		BasePrice:      shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
 	}

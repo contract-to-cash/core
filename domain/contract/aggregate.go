@@ -39,24 +39,10 @@ type CreateContractCommand struct {
 	AccountID      shared.AccountID
 	PriceID        shared.PriceID
 	ContractType   ContractType
-	BillingCycle   BillingCycle // Deprecated: Use Interval instead. Kept for backward compatibility.
 	Interval       BillingInterval
 	Price          shared.Money
 	BasePrice      shared.Money
 	AutoRenew      bool
-}
-
-// resolvedInterval returns the BillingInterval to use. If Interval is set, it is returned.
-// If BillingCycle is set, it is converted to a BillingInterval for backward compatibility.
-// Returns zero-value BillingInterval if neither is set.
-func (cmd *CreateContractCommand) resolvedInterval() BillingInterval {
-	if !cmd.Interval.IsZero() {
-		return cmd.Interval
-	}
-	if cmd.BillingCycle != "" {
-		return pricing.BillingCycleToInterval(cmd.BillingCycle)
-	}
-	return BillingInterval{}
 }
 
 // ContractAggregate is the event-sourced aggregate for contracts.
@@ -67,7 +53,6 @@ type ContractAggregate struct {
 	accountID         shared.AccountID
 	status            ContractStatus
 	contractType      ContractType
-	billingCycle      BillingCycle
 	interval          BillingInterval
 	currentPeriod     shared.DateRange
 	trialConfig       *TrialConfiguration
@@ -103,10 +88,6 @@ func (a *ContractAggregate) Status() ContractStatus { return a.status }
 
 // GetContractType returns the contract type.
 func (a *ContractAggregate) GetContractType() ContractType { return a.contractType }
-
-// GetBillingCycle returns the billing cycle.
-// Deprecated: Use GetInterval() for new code.
-func (a *ContractAggregate) GetBillingCycle() BillingCycle { return a.billingCycle }
 
 // GetInterval returns the billing interval.
 func (a *ContractAggregate) GetInterval() BillingInterval { return a.interval }
@@ -180,10 +161,9 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 	}
 
 	now := a.Clock().Now()
-	interval := cmd.resolvedInterval()
-	if interval.IsZero() {
+	if cmd.Interval.IsZero() {
 		return shared.NewDomainError(shared.ErrCodeValidation,
-			"either BillingCycle or Interval must be set")
+			"Interval must be set")
 	}
 	event := &ContractCreatedEvent{
 		ContractID:   a.contractID,
@@ -191,8 +171,7 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 		PriceID:      cmd.PriceID,
 		Price:        cmd.Price,
 		BasePrice:    cmd.BasePrice,
-		BillingCycle: cmd.BillingCycle,
-		Interval:     interval,
+		Interval:     cmd.Interval,
 		ContractType: cmd.ContractType,
 		AutoRenew:    cmd.AutoRenew,
 		CreatedAt:    now,
@@ -473,14 +452,6 @@ func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMe
 	return a.RaiseEvent(event, metadata)
 }
 
-// Renew renews the contract for a new billing period.
-// The newBillingCycle parameter specifies the billing cycle for the next period,
-// typically resolved from the Price entity by the caller (e.g., batch processor).
-// Deprecated: Use RenewWithInterval for new code.
-func (a *ContractAggregate) Renew(newBillingCycle BillingCycle, metadata eventstore.EventMetadata) error {
-	return a.RenewWithInterval(pricing.BillingCycleToInterval(newBillingCycle), metadata)
-}
-
 // RenewWithInterval renews the contract for a new billing period using a BillingInterval.
 func (a *ContractAggregate) RenewWithInterval(newInterval BillingInterval, metadata eventstore.EventMetadata) error {
 	if a.status != ContractStatusActive {
@@ -512,20 +483,16 @@ func (a *ContractAggregate) RenewWithInterval(newInterval BillingInterval, metad
 		priceChanged = true
 	}
 
-	newBillingCycle := newInterval.ToBillingCycle()
-
 	event := &ContractRenewedEvent{
-		ContractID:      a.contractID,
-		OldPeriod:       a.currentPeriod,
-		NewPeriod:       newPeriod,
-		OldPriceID:      oldPriceID,
-		NewPriceID:      newPriceID,
-		PriceChanged:    priceChanged,
-		OldBillingCycle: a.billingCycle,
-		NewBillingCycle: newBillingCycle,
-		OldInterval:     a.interval,
-		NewInterval:     newInterval,
-		RenewedAt:       a.Clock().Now(),
+		ContractID:   a.contractID,
+		OldPeriod:    a.currentPeriod,
+		NewPeriod:    newPeriod,
+		OldPriceID:   oldPriceID,
+		NewPriceID:   newPriceID,
+		PriceChanged: priceChanged,
+		OldInterval:  a.interval,
+		NewInterval:  newInterval,
+		RenewedAt:    a.Clock().Now(),
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -598,13 +565,7 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.priceID = e.PriceID
 		a.price = e.Price
 		a.basePrice = e.BasePrice
-		a.billingCycle = e.BillingCycle
-		// Resolve interval: prefer explicit Interval, fall back to BillingCycle conversion
-		if !e.Interval.IsZero() {
-			a.interval = e.Interval
-		} else {
-			a.interval = pricing.BillingCycleToInterval(e.BillingCycle)
-		}
+		a.interval = e.Interval
 		a.contractType = e.ContractType
 		a.autoRenew = e.AutoRenew
 		a.status = ContractStatusDraft
@@ -688,10 +649,6 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.pendingPriceID = nil
 		if !e.NewInterval.IsZero() {
 			a.interval = e.NewInterval
-			a.billingCycle = e.NewInterval.ToBillingCycle()
-		} else if e.NewBillingCycle != "" {
-			a.billingCycle = e.NewBillingCycle
-			a.interval = pricing.BillingCycleToInterval(e.NewBillingCycle)
 		}
 		a.updatedAt = e.RenewedAt
 
@@ -734,11 +691,11 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 // entities — the two patterns serve different persistence models.
 func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 	state := contractSnapshotState{
+		SchemaVersion:     contractSnapshotSchemaVersion,
 		ContractID:        a.contractID,
 		AccountID:         a.accountID,
 		Status:            a.status,
 		ContractType:      a.contractType,
-		BillingCycle:      a.billingCycle,
 		Interval:          a.interval,
 		CurrentPeriod:     a.currentPeriod,
 		TrialConfig:       a.trialConfig,
@@ -780,14 +737,21 @@ func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error {
 	return nil
 }
 
+// contractSnapshotSchemaVersion is the current schema version of
+// contractSnapshotState. Version 2 dropped the deprecated billing_cycle field;
+// the billing interval is now carried solely by the interval field. Snapshots
+// written before this version (schema_version 0/1) stored only billing_cycle,
+// and LoadFromSnapshot converts it to an interval on read.
+const contractSnapshotSchemaVersion = 2
+
 // contractSnapshotState is the JSON representation of aggregate state for snapshots.
 type contractSnapshotState struct {
+	SchemaVersion     int                      `json:"schema_version,omitempty"`
 	ContractID        shared.ContractID        `json:"contract_id"`
 	AccountID         shared.AccountID         `json:"account_id"`
 	Status            ContractStatus           `json:"status"`
 	ContractType      ContractType             `json:"contract_type"`
-	BillingCycle      BillingCycle             `json:"billing_cycle"`      // Deprecated: kept for backward compat
-	Interval          BillingInterval          `json:"interval,omitempty"` // New: flexible billing interval
+	Interval          BillingInterval          `json:"interval,omitempty"` // Flexible billing interval
 	CurrentPeriod     shared.DateRange         `json:"current_period"`
 	TrialConfig       *TrialConfiguration      `json:"trial_config,omitempty"`
 	SuspensionConfig  *SuspensionConfiguration `json:"suspension_config,omitempty"`
@@ -814,12 +778,18 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.accountID = state.AccountID
 	a.status = state.Status
 	a.contractType = state.ContractType
-	a.billingCycle = state.BillingCycle
-	// Resolve interval: prefer explicit Interval, fall back to BillingCycle conversion
 	if !state.Interval.IsZero() {
 		a.interval = state.Interval
 	} else {
-		a.interval = pricing.BillingCycleToInterval(state.BillingCycle)
+		// Legacy snapshot (schema_version 0/1): the interval was stored only in
+		// the now-removed billing_cycle field. Recover it from the raw payload.
+		var legacy struct {
+			BillingCycle pricing.BillingCycle `json:"billing_cycle"`
+		}
+		if err := json.Unmarshal(snapshot.State, &legacy); err != nil {
+			return fmt.Errorf("failed to unmarshal legacy snapshot billing_cycle: %w", err)
+		}
+		a.interval = pricing.BillingCycleToInterval(legacy.BillingCycle)
 	}
 	a.currentPeriod = state.CurrentPeriod
 	// Deep-copy pointer fields so the aggregate does not alias the local

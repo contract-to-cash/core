@@ -8,6 +8,7 @@ import (
 
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -20,7 +21,7 @@ func newCancelledContract(t *testing.T, contractID shared.ContractID, clock shar
 	if err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        jpy(10000),
 		BasePrice:    jpy(10000),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
