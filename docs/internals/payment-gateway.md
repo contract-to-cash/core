@@ -1660,6 +1660,54 @@ SELECT effective_key FROM compensated_idempotency_keys WHERE original_key = $1;
 
 ---
 
+## 6.2 Saga 補償の Void→Refund フォールバック（Issue #86 対応）
+
+### 6.2.1 解決する課題
+
+`ProcessPayment` は「Gateway Charge 成功 → ローカル DB 保存失敗」時、同一リクエスト内(Charge 直後)でサガ補償を発火する。PR #84 まではこの補償が **Refund のみ** だったが、一部の決済ゲートウェイ/決済方法は **Settlement（売上確定）前の即時 Refund を拒否する**:
+
+- **Stripe**: クレジットカードは即時 Refund 可能だが、銀行振込等は Settlement に 24-48h かかる
+- **GMO 等の国内 GW**: コンビニ払い・キャリア決済は Settlement 完了後でないと Refund 不可
+- **口座振替**: 引落完了前の Refund は不可
+
+補償は Charge 直後（同一リクエスト内 = 常に Settlement 前）に走るため、これらのケースでは Refund が失敗し `MANUAL RECONCILIATION REQUIRED` に陥っていた。
+
+### 6.2.2 補償フローの新しい順序
+
+補償はまず **Void（オーソリ取消）** を試み、失敗した場合にのみ **Refund** にフォールバックする:
+
+```
+saga 補償:
+  1. Void(AuthorizationID = chargeResp.TransactionID, key = "comp-void-"+txnID)
+       成功 → return（Refund は呼ばない）★money-safety
+       失敗 → 2 へ（charge は既に capture/settle 済みと判断）
+  2. Refund(TransactionID = txnID, key = "comp-refund-"+txnID)
+       成功 → return
+       失敗 → void と refund 両方のエラーを結合して返す（= MANUAL RECONCILIATION）
+```
+
+- **Settlement 前**（銀行振込・コンビニ・キャリア・口座振替の同一リクエスト補償）: Void で確実に取消できる
+- **Settlement 後 / 即時確定**（クレジットカードの一般ケース）: Void は「capture 済みは Void 不可」で失敗し、Refund にフォールバックする
+
+### 6.2.3 設計ポイント
+
+| 設計判断 | 理由 |
+|---|---|
+| **Void 成功時は Refund を呼ばない** | 二重取消防止。gateway の Void/Refund が冪等でない場合でも、成功した Void の後に Refund を呼ばなければ二重リバースは起きない |
+| **Void/Refund とも決定性 idempotency key** | `comp-void-{txnID}` / `comp-refund-{txnID}`。並行補償でも gateway が replay を dedup し、両 goroutine が同じ分岐（両方 Void 成功 or 両方同じ Void エラー→Refund）を取る。UUID 等の非決定キーにすると二重リバースのリスクが再発する |
+| **`VoidRequest.AuthorizationID` に `chargeResp.TransactionID` を渡す** | 1-step Charge は独立した AuthorizationID を返さない（`TransactionID` のみ）。Settlement 前トランザクションの識別子として TransactionID を Void に渡す。IF シグネチャは変更しない |
+| **両方失敗時は結合エラー** | Void も Refund も効いていない = 二重リバースしていないので金銭安全。人手のリコンサイルにエスカレーションする（`compensation void failed (...) and refund fallback also failed: ...`）|
+| **決済手段に非依存** | フォールバック自体はカード/非カードに関わらず有効。現状 `resolvePaymentMethodType` で決済手段を解決しており（旧 `PaymentMethodCreditCard` ハードコードは解消済み・成功パスの記録精度は #88 で追跡）、本フォールバックはそれと独立して機能する |
+
+### 6.2.4 検証
+
+`application/service/payment_service_test.go`:
+- `TestProcessPayment_SagaCompensation_VoidSucceeds_NoRefund` — Void 成功時に Refund を呼ばない（+ Void の key/AuthorizationID 検証）
+- `TestProcessPayment_SagaCompensation_VoidFails_FallsBackToRefund` — Void 失敗時に Refund へフォールバック（+ Refund の txnID/amount/reason/key 検証）
+- `TestProcessPayment_SagaCompensation_RefundFailure_ReturnsCompoundError` — Void・Refund 双方失敗時に結合エラー（MANUAL RECONCILIATION）
+
+---
+
 ## 7. ディレクトリ構成（決済追加後）
 
 ```
