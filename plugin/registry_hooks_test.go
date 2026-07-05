@@ -21,6 +21,9 @@ type allHooksPlugin struct {
 func (p *allHooksPlugin) CalculateDiscount(ctx *CalculationContext) (shared.Money, error) {
 	return shared.Zero(shared.CurrencyJPY), nil
 }
+func (p *allHooksPlugin) CommitDiscounts(_ context.Context, _ []AppliedDiscount) error {
+	return nil
+}
 func (p *allHooksPlugin) CalculateTax(ctx *CalculationContext) (shared.Money, error) {
 	return shared.Zero(shared.CurrencyJPY), nil
 }
@@ -84,26 +87,27 @@ func (p *allHooksPlugin) OnInvoiceRevised(ctx *Context, original, replacement *i
 
 // Compile-time assertions that allHooksPlugin implements every hook interface.
 var (
-	_ DiscountHook           = (*allHooksPlugin)(nil)
-	_ TaxHook                = (*allHooksPlugin)(nil)
-	_ InvoiceLifecycleHook   = (*allHooksPlugin)(nil)
-	_ OnContractCreateHook   = (*allHooksPlugin)(nil)
-	_ OnContractActivateHook = (*allHooksPlugin)(nil)
-	_ OnContractSuspendHook  = (*allHooksPlugin)(nil)
-	_ OnContractResumeHook   = (*allHooksPlugin)(nil)
-	_ OnContractCancelHook   = (*allHooksPlugin)(nil)
-	_ OnContractRenewHook    = (*allHooksPlugin)(nil)
-	_ OnContractTrialEndHook = (*allHooksPlugin)(nil)
-	_ BeforeChargeHook       = (*allHooksPlugin)(nil)
-	_ AfterChargeHook        = (*allHooksPlugin)(nil)
-	_ OnPaymentFailedHook    = (*allHooksPlugin)(nil)
-	_ OnRefundHook           = (*allHooksPlugin)(nil)
-	_ OnContractChangeHook   = (*allHooksPlugin)(nil)
-	_ OnInvoiceIssuedHook    = (*allHooksPlugin)(nil)
-	_ OnPaymentProcessedHook = (*allHooksPlugin)(nil)
-	_ InvoiceGenerationHook  = (*allHooksPlugin)(nil)
-	_ OnCreditNoteIssuedHook = (*allHooksPlugin)(nil)
-	_ OnInvoiceRevisedHook   = (*allHooksPlugin)(nil)
+	_ DiscountHook              = (*allHooksPlugin)(nil)
+	_ TransactionalDiscountHook = (*allHooksPlugin)(nil)
+	_ TaxHook                   = (*allHooksPlugin)(nil)
+	_ InvoiceLifecycleHook      = (*allHooksPlugin)(nil)
+	_ OnContractCreateHook      = (*allHooksPlugin)(nil)
+	_ OnContractActivateHook    = (*allHooksPlugin)(nil)
+	_ OnContractSuspendHook     = (*allHooksPlugin)(nil)
+	_ OnContractResumeHook      = (*allHooksPlugin)(nil)
+	_ OnContractCancelHook      = (*allHooksPlugin)(nil)
+	_ OnContractRenewHook       = (*allHooksPlugin)(nil)
+	_ OnContractTrialEndHook    = (*allHooksPlugin)(nil)
+	_ BeforeChargeHook          = (*allHooksPlugin)(nil)
+	_ AfterChargeHook           = (*allHooksPlugin)(nil)
+	_ OnPaymentFailedHook       = (*allHooksPlugin)(nil)
+	_ OnRefundHook              = (*allHooksPlugin)(nil)
+	_ OnContractChangeHook      = (*allHooksPlugin)(nil)
+	_ OnInvoiceIssuedHook       = (*allHooksPlugin)(nil)
+	_ OnPaymentProcessedHook    = (*allHooksPlugin)(nil)
+	_ InvoiceGenerationHook     = (*allHooksPlugin)(nil)
+	_ OnCreditNoteIssuedHook    = (*allHooksPlugin)(nil)
+	_ OnInvoiceRevisedHook      = (*allHooksPlugin)(nil)
 )
 
 // TestRegister_DistributesToAllHookSlices verifies that a plugin implementing all
@@ -192,6 +196,33 @@ func TestRegister_NarrowPluginOnlyPopulatesImplementedHooks(t *testing.T) {
 		if n != 0 {
 			t.Errorf("unrelated hook slice #%d: expected 0, got %d", i, n)
 		}
+	}
+}
+
+// TestRegister_TransactionalDiscountHook verifies the optional DiscountHook
+// extension is classified independently: a plugin implementing it is discoverable
+// via GetTransactionalDiscountHooks, while a plain DiscountHook is not.
+func TestRegister_TransactionalDiscountHook(t *testing.T) {
+	r := NewRegistry()
+	all := &allHooksPlugin{basePlugin: basePlugin{name: "all", version: "1.0.0", priority: PriorityNormal}}
+	narrow := &discountOnlyPlugin{basePlugin: basePlugin{name: "discount-only", version: "1.0.0", priority: PriorityNormal}}
+	if err := r.Register(all); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := r.Register(narrow); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Both are DiscountHooks; only the full plugin is a TransactionalDiscountHook.
+	if got := len(r.GetDiscountHooks()); got != 2 {
+		t.Errorf("expected 2 discount hooks, got %d", got)
+	}
+	tx := r.GetTransactionalDiscountHooks()
+	if len(tx) != 1 {
+		t.Fatalf("expected 1 transactional discount hook, got %d", len(tx))
+	}
+	if tx[0].Name() != "all" {
+		t.Errorf("expected the all-hooks plugin, got %q", tx[0].Name())
 	}
 }
 

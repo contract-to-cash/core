@@ -1178,7 +1178,12 @@ func (r *inMemoryCouponRepo) Save(_ context.Context, c *couponplugin.Coupon) err
 func (r *inMemoryCouponRepo) RecordUsage(_ context.Context, couponID couponplugin.CouponID, contractID shared.ContractID) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Idempotent on (couponID, contractID) per the CouponRepository contract: a
+	// replayed CommitDiscounts must not inflate the counter.
 	key := string(couponID) + ":" + string(contractID)
+	if r.usage[key] > 0 {
+		return nil
+	}
 	r.usage[key]++
 	return nil
 }
@@ -1193,6 +1198,15 @@ func (r *inMemoryCouponRepo) FindUsageByAccount(_ context.Context, couponID coup
 func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, redemption *couponplugin.Redemption) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Idempotent on (couponID, contractID) per the CouponRepository contract: a
+	// replayed CommitDiscounts must not append a duplicate redemption or
+	// double-increment account usage.
+	dedupKey := string(redemption.CouponID()) + ":" + string(redemption.ContractID())
+	for _, existing := range r.redemptions {
+		if string(existing.CouponID())+":"+string(existing.ContractID()) == dedupKey {
+			return nil
+		}
+	}
 	r.redemptions = append(r.redemptions, redemption)
 	// Also increment account usage
 	key := string(redemption.CouponID()) + ":" + string(redemption.AccountID())

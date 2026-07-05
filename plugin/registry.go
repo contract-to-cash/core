@@ -15,9 +15,10 @@ type Registry struct {
 	plugins map[string]Plugin
 
 	// Billing calculation hooks
-	discountHooks         []DiscountHook
-	taxHooks              []TaxHook
-	invoiceLifecycleHooks []InvoiceLifecycleHook
+	discountHooks              []DiscountHook
+	transactionalDiscountHooks []TransactionalDiscountHook
+	taxHooks                   []TaxHook
+	invoiceLifecycleHooks      []InvoiceLifecycleHook
 
 	// Contract lifecycle hooks
 	onContractCreateHooks   []OnContractCreateHook
@@ -69,6 +70,9 @@ func (r *Registry) Register(p Plugin) error {
 	// Billing calculation hooks
 	if h, ok := p.(DiscountHook); ok {
 		r.discountHooks = append(r.discountHooks, h)
+	}
+	if h, ok := p.(TransactionalDiscountHook); ok {
+		r.transactionalDiscountHooks = append(r.transactionalDiscountHooks, h)
 	}
 	if h, ok := p.(TaxHook); ok {
 		r.taxHooks = append(r.taxHooks, h)
@@ -192,6 +196,13 @@ func (r *Registry) GetDiscountHooks() []DiscountHook {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return sortedCopy(r.discountHooks)
+}
+
+// GetTransactionalDiscountHooks returns transactional discount hooks sorted by priority.
+func (r *Registry) GetTransactionalDiscountHooks() []TransactionalDiscountHook {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return sortedCopy(r.transactionalDiscountHooks)
 }
 
 // GetTaxHooks returns tax hooks sorted by priority.

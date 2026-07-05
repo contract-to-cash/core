@@ -283,12 +283,40 @@ type EventMetadata struct {
 
 ### 6.2 トランザクション境界
 
-| 決定 | **プラグインはコアと同一トランザクション** |
+| 決定 | **プラグインの永続的副作用はコアと同一トランザクション** |
 |------|----------------------------------------|
 
 **理由：**
 - データ整合性の保証
 - ロールバック時にプラグインの変更も戻る
+
+**実現方法（計算フックと副作用の分離）:**
+
+請求計算フック（`DiscountHook` / `TaxHook` / `InvoiceLifecycleHook`）は**副作用禁止（純粋計算）**。
+これらは請求トランザクション（`tx.Run`）が開く**前**に実行されるため、ここで永続書き込みを行うと
+後続ステップ（税計算・クレジット充当・請求書保存・`AfterCalculation`）が失敗しても
+ロールバックされず、幽霊レコードが残る（issue #123）。
+
+割引に付随する永続的副作用（クーポンの redemption / usage カウンタ等）が必要なプラグインは、
+`DiscountHook` に加えて **`TransactionalDiscountHook`** を実装する:
+
+```go
+type TransactionalDiscountHook interface {
+    Plugin
+    CommitDiscounts(txCtx context.Context, applied []AppliedDiscount) error
+}
+```
+
+- `CalculateDiscount` は割引額を計算し、意図を `CalculationContext.RecordDiscount(AppliedDiscount{...})` で宣言するのみ。
+- コアは請求書保存**後**の `tx.Run` クロージャ内で、登録済み `TransactionalDiscountHook` に対し
+  `CommitDiscounts(txCtx, calcCtx.AppliedDiscounts())` を発火する。`txCtx` は TxManager の
+  トランザクションを ctx 伝播で運ぶため、プラグインの repo が同一トランザクションに参加できる
+  （実 DB アダプタは context 上の querier で join、inmemory はプロセス内）。
+- 中間ステップの失敗時は `CommitDiscounts` に到達しないため、redemption / usage は永続化されない。
+- 冪等リプレイ（楽観ロックによる `tx.Run` 再試行等）で複数回発火し得るため、実装は
+  **安定キーでの冪等性**を担保する（公式 coupon プラグインは `(couponID, contractID)` をキーに
+  `SaveRedemption` / `RecordUsage` をデデュープする）。
+- これは追加的な契約であり、`TransactionalDiscountHook` を実装しない `DiscountHook` は従来どおり動作する。
 
 ## 7. イベントソーシング
 

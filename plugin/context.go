@@ -9,10 +9,29 @@ import (
 )
 
 // AppliedDiscount represents a discount that has been applied by a plugin.
+//
+// DiscountHook.CalculateDiscount records these during the (side-effect-free)
+// calculation phase. A plugin that also implements TransactionalDiscountHook
+// then receives the recorded discounts back in CommitDiscounts, inside the
+// billing transaction, so it can persist durable redemption/usage records that
+// roll back with the invoice if any later step fails.
+//
+// PluginName/Code/Amount are the original fields. AccountID, ContractID and
+// Reference are optional identity fields that a transactional discount plugin
+// populates so it can reconstruct what to persist at commit time without holding
+// mutable per-request state on the (shared, concurrently used) plugin instance.
+// Reference is a plugin-scoped stable identifier for the applied item (the coupon
+// plugin sets it to the coupon ID) and, together with ContractID, forms the
+// idempotency key that guards against double-counting on retry/replay.
 type AppliedDiscount struct {
 	PluginName string
 	Code       string
 	Amount     shared.Money
+
+	// Optional identity fields for TransactionalDiscountHook implementations.
+	AccountID  shared.AccountID
+	ContractID shared.ContractID
+	Reference  string
 }
 
 // CalculationContext provides type-safe context for billing calculation hooks.

@@ -252,6 +252,7 @@ for the per-hook detail):
 | Fired by | Hooks | Where |
 |----------|-------|-------|
 | **Core** (14) | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook`, `OnInvoiceIssuedHook` | `BillingService` (billing pipeline; `FinalizeInvoice` fires OnInvoiceIssued) |
+| | `TransactionalDiscountHook` (optional `DiscountHook` extension) | `BillingService` fires `CommitDiscounts` inside the billing `tx.Run`, after the invoice is saved, so discount side effects (coupon redemptions/usage) commit or roll back atomically with the invoice — see plugin-system.md §3.1.1 |
 | | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentProcessedHook`, `OnPaymentFailedHook`, `OnRefundHook` | `PaymentService` |
 | | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | `CreditNoteService` |
 | | `OnContractRenewHook`, `OnContractTrialEndHook`, `OnContractChangeHook` | `batch.ContractRenewalProcessor`, `batch.TrialExpirationProcessor` |
@@ -276,8 +277,13 @@ flowchart LR
         I --> J["10. Create draft invoice"]
         J --> K["11. AfterCalculation hook"]
         K --> L["12. Save"]
+        L --> M["13. CommitDiscounts (in tx)"]
     end
 ```
+
+Steps 9–13 run inside the billing transaction. `DiscountHook.CalculateDiscount` (step 4) is
+side-effect-free; its durable side effects are deferred to `TransactionalDiscountHook.CommitDiscounts`
+(step 13), so a failure anywhere in steps 5–12 leaves no phantom redemption/usage (issue #123).
 
 **Calculation order detail:**
 

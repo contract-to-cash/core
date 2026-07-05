@@ -550,6 +550,23 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 			return fmt.Errorf("failed to save invoice: %w", saveErr)
 		}
 
+		// Commit discount side effects (e.g. coupon redemptions / usage counters)
+		// INSIDE the same transaction, after the invoice is persisted. DiscountHooks
+		// are side-effect-free (they only recorded intent via RecordDiscount); the
+		// durable writes happen here so they roll back atomically with the invoice if
+		// anything in this closure fails (issue #123). txCtx carries the active
+		// transaction, letting a plugin's repo join it (real adapters via the
+		// context-bound querier; the in-memory manager runs in-process). Plugins make
+		// these writes idempotent, so a retried/replayed commit does not double-count.
+		applied := calcCtx.AppliedDiscounts()
+		if len(applied) > 0 {
+			for _, hook := range s.registry.GetTransactionalDiscountHooks() {
+				if commitErr := hook.CommitDiscounts(txCtx, applied); commitErr != nil {
+					return fmt.Errorf("CommitDiscounts hook %q failed: %w", hook.Name(), commitErr)
+				}
+			}
+		}
+
 		return nil
 	})
 	if err != nil {
