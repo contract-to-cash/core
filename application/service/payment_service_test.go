@@ -70,7 +70,13 @@ func (g *mockGateway) Capture(_ context.Context, _ *port.CaptureRequest) (*port.
 	return nil, nil
 }
 func (g *mockGateway) Void(_ context.Context, _ *port.VoidRequest) (*port.VoidResponse, error) {
-	return nil, nil
+	// A one-step Charge (authorize+capture) produces a captured transaction,
+	// which cannot be Voided. Modelling this as an error is what drives the
+	// issue #86 Void→Refund fallback for the common instantly-settled card
+	// case, so saga compensation falls back to Refund. Gateways/tests that
+	// exercise the pre-settlement Void-succeeds path (e.g. spyGateway)
+	// override this method.
+	return nil, fmt.Errorf("cannot void a captured transaction")
 }
 func (g *mockGateway) Refund(_ context.Context, _ *port.RefundRequest) (*port.RefundResponse, error) {
 	return &port.RefundResponse{TransactionID: "refund-001"}, nil
@@ -566,6 +572,7 @@ type spyGateway struct {
 	mockGateway
 	voidCalled   bool
 	voidReq      *port.VoidRequest
+	voidErr      error
 	refundCalled bool
 	refundReq    *port.RefundRequest
 	refundErr    error
@@ -574,6 +581,9 @@ type spyGateway struct {
 func (g *spyGateway) Void(_ context.Context, req *port.VoidRequest) (*port.VoidResponse, error) {
 	g.voidCalled = true
 	g.voidReq = req
+	if g.voidErr != nil {
+		return nil, g.voidErr
+	}
 	return &port.VoidResponse{}, nil
 }
 
@@ -594,15 +604,16 @@ func (m *paymentFailingTxManager) RunInTx(_ context.Context, _ func(context.Cont
 	return fmt.Errorf("simulated database failure")
 }
 
-// --- Saga compensation tests (Issue #82) ---
+// --- Saga compensation tests (Issue #82 / #86) ---
 
-func TestProcessPayment_SagaCompensation_CallsRefundNotVoid(t *testing.T) {
-	// When Charge succeeds but local save fails, the saga compensation
-	// must call Refund (not Void) because Charge is authorize+capture.
-	// Void only works on pre-capture authorizations.
+func TestProcessPayment_SagaCompensation_VoidSucceeds_NoRefund(t *testing.T) {
+	// Issue #86: when Charge succeeds but local save fails, the saga
+	// compensation tries Void FIRST. When Void succeeds (pre-settlement
+	// charge cancelled), Refund MUST NOT be called — otherwise a
+	// non-idempotent gateway could double-reverse the charge.
 	clock := newPaymentTestClock()
 	inv := newSimpleFinalizedInvoice()
-	gw := &spyGateway{}
+	gw := &spyGateway{} // Void returns success by default
 
 	svc := NewPaymentService(
 		gw,
@@ -627,20 +638,32 @@ func TestProcessPayment_SagaCompensation_CallsRefundNotVoid(t *testing.T) {
 		t.Fatal("expected error from local save failure")
 	}
 
-	// Compensation should have called Refund, NOT Void
-	if gw.voidCalled {
-		t.Error("Void should NOT be called for saga compensation after Charge (captured transaction)")
+	// Compensation should have tried Void first...
+	if !gw.voidCalled {
+		t.Fatal("Void should be called first as saga compensation")
 	}
-	if !gw.refundCalled {
-		t.Fatal("Refund should be called as saga compensation after Charge fails to save locally")
+	// ...and since Void succeeded, Refund must NOT be called (money safety).
+	if gw.refundCalled {
+		t.Error("Refund must NOT be called when Void already reversed the charge")
+	}
+	// Void must target the charge transaction with a deterministic idempotency key.
+	expectedTxnID := "txn-key-comp"
+	if gw.voidReq.AuthorizationID != expectedTxnID {
+		t.Errorf("expected Void AuthorizationID %q, got %q", expectedTxnID, gw.voidReq.AuthorizationID)
+	}
+	expectedVoidKey := "comp-void-" + expectedTxnID
+	if gw.voidReq.IdempotencyKey != expectedVoidKey {
+		t.Errorf("expected Void IdempotencyKey %q, got %q", expectedVoidKey, gw.voidReq.IdempotencyKey)
 	}
 }
 
-func TestProcessPayment_SagaCompensation_RefundUsesCorrectTransactionID(t *testing.T) {
-	// Verify the refund compensation uses the correct gateway transaction ID.
+func TestProcessPayment_SagaCompensation_VoidFails_FallsBackToRefund(t *testing.T) {
+	// Issue #86: when Void fails (charge already captured/settled — the
+	// common case for instantly-settling credit cards), compensation falls
+	// back to Refund with the correct transaction ID and deterministic key.
 	clock := newPaymentTestClock()
 	inv := newSimpleFinalizedInvoice()
-	gw := &spyGateway{}
+	gw := &spyGateway{voidErr: fmt.Errorf("cannot void a settled transaction")}
 
 	svc := NewPaymentService(
 		gw,
@@ -653,15 +676,25 @@ func TestProcessPayment_SagaCompensation_RefundUsesCorrectTransactionID(t *testi
 		WithPaymentTxManager(&paymentFailingTxManager{}),
 	)
 
-	_, _ = svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
 		PaymentMethodID: "pm-001",
 		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
 		Currency:        shared.CurrencyJPY,
 		IdempotencyKey:  "key-txnid",
 	})
 
+	// ProcessPayment still returns an error (local save failed), but
+	// compensation (Void→Refund fallback) succeeded, so it is the plain
+	// "local save failed (gateway charge refunded)" error.
+	if err == nil {
+		t.Fatal("expected error from local save failure")
+	}
+
+	if !gw.voidCalled {
+		t.Fatal("Void should be attempted first")
+	}
 	if !gw.refundCalled {
-		t.Fatal("Refund should be called as compensation")
+		t.Fatal("Refund should be called as fallback after Void fails")
 	}
 	// mockGateway.Charge returns "txn-" + IdempotencyKey
 	expectedTxnID := "txn-key-txnid"
@@ -688,11 +721,15 @@ func TestProcessPayment_SagaCompensation_RefundUsesCorrectTransactionID(t *testi
 }
 
 func TestProcessPayment_SagaCompensation_RefundFailure_ReturnsCompoundError(t *testing.T) {
-	// When both local save and compensation refund fail,
-	// the error should contain both failures for manual reconciliation.
+	// When local save fails and BOTH compensation reversals (Void then the
+	// Refund fallback, issue #86) fail, the error should contain both the
+	// save and compensation failures for manual reconciliation.
 	clock := newPaymentTestClock()
 	inv := newSimpleFinalizedInvoice()
-	gw := &spyGateway{refundErr: fmt.Errorf("gateway timeout")}
+	gw := &spyGateway{
+		voidErr:   fmt.Errorf("cannot void a settled transaction"),
+		refundErr: fmt.Errorf("gateway timeout"),
+	}
 
 	svc := NewPaymentService(
 		gw,
@@ -1161,10 +1198,11 @@ func TestProcessPayment_Idempotency_DoesNotMutateInvoiceForDuplicateKey(t *testi
 }
 
 func TestProcessPayment_TxFailure_SagaCompensationFires(t *testing.T) {
-	// When RunInTx fails, saga compensation (refund) must be triggered.
+	// When RunInTx fails, saga compensation must be triggered.
 	// Before the fix, if RecordPayment failed outside RunInTx, the function
 	// returned early without calling saga.Compensate(), leaving a charged
-	// payment without a refund.
+	// payment without a reversal. Post-#86 the compensation reverses via
+	// Void first (Refund is only the fallback when Void fails).
 	clock := newPaymentTestClock()
 	inv := newSimpleFinalizedInvoice()
 	gw := &spyGateway{}
@@ -1190,9 +1228,11 @@ func TestProcessPayment_TxFailure_SagaCompensationFires(t *testing.T) {
 		t.Fatal("expected error from tx failure")
 	}
 
-	// Saga compensation must have fired
-	if !gw.refundCalled {
-		t.Fatal("saga compensation (refund) must fire when RunInTx fails")
+	// Saga compensation must have fired. Void is the first-line reversal
+	// (issue #86); the default spyGateway.Void succeeds, so Refund is not
+	// reached on this path.
+	if !gw.voidCalled {
+		t.Fatal("saga compensation (void) must fire when RunInTx fails")
 	}
 }
 
