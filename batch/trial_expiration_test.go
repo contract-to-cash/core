@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/domain/contract"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/plugin"
@@ -94,7 +95,7 @@ func newTrialingContract(id string, autoConvert bool) *contract.ContractAggregat
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		AutoRenew:    true,
@@ -242,7 +243,7 @@ func TestTrialExpirationProcessor_NonTrialingContract_Fails(t *testing.T) {
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}
@@ -365,7 +366,7 @@ func newTrialingContractRequiringPM(id string, paymentMethodID string) *contract
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		AutoRenew:    true,
@@ -488,7 +489,7 @@ func newTrialingContractWithEnd(id string, autoConvert bool, trialEnd time.Time)
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		AutoRenew:    true,

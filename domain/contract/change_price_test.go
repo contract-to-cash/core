@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 )
@@ -144,7 +145,7 @@ func TestRenew_AppliesPending(t *testing.T) {
 		t.Fatalf("schedule failed: %v", err)
 	}
 
-	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
+	if err := agg.RenewWithInterval(agg.GetInterval(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -285,7 +286,7 @@ func TestApply_PriceChangedEvent_NewFormat(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -322,7 +323,7 @@ func TestApply_PriceChangeScheduledEvent(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -352,7 +353,7 @@ func TestApply_PriceChangeUnscheduledEvent(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -409,7 +410,7 @@ func TestApply_LegacyPriceChangedEvent(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -491,7 +492,7 @@ func TestCreate_WithPriceID(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		PriceID:      shared.PriceID("price-001"),
 		ContractType: ContractTypeSubscription,
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		AutoRenew:    true,

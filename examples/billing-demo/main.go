@@ -81,7 +81,7 @@ func main() {
 		AccountID:    accountID,
 		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        price,
 		BasePrice:    price,
 	}, metadata))

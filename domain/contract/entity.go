@@ -29,18 +29,6 @@ const (
 	ContractTypeUsageBased   ContractType = "usage_based"
 )
 
-// BillingCycle is an alias for pricing.BillingCycle.
-// Deprecated: New code should use pricing.BillingInterval directly.
-type BillingCycle = pricing.BillingCycle
-
-// Billing cycle constants re-exported from pricing for backward compatibility.
-const (
-	BillingCycleDaily   = pricing.BillingCycleDaily
-	BillingCycleWeekly  = pricing.BillingCycleWeekly
-	BillingCycleMonthly = pricing.BillingCycleMonthly
-	BillingCycleYearly  = pricing.BillingCycleYearly
-)
-
 // BillingInterval is an alias for pricing.BillingInterval.
 type BillingInterval = pricing.BillingInterval
 
@@ -50,7 +38,6 @@ type Contract struct {
 	accountID        shared.AccountID
 	status           ContractStatus
 	contractType     ContractType
-	billingCycle     BillingCycle
 	interval         BillingInterval
 	currentPeriod    shared.DateRange
 	trialConfig      *TrialConfiguration
@@ -75,10 +62,6 @@ func (c *Contract) Status() ContractStatus { return c.status }
 
 // ContractType returns the contract type.
 func (c *Contract) ContractType() ContractType { return c.contractType }
-
-// BillingCycle returns the billing cycle.
-// Deprecated: Use Interval() for new code. Returns "" for intervals without an exact match.
-func (c *Contract) BillingCycle() BillingCycle { return c.billingCycle }
 
 // Interval returns the billing interval.
 func (c *Contract) Interval() BillingInterval { return c.interval }

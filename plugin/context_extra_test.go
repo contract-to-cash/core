@@ -8,6 +8,7 @@ import (
 
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 )
@@ -20,7 +21,7 @@ func newTestContract(t *testing.T, contractID shared.ContractID) *contract.Contr
 	if err := agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.NewAccountID(),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        price,
 		BasePrice:    price,
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {

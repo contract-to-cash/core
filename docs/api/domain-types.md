@@ -113,7 +113,7 @@ agg := contract.NewContractAggregate(contractID, clock)
 
 **Type constants**: `ContractTypeOneTime`, `ContractTypeSubscription`, `ContractTypeUsageBased`
 
-**Billing cycle constants**: `BillingCycleDaily`, `BillingCycleWeekly`, `BillingCycleMonthly`, `BillingCycleYearly`
+**Billing interval**: use `pricing.BillingInterval` (`{unit, count}`). Convenience constructors: `pricing.Daily()`, `pricing.Weekly()`, `pricing.Monthly()`, `pricing.Yearly()`, `pricing.Quarterly()`, `pricing.SemiAnnual()`. The `pricing.BillingCycle` string constants (`BillingCycleDaily/Weekly/Monthly/Yearly`) remain in the `pricing` package for `Price` construction, display, and adapter code, but the contract domain no longer surfaces them (removed in #111).
 
 #### Commands
 
@@ -126,7 +126,7 @@ agg := contract.NewContractAggregate(contractID, clock)
 | `Suspend(config, metadata)` | active, past_due | suspended |
 | `Resume(metadata)` | suspended | active |
 | `Cancel(reason, metadata)` | draft, trialing, active, suspended, past_due | cancelled |
-| `Renew(newBillingCycle BillingCycle, metadata)` | active | active (new period) |
+| `RenewWithInterval(newInterval BillingInterval, metadata)` | active | active (new period) |
 | `ChangePrice(priceID, policy, proration, metadata)` | active | active |
 | `UnscheduleChange(reason, metadata)` | active (has pending) | active |
 
@@ -137,7 +137,7 @@ type CreateContractCommand struct {
     AccountID      shared.AccountID
     PriceID        shared.PriceID
     ContractType   ContractType
-    BillingCycle   BillingCycle
+    Interval       BillingInterval
     Price          shared.Money
     BasePrice      shared.Money
     AutoRenew      bool
@@ -173,7 +173,7 @@ agg.ContractID() shared.ContractID
 agg.AccountID() shared.AccountID
 agg.Status() ContractStatus
 agg.GetContractType() ContractType
-agg.GetBillingCycle() BillingCycle
+agg.GetInterval() BillingInterval
 agg.CurrentPeriod() shared.DateRange
 agg.TrialConfig() *TrialConfiguration
 agg.SuspensionConfig() *SuspensionConfiguration

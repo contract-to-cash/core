@@ -18,6 +18,7 @@ import (
 	"github.com/contract-to-cash/core/application/query"
 	"github.com/contract-to-cash/core/application/service"
 	"github.com/contract-to-cash/core/domain/contract"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -42,7 +43,7 @@ func main() {
 	must("create", agg.Create(contract.CreateContractCommand{
 		AccountID:    shared.AccountID("acct-001"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        moneyJPY(3000),
 		BasePrice:    moneyJPY(3000),
 	}, metadata))

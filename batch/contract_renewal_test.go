@@ -86,7 +86,7 @@ func newActiveContract(id string) *contract.ContractAggregate {
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		AutoRenew:    true,
@@ -198,7 +198,7 @@ func TestContractRenewalProcessor_DryRun_AutoRenewFalse(t *testing.T) {
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		AutoRenew:    false,
@@ -255,7 +255,7 @@ func TestContractRenewalProcessor_StopOnError(t *testing.T) {
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		AutoRenew:    true,
@@ -334,7 +334,7 @@ func TestContractRenewalProcessor_ContinueOnError(t *testing.T) {
 	cmd := contract.CreateContractCommand{
 		AccountID:    shared.AccountID("a1"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		AutoRenew:    true,
@@ -387,7 +387,7 @@ func TestContractRenewalProcessor_BillingCycleChange(t *testing.T) {
 		AccountID:    shared.AccountID("a1"),
 		PriceID:      shared.PriceID("price-monthly"),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
 		AutoRenew:    true,
@@ -433,9 +433,9 @@ func TestContractRenewalProcessor_BillingCycleChange(t *testing.T) {
 		t.Errorf("Succeeded: got %d, want 1", result.Succeeded)
 	}
 
-	// billingCycle should be updated to yearly
-	if agg.GetBillingCycle() != contract.BillingCycleYearly {
-		t.Errorf("expected billingCycle yearly, got %s", agg.GetBillingCycle())
+	// interval should be updated to yearly
+	if !agg.GetInterval().Equals(pricing.Yearly()) {
+		t.Errorf("expected interval yearly, got %s", agg.GetInterval())
 	}
 	// Period should advance by 1 year
 	expectedEnd := oldPeriod.End().AddDate(1, 0, 0)
@@ -463,7 +463,7 @@ func TestContractRenewalProcessor_NilPriceRepo_FallsBack(t *testing.T) {
 	if result.Succeeded != 1 {
 		t.Errorf("Succeeded: got %d, want 1", result.Succeeded)
 	}
-	if agg.GetBillingCycle() != contract.BillingCycleMonthly {
-		t.Errorf("expected billingCycle monthly (fallback), got %s", agg.GetBillingCycle())
+	if !agg.GetInterval().Equals(pricing.Monthly()) {
+		t.Errorf("expected interval monthly (fallback), got %s", agg.GetInterval())
 	}
 }

@@ -33,7 +33,7 @@ func newTestCommand() CreateContractCommand {
 	return CreateContractCommand{
 		AccountID:    shared.AccountID("acc-001"),
 		ContractType: ContractTypeSubscription,
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 	}
@@ -229,7 +229,7 @@ func TestApplyAllEvents(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -317,7 +317,7 @@ func TestApplyTrialEvents(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -370,7 +370,7 @@ func TestApplyTrialEndedNotConverted(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -454,7 +454,7 @@ func TestLoadFromSnapshot(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Status:       ContractStatusActive,
 		ContractType: ContractTypeSubscription,
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
 		CreatedAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
@@ -777,7 +777,7 @@ func TestRenew_HappyPath(t *testing.T) {
 
 	oldPeriod := agg.CurrentPeriod()
 
-	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
+	if err := agg.RenewWithInterval(agg.GetInterval(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -805,7 +805,7 @@ func TestRenew_WithPendingPriceID(t *testing.T) {
 		t.Fatalf("ChangePrice END_OF_TERM failed: %v", err)
 	}
 
-	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
+	if err := agg.RenewWithInterval(agg.GetInterval(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -847,7 +847,7 @@ func TestRenew_AutoRenewFalse_Expires(t *testing.T) {
 	agg := createActiveAggregate(t) // autoRenew defaults to false
 	meta := newTestMetadata()
 
-	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
+	if err := agg.RenewWithInterval(agg.GetInterval(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -864,7 +864,7 @@ func TestRenew_CancelAtPeriodEnd_Cancels(t *testing.T) {
 		t.Fatalf("ScheduleCancellation failed: %v", err)
 	}
 
-	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
+	if err := agg.RenewWithInterval(agg.GetInterval(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -912,7 +912,7 @@ func TestRenew_NotActive_Fails(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			agg := tt.setup()
-			err := agg.Renew(agg.GetBillingCycle(), meta)
+			err := agg.RenewWithInterval(agg.GetInterval(), meta)
 			if err == nil {
 				t.Fatal("expected error for renew from non-active state, got nil")
 			}
@@ -961,7 +961,7 @@ func TestApplyContractRenewedEvent(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		AutoRenew:    true,
 		CreatedAt:    now,
@@ -1016,7 +1016,7 @@ func TestApplyContractExpiredEvent(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		CreatedAt:    now,
 	})
@@ -1129,7 +1129,7 @@ func TestUnscheduleCancellation_ThenRenew_Renews(t *testing.T) {
 	}
 
 	oldPeriod := agg.CurrentPeriod()
-	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
+	if err := agg.RenewWithInterval(agg.GetInterval(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -1150,7 +1150,7 @@ func TestApplyCancellationScheduledEvent(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		AutoRenew:    true,
 		CreatedAt:    now,
@@ -1183,7 +1183,7 @@ func TestApplyCancellationUnscheduledEvent(t *testing.T) {
 		AccountID:    shared.AccountID("acc-001"),
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		ContractType: ContractTypeSubscription,
 		AutoRenew:    true,
 		CreatedAt:    now,
@@ -1280,7 +1280,7 @@ func TestRenew_CancelAtPeriodEnd_ResetsCancelFlag(t *testing.T) {
 	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
 		t.Fatalf("ScheduleCancellation failed: %v", err)
 	}
-	if err := agg.Renew(agg.GetBillingCycle(), meta); err != nil {
+	if err := agg.RenewWithInterval(agg.GetInterval(), meta); err != nil {
 		t.Fatalf("Renew failed: %v", err)
 	}
 
@@ -1292,18 +1292,18 @@ func TestRenew_CancelAtPeriodEnd_ResetsCancelFlag(t *testing.T) {
 	}
 }
 
-func TestCreate_NoBillingCycleOrInterval_ReturnsError(t *testing.T) {
+func TestCreate_NoInterval_ReturnsError(t *testing.T) {
 	agg := newTestAggregate()
 	cmd := CreateContractCommand{
 		AccountID:    shared.AccountID("acc-001"),
 		ContractType: ContractTypeSubscription,
 		Price:        newTestMoney(),
 		BasePrice:    newTestMoney(),
-		// BillingCycle and Interval both unset
+		// Interval unset
 	}
 	err := agg.Create(cmd, newTestMetadata())
 	if err == nil {
-		t.Fatal("expected error when both BillingCycle and Interval are unset")
+		t.Fatal("expected error when Interval is unset")
 	}
 	var domErr *shared.DomainError
 	if !errors.As(err, &domErr) {

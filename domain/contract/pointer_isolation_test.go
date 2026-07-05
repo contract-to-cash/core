@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 )
@@ -24,7 +25,7 @@ func newActiveAggregate(t *testing.T) *ContractAggregate {
 		AccountID:    shared.NewAccountID(),
 		PriceID:      shared.NewPriceID(),
 		ContractType: ContractTypeSubscription,
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		AutoRenew:    true,
@@ -117,7 +118,7 @@ func TestAggregate_TrialConfig_GetterIsDefensivelyCopied(t *testing.T) {
 		AccountID:    shared.NewAccountID(),
 		PriceID:      shared.NewPriceID(),
 		ContractType: ContractTypeSubscription,
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
@@ -159,7 +160,7 @@ func TestAggregate_TrialConfig_IntakeIsDefensivelyCopied(t *testing.T) {
 		AccountID:    shared.NewAccountID(),
 		PriceID:      shared.NewPriceID(),
 		ContractType: ContractTypeSubscription,
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
@@ -305,7 +306,7 @@ func TestAggregate_LoadFromSnapshot_IsolatesTrialConfig(t *testing.T) {
 		AccountID:    shared.NewAccountID(),
 		PriceID:      shared.NewPriceID(),
 		ContractType: ContractTypeSubscription,
-		BillingCycle: BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {

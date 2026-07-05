@@ -59,7 +59,7 @@ func createActiveContractWithPrice(
 		AccountID:    shared.AccountID("acc-001"),
 		PriceID:      priceEntity.ID(),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        price,
 		BasePrice:    price,
 	}, emptyMetadata())

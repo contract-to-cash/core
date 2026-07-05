@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/domain/contract"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -97,7 +98,7 @@ func setupContractWithCreateAndActivate(t *testing.T, store eventstore.Store, co
 			AccountID:    shared.AccountID("acc-001"),
 			PriceID:      shared.PriceID("price-001"),
 			ContractType: contract.ContractTypeSubscription,
-			BillingCycle: contract.BillingCycleMonthly,
+			Interval:     pricing.Monthly(),
 			Price:        testMoney(),
 			BasePrice:    testMoney(),
 			AutoRenew:    true,
@@ -385,7 +386,7 @@ func TestGetContractAsOf_WithSnapshot_FiltersEventsCorrectly(t *testing.T) {
 			AccountID:    shared.AccountID("acc-002"),
 			PriceID:      shared.PriceID("price-002"),
 			ContractType: contract.ContractTypeSubscription,
-			BillingCycle: contract.BillingCycleMonthly,
+			Interval:     pricing.Monthly(),
 			Price:        testMoney(),
 			BasePrice:    testMoney(),
 		}, meta)

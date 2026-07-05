@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/domain/contract"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
@@ -77,7 +78,7 @@ func main() {
 	must("create vps", vps.Create(contract.CreateContractCommand{
 		AccountID: accountID, PriceID: "price-vps-standard",
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        moneyJPY(5000), BasePrice: moneyJPY(5000),
 	}, metadata))
 	must("activate vps", vps.Activate(metadata))
@@ -91,7 +92,7 @@ func main() {
 	must("create ssl", ssl.Create(contract.CreateContractCommand{
 		AccountID: accountID, PriceID: "price-ssl-wildcard",
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleYearly,
+		Interval:     pricing.Yearly(),
 		Price:        moneyJPY(20000), BasePrice: moneyJPY(20000),
 	}, metadata))
 	must("activate ssl", ssl.Activate(metadata))
@@ -105,7 +106,7 @@ func main() {
 	must("create domain", dom.Create(contract.CreateContractCommand{
 		AccountID: accountID, PriceID: "price-domain-jp",
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleYearly,
+		Interval:     pricing.Yearly(),
 		Price:        moneyJPY(1500), BasePrice: moneyJPY(1500),
 	}, metadata))
 	must("activate domain", dom.Activate(metadata))

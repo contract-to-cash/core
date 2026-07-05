@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/domain/contract"
+	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
 )
@@ -20,7 +21,7 @@ func newTestContractAggregate(t *testing.T, clock shared.Clock, accountID shared
 		AccountID:    accountID,
 		PriceID:      shared.NewPriceID(),
 		ContractType: contract.ContractTypeSubscription,
-		BillingCycle: contract.BillingCycleMonthly,
+		Interval:     pricing.Monthly(),
 		Price:        shared.NewMoney(new(big.Rat).SetInt64(980), shared.CurrencyJPY),
 		BasePrice:    shared.NewMoney(new(big.Rat).SetInt64(980), shared.CurrencyJPY),
 		AutoRenew:    true,

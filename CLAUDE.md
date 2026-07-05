@@ -55,8 +55,14 @@ infrastructure/  ドメイン IF の実装（現在は inmemory/ のみ。DB 実
 | BalanceEntry | Entity | FIFO 消費、有効期限対応、楽観的ロック |
 
 - 契約は `CreateContractCommand.PriceID` で Price を指定する（旧 `PlanID` は廃止済み）
-- 課金サイクルは `pricing.BillingInterval`（`{unit, count}` の値オブジェクト）が新 API。
-  `BillingCycle`（文字列エイリアス）は後方互換のために残っているが新規コードでは `BillingInterval` を使う
+- 課金サイクルは `pricing.BillingInterval`（`{unit, count}` の値オブジェクト）を使う。
+  契約ドメインの `BillingCycle` スキャフォールディング（`CreateContractCommand.BillingCycle`、
+  イベント/集約/スナップショットの `billing_cycle` フィールド、`GetBillingCycle()`、
+  `Renew(BillingCycle)`、`domain/contract` の型エイリアス）は #111 で撤去済み。
+  歴史的イベント（`billing_cycle` のみを持つペイロード）は `domain/contract/upcaster.go` の
+  Upcaster が `interval` へ変換する（SchemaVersion 2）。
+  `pricing.BillingCycle`（文字列型 + `Daily/Weekly/Monthly/Yearly` 定数、`BillingCycleToInterval` /
+  `BillingInterval.ToBillingCycle`）は Price 構築・表示・アダプタ用に pricing パッケージ内でのみ残存する
 - `shared.MetricName`（型付き string）を使用。生の string でメトリック名を渡さない
 
 ### Event Sourcing
