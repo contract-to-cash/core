@@ -333,7 +333,7 @@ type ContractAggregate struct {
     accountID     shared.AccountID
     status        ContractStatus
     price         Money
-    billingCycle  BillingCycle
+    interval      BillingInterval
     currentPeriod DateRange
     createdAt     time.Time
     updatedAt     time.Time
@@ -360,7 +360,7 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
         AccountID:    cmd.AccountID,
         PriceID:      cmd.PriceID,
         Price:        cmd.Price,
-        BillingCycle: cmd.BillingCycle,
+        Interval:     cmd.Interval,
         CreatedAt:    now,
     }
 
@@ -436,7 +436,7 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
     case *ContractCreatedEvent:
         a.accountID = e.AccountID
         a.price = e.Price
-        a.billingCycle = e.BillingCycle
+        a.interval = e.Interval
         a.status = ContractStatusDraft
         a.createdAt = e.CreatedAt
         a.updatedAt = e.CreatedAt
@@ -515,7 +515,7 @@ type ContractCreatedEvent struct {
     AccountID    shared.AccountID  `json:"account_id"`
     PriceID      shared.PriceID    `json:"price_id"`
     Price        Money             `json:"price"`
-    BillingCycle BillingCycle      `json:"billing_cycle"`
+    Interval     BillingInterval   `json:"interval,omitempty"`
     CreatedAt    time.Time         `json:"created_at"`
 }
 

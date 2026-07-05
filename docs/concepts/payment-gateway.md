@@ -6,6 +6,12 @@ sidebar_position: 4
 
 Contract Billing Core defines a `PaymentGateway` interface that abstracts payment processing. You implement this interface for your payment provider (Stripe, Braintree, PayPay, etc.).
 
+:::note Canonical reference
+This page is an English summary. The canonical, in-depth specification is
+[`docs/internals/payment-gateway.md`](../internals/payment-gateway.md) (see the
+[Documentation Map](../README.md)). When details differ, the internals spec and the code win.
+:::
+
 ## Interface Overview
 
 The gateway supports direct charge, two-phase (authorize/capture), refunds, and payment method management:

@@ -6,6 +6,12 @@ sidebar_position: 2
 
 Contract Billing Core uses event sourcing for the Contract aggregate, providing a complete audit trail and time-travel capabilities.
 
+:::note Canonical reference
+This page is an English summary. The canonical, in-depth specification is
+[`docs/internals/event-sourcing.md`](../internals/event-sourcing.md) (see the
+[Documentation Map](../README.md)). When details differ, the internals spec and the code win.
+:::
+
 ## How It Works
 
 Instead of storing only the current state, every state change is recorded as an immutable event:
