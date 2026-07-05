@@ -505,29 +505,68 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("unexpected charge status %q for transaction %s", chargeResp.Status, chargeResp.TransactionID)
 	}
 
-	// Phase 2: Saga compensation for gateway charge.
-	// Charge is authorize+capture (one-step), so the transaction is already
-	// captured. Void only works on pre-capture authorizations; we must use
-	// Refund to reverse a captured charge.
+	// Phase 2: Saga compensation for gateway charge (issue #86).
 	//
-	// Load-bearing invariant: the compensation Refund's IdempotencyKey is
-	// DETERMINISTIC on chargeResp.TransactionID, not a fresh UUID. This is
-	// what makes concurrent compensations safe: if two goroutines both
-	// trigger compensation for the same original charge (e.g. two parallel
-	// ProcessPayment calls that both hit the gateway's idempotent replay
-	// of a successful charge), they both derive the same refund key and
-	// the gateway deduplicates the second Refund automatically. Changing
-	// this key to something non-deterministic (a UUID, a timestamp, etc.)
-	// would silently reintroduce double-refund risk under concurrency.
+	// Charge is authorize+capture (one-step), so the transaction is already
+	// captured from the caller's point of view. To reverse it we try Void
+	// FIRST, then fall back to Refund:
+	//
+	//   1. Void — cancels the transaction while it is still pre-settlement.
+	//      Some gateways/payment methods (bank transfer, convenience store,
+	//      carrier billing, direct debit) do NOT settle instantly and REJECT
+	//      an immediate Refund until settlement completes 24-48h later. For
+	//      those, Void is the only reversal available inside the same request.
+	//   2. Refund (fallback) — reverses an already-settled/captured charge.
+	//      Void fails for a settled charge (it is only valid pre-capture),
+	//      so a Void error is the signal to fall back to Refund. This is the
+	//      common case for instantly-settling credit-card charges.
+	//
+	// MONEY-SAFETY INVARIANT: Void and Refund must NEVER both take effect for
+	// one charge. On a SUCCESSFUL Void we return immediately and never call
+	// Refund, so a non-idempotent gateway cannot double-reverse. Refund is
+	// attempted ONLY when Void returns an error (i.e. nothing was voided).
+	//
+	// Load-bearing invariant: both compensation calls use a DETERMINISTIC
+	// IdempotencyKey derived from chargeResp.TransactionID, not a fresh UUID.
+	// This is what makes concurrent compensations safe: if two goroutines
+	// both trigger compensation for the same original charge (e.g. two
+	// parallel ProcessPayment calls that both hit the gateway's idempotent
+	// replay of a successful charge), they derive the same void/refund keys
+	// and the gateway deduplicates the replayed call, returning the SAME
+	// outcome — so both goroutines take the same branch (both see Void
+	// success → neither refunds, or both see the same Void error → both
+	// refund under one deduplicated refund key). Changing either key to
+	// something non-deterministic would silently reintroduce double-reverse
+	// risk under concurrency.
 	saga := tx.NewSaga()
 	saga.AddCompensation(func(compCtx context.Context) error {
+		// One-step Charge exposes no separate AuthorizationID; the transaction
+		// ID identifies the (as-yet-unsettled) authorization for Void.
+		_, voidErr := s.gateway.Void(compCtx, &port.VoidRequest{
+			AuthorizationID: chargeResp.TransactionID,
+			IdempotencyKey:  "comp-void-" + chargeResp.TransactionID,
+		})
+		if voidErr == nil {
+			// Pre-settlement charge reversed via Void. MUST NOT also Refund.
+			return nil
+		}
+
+		// Void failed — the charge is likely already captured/settled, where
+		// Void is not permitted. Fall back to Refund.
+		s.logger.Warn("saga compensation: Void failed, falling back to Refund (charge likely already settled)",
+			"transactionID", chargeResp.TransactionID,
+			"voidError", voidErr,
+		)
 		_, refundErr := s.gateway.Refund(compCtx, &port.RefundRequest{
 			TransactionID:  chargeResp.TransactionID,
 			Amount:         &chargeResp.Amount,
 			Reason:         port.RefundReasonOther,
 			IdempotencyKey: "comp-refund-" + chargeResp.TransactionID,
 		})
-		return refundErr
+		if refundErr != nil {
+			return fmt.Errorf("compensation void failed (%v) and refund fallback also failed: %w", voidErr, refundErr)
+		}
+		return nil
 	})
 
 	// Create payment record. The payment's idempotency key is the EFFECTIVE

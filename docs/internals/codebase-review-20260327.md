@@ -185,7 +185,7 @@ core/
 | - | ContractAggregateの長いif-chain | `Cancel()`で5状態チェックがあるが、これは正当なステートマシンコード。Go言語では標準的な書き方 |
 | - | PostgreSQL/MySQL実装が未提供 | ライブラリとしてポートインターフェースを定義するのが責務。DB実装を同梱しないのは適切な設計判断 |
 | - | WebhookValidatorインターフェースの参照実装が未提供 | `WebhookHandler.ParseAndVerify()`で検証は行われており、分離が必要な実運用シーンは限定的 |
-| - | CorrelationID/CausationIDが未活用 | 定義済みだが未使用。将来のトレーシング統合に向けた準備であり、現時点では問題ではない |
+| - | CorrelationID/CausationIDが未活用 | 定義済みだが未使用。将来のトレーシング統合に向けた準備であり、現時点では問題ではない。<br>**決着（Issue #116 / Option B）**: 約1年経過しても利用者が現れなかったため削除。再導入は非破壊なので後から可能。詳細は `docs/decisions/design-decisions.md` 5.2 |
 | - | TieredPrice.CalculatePriceの負値処理 | `usage <= 0`で明示的にゼロを返す防御的コード。上流のバリデーション(#1)で対処すべき |
 
 ---

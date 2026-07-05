@@ -27,11 +27,18 @@ type Event struct {
 	GlobalPosition int64           `json:"global_position,omitempty"`
 }
 
-// EventMetadata holds audit and tracing information for an event.
+// EventMetadata holds audit information for an event.
+//
+// Historical note: earlier versions carried CorrelationID / CausationID string
+// fields intended for future tracing. They were never populated by any core
+// flow and were removed in issue #116 (Option B) until a concrete consumer
+// appears. Removal is read-safe: metadata is deserialized independently from
+// the schema-versioned event Data payload, so no Upcaster is involved, and
+// json.Unmarshal ignores the now-unknown "correlation_id" / "causation_id"
+// keys that may still be present in previously stored events. Re-adding a
+// tracing field later is a purely additive (non-breaking) change.
 type EventMetadata struct {
-	UserID        string  `json:"user_id"`
-	IPAddress     *string `json:"ip_address,omitempty"`
-	UserAgent     *string `json:"user_agent,omitempty"`
-	CorrelationID string  `json:"correlation_id,omitempty"`
-	CausationID   string  `json:"causation_id,omitempty"`
+	UserID    string  `json:"user_id"`
+	IPAddress *string `json:"ip_address,omitempty"`
+	UserAgent *string `json:"user_agent,omitempty"`
 }

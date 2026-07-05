@@ -14,9 +14,11 @@ type UsagePrice struct {
 }
 
 // CalculatePrice calculates usage * UnitPrice, clamped by Minimum and Maximum.
-// Negative usage is treated as zero.
+// Zero usage returns zero money; negative usage panics (see the PricingModel
+// contract and assertNonNegativeUsage).
 func (p UsagePrice) CalculatePrice(usage int64) shared.Money {
-	if usage <= 0 {
+	assertNonNegativeUsage("UsagePrice", usage)
+	if usage == 0 {
 		return shared.Zero(p.UnitPrice.Currency())
 	}
 	factor := new(big.Rat).SetInt64(usage)

@@ -246,15 +246,51 @@ type EventMetadata struct {
     UserID      string  // 必須
     IPAddress   *string // オプション
     UserAgent   *string // オプション
-    CorrelationID string
-    CausationID   string
 }
 ```
 
 **理由：**
 - 誰が操作したかは必須情報
 - IP/UserAgentはプライバシー配慮でオプション
-- 相関ID/因果IDはトレーシングに有用
+
+### 5.2 CorrelationID / CausationID の扱い（Issue #116）
+
+| 決定 | **Option B: 具体的な利用者が現れるまで削除する** |
+|------|--------------------------------------------------|
+
+`EventMetadata` には当初、将来のトレーシング統合に備えて `CorrelationID` と
+`CausationID` の 2 フィールドが定義されていた。しかし約 1 年経過してもコアの
+どのフロー（`BillingService` / `PaymentService` / `CreditNoteService` / `batch/` /
+Saga）もこれらを設定せず、参照するプラグインフックもクエリ／プロジェクションも
+存在しなかった（`docs/internals/codebase-review-20260327.md` で「未活用」と指摘）。
+
+**選択肢：**
+- Option A（採用・文書化）: セマンティクスを定義し、全サービスで伝播を実装、
+  `docs/guides/tracing.md` を追加、伝播を検証する統合テストを追加する。
+  → 直近の四半期にトレーシングをロードマップに載せる場合のみ妥当。
+- **Option B（削除）** → 具体的な利用者が現れるまで削除する ✓
+
+**理由：**
+- **非対称なリスク**: 削除は追記専用ストレージ上のイベントスキーマ変更（本来は
+  Upcaster 対応）だが、**追加は純粋に非破壊（additive）** なので後からいつでも
+  再導入できる。コミットしないなら削除する方が安全。
+- 中途半端に「定義済みだが未使用」の状態は最悪。採用者がスキーマ上のフィールドを
+  見て、我々が定義していないセマンティクスを推測してしまう。
+- 追記専用ストレージでは全書き込みに（空値でも）永続的に含まれ、ペイロードを
+  わずかに肥大させる。
+
+**後方互換（読み取り安全性）：**
+- `EventMetadata` は schema-versioned な `Event.Data` ペイロードとは独立に JSON
+  デシリアライズされるため、**Upcaster は不要**。
+- 既存の保存済みイベントの metadata JSON に `correlation_id` / `causation_id`
+  キーが残っていても、`json.Unmarshal` は未知キーを無視するため読み取りは壊れない。
+- したがって snapshot / schema version のバンプも不要（metadata はイベント本体の
+  スキーマバージョン管理下にない）。
+
+**再導入する場合：**
+- トレーシングを実装する段階で、単一フィールドの追加として `EventMetadata` に
+  戻せばよい（非破壊変更）。その際は Option A のとおりセマンティクス定義・伝播実装・
+  ガイド・テストをセットで行う。
 
 ## 6. プラグインシステム
 

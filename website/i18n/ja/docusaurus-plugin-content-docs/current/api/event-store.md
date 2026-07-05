@@ -55,12 +55,12 @@ type Event struct {
 
 ```go
 type EventMetadata struct {
-    UserID        string  // 操作者（必須）
-    IPAddress     *string // クライアントIP（オプション）
-    UserAgent     *string // クライアントUA（オプション）
-    CorrelationID string  // リクエスト相関ID
-    CausationID   string  // 因果イベントID
+    UserID    string  // 操作者（必須）
+    IPAddress *string // クライアントIP（オプション）
+    UserAgent *string // クライアントUA（オプション）
 }
+// 注: CorrelationID / CausationID は未活用のため Issue #116（Option B）で削除。
+// 具体的な利用者が現れた段階で非破壊的に再導入する。
 ```
 
 ## Snapshot
