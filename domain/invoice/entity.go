@@ -128,6 +128,7 @@ type Invoice struct {
 	originalInvoiceID *shared.InvoiceID
 	revisionOf        *shared.InvoiceID
 	voidReason        string
+	refundReason      string
 
 	// Optimistic-locking support (mirrors balance.BalanceEntry, issue #130).
 	// version is bumped by state transitions that must not race (currently
@@ -429,6 +430,48 @@ func (inv *Invoice) VoidWithReason(reason string) error {
 	inv.voidReason = reason
 	return nil
 }
+
+// MarkRefunded transitions the invoice to refunded status with an explicit reason.
+//
+// This is the in-core mutator that produces the InvoiceStatusRefunded state,
+// which was previously reachable only via InvoiceFromSnapshot (persistence
+// adapters) — see issue #99. The upstream trigger (a CreditNote fully applied
+// to the invoice, a Payment refunded in full via the PaymentGateway, or a
+// manual admin action) is deliberately left to the caller: this method only
+// performs the in-core state transition and does not orchestrate any
+// cross-service refund workflow (issue #99 Non-goals).
+//
+// Allowed source states are Paid and PartialPaid: a refund only makes sense
+// once money has actually been collected against the invoice. Every other
+// state (including Voided) is rejected with invalid_state_transition:
+//   - Draft / Finalized / Issued / Overdue have no collected payment to refund.
+//   - Voided is a distinct terminal state for invoices that were cancelled
+//     (typically via void-and-recreate) rather than paid then refunded; a
+//     voided invoice never validly collected funds, so voided → refunded is
+//     meaningless. This mirrors VoidWithReason, which likewise treats voided
+//     and refunded as separate terminal states and refuses to cross between
+//     them.
+//   - Refunded is already terminal, so this also guards against double refund.
+//
+// Like Finalize, it bumps the optimistic-locking version so two concurrently
+// loaded copies cannot both be refunded: a repository honoring the concurrency
+// contract rejects the second Save with tx.ErrVersionConflict (issue #130).
+func (inv *Invoice) MarkRefunded(reason string) error {
+	if reason == "" {
+		return shared.NewDomainError(shared.ErrCodeValidation, "refund reason must not be empty")
+	}
+	if inv.status != InvoiceStatusPaid && inv.status != InvoiceStatusPartialPaid {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot refund invoice in status %s", inv.status))
+	}
+	inv.status = InvoiceStatusRefunded
+	inv.refundReason = reason
+	inv.version++
+	return nil
+}
+
+// RefundReason returns the reason this invoice was marked refunded.
+func (inv *Invoice) RefundReason() string { return inv.refundReason }
 
 // OriginalInvoiceID returns a defensive copy of the original invoice ID
 // pointer (for reissued invoices). Mutating the returned pointer does NOT

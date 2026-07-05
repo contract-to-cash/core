@@ -915,6 +915,21 @@ const (
     InvoiceStatusRefunded   InvoiceStatus = "refunded"
 )
 
+// InvoiceStatus 状態遷移ルール:
+//   draft        → finalized（Finalize）| voided（Void）
+//   finalized    → issued | paid | partial_paid（RecordPayment）| voided（VoidWithReason）
+//   issued       → paid | partial_paid（RecordPayment）| overdue | voided（VoidWithReason）
+//   partial_paid → paid（残額入金）| refunded（MarkRefunded）| voided（VoidWithReason）
+//   overdue      → paid | partial_paid（RecordPayment）| voided（VoidWithReason）
+//   paid         → refunded（MarkRefunded）| voided（VoidWithReason）
+//   voided       → 終端状態（遷移なし。refunded へは遷移不可）
+//   refunded     → 終端状態（遷移なし）
+//
+// MarkRefunded の遷移元は paid / partial_paid のみ（実際に入金があった請求書だけ返金しうる）。
+// voided は「入金前にキャンセルされた」別の終端状態であり、返金対象の入金が存在しないため
+// voided → refunded は許可しない（VoidWithReason も voided/refunded を別終端として扱う）。
+// 上位トリガー（CreditNote 全額適用 / Payment 全額返金 / 手動）の決定は呼び出し側に委ねる（issue #99）。
+
 type LineItem struct {
     id          string
     description string
@@ -962,6 +977,7 @@ type Invoice struct {
     originalInvoiceID *shared.InvoiceID
     revisionOf        *shared.InvoiceID
     voidReason        string
+    refundReason      string
 }
 
 // コンストラクタ
@@ -996,6 +1012,7 @@ func (inv *Invoice) RecordPayment(amount shared.Money, paidAt time.Time) error
 func (inv *Invoice) ValidatePayment(amount shared.Money) error
 func (inv *Invoice) Void() error
 func (inv *Invoice) VoidWithReason(reason string) error
+func (inv *Invoice) MarkRefunded(reason string) error
 
 // リビジョンリンク設定
 func (inv *Invoice) SetRevisionOf(id shared.InvoiceID)
@@ -1005,6 +1022,7 @@ func (inv *Invoice) SetOriginalInvoiceID(id shared.InvoiceID)
 func (inv *Invoice) OriginalInvoiceID() *shared.InvoiceID
 func (inv *Invoice) RevisionOf() *shared.InvoiceID
 func (inv *Invoice) VoidReason() string
+func (inv *Invoice) RefundReason() string
 func (inv *Invoice) PaymentMethodID() *string
 ```
 // NOTE: metrics-invoicegen の InvoiceLineItem.Quantity は float64（小数量=0.5時間等の表現用）。

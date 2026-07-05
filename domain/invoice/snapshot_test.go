@@ -75,6 +75,7 @@ func TestInvoice_Snapshot_RoundTrip(t *testing.T) {
 	snap.Balance = shared.Zero(shared.CurrencyJPY)
 	snap.PaidAt = &paidAt
 	snap.VoidReason = ""
+	snap.RefundReason = "customer refund"
 
 	restored, err := InvoiceFromSnapshot(snap)
 	if err != nil {
@@ -156,6 +157,9 @@ func TestInvoice_Snapshot_RoundTrip(t *testing.T) {
 	}
 	if restored.VoidReason() != "" {
 		t.Errorf("VoidReason mismatch: %q", restored.VoidReason())
+	}
+	if restored.RefundReason() != "customer refund" {
+		t.Errorf("RefundReason mismatch: %q", restored.RefundReason())
 	}
 	if meta := restored.Metadata(); meta["k"] != "v" {
 		t.Errorf("Metadata not restored: %v", meta)
