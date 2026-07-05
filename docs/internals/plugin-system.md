@@ -1287,28 +1287,45 @@ func (s *BillingService) calculateUsageCharge(
 // FinalizeInvoice 請求書を確定する
 // GracePeriod経過後に呼び出す。確定後は変更不可。
 // 保存成功後に OnInvoiceIssuedHook（メトリクス）を発火する（フックエラーは非致命・ログのみ）。
+//
+// 並行保証は Repository が並行制御契約（invoice.Repository.Save の godoc / issue #130）
+// を満たす場合にのみ成立する。楽観ロック実装では、敗者の Save が tx.ErrVersionConflict を
+// 返し、RetryOnConflict がクロージャを再実行する。再読込時には請求書が finalized 済みのため
+// Finalize が invalid_state_transition で拒否する。読みの直列化（行ロック / SERIALIZABLE）
+// でも同じ契約を満たせる。無条件 last-writer-wins のアダプタでは二重 finalize が成立し、
+// OnInvoiceIssued が二重発火し得る（アダプタ側 issue: contract-to-cash/adapters#12）。
 func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.InvoiceID) (*invoice.Invoice, error) {
     // 読み込み・draft検査・状態遷移・保存を同一トランザクション内で行う
-    // （check-then-act を tx 境界で分割しない）。並行呼び出しの敗者は
-    // finalized 済みの行を読んで invalid_state_transition で拒否されるため、
-    // 二重 finalize と OnInvoiceIssued の二重発火は起きない。
+    // （check-then-act を tx 境界で分割しない）。RetryOnConflict は Repository が
+    // 楽観ロック競合を報告したときにクロージャを再実行する。再実行時には請求書が
+    // finalized 済みのため Finalize が invalid_state_transition で拒否する
+    // （競合エラーではないので再試行されない）。
     var inv *invoice.Invoice
-    err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
-        loaded, findErr := repos.Invoices.FindByID(txCtx, invoiceID)
-        if findErr != nil {
-            return fmt.Errorf("failed to load invoice: %w", findErr)
-        }
+    err := tx.RetryOnConflict(finalizeMaxRetries, func() error {
+        var finalized *invoice.Invoice
+        runErr := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+            loaded, findErr := repos.Invoices.FindByID(txCtx, invoiceID)
+            if findErr != nil {
+                return fmt.Errorf("failed to load invoice: %w", findErr)
+            }
 
-        // draft以外は invalid_state_transition の DomainError で拒否される
-        if finalizeErr := loaded.Finalize(); finalizeErr != nil {
-            return finalizeErr
-        }
+            // draft以外は invalid_state_transition の DomainError で拒否される
+            if finalizeErr := loaded.Finalize(); finalizeErr != nil {
+                return finalizeErr
+            }
 
-        // 保存（フックより先に永続化する）
-        if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
-            return fmt.Errorf("failed to save finalized invoice: %w", saveErr)
+            // 保存（フックより先に永続化する）。並行 finalize では
+            // tx.ErrVersionConflict が返り得る。
+            if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
+                return saveErr
+            }
+            finalized = loaded
+            return nil
+        })
+        if runErr != nil {
+            return runErr
         }
-        inv = loaded
+        inv = finalized
         return nil
     })
     if err != nil {

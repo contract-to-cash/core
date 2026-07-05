@@ -2,10 +2,12 @@ package inmemory
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/shared"
 )
@@ -327,6 +329,96 @@ func TestInMemoryInvoiceRepository_FindOverdue(t *testing.T) {
 	}
 	if len(results) != 3 {
 		t.Errorf("expected 3 overdue invoices, got %d", len(results))
+	}
+}
+
+// TestInMemoryInvoiceRepository_Save_OptimisticLock_RejectsConcurrentFinalize
+// is the #130 regression test: when two callers each load an independent copy
+// of the same draft invoice (as a real RDBMS hands each transaction its own row
+// snapshot) and both finalize, exactly one Save wins and the loser is
+// deterministically rejected with tx.ErrVersionConflict. Without optimistic
+// locking both saves would succeed (last-writer-wins), letting the caller fire
+// OnInvoiceIssued twice.
+func TestInMemoryInvoiceRepository_Save_OptimisticLock_RejectsConcurrentFinalize(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)}
+	repo := NewInMemoryInvoiceRepository(clock)
+	ctx := context.Background()
+
+	inv := newTestInvoice(t, shared.NewAccountID(), shared.NewContractID())
+	if err := repo.Save(ctx, inv); err != nil {
+		t.Fatalf("initial Save failed: %v", err)
+	}
+
+	stored, err := repo.FindByID(ctx, inv.ID())
+	if err != nil {
+		t.Fatalf("FindByID failed: %v", err)
+	}
+
+	// Two independent loads (snapshot round-trip simulates per-tx isolation).
+	winner, err := invoice.InvoiceFromSnapshot(stored.ToSnapshot())
+	if err != nil {
+		t.Fatalf("clone winner failed: %v", err)
+	}
+	loser, err := invoice.InvoiceFromSnapshot(stored.ToSnapshot())
+	if err != nil {
+		t.Fatalf("clone loser failed: %v", err)
+	}
+
+	if err := winner.Finalize(); err != nil {
+		t.Fatalf("winner Finalize failed: %v", err)
+	}
+	if err := repo.Save(ctx, winner); err != nil {
+		t.Fatalf("winner Save should succeed, got: %v", err)
+	}
+
+	if err := loser.Finalize(); err != nil {
+		t.Fatalf("loser Finalize failed: %v", err)
+	}
+	err = repo.Save(ctx, loser)
+	if !errors.Is(err, tx.ErrVersionConflict) {
+		t.Fatalf("loser Save should be rejected with ErrVersionConflict, got: %v", err)
+	}
+
+	// The persisted invoice is finalized exactly once, at version 1.
+	final, err := repo.FindByID(ctx, inv.ID())
+	if err != nil {
+		t.Fatalf("final FindByID failed: %v", err)
+	}
+	if final.Status() != invoice.InvoiceStatusFinalized {
+		t.Errorf("stored status: got %s, want finalized", final.Status())
+	}
+	if final.Version() != 1 {
+		t.Errorf("stored version: got %d, want 1", final.Version())
+	}
+}
+
+// TestInMemoryInvoiceRepository_Save_SamePointerReSaveSucceeds guards the
+// common non-isolated path: loading via FindByID (which returns the stored
+// pointer) and re-saving after a mutation must not spuriously conflict, because
+// Save syncs loadedVersion to the persisted version.
+func TestInMemoryInvoiceRepository_Save_SamePointerReSaveSucceeds(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)}
+	repo := NewInMemoryInvoiceRepository(clock)
+	ctx := context.Background()
+
+	inv := newTestInvoice(t, shared.NewAccountID(), shared.NewContractID())
+	if err := repo.Save(ctx, inv); err != nil {
+		t.Fatalf("initial Save failed: %v", err)
+	}
+
+	loaded, err := repo.FindByID(ctx, inv.ID())
+	if err != nil {
+		t.Fatalf("FindByID failed: %v", err)
+	}
+	if err := loaded.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+	if err := repo.Save(ctx, loaded); err != nil {
+		t.Fatalf("re-save after finalize should succeed, got: %v", err)
+	}
+	// A second save from the same synced pointer also succeeds.
+	if err := repo.Save(ctx, loaded); err != nil {
+		t.Fatalf("second re-save should succeed, got: %v", err)
 	}
 }
 

@@ -118,6 +118,12 @@ func NewBillingService(
 	return s
 }
 
+// finalizeMaxRetries bounds how many times FinalizeInvoice re-runs its
+// load→finalize→save closure on an optimistic-lock conflict. A conflict means
+// another caller finalized first; on retry this call re-reads the finalized row
+// and is rejected with invalid_state_transition, so a small bound suffices.
+const finalizeMaxRetries = 3
+
 // billableStatuses defines which contract statuses allow invoice generation.
 var billableStatuses = map[contract.ContractStatus]bool{
 	contract.ContractStatusDraft:    true,
@@ -565,6 +571,16 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 // is already finalized and saved, so failures are logged and do not fail
 // the finalization.
 //
+// Concurrency: two concurrent FinalizeInvoice calls are made safe by the
+// invoice.Repository concurrency contract. When the repository implements
+// optimistic locking, the race loser's Save returns tx.ErrVersionConflict;
+// RetryOnConflict re-runs the closure, which re-reads the now-finalized row so
+// Finalize rejects it with invalid_state_transition. Either way exactly one
+// call finalizes and OnInvoiceIssued fires at most once. A repository that
+// serializes reads (row lock / SERIALIZABLE) satisfies the same contract
+// without conflicts. Against a last-writer-wins repository this guarantee does
+// NOT hold — see Repository.Save.
+//
 // Nested-transaction caveat: tx.Run joins an outer transaction if the
 // caller's ctx already carries one, and returns without committing it. In
 // that case the hooks fire before the OUTER commit — if the caller then
@@ -575,31 +591,42 @@ func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.I
 	// Load, check and transition INSIDE the transaction (same in-tx re-check
 	// pattern as PaymentService.ProcessPayment): a check-then-act split across
 	// the tx boundary would let two concurrent calls both observe the draft
-	// state and double-finalize — firing OnInvoiceIssued twice. In-tx, the
-	// loser of the race re-reads the already-finalized row and Finalize
-	// rejects it with an invalid_state_transition domain error.
-	// tx.Run joins an outer transaction if one is already active.
+	// state and double-finalize. RetryOnConflict re-runs the closure when the
+	// repository reports an optimistic-lock conflict; on retry the invoice is
+	// already finalized, so Finalize rejects it with an
+	// invalid_state_transition domain error (not a conflict, so no further
+	// retry). tx.Run joins an outer transaction if one is already active.
 	var inv *invoice.Invoice
-	err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
-		loaded, findErr := repos.Invoices.FindByID(txCtx, invoiceID)
-		if findErr != nil {
-			return fmt.Errorf("failed to load invoice: %w", findErr)
-		}
-		if loaded == nil {
-			return shared.NewDomainError(shared.ErrCodeNotFound,
-				fmt.Sprintf("invoice %s not found", invoiceID))
-		}
+	err := tx.RetryOnConflict(finalizeMaxRetries, func() error {
+		var finalized *invoice.Invoice
+		runErr := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+			loaded, findErr := repos.Invoices.FindByID(txCtx, invoiceID)
+			if findErr != nil {
+				return fmt.Errorf("failed to load invoice: %w", findErr)
+			}
+			if loaded == nil {
+				return shared.NewDomainError(shared.ErrCodeNotFound,
+					fmt.Sprintf("invoice %s not found", invoiceID))
+			}
 
-		// Finalize enforces the draft→finalized transition; any other status
-		// is rejected with an invalid_state_transition domain error.
-		if finalizeErr := loaded.Finalize(); finalizeErr != nil {
-			return finalizeErr
-		}
+			// Finalize enforces the draft→finalized transition; any other status
+			// is rejected with an invalid_state_transition domain error.
+			if finalizeErr := loaded.Finalize(); finalizeErr != nil {
+				return finalizeErr
+			}
 
-		if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
-			return fmt.Errorf("failed to save finalized invoice: %w", saveErr)
+			// Save may return tx.ErrVersionConflict under a concurrent
+			// finalization; RetryOnConflict handles it.
+			if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
+				return saveErr
+			}
+			finalized = loaded
+			return nil
+		})
+		if runErr != nil {
+			return runErr
 		}
-		inv = loaded
+		inv = finalized
 		return nil
 	})
 	if err != nil {

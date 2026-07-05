@@ -106,6 +106,10 @@ type InvoiceSnapshot struct {
 	RevisionOf        *shared.InvoiceID
 	VoidReason        string
 	Metadata          map[string]string
+	// Version is the optimistic-locking version (issue #130). The entity's
+	// loadedVersion is not stored separately: InvoiceFromSnapshot restores both
+	// version and loadedVersion from this single field.
+	Version int
 }
 
 // ToSnapshot returns a flat, independent copy of the invoice's internal state.
@@ -192,6 +196,7 @@ func (inv *Invoice) ToSnapshot() InvoiceSnapshot {
 		RevisionOf:        revisionOf,
 		VoidReason:        inv.voidReason,
 		Metadata:          metadata,
+		Version:           inv.version,
 	}
 }
 
@@ -292,5 +297,9 @@ func InvoiceFromSnapshot(s InvoiceSnapshot) (*Invoice, error) {
 		revisionOf:        revisionOf,
 		voidReason:        s.VoidReason,
 		metadata:          metadata,
+		// loadedVersion is set to Version so the next Save through a repository
+		// with optimistic locking compares against the correct baseline (#130).
+		version:       s.Version,
+		loadedVersion: s.Version,
 	}, nil
 }
