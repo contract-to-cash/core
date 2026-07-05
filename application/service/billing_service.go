@@ -734,6 +734,12 @@ func (s *BillingService) calculateUsageCharge(
 			return shared.Money{}, nil, fmt.Errorf("failed to get usage summary for %s: %w", metric.Name, err)
 		}
 
+		// Subtracting the included allowance can drive usage negative; clamp to
+		// zero here. This clamp is the boundary that upholds the PricingModel
+		// contract (pricing.PricingModel): CalculatePrice requires non-negative
+		// usage and panics otherwise, so billableUsage must never be passed
+		// negative. Zero is a legitimate value (no billable usage after the
+		// allowance) and yields a zero charge.
 		billableUsage := summary.TotalUsage - metric.IncludedQuantity
 		if billableUsage < 0 {
 			billableUsage = 0

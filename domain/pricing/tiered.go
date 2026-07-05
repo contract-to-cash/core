@@ -30,8 +30,11 @@ type TieredPrice struct {
 }
 
 // CalculatePrice calculates the price based on the tiered pricing mode.
+// Zero usage (or no configured tiers) returns zero money; negative usage
+// panics (see the PricingModel contract and assertNonNegativeUsage).
 func (p TieredPrice) CalculatePrice(usage int64) shared.Money {
-	if len(p.Tiers) == 0 || usage <= 0 {
+	assertNonNegativeUsage("TieredPrice", usage)
+	if len(p.Tiers) == 0 || usage == 0 {
 		// Use currency from first tier if available, otherwise fallback
 		if len(p.Tiers) > 0 {
 			return shared.Zero(p.Tiers[0].UnitPrice.Currency())
