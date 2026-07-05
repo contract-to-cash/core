@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub Release when a versioned `## [x.y.z]` section lands in `CHANGELOG.md`
   on `main`, or on manual `workflow_dispatch` with an explicit tag input.
   Runs build + test + lint before tagging.
+- Optimistic locking for `invoice.Invoice` (#130): new `Version()`,
+  `LoadedVersion()`, and `SetVersion()` methods mirror `balance.BalanceEntry`.
+  `Finalize()` now bumps the version so two concurrent finalizations cannot both
+  succeed. `InvoiceSnapshot` carries a `Version` field; `InvoiceFromSnapshot`
+  restores `version` and `loadedVersion` from it. The in-memory
+  `invoice.Repository` enforces the lock (returns `tx.ErrVersionConflict` on
+  version mismatch), and `BillingService.FinalizeInvoice` wraps its
+  load→finalize→save closure in `tx.RetryOnConflict` so the race loser re-reads
+  the finalized row and is rejected with `invalid_state_transition` — firing
+  `OnInvoiceIssued` at most once. These additions are backward compatible: a
+  fresh invoice starts at version 0 and adapters that never populate the field
+  keep working.
 
 ### Fixed
 
@@ -119,6 +131,51 @@ for a fuller walkthrough.
   `FindByIdempotencyKey` and re-fetches the invoice outside the tx so
   `AfterCharge` plugins see the committed invoice state (not the loser's
   stale local clone).
+
+#### `invoice.Repository.Save` must protect concurrent `FinalizeInvoice` (#130)
+
+**Why:** `BillingService.FinalizeInvoice`'s guarantee that two concurrent
+finalizations cannot both fire `OnInvoiceIssued` only holds when the repository
+serializes the load→check→save sequence. Previously this contract was implicit;
+last-writer-wins adapters silently allowed a double finalize and double hook
+firing.
+
+**What changed:** `domain/invoice/repository.go` godoc now requires `Save`
+implementations to EITHER implement optimistic locking — compare
+`Invoice.LoadedVersion()` against the stored version and return an error
+matching `errors.Is(err, tx.ErrVersionConflict)` on mismatch, persisting
+`Invoice.Version()` on success — OR serialize reads via a row lock
+(`SELECT ... FOR UPDATE`) or `SERIALIZABLE` isolation. The `Invoice` API is
+extended additively (`Version` / `LoadedVersion` / `SetVersion`, plus
+`InvoiceSnapshot.Version`), so adapters still **compile** unchanged.
+
+**Who is affected:** consumers implementing `invoice.Repository` against a
+production backend. A non-compliant (unconditional upsert) adapter compiles but
+double-fires `OnInvoiceIssued` under concurrent finalization. Track the
+adapter-side fix at contract-to-cash/adapters#12.
+
+**Migration recipe (Postgres):** add a `version` integer column and finalize
+with a version-guarded update, translating a zero-row result to
+`tx.ErrVersionConflict`:
+
+```sql
+UPDATE invoices
+   SET status = $newStatus, version = version + 1, /* ... */
+ WHERE id = $id AND version = $loadedVersion;
+```
+
+```go
+tag, err := r.db.Exec(ctx, updateSQL, /* ... */ inv.ID(), inv.LoadedVersion())
+if err != nil {
+    return err
+}
+if tag.RowsAffected() == 0 {
+    return tx.ErrVersionConflict
+}
+```
+
+Alternatively, load the row `FOR UPDATE` inside the finalize transaction so the
+loser blocks until the winner commits and then observes the finalized status.
 
 ---
 

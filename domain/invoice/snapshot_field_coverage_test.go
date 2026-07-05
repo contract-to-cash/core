@@ -14,8 +14,12 @@ import (
 // tests and catches omissions at CI time.
 func TestInvoiceSnapshot_FieldCoverage(t *testing.T) {
 	t.Parallel()
+	// loadedVersion exists only to implement optimistic locking at load time;
+	// it is deliberately NOT stored separately in the snapshot
+	// (InvoiceFromSnapshot sets both version and loadedVersion from Version).
 	assertFieldParity(t, "Invoice", reflect.TypeOf(Invoice{}),
-		"InvoiceSnapshot", reflect.TypeOf(InvoiceSnapshot{}))
+		"InvoiceSnapshot", reflect.TypeOf(InvoiceSnapshot{}),
+		"loadedversion")
 }
 
 func TestLineItemSnapshot_FieldCoverage(t *testing.T) {
@@ -33,12 +37,20 @@ func TestCreditNoteSnapshot_FieldCoverage(t *testing.T) {
 // assertFieldParity verifies bidirectional name parity between two struct
 // types after case-insensitive normalization. Any field present in one but
 // missing in the other produces a failure.
-func assertFieldParity(t *testing.T, entityName string, entityType reflect.Type, snapshotName string, snapshotType reflect.Type) {
+func assertFieldParity(t *testing.T, entityName string, entityType reflect.Type, snapshotName string, snapshotType reflect.Type, excluded ...string) {
 	t.Helper()
 	entityFields := collectFieldNames(entityType)
 	snapshotFields := collectFieldNames(snapshotType)
 
+	skip := make(map[string]struct{}, len(excluded))
+	for _, name := range excluded {
+		skip[name] = struct{}{}
+	}
+
 	for name := range entityFields {
+		if _, ok := skip[name]; ok {
+			continue
+		}
 		if _, ok := snapshotFields[name]; !ok {
 			t.Errorf("%s field %q has no matching %s field. "+
 				"When adding a new field to %s, add it to %s too "+
@@ -47,6 +59,9 @@ func assertFieldParity(t *testing.T, entityName string, entityType reflect.Type,
 		}
 	}
 	for name := range snapshotFields {
+		if _, ok := skip[name]; ok {
+			continue
+		}
 		if _, ok := entityFields[name]; !ok {
 			t.Errorf("%s field %q has no matching %s field. "+
 				"If the field was removed from %s, remove it from %s too.",

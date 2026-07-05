@@ -128,6 +128,16 @@ type Invoice struct {
 	originalInvoiceID *shared.InvoiceID
 	revisionOf        *shared.InvoiceID
 	voidReason        string
+
+	// Optimistic-locking support (mirrors balance.BalanceEntry, issue #130).
+	// version is bumped by state transitions that must not race (currently
+	// Finalize). loadedVersion records the version observed when the invoice
+	// was loaded from persistence; repositories compare it against the stored
+	// version on Save to reject a check-then-act race (tx.ErrVersionConflict).
+	// A brand-new invoice starts at version 0 / loadedVersion 0, so callers
+	// and adapters that never populate these fields keep working unchanged.
+	version       int
+	loadedVersion int
 }
 
 // InvoiceOption is a functional option for NewInvoice.
@@ -242,12 +252,19 @@ func NewInvoice(
 }
 
 // Finalize transitions the invoice from draft to finalized.
+//
+// It bumps the optimistic-locking version so that two concurrently loaded
+// copies cannot both be finalized: a repository honoring the concurrency
+// contract (see Repository.Save) rejects the second Save with
+// tx.ErrVersionConflict, guaranteeing OnInvoiceIssued fires at most once per
+// finalization (issue #130).
 func (inv *Invoice) Finalize() error {
 	if inv.status != InvoiceStatusDraft {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot finalize invoice in status %s", inv.status))
 	}
 	inv.status = InvoiceStatusFinalized
+	inv.version++
 	return nil
 }
 
@@ -362,6 +379,28 @@ func WithIssueDate(t time.Time) InvoiceOption {
 	}
 }
 func (inv *Invoice) AllowPartialPay() bool { return inv.allowPartialPay }
+
+// Version returns the current optimistic-locking version. It is incremented by
+// state transitions that must not race (currently Finalize). See issue #130.
+func (inv *Invoice) Version() int { return inv.version }
+
+// LoadedVersion returns the version observed when this invoice was loaded from
+// persistence. Repository implementations compare it against the stored version
+// on Save to detect a concurrent modification (issue #130).
+func (inv *Invoice) LoadedVersion() int { return inv.loadedVersion }
+
+// SetVersion sets the version and records it as the loaded version.
+// Repository implementations call this after a successful Save so that
+// subsequent saves from the same pointer compare against the just-persisted
+// version instead of a stale baseline.
+//
+// For initial reconstitution from persistence, prefer InvoiceFromSnapshot,
+// which restores version and loadedVersion atomically alongside all other
+// fields.
+func (inv *Invoice) SetVersion(v int) {
+	inv.version = v
+	inv.loadedVersion = v
+}
 
 // Void transitions the invoice to voided status.
 // Only Draft and Finalized invoices can be voided.
