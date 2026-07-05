@@ -51,6 +51,15 @@ type MetricName string
 
 func (m MetricName) String() string { return string(m) }
 
+// generateULID builds a new ULID string.
+//
+// This is the single deliberate exception to the project-wide "no time.Now();
+// always go through shared.Clock" rule. The time value here is only the ULID
+// timestamp component, which exists to make IDs lexicographically sortable by
+// creation order; it is never used for domain time logic, comparisons, or
+// business decisions, so it does not need to be injectable/mockable. Keeping it
+// as a direct time.Now() call avoids threading a Clock through every
+// NewXxxID() constructor and every call site that generates an ID.
 func generateULID() string {
 	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
 }

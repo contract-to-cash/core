@@ -129,6 +129,11 @@ func (m Money) Int64() int64 {
 }
 
 // Float64 returns the amount as float64.
+//
+// For display and logging only. Never use the result for monetary arithmetic:
+// float64 cannot represent most decimal amounts exactly, so any add/subtract/
+// multiply on it introduces rounding error. Use Add/Subtract/Multiply (which
+// operate on the exact big.Rat amount) for all money math.
 func (m Money) Float64() float64 {
 	if m.amount == nil {
 		return 0

@@ -88,7 +88,8 @@ Hook の完全な一覧と設計意図は @docs/internals/plugin-system.md を�
 ## コーディング規約
 
 - **時刻**: `time.Now()` は使わない。必ず `shared.Clock` IF 経由（テストでは `shared.FixedClock`）
-- **金額**: `big.Rat` ベースの `shared.Money` を使う。浮動小数点演算は禁止
+  - **唯一の例外**: `domain/shared/identifier.go` の `generateULID()`。ULID のタイムスタンプ部（ID をソート可能にするためだけの値）に `time.Now()` を直接使う。この時刻はドメインの時間ロジックには一切使われないため注入不要。他の箇所で `time.Now()` を直呼びしてはならない
+- **金額**: `big.Rat` ベースの `shared.Money` を使う。浮動小数点演算は禁止。`Money.Float64()` は表示・ログ専用で金額演算に使わない（丸め誤差）。演算には `Add`/`Subtract`/`Multiply` を使う
 - **ID 生成**: `github.com/oklog/ulid/v2`。ID 型は具体的な名前（`ContractID`, `InvoiceID` 等）を使い、汎用 `ID` は作らない
 - **エラー**: `shared.DomainError` + `shared.ErrorCode` で構造化。ビジネスエラーと技術エラーを区別する
 - **タイムゾーン**: すべて UTC。ローカルタイムへの変換は表示層の責務
