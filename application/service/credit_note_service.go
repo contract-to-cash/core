@@ -70,7 +70,8 @@ func NewCreditNoteService(
 	}
 	if s.txManager == nil {
 		s.txManager = tx.NewNoopTxManager(tx.Repos{
-			Invoices: invoiceRepo,
+			Invoices:    invoiceRepo,
+			CreditNotes: creditNoteRepo,
 		})
 	}
 	return s
@@ -88,14 +89,17 @@ var creditNoteEligibleStatuses = map[invoice.InvoiceStatus]bool{
 // CreateCreditNote creates a new credit note in draft status for an existing invoice.
 //
 // The cumulative over-credit guard (existing non-voided credit notes + this one
-// must not exceed the invoice total) is evaluated read-then-write without a
-// surrounding transaction, because CreditNoteRepository is not part of tx.Repos.
-// Under concurrency this is therefore a check-then-act: two simultaneous calls
-// for the same invoice can both observe the pre-existing total and both pass the
-// cap. Consumers that must guarantee the invariant under concurrent issuance are
-// responsible for serializing CreateCreditNote per invoice (e.g. an advisory/row
-// lock on the invoice, or a DB constraint). A transactional cumulative cap is
-// tracked separately (see issue for CreditNote transactional integrity).
+// must not exceed the invoice total) is evaluated inside a single transaction
+// via tx.Run. The invoice is loaded through the transaction-scoped
+// repos.Invoices.FindByID, which a real database adapter backs with a row lock
+// (SELECT ... FOR UPDATE); concurrent CreateCreditNote calls for the same
+// invoice are therefore serialized. The loser blocks until the winner commits,
+// then re-reads the now-larger aggregate of existing credit notes and is
+// rejected with business_rule_violation, so two callers cannot collectively
+// over-credit an invoice (issue #124). The in-memory NoopTxManager runs the
+// closure inline without real locking; consumers that need the invariant under
+// concurrency must supply a TxManager whose repos.Invoices.FindByID takes the
+// row lock (the standard financial-ledger pessimistic-lock pattern).
 func (s *CreditNoteService) CreateCreditNote(
 	ctx context.Context,
 	invoiceID shared.InvoiceID,
@@ -103,114 +107,137 @@ func (s *CreditNoteService) CreateCreditNote(
 	items []invoice.CreditNoteItem,
 	memo string,
 ) (*invoice.CreditNote, error) {
-	inv, err := s.invoiceRepo.FindByID(ctx, invoiceID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find invoice: %w", err)
-	}
-
-	if !creditNoteEligibleStatuses[inv.Status()] {
-		return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
-			fmt.Sprintf("cannot create credit note for invoice in status %s", inv.Status()))
-	}
-
 	if len(items) == 0 {
 		return nil, shared.NewDomainError(shared.ErrCodeValidation,
 			"credit note must have at least one item")
 	}
 
-	// Validate that credit note total does not exceed original invoice total.
-	// The credit note must be denominated in the invoice's currency: otherwise
-	// the over-credit comparison below (Money.GreaterThan) silently returns false
-	// on a currency mismatch and an arbitrarily large foreign total slips through
-	// (review #2). Anchor the currency on the invoice, not on items[0].
-	currency := inv.Total().Currency()
-	itemSubtotal := shared.Zero(currency)
-	itemTax := shared.Zero(currency)
-	for _, item := range items {
-		if item.Amount().Currency() != currency {
-			return nil, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
-				fmt.Sprintf("credit note item currency %s does not match invoice currency %s",
-					item.Amount().Currency(), currency))
+	var cn *invoice.CreditNote
+	err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		// Fall back to the field repos when the caller wired an incomplete tx.Repos
+		// set (mirrors tx.Run's fill-from-fallback for joined transactions).
+		invoiceRepo := repos.Invoices
+		if invoiceRepo == nil {
+			invoiceRepo = s.invoiceRepo
 		}
-		s, err := itemSubtotal.Add(item.Amount())
-		if err != nil {
-			return nil, fmt.Errorf("failed to sum credit note item amounts: %w", err)
+		creditNoteRepo := repos.CreditNotes
+		if creditNoteRepo == nil {
+			creditNoteRepo = s.creditNoteRepo
 		}
-		itemSubtotal = s
 
-		itemTaxAmt := item.TaxAmount()
-		if itemTaxAmt.IsZero() {
-			itemTaxAmt = shared.Zero(currency)
-		}
-		if itemTaxAmt.Currency() != currency {
-			return nil, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
-				fmt.Sprintf("credit note item tax currency %s does not match invoice currency %s",
-					itemTaxAmt.Currency(), currency))
-		}
-		ta, err := itemTax.Add(itemTaxAmt)
+		// Load the invoice inside the transaction. A real adapter backs this with
+		// SELECT ... FOR UPDATE, serializing concurrent issuance on this invoice.
+		inv, err := invoiceRepo.FindByID(txCtx, invoiceID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to sum credit note item taxes: %w", err)
+			return fmt.Errorf("failed to find invoice: %w", err)
 		}
-		itemTax = ta
-	}
-	cnTotal, err := itemSubtotal.Add(itemTax)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute credit note total: %w", err)
-	}
-	// Aggregate previously-issued (non-voided) credit notes for this invoice so the
-	// cumulative credited amount cannot exceed the invoice total. Checking only this
-	// credit note against the invoice total would let multiple individually-valid
-	// credit notes collectively over-credit the customer.
-	existingCNs, err := s.creditNoteRepo.FindByInvoiceID(ctx, invoiceID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load existing credit notes: %w", err)
-	}
-	creditedSoFar := shared.Zero(currency)
-	for _, existing := range existingCNs {
-		if existing.Status() == invoice.CreditNoteStatusVoided {
-			continue
+
+		if !creditNoteEligibleStatuses[inv.Status()] {
+			return shared.NewDomainError(shared.ErrCodeBusinessRule,
+				fmt.Sprintf("cannot create credit note for invoice in status %s", inv.Status()))
 		}
-		// Defensive: a credit note in a different currency cannot be summed; the
-		// per-note currency guard above prevents creating such notes, so skip.
-		if existing.Total().Currency() != currency {
-			continue
+
+		// Validate that credit note total does not exceed original invoice total.
+		// The credit note must be denominated in the invoice's currency: otherwise
+		// the over-credit comparison below (Money.GreaterThan) silently returns false
+		// on a currency mismatch and an arbitrarily large foreign total slips through
+		// (review #2). Anchor the currency on the invoice, not on items[0].
+		currency := inv.Total().Currency()
+		itemSubtotal := shared.Zero(currency)
+		itemTax := shared.Zero(currency)
+		for _, item := range items {
+			if item.Amount().Currency() != currency {
+				return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+					fmt.Sprintf("credit note item currency %s does not match invoice currency %s",
+						item.Amount().Currency(), currency))
+			}
+			sub, err := itemSubtotal.Add(item.Amount())
+			if err != nil {
+				return fmt.Errorf("failed to sum credit note item amounts: %w", err)
+			}
+			itemSubtotal = sub
+
+			itemTaxAmt := item.TaxAmount()
+			if itemTaxAmt.IsZero() {
+				itemTaxAmt = shared.Zero(currency)
+			}
+			if itemTaxAmt.Currency() != currency {
+				return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+					fmt.Sprintf("credit note item tax currency %s does not match invoice currency %s",
+						itemTaxAmt.Currency(), currency))
+			}
+			ta, err := itemTax.Add(itemTaxAmt)
+			if err != nil {
+				return fmt.Errorf("failed to sum credit note item taxes: %w", err)
+			}
+			itemTax = ta
 		}
-		creditedSoFar, err = creditedSoFar.Add(existing.Total())
+		cnTotal, err := itemSubtotal.Add(itemTax)
 		if err != nil {
-			return nil, fmt.Errorf("failed to aggregate existing credit notes: %w", err)
+			return fmt.Errorf("failed to compute credit note total: %w", err)
 		}
-	}
-	cumulative, err := creditedSoFar.Add(cnTotal)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute cumulative credit total: %w", err)
-	}
-	if cumulative.GreaterThan(inv.Total()) {
-		return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
-			fmt.Sprintf("cumulative credit note total %s exceeds invoice total %s",
-				cumulative.Amount().RatString(), inv.Total().Amount().RatString()))
-	}
 
-	var opts []invoice.CreditNoteOption
-	if memo != "" {
-		opts = append(opts, invoice.WithCreditNoteMemo(memo))
-	}
+		// Aggregate previously-issued (non-voided) credit notes for this invoice so the
+		// cumulative credited amount cannot exceed the invoice total. Reading through the
+		// transaction-scoped repo (under the invoice row lock) guarantees this sees every
+		// credit note a prior serialized transaction committed for the same invoice.
+		existingCNs, err := creditNoteRepo.FindByInvoiceID(txCtx, invoiceID)
+		if err != nil {
+			return fmt.Errorf("failed to load existing credit notes: %w", err)
+		}
+		creditedSoFar := shared.Zero(currency)
+		for _, existing := range existingCNs {
+			if existing.Status() == invoice.CreditNoteStatusVoided {
+				continue
+			}
+			// Defensive: a credit note in a different currency cannot be summed; the
+			// per-note currency guard above prevents creating such notes, so skip.
+			if existing.Total().Currency() != currency {
+				continue
+			}
+			creditedSoFar, err = creditedSoFar.Add(existing.Total())
+			if err != nil {
+				return fmt.Errorf("failed to aggregate existing credit notes: %w", err)
+			}
+		}
+		cumulative, err := creditedSoFar.Add(cnTotal)
+		if err != nil {
+			return fmt.Errorf("failed to compute cumulative credit total: %w", err)
+		}
+		if cumulative.GreaterThan(inv.Total()) {
+			return shared.NewDomainError(shared.ErrCodeBusinessRule,
+				fmt.Sprintf("cumulative credit note total %s exceeds invoice total %s",
+					cumulative.Amount().RatString(), inv.Total().Amount().RatString()))
+		}
 
-	cn, err := invoice.NewCreditNote(
-		shared.NewCreditNoteID(),
-		invoiceID,
-		inv.AccountID(),
-		inv.ContractID(),
-		reason,
-		items,
-		s.clock.Now(),
-		opts...,
-	)
+		var opts []invoice.CreditNoteOption
+		if memo != "" {
+			opts = append(opts, invoice.WithCreditNoteMemo(memo))
+		}
+
+		created, err := invoice.NewCreditNote(
+			shared.NewCreditNoteID(),
+			invoiceID,
+			inv.AccountID(),
+			inv.ContractID(),
+			reason,
+			items,
+			s.clock.Now(),
+			opts...,
+		)
+		if err != nil {
+			return err
+		}
+
+		if err := creditNoteRepo.Save(txCtx, created); err != nil {
+			return fmt.Errorf("failed to save credit note: %w", err)
+		}
+
+		cn = created
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-
-	if err := s.creditNoteRepo.Save(ctx, cn); err != nil {
-		return nil, fmt.Errorf("failed to save credit note: %w", err)
 	}
 
 	return cn, nil

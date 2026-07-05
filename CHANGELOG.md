@@ -37,6 +37,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Transactional cumulative over-credit cap for `CreditNoteService.CreateCreditNote`
+  (#124): the load-invoice → aggregate-existing-credit-notes → cumulative-cap-check
+  → save sequence now runs inside a single `tx.Run` transaction. The invoice is
+  loaded through the transaction-scoped `repos.Invoices.FindByID`, which a real
+  database adapter backs with a row lock (`SELECT ... FOR UPDATE`), so concurrent
+  `CreateCreditNote` calls for the same invoice are serialized and cannot
+  collectively over-credit it — the loser re-reads the larger aggregate and is
+  rejected with `business_rule_violation`. A new in-memory
+  `inmemory.InMemoryCreditNoteRepository` and an integration regression test
+  (concurrent 600 + 600 issuance against a 1000 invoice, one rejected) accompany
+  the change. Adapter `ReposFactory` implementations must be extended to populate
+  the new `CreditNotes` field (follow-up in the adapters repo); until then the
+  service falls back to its field repo, preserving best-effort behavior.
 - Release workflow (`.github/workflows/release.yml`): tags and publishes a
   GitHub Release when a versioned `## [x.y.z]` section lands in `CHANGELOG.md`
   on `main`, or on manual `workflow_dispatch` with an explicit tag input.

@@ -23,10 +23,11 @@ var ErrVersionConflict = errors.New("version conflict")
 // Read-only repositories (pricing, product, usage) are excluded — they have
 // no writes to transact and reads complete outside the transaction.
 type Repos struct {
-	Contracts contract.Repository
-	Invoices  invoice.Repository
-	Payments  payment.Repository
-	Balances  balance.Repository
+	Contracts   contract.Repository
+	Invoices    invoice.Repository
+	Payments    payment.Repository
+	Balances    balance.Repository
+	CreditNotes invoice.CreditNoteRepository
 }
 
 // TxManager manages transaction boundaries.
@@ -115,6 +116,9 @@ func (r Repos) withFallback(fb Repos) Repos {
 	}
 	if r.Balances == nil {
 		r.Balances = fb.Balances
+	}
+	if r.CreditNotes == nil {
+		r.CreditNotes = fb.CreditNotes
 	}
 	return r
 }
