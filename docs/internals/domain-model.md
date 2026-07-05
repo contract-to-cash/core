@@ -1375,14 +1375,23 @@ type Repository interface {
 
 ## 7. Pricing（料金モデル）
 
-### 7.1 BillingCycle
+### 7.1 BillingInterval / BillingCycle
+
+課金サイクルの新 API は `BillingInterval`（`{unit, count}` の値オブジェクト）。
+`contract` パッケージはこれをエイリアスとして参照する（セクション6.1参照）。
+`BillingCycle`（文字列）は `pricing` パッケージに残っており、`Price` 構築・表示・
+アダプタコードで使うが、内部では `BillingCycleToInterval` で `BillingInterval` に変換される。
+新規コードでは `BillingInterval` を使う（#111）。
 
 ```go
 // domain/pricing/price.go
 package pricing
 
-// BillingCycle は請求サイクルを表す。pricing パッケージで定義され、
-// contract パッケージからはエイリアスとして参照される。
+// BillingInterval は課金サイクルを {unit, count} で表す値オブジェクト（新 API）。
+type BillingInterval struct { /* unit, count */ }
+
+// BillingCycle は請求サイクルを表す文字列型。pricing パッケージに残存し、
+// Price 構築・表示・アダプタ向けに使う。BillingCycleToInterval で BillingInterval に変換される。
 type BillingCycle string
 
 const (
@@ -1391,6 +1400,9 @@ const (
     BillingCycleMonthly BillingCycle = "monthly"
     BillingCycleYearly  BillingCycle = "yearly"
 )
+
+// BillingCycleToInterval は文字列サイクルを BillingInterval に変換する。
+func BillingCycleToInterval(c BillingCycle) BillingInterval
 ```
 
 ### 7.2 Price（価格）
@@ -1413,19 +1425,20 @@ const (
 )
 
 // Price は「どう課金するか」を表すイミュータブルなエンティティ。
-// 作成後は amount, currency, billingCycle, pricingModel を変更できない。
+// 作成後は amount, currency, interval, pricingModel を変更できない。
 // 価格改定時は新しい Price を作成する。
 type Price struct {
     id           shared.PriceID
     productID    shared.ProductID
     amount       shared.Money
     currency     shared.Currency
-    billingCycle BillingCycle
+    interval     BillingInterval  // 課金サイクル（新 API）。旧 billingCycle は #111 で撤去
     pricingModel PricingModel
     status       PriceStatus
     createdAt    time.Time
 }
 
+// NewPrice は後方互換の BillingCycle 文字列を受け取り、内部で BillingInterval に変換する。
 func NewPrice(
     productID shared.ProductID,
     amount shared.Money,
@@ -1434,10 +1447,22 @@ func NewPrice(
     pricingModel PricingModel,
 ) *Price
 
+// NewPriceWithInterval は BillingInterval を直接受け取る（新規コード推奨）。
+func NewPriceWithInterval(
+    productID shared.ProductID,
+    amount shared.Money,
+    currency shared.Currency,
+    interval BillingInterval,
+    pricingModel PricingModel,
+) *Price
+
 func (p *Price) ID() shared.PriceID
 func (p *Price) ProductID() shared.ProductID
 func (p *Price) Amount() shared.Money
 func (p *Price) Currency() shared.Currency
+func (p *Price) Interval() BillingInterval // 課金サイクル（新 API）
+// BillingCycle は interval から導出した文字列を返す。
+// 完全一致する BillingCycle がない interval（例: quarterly）では "" を返す。
 func (p *Price) BillingCycle() BillingCycle
 func (p *Price) PricingModel() PricingModel
 func (p *Price) Status() PriceStatus

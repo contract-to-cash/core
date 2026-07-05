@@ -6,6 +6,12 @@ sidebar_position: 1
 
 The domain model consists of entities, value objects, and aggregates that represent the billing domain.
 
+:::note Canonical reference
+This page is an English summary. The canonical, in-depth specification is
+[`docs/internals/domain-model.md`](../internals/domain-model.md) (see the
+[Documentation Map](../README.md)). When details differ, the internals spec and the code win.
+:::
+
 ## Entity Relationship Diagram
 
 ```mermaid

@@ -6,6 +6,12 @@ sidebar_position: 3
 
 The plugin system lets you extend billing logic through well-defined hooks. Each hook type serves a specific purpose, and you only implement the interfaces you need (ISP — Interface Segregation Principle).
 
+:::note Canonical reference
+This page is an English summary. The canonical, in-depth specification is
+[`docs/internals/plugin-system.md`](../internals/plugin-system.md) (see the
+[Documentation Map](../README.md)). When details differ, the internals spec and the code win.
+:::
+
 ## Design Principles
 
 1. **Loose coupling** — Core logic and plugins are cleanly separated

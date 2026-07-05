@@ -136,6 +136,8 @@ golangci-lint の設定は `.golangci.yml`。`exhaustive` で switch の網羅�
 
 ## 詳細ドキュメント
 
+**ドキュメントマップ（正準ルール）**: 仕様の正準は `docs/internals/`（日本語・詳細・本 CLAUDE.md が参照）。`docs/concepts/`（英語・要約・Docusaurus 公開）は入門/メンタルモデル層で、各文書冒頭から対応する `docs/internals/` へリンクする。仕様変更時は **`docs/internals/` を正として更新**し、`docs/concepts/` は要約が乖離した場合のみ追随する。全体像は @docs/README.md を参照。
+
 常時ロードされるリファレンス（メンタルモデル）:
 
 - @docs/architecture.md — 全体アーキテクチャ概観

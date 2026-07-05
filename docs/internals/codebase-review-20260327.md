@@ -50,7 +50,7 @@ core/
 │   ├── projection/            #   プロジェクション（読み取りモデル）
 │   └── tx/                    #   トランザクション管理
 ├── eventstore/                # イベントソーシング基盤
-├── plugin/                    # プラグインシステム（17種のフック）
+├── plugin/                    # プラグインシステム（17種のフック / 現在は20種）
 ├── plugins/                   # 公式プラグイン実装
 │   ├── coupon/                #   クーポン/割引
 │   ├── tax/                   #   税金計算（日本消費税対応）
@@ -91,7 +91,7 @@ core/
 **責務**: 拡張ポイントを提供し、ビジネスロジックのカスタマイズを可能にする
 **ファイル**: `plugin/registry.go`, `plugin/hooks.go` 他
 
-- 17種のフックインターフェース（ISP準拠）
+- 17種のフックインターフェース（ISP準拠）※現在は20種
 - 優先度ベースの実行順制御
 - スレッドセーフなレジストリ（sync.RWMutex）
 - 初期化/シャットダウンのライフサイクル管理
@@ -202,7 +202,7 @@ core/
 | Strategy | PricingModel (Flat/Tiered/Usage) | 課金方式の柔軟な切り替え |
 | Value Object | Money, DateRange, Currency | 型安全な概念モデリング |
 | Functional Options | Invoice構築 | 柔軟なコンストラクタ |
-| Plugin/Hook | 17種のフックインターフェース | 変更なしで拡張可能 |
+| Plugin/Hook | 17種のフックインターフェース（現在は20種） | 変更なしで拡張可能 |
 | State Machine | Contract, Invoice, Payment | 厳密な状態遷移バリデーション |
 | Ports & Adapters | application/port | 外部システムの抽象化 |
 | Optimistic Locking | EventStore | 同時実行制御 |
@@ -243,7 +243,7 @@ plugin/plugins （プラグイン - フックの実装）
 
 ### 総合評価: **A-（優秀）**
 
-- **技術的特徴**: DDD + Event Sourcing + Plugin Architecture の教科書的な実装。`big.Rat`による精密な金額計算、17種のプラグインフック、時間旅行クエリなど、契約課金ドメインに求められる機能を網羅
+- **技術的特徴**: DDD + Event Sourcing + Plugin Architecture の教科書的な実装。`big.Rat`による精密な金額計算、17種（現在は20種）のプラグインフック、時間旅行クエリなど、契約課金ドメインに求められる機能を網羅
 - **品質状態**: 全テストがrace detector付きでパス、golangci-lintで警告ゼロ。コアドメインのテストカバレッジは67-100%と良好
 - **精査結果**: 初期レビューの12件中、実コード検証の結果 **7件が対応推奨（高）、4件が改善推奨（中）、2件がNice-to-have（低）**。5件は過大評価として取り下げ
 - **最優先対応**: 負値バリデーション不足（#1-3）は課金ドメインとして致命的になりうるため、最優先で対処すべき
