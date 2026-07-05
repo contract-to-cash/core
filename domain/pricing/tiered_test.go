@@ -107,3 +107,17 @@ func TestTieredPrice_ZeroUsage(t *testing.T) {
 		t.Errorf("expected zero for zero usage, got %s", result.Amount().RatString())
 	}
 }
+
+func TestTieredPrice_NegativeUsagePanics(t *testing.T) {
+	tp := TieredPrice{
+		Tiers: makeTiers(),
+		Mode:  TieredPricingGraduated,
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic for negative usage, got none")
+		}
+	}()
+	tp.CalculatePrice(-1)
+}

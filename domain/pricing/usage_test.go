@@ -49,10 +49,14 @@ func TestUsagePrice_NegativeUsage(t *testing.T) {
 	unitPrice := shared.NewMoney(new(big.Rat).SetInt64(10), shared.CurrencyJPY)
 	up := UsagePrice{UnitPrice: unitPrice}
 
-	result := up.CalculatePrice(-5)
-	if !result.IsZero() {
-		t.Errorf("expected zero for negative usage, got %s", result.Amount().RatString())
-	}
+	// Negative usage is a caller-side invariant violation; CalculatePrice must
+	// panic rather than silently clamp to zero (issue #113).
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic for negative usage, got none")
+		}
+	}()
+	up.CalculatePrice(-5)
 }
 
 func TestUsagePrice_ZeroUsage(t *testing.T) {
