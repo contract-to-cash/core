@@ -121,9 +121,10 @@ type EventMetadata struct {
     UserID      string  // 操作ユーザーID（必須）
     IPAddress   *string // IPアドレス（オプション）
     UserAgent   *string // User-Agent（オプション）
-    CorrelationID string // 相関ID（トレーシング用）
-    CausationID   string // 因果ID（イベントチェーン追跡用）
 }
+// 注: CorrelationID / CausationID は未活用のため Issue #116（Option B）で削除。
+// 具体的な利用者が現れた段階で非破壊的に再導入する。詳細は
+// docs/decisions/design-decisions.md 5.2 を参照。
 ```
 
 ### 2.3 スナップショット構造
