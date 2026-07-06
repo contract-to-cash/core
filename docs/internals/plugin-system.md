@@ -654,8 +654,8 @@ Priority値に依存しないため、プラグイン登録順のミスで会計
 10. 保存（コア、tx内）
 ```
 
-> **注**: このフロー順序は `architecture.md` セクション6.3 および `design-decisions.md`
-> セクション6.1 と同一。実コードは `application/service/billing_service.go` の
+> **注**: このフロー順序は `architecture.md` セクション6.3 と同一。実コードは
+> `application/service/billing_service.go` の
 > `executeBillingPipeline`（正準はソース）。
 >
 > **プラグイン可観測性の要点**:
@@ -738,8 +738,7 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 
 - `InvoiceGenerationHook`（BuildDocument / AfterRender / AfterDelivery）—
   請求書のレンダリング・送付パイプラインはコアのスコープ外。
-  `docs/internals/metrics-invoicegen.md` の請求書生成アダプタ（利用者実装）が
-  各フェーズで発火する。
+  利用者が実装する請求書生成アダプタが各フェーズで発火する。
 
 ## 6. クーポンプラグイン実装例
 

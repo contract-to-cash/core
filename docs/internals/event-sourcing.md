@@ -123,8 +123,7 @@ type EventMetadata struct {
     UserAgent   *string // User-Agent（オプション）
 }
 // 注: CorrelationID / CausationID は未活用のため Issue #116（Option B）で削除。
-// 具体的な利用者が現れた段階で非破壊的に再導入する。詳細は
-// docs/decisions/design-decisions.md 5.2 を参照。
+// 具体的な利用者が現れた段階で非破壊的に再導入する。
 ```
 
 ### 2.3 スナップショット構造
