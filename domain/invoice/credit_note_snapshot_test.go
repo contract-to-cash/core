@@ -103,6 +103,54 @@ func TestCreditNote_FromSnapshot_AllowsEmptyItems(t *testing.T) {
 	}
 }
 
+// TestCreditNote_Snapshot_PreservesVersion verifies that the optimistic-locking
+// version survives a ToSnapshot / CreditNoteFromSnapshot round trip and that
+// loadedVersion is restored from the same field (issue #147).
+func TestCreditNote_Snapshot_PreservesVersion(t *testing.T) {
+	t.Parallel()
+
+	item := NewCreditNoteItem(
+		"li-1", "adjustment",
+		shared.NewMoney(big.NewRat(500, 1), shared.CurrencyJPY),
+		big.NewRat(10, 100),
+		shared.NewMoney(big.NewRat(50, 1), shared.CurrencyJPY),
+	)
+	cn, err := NewCreditNote(
+		shared.NewCreditNoteID(), shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
+		CreditNoteReasonOrderChange, []CreditNoteItem{item},
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("NewCreditNote: %v", err)
+	}
+	if err := cn.Issue(time.Date(2026, 3, 30, 1, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if err := cn.Apply(shared.NewMoney(big.NewRat(500, 1), shared.CurrencyJPY)); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	want := cn.Version()
+	if want == 0 {
+		t.Fatalf("precondition: expected non-zero version after Issue+Apply, got 0")
+	}
+
+	snap := cn.ToSnapshot()
+	if snap.Version != want {
+		t.Errorf("snapshot Version = %d, want %d", snap.Version, want)
+	}
+
+	restored, err := CreditNoteFromSnapshot(snap)
+	if err != nil {
+		t.Fatalf("CreditNoteFromSnapshot: %v", err)
+	}
+	if got := restored.Version(); got != want {
+		t.Errorf("restored Version = %d, want %d", got, want)
+	}
+	if got := restored.LoadedVersion(); got != want {
+		t.Errorf("restored LoadedVersion = %d, want %d (must be restored from Version)", got, want)
+	}
+}
+
 func TestCreditNote_FromSnapshot_ValidatesID(t *testing.T) {
 	t.Parallel()
 

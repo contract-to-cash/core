@@ -54,6 +54,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub Release when a versioned `## [x.y.z]` section lands in `CHANGELOG.md`
   on `main`, or on manual `workflow_dispatch` with an explicit tag input.
   Runs build + test + lint before tagging.
+- Optimistic-locking coverage for all mutating paths on `invoice.Invoice` and
+  `invoice.CreditNote` (#147). Previously only `Invoice.Finalize` and
+  `Invoice.MarkRefunded` bumped the version, and `CreditNote` had no version
+  machinery at all, so a compliant optimistic-locking adapter could not detect
+  lost updates on `RecordPayment` / `Void` / `VoidWithReason` (concurrent
+  partial payments silently under-reported `paidAmount`; a Void-vs-RecordPayment
+  race lost the payment) or on any `CreditNote` transition (a concurrent
+  `Apply` + `Refund` on one issued note both succeeded — crediting the account
+  AND refunding the gateway while recording one outcome).
+  - `Invoice.RecordPayment`, `Void`, `VoidWithReason`, and the revision-chain
+    link setters `SetRevisionOf` / `SetOriginalInvoiceID` now bump `version`
+    (in addition to the existing `Finalize` / `MarkRefunded`).
+  - `invoice.CreditNote` gains `Version()`, `LoadedVersion()`, and
+    `SetVersion()` (mirroring `Invoice`); `Issue` / `Apply` / `Refund` / `Void`
+    bump the version. `CreditNoteSnapshot` carries a new `Version` field and
+    `CreditNoteFromSnapshot` restores both `version` and `loadedVersion` from
+    it.
+  - `domain/invoice/credit_note_repository.go` godoc documents the same
+    concurrency contract as `invoice.Repository.Save` (#130): implementations
+    must either optimistic-lock on `LoadedVersion()` (returning
+    `tx.ErrVersionConflict` on mismatch) or serialize reads. The in-memory
+    `InMemoryCreditNoteRepository` now enforces the lock so the contract is
+    exercisable in tests.
+  - These additions are backward compatible: fresh entities start at version 0
+    and adapters that never populate the field keep working. The adapter-side
+    follow-up is tracked at contract-to-cash/adapters#30.
 - Optimistic locking for `invoice.Invoice` (#130): new `Version()`,
   `LoadedVersion()`, and `SetVersion()` methods mirror `balance.BalanceEntry`.
   `Finalize()` now bumps the version so two concurrent finalizations cannot both

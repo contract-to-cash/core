@@ -30,8 +30,12 @@ func TestLineItemSnapshot_FieldCoverage(t *testing.T) {
 
 func TestCreditNoteSnapshot_FieldCoverage(t *testing.T) {
 	t.Parallel()
+	// loadedVersion exists only to implement optimistic locking at load time;
+	// it is deliberately NOT stored separately in the snapshot
+	// (CreditNoteFromSnapshot sets both version and loadedVersion from Version).
 	assertFieldParity(t, "CreditNote", reflect.TypeOf(CreditNote{}),
-		"CreditNoteSnapshot", reflect.TypeOf(CreditNoteSnapshot{}))
+		"CreditNoteSnapshot", reflect.TypeOf(CreditNoteSnapshot{}),
+		"loadedversion")
 }
 
 // assertFieldParity verifies bidirectional name parity between two struct
