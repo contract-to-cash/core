@@ -121,25 +121,42 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		return zero, nil
 	}
 
-	// 3. If stacking is not allowed, use only the first coupon.
-	// Note: AllowStacking=false takes precedence over MaxCouponsPerInvoice.
+	// 3. Determine how many VALIDATED (applied) coupons to accept.
+	//
+	// The limit is enforced against coupons that pass ALL per-coupon checks in
+	// the loop below (validity window, minAmount, currency, per-account limit),
+	// NOT against the raw scanned slice. An earlier version truncated the slice
+	// up front (coupons[:1] / coupons[:max]) BEFORE these checks ran, so a
+	// leading invalid coupon (e.g. expired) could crowd out a valid coupon
+	// behind it and zero the discount for a customer who actually holds a valid
+	// coupon (#158). Counting validated coupons instead makes the selection
+	// "first valid wins".
+	//
+	// Semantics of effectiveLimit (0 == unlimited):
+	//   - AllowStacking=false: apply at most ONE coupon — the first that passes
+	//     every check. This takes precedence over MaxCouponsPerInvoice.
+	//   - AllowStacking=true: apply up to MaxCouponsPerInvoice validated coupons.
+	//     A value of 0 means "no limit" (matches the documented reference
+	//     implementation's `> 0` sentinel; guards W1 so that 0 does not silently
+	//     zero out all discounts).
+	effectiveLimit := 0
 	if !p.config.AllowStacking {
-		coupons = coupons[:1]
+		effectiveLimit = 1
+	} else if p.config.MaxCouponsPerInvoice > 0 {
+		effectiveLimit = p.config.MaxCouponsPerInvoice
 	}
 
-	// 4. Apply MaxCouponsPerInvoice limit.
-	// A value of 0 means "no limit" (matches the documented reference
-	// implementation's `> 0` sentinel); without this guard, 0 would truncate
-	// coupons to an empty slice and silently zero out all discounts (W1).
-	if p.config.MaxCouponsPerInvoice > 0 && len(coupons) > p.config.MaxCouponsPerInvoice {
-		coupons = coupons[:p.config.MaxCouponsPerInvoice]
-	}
-
-	// 5. Calculate discount for each coupon
+	// 4. Calculate discount for each coupon that passes validation.
 	subtotal := ctx.Subtotal()
 	total := zero
 	now := p.clock.Now()
+	applied := 0 // count of coupons that passed all checks and were applied
 	for _, c := range coupons {
+		// Stop once the maximum number of validated coupons has been applied.
+		if effectiveLimit > 0 && applied >= effectiveLimit {
+			break
+		}
+
 		// Defensive validity check: even though the repository is given `At` and
 		// is expected to filter, repo filtering is optional — re-check the
 		// validity window and global usage limit here (review M4).
@@ -190,6 +207,10 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		if discount.GreaterThan(subtotal) {
 			discount = subtotal
 		}
+
+		// The coupon has passed every validity check; it counts toward the
+		// applied limit ("first valid wins" when stacking is disabled).
+		applied++
 
 		// 6. Record redemption first (audit trail), then usage counter.
 		// This ordering is intentional: if redemption save fails, usage count

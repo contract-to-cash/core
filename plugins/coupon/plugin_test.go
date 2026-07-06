@@ -226,6 +226,9 @@ func TestCouponPlugin_MaxDiscount(t *testing.T) {
 	}
 }
 
+// TestCouponPlugin_NoStackingReturnsFirst verifies that with stacking disabled
+// (the default) only the first VALID coupon is applied ("first valid wins").
+// Both coupons here are valid, so the first is selected.
 func TestCouponPlugin_NoStackingReturnsFirst(t *testing.T) {
 	coupon1 := newTestCoupon("c1", "FIRST10", CouponTypePercentage, big.NewRat(10, 100), nil)
 	coupon2 := newTestCoupon("c2", "SECOND20", CouponTypePercentage, big.NewRat(20, 100), nil)
@@ -244,12 +247,126 @@ func TestCouponPlugin_NoStackingReturnsFirst(t *testing.T) {
 	// Only first coupon applied: 10% of 10000 = 1000
 	expected := big.NewRat(1000, 1)
 	if discount.Amount().Cmp(expected) != 0 {
-		t.Errorf("expected discount 1000 (first coupon only), got %s", discount.Amount().RatString())
+		t.Errorf("expected discount 1000 (first valid coupon only), got %s", discount.Amount().RatString())
 	}
 
 	discounts := ctx.AppliedDiscounts()
 	if len(discounts) != 1 {
 		t.Errorf("expected 1 recorded discount, got %d", len(discounts))
+	}
+}
+
+// newExpiredCoupon builds a coupon whose validity window closed before testClock.
+func newExpiredCoupon(id CouponID, code string, value *big.Rat) *Coupon {
+	return NewCoupon(
+		id, code, CouponTypePercentage, value, shared.CurrencyJPY,
+		nil, nil,
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), // expired before testClock (2026-06-01)
+		nil, 0, nil,
+	)
+}
+
+// TestCouponPlugin_NoStacking_InvalidFirstValidSecond is the core regression for
+// #158: with stacking disabled, a leading INVALID coupon (expired) must not
+// crowd out a valid coupon behind it. Before the fix the plugin truncated to
+// coupons[:1] before validation, so the customer received NO discount despite
+// holding a valid coupon.
+func TestCouponPlugin_NoStacking_InvalidFirstValidSecond(t *testing.T) {
+	expired := newExpiredCoupon("c-exp", "OLD10", big.NewRat(10, 100))
+	valid := newTestCoupon("c-valid", "SAVE20", CouponTypePercentage, big.NewRat(20, 100), nil)
+
+	repo := newMockRepo(expired, valid)
+	p := NewCouponPlugin(repo, testClock) // default: AllowStacking=false
+
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContext(subtotal)
+
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The expired coupon is skipped; the valid coupon (20% of 10000) applies.
+	expected := big.NewRat(2000, 1)
+	if discount.Amount().Cmp(expected) != 0 {
+		t.Errorf("expected discount 2000 (valid coupon applied despite expired first), got %s", discount.Amount().RatString())
+	}
+
+	discounts := ctx.AppliedDiscounts()
+	if len(discounts) != 1 {
+		t.Fatalf("expected 1 recorded discount, got %d", len(discounts))
+	}
+	if discounts[0].Code != "SAVE20" {
+		t.Errorf("expected valid coupon SAVE20 to be applied, got %s", discounts[0].Code)
+	}
+	// The expired coupon must not have produced a redemption.
+	if repo.saveRedemptionCall != 1 {
+		t.Errorf("expected exactly 1 redemption (valid coupon only), got %d", repo.saveRedemptionCall)
+	}
+}
+
+// TestCouponPlugin_AllInvalid_ZeroDiscount verifies that when every candidate
+// coupon fails validation the result is a zero discount with no redemptions.
+func TestCouponPlugin_AllInvalid_ZeroDiscount(t *testing.T) {
+	expired1 := newExpiredCoupon("c-exp1", "OLD10", big.NewRat(10, 100))
+	expired2 := newExpiredCoupon("c-exp2", "OLD20", big.NewRat(20, 100))
+
+	repo := newMockRepo(expired1, expired2)
+	p := NewCouponPlugin(repo, testClock)
+
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContext(subtotal)
+
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !discount.IsZero() {
+		t.Errorf("expected zero discount when all coupons invalid, got %s", discount.Amount().RatString())
+	}
+	if repo.saveRedemptionCall != 0 {
+		t.Errorf("expected no redemptions when all coupons invalid, got %d", repo.saveRedemptionCall)
+	}
+}
+
+// TestCouponPlugin_MaxCountsValidatedCoupons verifies that MaxCouponsPerInvoice counts
+// VALIDATED (applied) coupons, not scanned ones: with stacking on and max=1, a
+// leading invalid coupon is skipped and the following valid coupon still fills
+// the single slot.
+func TestCouponPlugin_MaxCountsValidatedCoupons(t *testing.T) {
+	expired := newExpiredCoupon("c-exp", "OLD10", big.NewRat(10, 100))
+	valid1 := newTestCoupon("c-v1", "SAVE20", CouponTypePercentage, big.NewRat(20, 100), nil)
+	valid2 := newTestCoupon("c-v2", "SAVE5", CouponTypePercentage, big.NewRat(5, 100), nil)
+
+	repo := newMockRepo(expired, valid1, valid2)
+	p := NewCouponPlugin(repo, testClock)
+	_ = p.Initialize(context.Background(), plugin.Config{
+		"allowStacking":        true,
+		"maxCouponsPerInvoice": 1,
+	})
+
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContext(subtotal)
+
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// max=1 validated coupon: expired is skipped, first valid (20%) fills the slot.
+	expected := big.NewRat(2000, 1)
+	if discount.Amount().Cmp(expected) != 0 {
+		t.Errorf("expected discount 2000 (first valid coupon fills the single slot), got %s", discount.Amount().RatString())
+	}
+
+	discounts := ctx.AppliedDiscounts()
+	if len(discounts) != 1 {
+		t.Fatalf("expected 1 recorded discount, got %d", len(discounts))
+	}
+	if discounts[0].Code != "SAVE20" {
+		t.Errorf("expected SAVE20 applied, got %s", discounts[0].Code)
 	}
 }
 
