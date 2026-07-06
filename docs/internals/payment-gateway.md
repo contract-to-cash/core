@@ -1543,7 +1543,7 @@ type RefundInput struct {
 2. `PaymentService` はこの「成功」をそのまま信じて Payment レコードを completed で保存
 3. **Invoice は "支払済" になるが、Gateway にはお金がない**
 
-これが Issue #87 で報告された競合。業界プラクティスの調査(`docs/research/2026-04-10-payment-idempotency-patterns.md` 参照)からの結論は「補償が発火したキーは**同じ論理オペレーション**としては再利用不可。**新しい effective key**で新規 Charge として実行する」。
+これが Issue #87 で報告された競合。業界プラクティスの調査からの結論は「補償が発火したキーは**同じ論理オペレーション**としては再利用不可。**新しい effective key**で新規 Charge として実行する」。
 
 ### 6.1.2 IdempotencyStore インターフェース
 

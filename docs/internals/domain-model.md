@@ -494,7 +494,7 @@ import (
 )
 
 // CreateContractCommand はContract作成時のパラメータを保持する。
-// IdempotencyKey は必須（design-decisions §4.1、issue #159）: Create が空を
+// IdempotencyKey は必須（issue #159）: Create が空を
 // validation エラーで拒否し、キーは ContractCreatedEvent（schema v3）に載る。
 // コアが強制するのは「存在」まで — キーの一意性はリポジトリ/アダプタが
 // ユニークインデックス等で強制する（contract.Repository.Save の godoc 参照）。
@@ -1032,7 +1032,7 @@ func (inv *Invoice) VoidReason() string
 func (inv *Invoice) RefundReason() string
 func (inv *Invoice) PaymentMethodID() *string
 ```
-// NOTE: metrics-invoicegen の InvoiceLineItem.Quantity は float64（小数量=0.5時間等の表現用）。
+// NOTE: 請求書生成アダプタの InvoiceLineItem.Quantity は float64（小数量=0.5時間等の表現用）。
 // ドメインモデル → 請求書ドキュメントの変換時に int64→float64 キャストを行う。
 
 ### 4.2 CreditNote（クレジットノート）

@@ -256,7 +256,7 @@ for the per-hook detail):
 | | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | `CreditNoteService` |
 | | `OnContractRenewHook`, `OnContractTrialEndHook`, `OnContractChangeHook` | `batch.ContractRenewalProcessor`, `batch.TrialExpirationProcessor` |
 | **Integrator** (5) | `OnContractCreate/Activate/Suspend/Resume/Cancel Hook` | Contract lifecycle operations call aggregate methods directly (no core application service), so the integrator fires the matching hooks. Reference: `examples/hosting-integration-demo/main.go` |
-| **Adapter** (1) | `InvoiceGenerationHook` | Invoice rendering/delivery is out of core scope; the consumer's invoice-generation adapter fires BuildDocument/AfterRender/AfterDelivery (see `docs/internals/metrics-invoicegen.md`) |
+| **Adapter** (1) | `InvoiceGenerationHook` | Invoice rendering/delivery is out of core scope; the consumer's invoice-generation adapter fires BuildDocument/AfterRender/AfterDelivery |
 
 ### 6.3 Billing Pipeline
 
@@ -311,6 +311,4 @@ flowchart LR
 | [Event Sourcing](./concepts/event-sourcing.md) | Event Store, temporal reconstruction |
 | [Plugin System](./concepts/plugin-system.md) | Plugin implementation guide |
 | [Payment Gateway](./concepts/payment-gateway.md) | Payment interface design |
-| [Metrics & Invoice Generation](./internals/metrics-invoicegen.md) | Aggregation, reporting, invoice rendering |
-| [Design Decisions](./decisions/design-decisions.md) | Key decisions and rationale |
 | [Integration Guide](./guides/integration.md) | How to integrate into your service |

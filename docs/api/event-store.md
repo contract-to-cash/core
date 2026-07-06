@@ -61,7 +61,7 @@ type EventMetadata struct {
 }
 // Note: CorrelationID / CausationID were removed in issue #116 (Option B) as
 // unused. They will be re-added additively once a concrete tracing consumer
-// exists. See docs/decisions/design-decisions.md section 5.2.
+// exists.
 ```
 
 ## Snapshot
