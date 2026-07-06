@@ -305,7 +305,7 @@ func (c *consumeOnFirstLoadRepo) FindByID(ctx context.Context, id shared.Balance
 		if _, err := loaded.Consume(loaded.RemainingAmount()); err != nil {
 			return nil, err
 		}
-		if err := c.Repository.Save(ctx, loaded); err != nil {
+		if err := c.Save(ctx, loaded); err != nil {
 			return nil, err
 		}
 	}
