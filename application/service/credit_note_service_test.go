@@ -913,6 +913,76 @@ func TestReissueInvoice_TransactionFailure_ReturnsError(t *testing.T) {
 	}
 }
 
+// txAwareInvoiceRepo records whether FindByID for a target invoice ID was
+// invoked with a context carrying an in-progress transaction. Used to prove the
+// issue #151 (M3) fix: ReissueInvoice loads the original invoice INSIDE the
+// transaction (through the tx-scoped repo), not before it.
+type txAwareInvoiceRepo struct {
+	*mockInvoiceRepoWithFind
+	targetID         shared.InvoiceID
+	loadedTargetInTx bool
+	loadedTarget     bool
+}
+
+func (r *txAwareInvoiceRepo) FindByID(ctx context.Context, id shared.InvoiceID) (*invoice.Invoice, error) {
+	if id == r.targetID {
+		r.loadedTarget = true
+		if _, ok := tx.ReposFromContext(ctx); ok {
+			r.loadedTargetInTx = true
+		}
+	}
+	return r.mockInvoiceRepoWithFind.FindByID(ctx, id)
+}
+
+// TestReissueInvoice_LoadsOriginalInsideTransaction guards issue #151 (M3): the
+// original invoice must be read through the transaction-scoped repository inside
+// the tx boundary, so a concurrent payment committed before the tx is observed by
+// VoidWithReason instead of a stale pre-tx snapshot silently overwriting it.
+func TestReissueInvoice_LoadsOriginalInsideTransaction(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(10000))
+	period := currentPeriodOf(agg)
+
+	originalInv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(10000), jpy(0), jpy(1000),
+		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+		invoice.WithBillingPeriod(period),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
+
+	inner := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{originalInv.ID(): originalInv}}
+	invRepo := &txAwareInvoiceRepo{mockInvoiceRepoWithFind: inner, targetID: originalInv.ID()}
+	cnRepo := &mockCreditNoteRepo{}
+
+	billingSvc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		invRepo,
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	svc := NewCreditNoteService(invRepo, cnRepo, plugin.NewRegistry(), clock, WithBillingService(billingSvc))
+
+	if _, err = svc.ReissueInvoice(context.Background(), originalInv.ID(), "billing error"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !invRepo.loadedTarget {
+		t.Fatal("expected ReissueInvoice to load the original invoice")
+	}
+	if !invRepo.loadedTargetInTx {
+		t.Error("expected the original invoice to be loaded INSIDE the transaction (issue #151)")
+	}
+}
+
 // --- Task 2: Post-save hooks should be non-fatal ---
 
 func TestIssueCreditNote_HookFailure_NonFatal(t *testing.T) {

@@ -677,6 +677,27 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// duplicate-key convergence below re-reads the winner on the OUTER ctx (which
 	// tx.Run leaves unstamped), so it remains a fresh read at the top level.
 	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		// Re-load the invoice through the transaction-scoped repository so the
+		// RecordPayment + Save check-then-act runs against the current persisted
+		// state, not the copy read before the gateway charge (issue #151). On a
+		// backend honouring the invoice concurrency contract this converges with a
+		// concurrent payment that already recorded on the invoice — RecordPayment
+		// sees the fresh state and either records the remaining balance or is
+		// rejected with a clean domain error — instead of the stale copy's Save
+		// failing with an optimistic-lock conflict (issue #147 version bump).
+		// Reassigning inv keeps the post-tx AfterCharge / OnPaymentProcessed hooks
+		// consistent with what was persisted; on the race-loser path inv is
+		// re-fetched again after convergence.
+		invoiceRepo := repos.Invoices
+		if invoiceRepo == nil {
+			invoiceRepo = s.invoiceRepo
+		}
+		freshInv, invErr := invoiceRepo.FindByID(txCtx, invoiceID)
+		if invErr != nil {
+			return fmt.Errorf("failed to reload invoice in tx: %w", invErr)
+		}
+		inv = freshInv
+
 		// Idempotency check first: avoid mutating in-memory state if a
 		// payment with the effective key was already persisted by a prior call.
 		//

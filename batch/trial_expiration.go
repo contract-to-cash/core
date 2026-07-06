@@ -191,20 +191,47 @@ func (p *TrialExpirationProcessor) processOne(ctx context.Context, agg *contract
 		return nil
 	}
 
-	oldStatus := agg.Status()
-	if err := agg.EndTrial(converted, metadata); err != nil {
+	// Load-mutate-save inside the transaction against a repository-loaded
+	// instance (issue #151). EndTrial and Save run inside the tx boundary so a
+	// failed Save never leaves a half-ended trial — carrying dangling uncommitted
+	// events and an advanced status — behind for the next batch run. On a real
+	// adapter FindByID materializes a fresh aggregate from history, so the
+	// instance returned by FindTrialsEndingSoon is never mutated when the trial
+	// end fails to persist. Save runs BEFORE hooks to prevent a "notified but not
+	// persisted" inconsistency.
+	var (
+		ended     *contract.ContractAggregate
+		oldStatus contract.ContractStatus
+		newStatus contract.ContractStatus
+	)
+	if err := p.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+		contractRepo := repos.Contracts
+		if contractRepo == nil {
+			contractRepo = p.contractRepo
+		}
+		loaded, findErr := contractRepo.FindByID(txCtx, agg.ContractID())
+		if findErr != nil {
+			return fmt.Errorf("failed to load contract for trial end: %w", findErr)
+		}
+
+		oldStatus = loaded.Status()
+		if endErr := loaded.EndTrial(converted, metadata); endErr != nil {
+			return endErr
+		}
+		newStatus = loaded.Status()
+
+		if saveErr := contractRepo.Save(txCtx, loaded); saveErr != nil {
+			return saveErr
+		}
+		ended = loaded
+		return nil
+	}); err != nil {
 		return err
 	}
-	newStatus := agg.Status()
 
-	// Persist within transaction — save BEFORE hooks to prevent
-	// "notified but not persisted" inconsistency.
-	err := p.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
-		return repos.Contracts.Save(txCtx, agg)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to save contract after trial end: %w", err)
-	}
+	// Subsequent post-commit hooks operate on the persisted,
+	// repository-loaded aggregate.
+	agg = ended
 
 	// Post-commit hooks — non-fatal. Contract is already persisted;
 	// hook failures are logged but do not fail the trial expiration.

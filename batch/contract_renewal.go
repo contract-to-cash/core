@@ -155,27 +155,52 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		return nil
 	}
 
-	// Resolve the billing interval for the next period.
-	// If there is a pending price change, load the new Price to get its interval.
-	interval, err := p.resolveInterval(ctx, agg)
-	if err != nil {
+	// Load-mutate-save inside the transaction against a repository-loaded
+	// instance (issue #151). Resolving the interval, RenewWithInterval, and Save
+	// all run inside the tx boundary so a failed Save never leaves a half-renewed
+	// aggregate — carrying dangling uncommitted events and an advanced
+	// period/status — behind for the next batch run. On a real adapter FindByID
+	// materializes a fresh aggregate from history, so the instance returned by
+	// FindDueForRenewal is never mutated when the renewal fails to persist. Save
+	// runs BEFORE hooks to prevent a "notified but not persisted" inconsistency.
+	var (
+		renewed   *contract.ContractAggregate
+		oldStatus contract.ContractStatus
+		newStatus contract.ContractStatus
+	)
+	if err := p.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
+		contractRepo := repos.Contracts
+		if contractRepo == nil {
+			contractRepo = p.contractRepo
+		}
+		loaded, findErr := contractRepo.FindByID(txCtx, agg.ContractID())
+		if findErr != nil {
+			return fmt.Errorf("failed to load contract for renewal: %w", findErr)
+		}
+
+		interval, resolveErr := p.resolveInterval(txCtx, loaded)
+		if resolveErr != nil {
+			return resolveErr
+		}
+
+		oldStatus = loaded.Status()
+		if renewErr := loaded.RenewWithInterval(interval, metadata); renewErr != nil {
+			return renewErr
+		}
+		newStatus = loaded.Status()
+
+		if saveErr := contractRepo.Save(txCtx, loaded); saveErr != nil {
+			return saveErr
+		}
+		renewed = loaded
+		return nil
+	}); err != nil {
 		return err
 	}
 
-	oldStatus := agg.Status()
-	if err := agg.RenewWithInterval(interval, metadata); err != nil {
-		return err
-	}
-	newStatus := agg.Status()
-
-	// Persist within transaction — save BEFORE hooks to prevent
-	// "notified but not persisted" inconsistency.
-	err = p.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
-		return repos.Contracts.Save(txCtx, agg)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to save renewed contract: %w", err)
-	}
+	// Subsequent post-commit hooks operate on the persisted,
+	// repository-loaded aggregate.
+	agg = renewed
 
 	// Post-commit hooks — non-fatal. Contract is already persisted;
 	// hook failures are logged but do not fail the renewal.

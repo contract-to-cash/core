@@ -95,6 +95,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Applied the `FinalizeInvoice` transaction pattern (in-tx load → state check →
+  mutate → save, with `RetryOnConflict` where an optimistic-lock conflict can
+  occur) to the remaining load-mutate-save-outside-tx sites (#151):
+  - `PaymentService.ProcessPayment` now re-loads the invoice through the
+    transaction-scoped repository inside the tx closure before `RecordPayment`,
+    instead of mutating and saving the copy read before the gateway charge. On a
+    backend honouring the invoice concurrency contract this converges with a
+    concurrent payment (fresh-state `RecordPayment`) rather than failing the
+    stale copy's `Save` with a version conflict (#147). Documented idempotency
+    behaviours (pre-charge short-circuit, #97 duplicate-key convergence, 3DS
+    upgrade, saga compensation) are unchanged.
+  - `CreditNoteService.ReissueInvoice` now loads the original invoice inside the
+    transaction (mirroring `CreateCreditNote`), so a payment committed
+    concurrently is observed by `VoidWithReason` instead of a stale pre-tx
+    snapshot silently overwriting a paid invoice with `voided`.
+  - `CreditNoteService.IssueCreditNote` / `ApplyCreditNote` / `RefundCreditNote`
+    now run load → state check → transition → save inside `tx.Run` wrapped in
+    `RetryOnConflict`, using the credit-note version machinery (#147). Concurrent
+    `IssueCreditNote` on the same note fires `OnCreditNoteIssued` exactly once and
+    the loser gets a clean `invalid_state_transition` domain error instead of a
+    raw version conflict, preventing double ledger postings.
+  - `batch.ContractRenewalProcessor` and `batch.TrialExpirationProcessor` now
+    resolve the interval / mutate (`RenewWithInterval` / `EndTrial`) and save a
+    repository-loaded instance INSIDE the transaction. A failed `Save` no longer
+    leaves the aggregate returned by `FindDueForRenewal` / `FindTrialsEndingSoon`
+    half-mutated with dangling uncommitted events for the next batch run.
 - Money currency / sign guards were missing at several money-critical sites,
   rooted in `Money.GreaterThan` returning `false` (rather than erroring) on a
   currency mismatch (#148). All six verified sites now guard explicitly, mirroring
