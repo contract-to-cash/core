@@ -599,6 +599,20 @@ func (a *ContractAggregate) expire(metadata eventstore.EventMetadata) error {
 }
 
 // Apply applies a domain event to update aggregate state.
+// Apply mutates the aggregate's in-memory state for a single event. It is used
+// both by command methods (which call Apply then RaiseEvent) and by
+// LoadFromHistory during replay.
+//
+// Ordering note (issue #162 L-8): command methods intentionally call Apply
+// BEFORE RaiseEvent so a rejected transition (Apply returning an error) never
+// records an event. The residual fragility is the reverse edge — if RaiseEvent
+// failed AFTER a successful Apply, the aggregate would carry a mutation with no
+// corresponding uncommitted event. In practice RaiseEvent only fails on a
+// json.Marshal error, which cannot occur for these plain-struct events, and any
+// error from a command method causes the caller to discard the aggregate
+// without saving. This is documented rather than restructured: reordering to
+// RaiseEvent-then-Apply would trade this theoretical edge for a worse one (an
+// event recorded for a mutation that then fails to apply).
 func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	switch e := event.(type) {
 	case *ContractCreatedEvent:

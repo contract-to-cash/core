@@ -94,6 +94,14 @@ func AddBillingCycleDuration(t time.Time, cycle string) time.Time {
 }
 
 // UnmarshalJSON implements json.Unmarshaler for DateRange.
+//
+// Times are normalized to UTC so a deserialized range matches one built via
+// NewDateRange, whose contract is UTC-only (issue #162 L-3). Unlike NewDateRange
+// it does NOT reject start >= end: DateRange is embedded in append-only event
+// and snapshot payloads, and rejecting a historically-persisted degenerate or
+// inverted range here would make an existing stream fail to replay. Deserialize
+// is a read path and must stay replay-safe; range validity is enforced at
+// CONSTRUCTION time (NewDateRange) where it belongs.
 func (r *DateRange) UnmarshalJSON(data []byte) error {
 	type dateRangeJSON struct {
 		Start time.Time `json:"start"`
@@ -103,7 +111,7 @@ func (r *DateRange) UnmarshalJSON(data []byte) error {
 	if err := unmarshalJSON(data, &v); err != nil {
 		return err
 	}
-	r.start = v.Start
-	r.end = v.End
+	r.start = v.Start.UTC()
+	r.end = v.End.UTC()
 	return nil
 }

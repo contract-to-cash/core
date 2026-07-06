@@ -12,6 +12,106 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
+// --- WithLineItems intake copy (issue #162 L-6) ---
+
+// TestWithLineItems_IntakeIsDefensivelyCopied verifies that mutating the
+// caller's line-item slice after passing it to NewInvoice via WithLineItems does
+// NOT alter the invoice's stored line items.
+func TestWithLineItems_IntakeIsDefensivelyCopied(t *testing.T) {
+	li, err := NewLineItem("li-1", "Item", 1, jpy(1000), jpy(1000), nil)
+	if err != nil {
+		t.Fatalf("NewLineItem: %v", err)
+	}
+	items := []LineItem{li}
+
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		WithLineItems(items),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+
+	// Overwrite the caller's backing array element after construction.
+	tampered, err := NewLineItem("hacked", "tampered", 1, jpy(999999), jpy(999999), nil)
+	if err != nil {
+		t.Fatalf("NewLineItem: %v", err)
+	}
+	items[0] = tampered
+
+	got := inv.LineItems()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 line item, got %d", len(got))
+	}
+	if got[0].ID() != "li-1" {
+		t.Errorf("WithLineItems does not defend slice at intake: got id %q, want li-1", got[0].ID())
+	}
+}
+
+// --- Revision-chain self-reference guards (issue #162 L-9) ---
+
+// TestSetRevisionOf_RejectsSelfReference verifies that linking an invoice as a
+// revision of itself is a no-op (no mutation, no version bump) while a real
+// parent link is applied and bumps the version.
+func TestSetRevisionOf_RejectsSelfReference(t *testing.T) {
+	id := shared.NewInvoiceID()
+	inv, err := NewInvoice(id, shared.NewAccountID(), shared.NewContractID(),
+		jpy(1000), jpy(0), jpy(0))
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+
+	v0 := inv.Version()
+	inv.SetRevisionOf(id) // self-reference — must no-op
+	if inv.RevisionOf() != nil {
+		t.Errorf("SetRevisionOf(self) must not set revisionOf, got %v", inv.RevisionOf())
+	}
+	if inv.Version() != v0 {
+		t.Errorf("SetRevisionOf(self) must not bump version: got %d, want %d", inv.Version(), v0)
+	}
+
+	parent := shared.NewInvoiceID()
+	inv.SetRevisionOf(parent)
+	if inv.RevisionOf() == nil || *inv.RevisionOf() != parent {
+		t.Errorf("SetRevisionOf(parent) must set revisionOf to %s, got %v", parent, inv.RevisionOf())
+	}
+	if inv.Version() != v0+1 {
+		t.Errorf("SetRevisionOf(parent) must bump version to %d, got %d", v0+1, inv.Version())
+	}
+}
+
+// TestSetOriginalInvoiceID_RejectsSelfReference mirrors the revision-of guard
+// for the chain-root link.
+func TestSetOriginalInvoiceID_RejectsSelfReference(t *testing.T) {
+	id := shared.NewInvoiceID()
+	inv, err := NewInvoice(id, shared.NewAccountID(), shared.NewContractID(),
+		jpy(1000), jpy(0), jpy(0))
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+
+	v0 := inv.Version()
+	inv.SetOriginalInvoiceID(id) // self-reference — must no-op
+	if inv.OriginalInvoiceID() != nil {
+		t.Errorf("SetOriginalInvoiceID(self) must not set originalInvoiceID, got %v", inv.OriginalInvoiceID())
+	}
+	if inv.Version() != v0 {
+		t.Errorf("SetOriginalInvoiceID(self) must not bump version: got %d, want %d", inv.Version(), v0)
+	}
+
+	root := shared.NewInvoiceID()
+	inv.SetOriginalInvoiceID(root)
+	if inv.OriginalInvoiceID() == nil || *inv.OriginalInvoiceID() != root {
+		t.Errorf("SetOriginalInvoiceID(root) must set originalInvoiceID to %s, got %v", root, inv.OriginalInvoiceID())
+	}
+	if inv.Version() != v0+1 {
+		t.Errorf("SetOriginalInvoiceID(root) must bump version to %d, got %d", v0+1, inv.Version())
+	}
+}
+
 // --- LineItem ---
 
 // TestLineItem_TaxRate_GetterIsDefensivelyCopied verifies that mutating the

@@ -150,9 +150,17 @@ func (p *Payment) MarkPartiallyRefunded() error {
 	return nil
 }
 
-// MarkChargedBack marks the payment as charged back. Only valid from completed.
+// MarkChargedBack marks the payment as charged back. Valid from completed or
+// partially_refunded.
+//
+// partially_refunded is allowed because real-world chargebacks routinely land
+// after a partial refund has been issued (a customer disputes the remaining
+// charge even though part was already returned). A chargeback is a terminal
+// gateway-initiated reversal that supersedes the refund bookkeeping, so it wins
+// over the partially_refunded state (issue #162 L-9). Fully refunded payments
+// are excluded — there is nothing left to charge back.
 func (p *Payment) MarkChargedBack() error {
-	if p.status != PaymentStatusCompleted {
+	if p.status != PaymentStatusCompleted && p.status != PaymentStatusPartiallyRefunded {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot charge back payment: current status is %s", p.status))
 	}

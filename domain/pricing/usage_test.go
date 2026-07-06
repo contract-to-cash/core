@@ -69,6 +69,27 @@ func TestUsagePrice_ZeroUsage(t *testing.T) {
 	}
 }
 
+// TestUsagePrice_MinimumNotAppliedAtZeroUsage pins the documented semantics
+// (issue #162 L-2): the Minimum floor applies only when usage > 0. A period with
+// zero usage bills nothing, even when a Minimum is configured — the minimum is a
+// floor on a used resource, not an unconditional periodic base charge.
+func TestUsagePrice_MinimumNotAppliedAtZeroUsage(t *testing.T) {
+	unitPrice := shared.NewMoney(new(big.Rat).SetInt64(10), shared.CurrencyJPY)
+	min := shared.NewMoney(new(big.Rat).SetInt64(100), shared.CurrencyJPY)
+	up := UsagePrice{UnitPrice: unitPrice, Minimum: &min}
+
+	result := up.CalculatePrice(0)
+	if !result.IsZero() {
+		t.Errorf("expected zero (minimum must NOT apply at zero usage), got %s",
+			result.Amount().RatString())
+	}
+
+	// Sanity: with usage > 0 below the floor, the minimum DOES apply.
+	if got := up.CalculatePrice(5); got.Amount().Cmp(new(big.Rat).SetInt64(100)) != 0 {
+		t.Errorf("expected minimum 100 to apply for usage=5, got %s", got.Amount().RatString())
+	}
+}
+
 func TestUsagePrice_WithinBounds(t *testing.T) {
 	unitPrice := shared.NewMoney(new(big.Rat).SetInt64(10), shared.CurrencyJPY)
 	min := shared.NewMoney(new(big.Rat).SetInt64(50), shared.CurrencyJPY)

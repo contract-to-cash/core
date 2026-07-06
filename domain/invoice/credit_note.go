@@ -194,6 +194,13 @@ func NewCreditNote(
 		return nil, err
 	}
 
+	// Defensively copy the caller's slice so a post-construction mutation
+	// (items[i] = ... or append reusing the backing array) cannot rewrite the
+	// note's persisted line items. Items() already returns a copy on read; this
+	// closes the same hole on intake (issue #162 L-6).
+	ownedItems := make([]CreditNoteItem, len(items))
+	copy(ownedItems, items)
+
 	cn := &CreditNote{
 		id:           id,
 		invoiceID:    invoiceID,
@@ -201,7 +208,7 @@ func NewCreditNote(
 		contractID:   contractID,
 		status:       CreditNoteStatusDraft,
 		reason:       reason,
-		items:        items,
+		items:        ownedItems,
 		subtotal:     subtotal,
 		taxAmount:    taxAmount,
 		total:        total,

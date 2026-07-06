@@ -180,3 +180,53 @@ func TestDateRangeNext_UnknownCycle(t *testing.T) {
 		t.Errorf("expected end %v, got %v", wantEnd, next.End())
 	}
 }
+
+// TestDateRange_UnmarshalJSON_NormalizesToUTC verifies that a DateRange
+// deserialized from JSON with a non-UTC zone offset is normalized to UTC,
+// matching NewDateRange's UTC-only contract (issue #162 L-3).
+func TestDateRange_UnmarshalJSON_NormalizesToUTC(t *testing.T) {
+	// +09:00 instants that are 2026-01-01T00:00Z and 2026-02-01T00:00Z in UTC.
+	jst := time.FixedZone("JST", 9*3600)
+	start := time.Date(2026, 1, 1, 9, 0, 0, 0, jst)
+	end := time.Date(2026, 2, 1, 9, 0, 0, 0, jst)
+
+	src, err := NewDateRange(start, end)
+	if err != nil {
+		t.Fatalf("NewDateRange: %v", err)
+	}
+	data, err := src.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+
+	var got DateRange
+	if err := got.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if loc := got.Start().Location(); loc != time.UTC {
+		t.Errorf("Start not normalized to UTC: got location %v", loc)
+	}
+	if loc := got.End().Location(); loc != time.UTC {
+		t.Errorf("End not normalized to UTC: got location %v", loc)
+	}
+	wantStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if !got.Start().Equal(wantStart) {
+		t.Errorf("Start = %v, want %v", got.Start(), wantStart)
+	}
+}
+
+// TestDateRange_UnmarshalJSON_ToleratesInvertedRange verifies deserialize stays
+// replay-safe: an inverted (start > end) range that NewDateRange would reject
+// must still deserialize so a historically-persisted event never fails to
+// replay (issue #162 L-3).
+func TestDateRange_UnmarshalJSON_ToleratesInvertedRange(t *testing.T) {
+	data := []byte(`{"start":"2026-02-01T00:00:00Z","end":"2026-01-01T00:00:00Z"}`)
+	var got DateRange
+	if err := got.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON must tolerate inverted range for replay safety, got: %v", err)
+	}
+	if !got.Start().After(got.End()) {
+		t.Errorf("expected inverted range preserved (start after end), got start=%v end=%v",
+			got.Start(), got.End())
+	}
+}
