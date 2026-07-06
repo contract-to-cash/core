@@ -26,6 +26,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (pre-v1.0 API): `port.WebhookDeduplicator` gains a second method,
+  `MarkProcessed(ctx, eventID, ttl) error`, splitting webhook deduplication into
+  a CHECK phase (`IsDuplicate`) and a RECORD phase (`MarkProcessed`) (#155).
+  `WebhookProcessor.ProcessWebhook` now records the dedup marker ONLY AFTER the
+  event handler succeeds. Previously the marker was written *before* the handler
+  ran, so a transient handler failure (e.g. a DB outage during a
+  `payment.succeeded` webhook) returned an error to the gateway but the
+  gateway's redelivery was then swallowed as a duplicate — with `dlq == nil` the
+  event was lost permanently. Consequences and migration:
+  - Delivery is now **at-least-once**: an event can reach the handler more than
+    once (crash between handler success and `MarkProcessed`, a `MarkProcessed`
+    failure, or two redeliveries racing through `IsDuplicate`). **Handlers MUST
+    be idempotent** — this is documented on the new `port.WebhookEventHandler`
+    type and on `WebhookDeduplicator`.
+  - Concurrency is unchanged and explicit: `ProcessWebhook` does not serialize
+    same-event deliveries, so two concurrent redeliveries may both run the
+    handler. An implementation MAY make `IsDuplicate` perform an atomic
+    check-and-set for stronger dedup, but callers must not rely on it.
+  - The DLQ stays optional but is now a **backstop for poison messages**, not the
+    sole recovery path (the gateway retry works again because failures no longer
+    record a marker). When a handler exhausts its retries and `dlq == nil`, the
+    processor logs the failure at **error level** (via a new optional
+    `slog.Logger`, `port.WithWebhookLogger`, defaulting to `slog.Default()`) and
+    returns the error, so the loss is observable and recovery proceeds via
+    gateway redelivery. A `MarkProcessed` failure *after* a successful handler is
+    logged at warn level and is non-fatal.
+  - Migration: implementations of `WebhookDeduplicator` must add `MarkProcessed`
+    (record the event ID with a TTL); implementations that previously recorded
+    inside `IsDuplicate` must move the write to `MarkProcessed`. The
+    `ProcessWebhook` handler parameter is now the named type
+    `port.WebhookEventHandler` (assignable from the same func literal, so call
+    sites are unaffected).
 - **Event Sourcing / on-disk schema**: contract event payloads and the contract
   snapshot no longer carry `billing_cycle`. Historical events that recorded only
   `billing_cycle` are migrated on read by new upcasters
