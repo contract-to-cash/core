@@ -41,6 +41,12 @@ func (s *InMemoryEventStore) Append(_ context.Context, streamID string, events [
 
 	currentVersion := len(s.streams[streamID])
 	if currentVersion != expectedVersion {
+		// Optimistic-lock conflict. This is encoded as a version_conflict
+		// DomainError (not the tx.ErrVersionConflict sentinel) to keep the
+		// eventstore/infrastructure layer free of an application/tx import.
+		// tx.RetryOnConflict recognises this code via tx.IsVersionConflict, so a
+		// contract Save wrapped in RetryOnConflict retries just like an
+		// invoice/balance Save that returns the sentinel.
 		return shared.NewDomainError(shared.ErrCodeVersionConflict,
 			fmt.Sprintf("expected version %d but stream %q is at version %d", expectedVersion, streamID, currentVersion))
 	}

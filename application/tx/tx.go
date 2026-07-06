@@ -13,10 +13,25 @@ import (
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/payment"
+	"github.com/contract-to-cash/core/domain/shared"
 )
 
 // ErrVersionConflict is returned when an optimistic lock conflict is detected.
 // RetryOnConflict will retry on this error.
+//
+// Two encodings of an optimistic-lock conflict coexist in the codebase and both
+// are recognised by RetryOnConflict / IsVersionConflict:
+//   - this sentinel, returned by the state-stored repositories
+//     (invoice / balance / credit-note optimistic-locking Saves); and
+//   - a *shared.DomainError with Code == shared.ErrCodeVersionConflict, returned
+//     by the event store's Append when the expected stream version does not
+//     match (see infrastructure/inmemory/event_store.go). The event-sourced
+//     contract repository surfaces that DomainError directly from Save.
+//
+// The two cannot be unified by making the DomainError Unwrap() to this sentinel:
+// shared lives in the domain layer and must not import application/tx (the
+// dependency rule points inward). Instead tx — which already depends on shared —
+// matches the DomainError by its code. See IsVersionConflict.
 var ErrVersionConflict = errors.New("version conflict")
 
 // Repos holds transaction-scoped repositories for write operations.
@@ -146,9 +161,29 @@ func ReposFromContext(ctx context.Context) (Repos, bool) {
 	return reposFromContext(ctx)
 }
 
-// RetryOnConflict retries fn up to maxRetries times when ErrVersionConflict
-// is returned. Non-conflict errors are returned immediately without retry.
-// No backoff is applied — optimistic lock conflicts resolve on immediate retry.
+// IsVersionConflict reports whether err represents an optimistic-lock conflict,
+// regardless of which of the two encodings it uses: the ErrVersionConflict
+// sentinel (state-stored repositories) or a *shared.DomainError carrying
+// shared.ErrCodeVersionConflict (the event store's version check, surfaced by
+// the event-sourced contract repository's Save). Both are treated as retriable
+// so a contract-save conflict wrapped in RetryOnConflict is retried the same way
+// an invoice-save conflict is.
+func IsVersionConflict(err error) bool {
+	if errors.Is(err, ErrVersionConflict) {
+		return true
+	}
+	var de *shared.DomainError
+	if errors.As(err, &de) && de.Code == shared.ErrCodeVersionConflict {
+		return true
+	}
+	return false
+}
+
+// RetryOnConflict retries fn up to maxRetries times when it returns an
+// optimistic-lock conflict (see IsVersionConflict — either the
+// ErrVersionConflict sentinel or a shared.ErrCodeVersionConflict DomainError).
+// Non-conflict errors are returned immediately without retry. No backoff is
+// applied — optimistic lock conflicts resolve on immediate retry.
 func RetryOnConflict(maxRetries int, fn func() error) error {
 	var err error
 	for i := 0; i < maxRetries; i++ {
@@ -156,7 +191,7 @@ func RetryOnConflict(maxRetries int, fn func() error) error {
 		if err == nil {
 			return nil
 		}
-		if !errors.Is(err, ErrVersionConflict) {
+		if !IsVersionConflict(err) {
 			return err
 		}
 	}

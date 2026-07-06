@@ -95,6 +95,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- In-memory repositories now return isolated copies from every read, and
+  optimistic-lock conflicts are recognised uniformly (#152). Previously the
+  reference `infrastructure/inmemory` repositories handed back the stored
+  pointer from `FindByID` and the list finders, so concurrent load-modify raced
+  on aggregate/entity internals, the optimistic-locking contract was
+  unexercisable through the raw repo (two loads shared one instance), and
+  unsaved mutations were visible to other readers. Reads now return a fresh copy
+  — the event-sourced `ContractAggregate` is re-materialized from the event
+  store; the state-stored `Invoice`, `CreditNote`, `BalanceEntry`, and `Payment`
+  are cloned via their snapshot round-trip (preserving `version`/`loadedVersion`)
+  — and `Save` stores an isolated copy so later caller mutations cannot leak in.
+  This lets integrators test optimistic locking directly against the in-memory
+  repos, so the hand-rolled `isolatingInvoiceRepo` test wrapper was removed as
+  redundant. Separately, `tx.RetryOnConflict` now also treats the event store's
+  `shared.ErrCodeVersionConflict` `DomainError` (returned by contract saves) as
+  retriable — not only the `tx.ErrVersionConflict` sentinel — via the new
+  `tx.IsVersionConflict` helper, so a contract-save conflict wrapped in
+  `RetryOnConflict` retries the same way an invoice/balance/credit-note conflict
+  does. (The two encodings stay distinct because `domain/shared` must not import
+  `application/tx`; `tx` matches the code instead.)
 - Documentation: the README quick start (en/ja) and several published docs used
   APIs removed in #111 and stale constructor signatures, so copy-pasted snippets
   failed to compile (#160). Corrected `CreateContractCommand` to use

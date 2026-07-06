@@ -21,8 +21,9 @@ import (
 // serializes transactions so that a concurrent second caller only proceeds after
 // the first has committed. The in-memory NoopTxManager runs closures inline with
 // no locking, so this wrapper stands in for the adapter's lock in the concurrency
-// regression test — the same role isolatingInvoiceRepo plays for the finalize
-// optimistic-lock test (#130).
+// regression test — analogous to how the in-memory repositories' native read
+// isolation (issue #152) stands in for a real RDBMS's per-tx snapshot in the
+// finalize optimistic-lock test (#130).
 type serializingTxManager struct {
 	mu    sync.Mutex
 	inner tx.TxManager

@@ -62,11 +62,27 @@ func (r *InMemoryPaymentRepository) Save(_ context.Context, p *payment.Payment) 
 		}
 	}
 
-	r.payments[p.ID()] = p
+	// Store an ISOLATED copy (snapshot round-trip), not the caller's pointer, so
+	// the caller's later mutations to p cannot leak into the repository or into
+	// concurrent readers (issue #152). Payment has no optimistic-locking version,
+	// so the round-trip is a straight deep copy.
+	stored, err := clonePayment(p)
+	if err != nil {
+		return err
+	}
+	r.payments[p.ID()] = stored
 	return nil
 }
 
+// clonePayment returns an isolated deep copy of p via the snapshot round-trip.
+func clonePayment(p *payment.Payment) (*payment.Payment, error) {
+	return payment.FromSnapshot(p.ToSnapshot())
+}
+
 // FindByID loads a payment by its ID.
+//
+// Returns an ISOLATED copy (snapshot round-trip) so concurrent load-modify
+// callers never share a live pointer (issue #152).
 func (r *InMemoryPaymentRepository) FindByID(_ context.Context, id shared.PaymentID) (*payment.Payment, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -76,7 +92,7 @@ func (r *InMemoryPaymentRepository) FindByID(_ context.Context, id shared.Paymen
 		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
 			fmt.Sprintf("payment %s not found", id))
 	}
-	return p, nil
+	return clonePayment(p)
 }
 
 // FindByInvoiceID returns all payments for an invoice.
@@ -87,7 +103,11 @@ func (r *InMemoryPaymentRepository) FindByInvoiceID(_ context.Context, invoiceID
 	var result []*payment.Payment
 	for _, p := range r.payments {
 		if p.InvoiceID() == invoiceID {
-			result = append(result, p)
+			clone, err := clonePayment(p)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -103,7 +123,7 @@ func (r *InMemoryPaymentRepository) FindByIdempotencyKey(_ context.Context, key 
 
 	for _, p := range r.payments {
 		if p.IdempotencyKey() == key {
-			return p, nil
+			return clonePayment(p)
 		}
 	}
 	return nil, nil

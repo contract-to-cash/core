@@ -66,12 +66,29 @@ func (r *InMemoryInvoiceRepository) Save(_ context.Context, inv *invoice.Invoice
 		return err
 	}
 
-	r.invoices[inv.ID()] = inv
+	// Store an ISOLATED copy (snapshot round-trip), not the caller's pointer, so
+	// that the caller's later mutations to inv cannot leak into the repository
+	// or into concurrent readers (issue #152). The snapshot restores version and
+	// loadedVersion together, so the stored copy's optimistic-locking baseline
+	// matches the just-persisted version.
+	stored, err := cloneInvoice(inv)
+	if err != nil {
+		return err
+	}
+	r.invoices[inv.ID()] = stored
 	r.versions[inv.ID()] = inv.Version()
 	// Sync loadedVersion so subsequent saves from the same pointer (the common
 	// non-isolated in-memory case) compare against the just-persisted version.
 	inv.SetVersion(inv.Version())
 	return nil
+}
+
+// cloneInvoice returns an isolated deep copy of inv via the snapshot round-trip.
+// InvoiceFromSnapshot restores version and loadedVersion from the single stored
+// version field, so the clone carries the same optimistic-locking baseline as
+// the original (a freshly loaded entity has loadedVersion == version).
+func cloneInvoice(inv *invoice.Invoice) (*invoice.Invoice, error) {
+	return invoice.InvoiceFromSnapshot(inv.ToSnapshot())
 }
 
 // checkPeriodUniquenessLocked enforces the per-period uniqueness contract from
@@ -110,6 +127,11 @@ func participatesInPeriodUniqueness(inv *invoice.Invoice) bool {
 }
 
 // FindByID loads an invoice by its ID.
+//
+// Returns an ISOLATED copy (snapshot round-trip) so concurrent load-modify
+// callers never share a live pointer (issue #152). This makes the optimistic
+// lock in Save observable: two independent loads each carry loadedVersion, so
+// the loser of two concurrent Saves is rejected with tx.ErrVersionConflict.
 func (r *InMemoryInvoiceRepository) FindByID(_ context.Context, id shared.InvoiceID) (*invoice.Invoice, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -119,7 +141,7 @@ func (r *InMemoryInvoiceRepository) FindByID(_ context.Context, id shared.Invoic
 		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
 			fmt.Sprintf("invoice %s not found", id))
 	}
-	return inv, nil
+	return cloneInvoice(inv)
 }
 
 // FindByContractID returns all invoices for a contract.
@@ -130,7 +152,11 @@ func (r *InMemoryInvoiceRepository) FindByContractID(_ context.Context, contract
 	var result []*invoice.Invoice
 	for _, inv := range r.invoices {
 		if inv.ContractID() == contractID {
-			result = append(result, inv)
+			clone, err := cloneInvoice(inv)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -144,7 +170,11 @@ func (r *InMemoryInvoiceRepository) FindByAccountID(_ context.Context, accountID
 	var result []*invoice.Invoice
 	for _, inv := range r.invoices {
 		if inv.AccountID() == accountID {
-			result = append(result, inv)
+			clone, err := cloneInvoice(inv)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -158,11 +188,15 @@ func (r *InMemoryInvoiceRepository) FindOverdue(_ context.Context) ([]*invoice.I
 	now := r.clock.Now()
 	var result []*invoice.Invoice
 	for _, inv := range r.invoices {
-		if inv.Status() == invoice.InvoiceStatusOverdue {
-			result = append(result, inv)
-		} else if (inv.Status() == invoice.InvoiceStatusIssued || inv.Status() == invoice.InvoiceStatusFinalized) &&
-			!inv.DueDate().IsZero() && inv.DueDate().Before(now) {
-			result = append(result, inv)
+		overdue := inv.Status() == invoice.InvoiceStatusOverdue
+		dueElapsed := (inv.Status() == invoice.InvoiceStatusIssued || inv.Status() == invoice.InvoiceStatusFinalized) &&
+			!inv.DueDate().IsZero() && inv.DueDate().Before(now)
+		if overdue || dueElapsed {
+			clone, err := cloneInvoice(inv)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -176,7 +210,11 @@ func (r *InMemoryInvoiceRepository) FindByStatus(_ context.Context, status invoi
 	var result []*invoice.Invoice
 	for _, inv := range r.invoices {
 		if inv.Status() == status {
-			result = append(result, inv)
+			clone, err := cloneInvoice(inv)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -194,7 +232,7 @@ func (r *InMemoryInvoiceRepository) FindByIDAsOf(_ context.Context, id shared.In
 		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
 			fmt.Sprintf("invoice %s not found", id))
 	}
-	return inv, nil
+	return cloneInvoice(inv)
 }
 
 // FindByContractAndStatus returns invoices for a contract with a specific status.
@@ -205,7 +243,11 @@ func (r *InMemoryInvoiceRepository) FindByContractAndStatus(_ context.Context, c
 	var result []*invoice.Invoice
 	for _, inv := range r.invoices {
 		if inv.ContractID() == contractID && inv.Status() == status {
-			result = append(result, inv)
+			clone, err := cloneInvoice(inv)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -221,7 +263,11 @@ func (r *InMemoryInvoiceRepository) FindByContractAndPeriod(_ context.Context, c
 		if inv.ContractID() == contractID &&
 			inv.BillingPeriod().Start().Equal(period.Start()) &&
 			inv.BillingPeriod().End().Equal(period.End()) {
-			result = append(result, inv)
+			clone, err := cloneInvoice(inv)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -243,7 +289,11 @@ func (r *InMemoryInvoiceRepository) FindUnpaidByContract(_ context.Context, cont
 	var result []*invoice.Invoice
 	for _, inv := range r.invoices {
 		if inv.ContractID() == contractID && unpaidStatuses[inv.Status()] {
-			result = append(result, inv)
+			clone, err := cloneInvoice(inv)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
