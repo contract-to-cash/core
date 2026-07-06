@@ -108,6 +108,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against `expectedVersion` (events must be numbered `expectedVersion+1, +2, …`),
   rejecting a gapped/out-of-order batch with a `validation_error` before it can
   corrupt the append-only log (#153).
+- `SnapshotService.CreateSnapshot` now requires the aggregate to implement
+  `eventstore.SnapshotMarshaler` and returns a `validation_error` `DomainError`
+  naming the interface when it does not, instead of falling back to
+  `json.Marshal` (#157). Event-sourced aggregates keep their state in unexported
+  fields, so the old fallback silently serialized an empty `{}` snapshot that a
+  later `LoadFromSnapshot` restored as an empty aggregate at a non-zero version —
+  silent state corruption. `CreateSnapshot` was previously untested; added
+  round-trip, non-marshaler-error, and save-error-propagation tests.
+- `inmemory.InMemoryEventStore.LoadSnapshot` now returns the highest-`Version`
+  snapshot rather than the most recently appended one (#157). An out-of-order
+  `SaveSnapshot` (e.g. a lagging rebuild worker persisting a stale snapshot after
+  a newer one) previously made reads resume from an older snapshot and replay
+  events that predate it. `LoadSnapshotBefore` is likewise made robust to
+  out-of-order saves: among snapshots created before the cutoff it returns the
+  one with the greatest `CreatedAt` (tie-broken by higher `Version`), matching
+  the postgres reference (`ORDER BY created_at DESC LIMIT 1`); the CreatedAt cut
+  semantics are unchanged.
 
 ### Added
 
