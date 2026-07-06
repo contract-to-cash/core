@@ -32,17 +32,35 @@ billingService := service.NewBillingService(
 
 ```go
 type BillingConfig struct {
-    GracePeriod         time.Duration    // Grace window before an invoice is finalized
-                                         //   (draft stays open to absorb late usage / hook
-                                         //   adjustments; NOT an overdue window). Default 1h.
-    DaysUntilDue        int              // Days from invoice creation to due date. Default 30.
-    CollectionMethod    CollectionMethod // service.CollectionAutoCharge ("charge_automatically")
-                                         //   or service.CollectionSendInvoice ("send_invoice").
-                                         //   Default CollectionAutoCharge.
+    GracePeriod         time.Duration    // Integrator-interpreted: core does NOT act on this.
+                                         //   The integrator's scheduler decides when to call
+                                         //   FinalizeInvoice; this value is carried as config for
+                                         //   that scheduler (how long to leave a draft open to
+                                         //   absorb late usage / hook adjustments). NOT an overdue
+                                         //   window and NOT enforced by core. Default 1h.
+    DaysUntilDue        int              // Days added to the invoice ISSUE DATE (clock.Now() at
+                                         //   generation), NOT the billing period end, to compute
+                                         //   the due date. Zero value falls back to 30 days at
+                                         //   usage time, so BillingConfig{} is not immediately due.
+                                         //   Default 30.
+    CollectionMethod    CollectionMethod // Integrator-interpreted: core does NOT act on this and
+                                         //   never auto-charges. Carried for the integrator's
+                                         //   collection flow. service.CollectionAutoCharge
+                                         //   ("charge_automatically") or service.CollectionSendInvoice
+                                         //   ("send_invoice"). Default CollectionAutoCharge.
     AllowPartialPayment bool             // If true, generated invoices accept partial payment
                                          //   (invoice.allowPartialPay). Default false.
 }
 ```
+
+> **Integrator-interpreted knobs**: `GracePeriod` and `CollectionMethod` are validated by
+> `NewBillingConfig` but the core billing pipeline does not read them to drive behavior. They
+> are configuration carried for the integrator's own scheduler / collection flow. Core neither
+> auto-finalizes on `GracePeriod` nor auto-charges on `CollectionMethod`.
+>
+> **Due-date anchor**: the due date is `issueDate + DaysUntilDue`, where `issueDate` is
+> `clock.Now()` at generation time (not the billing period end). A zero-value `DaysUntilDue`
+> resolves to 30 days at usage time.
 
 `CollectionMethod` is a typed string with two values:
 

@@ -280,6 +280,70 @@ func TestGenerateInvoice_SubscriptionBasic(t *testing.T) {
 	}
 }
 
+func TestGenerateInvoice_DueDate_ZeroValueConfigFallsBackTo30Days(t *testing.T) {
+	// Regression for issue #154: a zero-value BillingConfig{} must not produce an
+	// immediately-due invoice. DaysUntilDue==0 falls back to 30 days, anchored on
+	// the issue date (clock.Now()), not the billing period end.
+	clock := newTestClock() // FixedTime: 2026-01-15
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{}, // zero value: no DaysUntilDue set
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	now := clock.Now()
+	wantDue := now.AddDate(0, 0, 30)
+	if !inv.DueDate().Equal(wantDue) {
+		t.Errorf("due date = %v, want %v (issue date %v + 30d)", inv.DueDate(), wantDue, now)
+	}
+	// Must not be immediately due (issue date == due date).
+	if inv.DueDate().Equal(now) {
+		t.Error("zero-value config produced an immediately-due invoice")
+	}
+}
+
+func TestGenerateInvoice_DueDate_ExplicitDaysUntilDueRespected(t *testing.T) {
+	clock := newTestClock() // FixedTime: 2026-01-15
+	price := jpy(10000)
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 7},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantDue := clock.Now().AddDate(0, 0, 7)
+	if !inv.DueDate().Equal(wantDue) {
+		t.Errorf("due date = %v, want %v", inv.DueDate(), wantDue)
+	}
+}
+
 func TestGenerateInvoice_DiscountCap(t *testing.T) {
 	clock := newTestClock()
 	price := jpy(5000)

@@ -24,6 +24,23 @@ var validCollectionMethods = map[CollectionMethod]bool{
 	CollectionSendInvoice: true,
 }
 
+// defaultDaysUntilDue is the fallback number of days added to an invoice's issue
+// date to compute its due date, applied when BillingConfig.DaysUntilDue is left
+// at its zero value. This keeps a zero-value BillingConfig{} from producing an
+// immediately-due (issue date == due date) invoice.
+const defaultDaysUntilDue = 30
+
+// effectiveDaysUntilDue returns the configured DaysUntilDue, falling back to
+// defaultDaysUntilDue when the field is left at its zero value. This matches the
+// "zero values are treated as defaults at usage time" contract documented on
+// BillingConfig and the default set by NewBillingConfig.
+func (c BillingConfig) effectiveDaysUntilDue() int {
+	if c.DaysUntilDue == 0 {
+		return defaultDaysUntilDue
+	}
+	return c.DaysUntilDue
+}
+
 // BillingConfigOption configures a BillingConfig via the functional options pattern.
 type BillingConfigOption func(*BillingConfig)
 
@@ -58,7 +75,7 @@ func WithAllowPartialPayment(allow bool) BillingConfigOption {
 func NewBillingConfig(opts ...BillingConfigOption) (BillingConfig, error) {
 	cfg := BillingConfig{
 		GracePeriod:      1 * time.Hour,
-		DaysUntilDue:     30,
+		DaysUntilDue:     defaultDaysUntilDue,
 		CollectionMethod: CollectionAutoCharge,
 	}
 	for _, opt := range opts {

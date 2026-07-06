@@ -25,9 +25,28 @@ import (
 // Zero-value struct literal (BillingConfig{}) remains valid for backward compatibility;
 // zero values are treated as "use defaults" at usage time.
 type BillingConfig struct {
-	GracePeriod      time.Duration
-	DaysUntilDue     int
+	// GracePeriod is integrator-interpreted configuration: core does not act on
+	// it and does not enforce it. The integrator's scheduler decides when to call
+	// FinalizeInvoice; this value is carried as configuration for that scheduler
+	// (e.g. how long to leave a draft open after GenerateInvoice so late usage
+	// records can be absorbed and InvoiceLifecycleHooks can adjust it). The core
+	// billing pipeline never reads it.
+	GracePeriod time.Duration
+
+	// DaysUntilDue is the number of days added to the invoice's issue date
+	// (clock.Now() at generation time) to compute its due date. The anchor is the
+	// issue date (now), not the billing period end. When left at its zero value,
+	// GenerateInvoice falls back to a 30-day due date (see effectiveDaysUntilDue),
+	// so BillingConfig{} does not produce an immediately-due invoice.
+	DaysUntilDue int
+
+	// CollectionMethod is integrator-interpreted configuration: core does not act
+	// on it and never auto-charges. It is carried for the integrator's collection
+	// flow (e.g. to decide whether to auto-charge via the payment gateway or send
+	// the invoice and wait for payment). The core billing pipeline does not read
+	// it to drive any behavior.
 	CollectionMethod CollectionMethod
+
 	// AllowPartialPayment, when true, marks generated invoices as accepting
 	// partial payments (Invoice.allowPartialPay). Default false: a payment must
 	// settle the full amount due in one go (design-decisions 3.1).
@@ -534,9 +553,11 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 			return fmt.Errorf("failed to calculate amount due: %w", amtErr)
 		}
 
-		// Create invoice
+		// Create invoice. Due date is anchored on the issue date (now), not the
+		// billing period end; a zero-value DaysUntilDue falls back to 30 days so
+		// BillingConfig{} does not yield an immediately-due invoice.
 		now := s.clock.Now()
-		dueDate := now.AddDate(0, 0, s.config.DaysUntilDue)
+		dueDate := now.AddDate(0, 0, s.config.effectiveDaysUntilDue())
 
 		invOpts := []invoice.InvoiceOption{
 			invoice.WithStatus(invoice.InvoiceStatusDraft),

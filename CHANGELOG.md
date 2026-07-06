@@ -86,6 +86,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `BillingService.GenerateInvoice` no longer produces immediately-due invoices
+  from a zero-value `BillingConfig{}` (#154). `DaysUntilDue == 0` now falls back to
+  a 30-day due date at usage time (`BillingConfig.effectiveDaysUntilDue`), matching
+  the struct's "zero values are defaults" contract and `NewBillingConfig`'s default.
+  The due-date anchor is documented as the invoice issue date (`clock.Now()` at
+  generation), not the billing period end; the docs previously misstated the anchor
+  as `period.End()`. Behavior is unchanged for callers that set `DaysUntilDue`.
+- Clarified that `BillingConfig.GracePeriod` and `CollectionMethod` are
+  integrator-interpreted configuration: `NewBillingConfig` validates them, but the
+  core billing pipeline does not act on them (core does not auto-finalize on
+  `GracePeriod` nor auto-charge on `CollectionMethod`). Field godocs and docs
+  (`docs/internals/plugin-system.md` §8.1, `docs/api/services.md`) updated to match;
+  no behavior change (#154).
 - `eventstore.EventRegistry.Register` now returns an `error` and rejects a
   duplicate `EventType` registration instead of silently overwriting the prior
   Go-type mapping (which could route deserialization to the wrong type), mirroring

@@ -1036,10 +1036,19 @@ func (c *JapaneseTaxCalculator) GetTaxRate(_ context.Context) *big.Rat {
 
 **設定・構築（要点）**
 
-- `BillingConfig`（`billing_config.go`）: `GracePeriod`（finalize までの猶予）/
-  `DaysUntilDue` / `CollectionMethod CollectionMethod`（`CollectionAutoCharge =
-  "charge_automatically"` または `CollectionSendInvoice = "send_invoice"`）/
-  `AllowPartialPayment bool`。検証付き構築は `NewBillingConfig(opts...)`。
+- `BillingConfig`（`billing_config.go`）: `GracePeriod` / `DaysUntilDue` /
+  `CollectionMethod CollectionMethod`（`CollectionAutoCharge = "charge_automatically"`
+  または `CollectionSendInvoice = "send_invoice"`）/ `AllowPartialPayment bool`。
+  検証付き構築は `NewBillingConfig(opts...)`（デフォルト: GracePeriod 1h / DaysUntilDue 30 /
+  CollectionMethod CollectionAutoCharge）。
+  - **`GracePeriod` と `CollectionMethod` は統合者が解釈する情報フィールド**であり、
+    **コアの請求パイプラインはこれらを読まない**。`NewBillingConfig` が値を検証するだけで、
+    コアは `GracePeriod` に基づいて自動 finalize せず、`CollectionMethod` に基づいて自動課金しない。
+    finalize のタイミングは統合者のスケジューラが `FinalizeInvoice` を呼ぶことで決まり、
+    回収方法（自動課金 / 請求書送付）も統合者のフローが解釈する（issue #154）。
+  - **`DaysUntilDue` の起点は請求書の発行日（生成時の `clock.Now()`）**であり、請求期間末
+    （`period.End()`）ではない。ゼロ値は利用時に 30 日へフォールバックするため、
+    `BillingConfig{}`（ゼロ値）でも即日期限にはならない（issue #154）。
 - `NewBillingService(contractRepo, invoiceRepo, usageRepo, balanceConfig, priceRepo,
   productRepo, registry, config, clock, opts...)`。オプション: `WithBalanceRepo`（クレジット台帳、
   nil 許容）/ `WithBillingTxManager`（既定は `NoopTxManager`）/ `WithBillingLogger`（既定は
@@ -1120,7 +1129,8 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
   `OnInvoiceIssuedHook`（非致命）を発火。
 
 > **注**: 旧版の本節に載っていた `ProcessPriceChange` / `calculateDueDate` は実コードに存在しない
-> （due date は `executeBillingPipeline` 内で `now.AddDate(0, 0, DaysUntilDue)` として算出される）。
+> （due date は `executeBillingPipeline` 内で `now.AddDate(0, 0, config.effectiveDaysUntilDue())`
+> として算出される。`now` は発行日 = `clock.Now()`。ゼロ値の `DaysUntilDue` は 30 日へフォールバック）。
 > ダウングレード時の BalancePolicy 分岐は `domain-model.md` を参照。従量課金の基本料金算出
 > （`calculateSubtotal` / `calculateUsageCharge`）は Price/Product エンティティ経由であり、
 > 廃止済みの `c.Plan()` は使用しない。
