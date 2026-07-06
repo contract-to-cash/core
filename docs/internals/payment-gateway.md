@@ -1708,6 +1708,93 @@ saga 補償:
 
 ---
 
+## 6.3 Refund の冪等性キーと並行ガード（Issue #150 対応）
+
+### 6.3.1 解決する課題
+
+修正前の `PaymentService.Refund` は 2 つの穴を持っていた:
+
+1. **ゲートウェイ冪等性キーが空**: `RefundRequest.IdempotencyKey` を空のまま送っていた。
+   ゲートウェイタイムアウト後に呼び出し側がリトライすると、ゲートウェイは重複を判定できず
+   **2 回目の実返金**が起きる。
+2. **並行ガードなし**: load → `ValidateRefund` → `gateway.Refund` がトランザクション・ロック
+   外で走るため、同一 payment への並行 `Refund` が両方とも未返金状態をロードし、両方
+   `ValidateRefund` を通過して両方ゲートウェイに到達 → **二重返金**。敗者の `RecordRefund`
+   が失敗し手動突合が必要になる。
+
+これは `ProcessPayment` が Charge に対して行っている「決定的キー + tx 境界」の設計が
+Refund 側に適用されていなかったことに起因する（Saga 補償パスは `comp-refund-<txID>` で
+正しく決定的キーを使っていた）。
+
+### 6.3.2 決定的な冪等性キーの導出
+
+ゲートウェイ返金には**常に非空の冪等性キー**を渡す。`RefundInput.IdempotencyKey` が
+指定されていればそれを使い、空なら以下から決定的に導出する（`deriveRefundIdempotencyKey`）:
+
+```
+refund-<paymentID>-<currency>-<この返金前の累積返金額 (big.Rat 文字列)>
+```
+
+**なぜ「返金前の累積返金額」が正しい識別子か:**
+
+- payment の `refundedAmount` は単調非減少（`ValidateRefund` が非正の額を拒否するため、
+  成功する `RecordRefund` は必ず正の額を加算する）。したがって「返金前の累積額」は
+  返金シーケンス上の「次の返金試行」を一意に識別する。
+- **同一試行のリトライ**（タイムアウト後の再送、または同じ未返金状態をロードした並行呼び出し）
+  は同じ累積額を観測 → **同じキー** → ゲートウェイが 1 回の実返金に集約する。これが二重返金の窓を閉じる。
+- **別個の部分返金**（3000 の返金の後に 2000 の返金）は異なる累積額（0、次に 3000）を観測 →
+  **異なるキー** → 両方が正当にゲートウェイに届く。
+
+キーは要求額に依存させない: 同じ累積額を共有する並行の「2 回目」返金は、定義上シーケンスの
+同じスロットを争っており、たとえ要求額が違っても衝突して**ゲートウェイに dedupe させる**のが
+安全側。異なる額の返金を意図的に 2 回行いたい場合は逐次実行（累積額が変わる）するか、
+明示的に異なる `RefundInput.IdempotencyKey` を渡す。
+
+### 6.3.3 トランザクション境界とゲートウェイ呼び出しの配置
+
+`ProcessPayment` と同じ方針: **ゲートウェイ呼び出しは tx の外（前）**で行い、ローカル記帳
+（re-load → `RecordRefund` → `Save`）を `tx.Run` の中で行う。理由:
+
+- 返金は補償できない（Charge と違い巻き戻せない）。遅く失敗しやすいゲートウェイ呼び出しを跨いで
+  DB トランザクションを開いたままにしてロールバックすると、「お金は動いたのにローカル記録がなく
+  反転もできない」状態になる。ゲートウェイを tx の外に置くことで、tx が扱うのは可逆なローカル
+  記帳だけになる。
+- 並行・リトライ時の安全性は上記の決定的キーが担保する（`ProcessPayment` が Charge の冪等
+  リプレイに依存するのと同じ）。
+
+ローカル記帳は `tx.Run` 内で **payment を tx スコープのリポジトリから re-load** してから
+`RecordRefund`（内部で `ValidateRefund` を再実行）する。したがって payment
+[`payment.Repository`] の並行制御契約（行ロック / `SELECT ... FOR UPDATE` / SERIALIZABLE）を
+満たすバックエンドでは、並行する 2 回目の返金は勝者が記録済みの状態を観測し、`RecordRefund` が
+ドメインエラー（`invalid_state_transition` / over-refund）で拒否する。ゲートウェイは 1 つの
+キーで 2 呼び出しを dedupe しているのでお金は二重に動かない。無条件 last-writer-wins の
+アダプタではローカルガードは弱まるが、ゲートウェイキーが二重返金を防ぐため、最悪ケースは
+冗長なローカル書き込みであってお金の喪失ではない。
+
+> **注**: `Payment` は楽観ロックの version を持たない（PR #164 の version bump は Invoice /
+> CreditNote のみ）。Refund の並行保証は `FinalizeInvoice` と同じく **Repository の並行制御契約**に
+> 依存する。in-memory の並行テストは行ロックを `serializingTxManager` で、per-tx スナップショット
+> 分離を `isolatingPaymentRepo` でモデル化している。
+
+敗者のエラーは**ドメインエラーとして清潔に返す**（`recordRejected` フラグで判別）。
+決定的キーによりゲートウェイが 1 回の実返金に集約しているため、これは手動突合イベントではない。
+真の永続化失敗（ゲートウェイ返金後に DB がダウン等）のみ MANUAL RECONCILIATION として
+Error ログを出す。
+
+`OnRefund` フックは従来どおり永続化成功後に発火する（非致命）。
+
+### 6.3.4 検証
+
+`tests/integration/refund_idempotency_test.go`:
+- `TestRefund_RetryAfterGatewayTimeout_ReusesIdempotencyKey` — タイムアウト後のリトライが
+  同じキーを再送し、実返金が 1 回に収束する
+- `TestRefund_ConcurrentRefunds_SingleRealRefund` — 並行 2 呼び出しで実返金 1 回、勝者成功・
+  敗者はドメインエラー（`-race`）
+- `TestRefund_SequentialPartialRefunds_UseDistinctKeys` — 逐次の部分返金 2 回が異なるキーを使う
+- `TestRefund_ExplicitIdempotencyKey_IsHonored` — 明示キーがゲートウェイへそのまま伝播する
+
+---
+
 ## 7. ディレクトリ構成（決済追加後）
 
 ```
