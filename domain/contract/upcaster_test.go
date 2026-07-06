@@ -426,6 +426,129 @@ func mustDateRange(t *testing.T, start, end time.Time) shared.DateRange {
 	return r
 }
 
+func TestTrialEndedEventUpcaster_CanUpcast(t *testing.T) {
+	u := &TrialEndedEventUpcaster{}
+
+	if !u.CanUpcast(EventTypeTrialEnded, 1) {
+		t.Error("expected CanUpcast=true for TrialEnded v1")
+	}
+	if u.CanUpcast(EventTypeTrialEnded, 2) {
+		t.Error("expected CanUpcast=false for TrialEnded v2")
+	}
+	if u.CanUpcast(EventTypeContractCancelled, 1) {
+		t.Error("expected CanUpcast=false for ContractCancelled")
+	}
+}
+
+func TestTrialEndedEventUpcaster_BumpsSchemaVersion(t *testing.T) {
+	u := &TrialEndedEventUpcaster{}
+
+	// Legacy v1 payload: converted trial with no current_period field.
+	legacy := map[string]interface{}{
+		"contract_id": "test-contract-001",
+		"ended_at":    time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+		"converted":   true,
+	}
+	data, _ := json.Marshal(legacy)
+	event := eventstore.Event{Type: EventTypeTrialEnded, SchemaVersion: 1, Data: data}
+
+	result, err := u.Upcast(event)
+	if err != nil {
+		t.Fatalf("Upcast failed: %v", err)
+	}
+	if result.SchemaVersion != 2 {
+		t.Errorf("expected SchemaVersion=2, got %d", result.SchemaVersion)
+	}
+
+	// The legacy payload still deserializes; current_period is the zero value,
+	// which Apply recognizes and fills from the interval.
+	domainEvent, err := contractEventRegistry.Deserialize(result.Type, result.Data)
+	if err != nil {
+		t.Fatalf("deserialize failed: %v", err)
+	}
+	ended, ok := domainEvent.(*TrialEndedEvent)
+	if !ok {
+		t.Fatalf("expected *TrialEndedEvent, got %T", domainEvent)
+	}
+	if !ended.Converted {
+		t.Error("expected converted=true preserved")
+	}
+	if !ended.CurrentPeriod.IsZero() {
+		t.Error("expected legacy current_period to be zero (filled at Apply)")
+	}
+}
+
+// TestLoadFromHistory_UpcastsLegacyTrialEndedConverted verifies issue #146's
+// replay semantics: a historical converted TrialEndedEvent with no
+// current_period replays into an Active contract with a non-zero billing period,
+// derived deterministically from the interval anchored at EndedAt.
+func TestLoadFromHistory_UpcastsLegacyTrialEndedConverted(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	trialEnd := now.AddDate(0, 0, 14) // 2026-01-15
+
+	createData, _ := json.Marshal(&ContractCreatedEvent{
+		ContractID:   shared.ContractID("test-contract-001"),
+		AccountID:    shared.AccountID("acc-001"),
+		PriceID:      shared.PriceID("price-001"),
+		Price:        shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY),
+		BasePrice:    shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY),
+		Interval:     pricing.Monthly(),
+		ContractType: ContractTypeSubscription,
+		CreatedAt:    now,
+	})
+
+	trialStartData, _ := json.Marshal(&TrialStartedEvent{
+		ContractID:  shared.ContractID("test-contract-001"),
+		TrialConfig: TrialConfiguration{TrialEndDate: trialEnd, AutoConvert: true},
+		StartedAt:   now,
+	})
+
+	// Legacy v1 TrialEndedEvent: converted, but WITHOUT current_period.
+	legacyTrialEnded := map[string]interface{}{
+		"contract_id": "test-contract-001",
+		"ended_at":    trialEnd,
+		"converted":   true,
+	}
+	trialEndData, _ := json.Marshal(legacyTrialEnded)
+
+	events := []eventstore.Event{
+		{Type: EventTypeContractCreated, SchemaVersion: 1, Data: createData},
+		{Type: EventTypeTrialStarted, SchemaVersion: 1, Data: trialStartData},
+		{Type: EventTypeTrialEnded, SchemaVersion: 1, Data: trialEndData},
+	}
+
+	agg := NewContractAggregate(shared.ContractID("test-contract-001"), newTestClock())
+	if err := agg.LoadFromHistory(events); err != nil {
+		t.Fatalf("LoadFromHistory with legacy TrialEndedEvent failed: %v", err)
+	}
+
+	if agg.Status() != ContractStatusActive {
+		t.Errorf("expected active after legacy replay, got %s", agg.Status())
+	}
+	if agg.TrialConfig() != nil {
+		t.Error("expected trialConfig cleared after trial end")
+	}
+	if agg.CurrentPeriod().IsZero() {
+		t.Fatal("expected non-zero derived billing period for legacy converted trial")
+	}
+	// Derived deterministically: [EndedAt, EndedAt + 1 month).
+	if !agg.CurrentPeriod().Start().Equal(trialEnd) {
+		t.Errorf("expected derived period start %s, got %s", trialEnd, agg.CurrentPeriod().Start())
+	}
+	if !agg.CurrentPeriod().End().Equal(trialEnd.AddDate(0, 1, 0)) {
+		t.Errorf("expected derived period end %s, got %s", trialEnd.AddDate(0, 1, 0), agg.CurrentPeriod().End())
+	}
+
+	// Replay must be deterministic: a second replay yields the same period.
+	agg2 := NewContractAggregate(shared.ContractID("test-contract-001"), newTestClock())
+	if err := agg2.LoadFromHistory(events); err != nil {
+		t.Fatalf("second LoadFromHistory failed: %v", err)
+	}
+	if !agg2.CurrentPeriod().Equals(agg.CurrentPeriod()) {
+		t.Errorf("replay not deterministic: %s vs %s", agg.CurrentPeriod(), agg2.CurrentPeriod())
+	}
+}
+
 func TestUpcasterChain_SkipsNonPriceEvents(t *testing.T) {
 	chain := NewContractUpcasterChain()
 

@@ -579,9 +579,10 @@ func (e TrialStartedEvent) EventType() eventstore.EventType { return EventTypeTr
 
 // TrialEndedEvent トライアル終了イベント
 type TrialEndedEvent struct {
-    ContractID shared.ContractID `json:"contract_id"`
-    EndedAt    time.Time `json:"ended_at"`
-    Converted  bool      `json:"converted"` // 本契約に移行したか
+    ContractID    shared.ContractID `json:"contract_id"`
+    EndedAt       time.Time         `json:"ended_at"`
+    Converted     bool              `json:"converted"`      // 本契約に移行したか
+    CurrentPeriod shared.DateRange  `json:"current_period"` // 転換時の初期課金期間（SchemaVersion 2 で追加、issue #146）
 }
 
 func (e TrialEndedEvent) EventType() eventstore.EventType { return EventTypeTrialEnded }
@@ -1066,3 +1067,24 @@ func (c *UpcasterChain) Upcast(event Event) (Event, error) {
     return current, nil
 }
 ```
+
+### 10.3 契約イベントの登録済み Upcaster
+
+`domain/contract/upcaster.go` の `NewContractUpcasterChain()` が以下を登録する。
+すべて冪等で SchemaVersion を 2 に上げる（`RaiseEvent` は常に SchemaVersion=1 で書くため、
+新旧いずれのイベントもチェーンを通る）。
+
+| Upcaster | 対象イベント | 変換内容 |
+|----------|------------|---------|
+| `PriceChangedEventUpcaster` | `contract.price_changed` | Money ベース v1 → PriceID ベース v2（`policy` / `*_price_id` を補完） |
+| `ContractCreatedEventUpcaster` | `contract.created` | 旧 `billing_cycle` → `interval` |
+| `ContractRenewedEventUpcaster` | `contract.renewed` | 旧 `old/new_billing_cycle` → `old/new_interval` |
+| `TrialEndedEventUpcaster` | `contract.trial_ended` | v1 → v2（`current_period` 追加、issue #146）。SchemaVersion を上げるのみ |
+
+**`TrialEndedEventUpcaster` の設計上の注意**: 転換時の初期課金期間 `current_period` を
+計算するには `interval` が必要だが、`interval` はこのイベントではなく先行する
+`ContractCreatedEvent` に載っているため、Upcaster（単一イベントの JSON しか見えない）では
+埋められない。したがって Upcaster は SchemaVersion を 2 に上げるだけで、期間の復元は
+集約の `Apply` が担う: `Converted=true` かつ `current_period` がゼロ値なら、リプレイ済みの
+`interval` を `EndedAt` に加算して期間を決定的に導出する。これによりリプレイは決定的で、
+追記専用履歴を書き換えない。

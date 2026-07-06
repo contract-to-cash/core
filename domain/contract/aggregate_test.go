@@ -568,6 +568,104 @@ func TestEndTrialNotConverted(t *testing.T) {
 	}
 }
 
+// TestEndTrialConvertedEstablishesPeriod is a regression test for issue #146:
+// EndTrial(converted=true) must set an initial billing period from the billing
+// interval, matching how Activate establishes it, so the converted contract is
+// not dropped from the renewal/billing cycle.
+func TestEndTrialConvertedEstablishesPeriod(t *testing.T) {
+	agg := newTestAggregate()
+	meta := newTestMetadata()
+
+	_ = agg.Create(newTestCommand(), meta) // Monthly interval
+	_ = agg.StartTrial(TrialConfiguration{
+		TrialEndDate: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+	}, meta)
+
+	if err := agg.EndTrial(true, meta); err != nil {
+		t.Fatalf("EndTrial(converted=true) failed: %v", err)
+	}
+
+	if agg.CurrentPeriod().IsZero() {
+		t.Fatal("expected non-zero billing period after conversion")
+	}
+	// Fixed clock is 2026-01-01; Monthly interval -> period ends 2026-02-01.
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if !agg.CurrentPeriod().Start().Equal(now) {
+		t.Errorf("expected period start %s, got %s", now, agg.CurrentPeriod().Start())
+	}
+	if !agg.CurrentPeriod().End().Equal(now.AddDate(0, 1, 0)) {
+		t.Errorf("expected period end %s, got %s", now.AddDate(0, 1, 0), agg.CurrentPeriod().End())
+	}
+}
+
+// TestEndTrialNotConvertedHasNoPeriod verifies a cancelled (non-converted) trial
+// leaves the billing period unset — there is nothing to bill.
+func TestEndTrialNotConvertedHasNoPeriod(t *testing.T) {
+	agg := newTestAggregate()
+	meta := newTestMetadata()
+
+	_ = agg.Create(newTestCommand(), meta)
+	_ = agg.StartTrial(TrialConfiguration{
+		TrialEndDate: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+	}, meta)
+
+	if err := agg.EndTrial(false, meta); err != nil {
+		t.Fatalf("EndTrial(converted=false) failed: %v", err)
+	}
+	if !agg.CurrentPeriod().IsZero() {
+		t.Errorf("expected zero billing period for cancelled trial, got %s", agg.CurrentPeriod())
+	}
+}
+
+// TestActivateFromTrialingCoherentWithEndTrial verifies issue #146's "other
+// half": activating a trialing contract via Activate is coherent with the
+// batch EndTrial path — it establishes the billing period, clears trialConfig,
+// and records a TrialEndedEvent (converted=true) rather than a
+// ContractActivatedEvent.
+func TestActivateFromTrialingCoherentWithEndTrial(t *testing.T) {
+	agg := newTestAggregate()
+	meta := newTestMetadata()
+
+	_ = agg.Create(newTestCommand(), meta)
+	_ = agg.StartTrial(TrialConfiguration{
+		TrialEndDate: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+	}, meta)
+
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate from trialing failed: %v", err)
+	}
+
+	if agg.Status() != ContractStatusActive {
+		t.Errorf("expected active, got %s", agg.Status())
+	}
+	if agg.CurrentPeriod().IsZero() {
+		t.Error("expected non-zero billing period after activation from trialing")
+	}
+	if agg.TrialConfig() != nil {
+		t.Error("expected trialConfig to be cleared after activation from trialing")
+	}
+
+	// The conversion must be recorded as a TrialEndedEvent, matching the batch
+	// path, so both conversion routes replay and fire hooks identically.
+	events := agg.UncommittedEvents()
+	last := events[len(events)-1]
+	if last.Type != EventTypeTrialEnded {
+		t.Errorf("expected last event %s, got %s", EventTypeTrialEnded, last.Type)
+	}
+
+	// The resulting state must equal the state produced by EndTrial(true).
+	viaEndTrial := newTestAggregate()
+	_ = viaEndTrial.Create(newTestCommand(), meta)
+	_ = viaEndTrial.StartTrial(TrialConfiguration{
+		TrialEndDate: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+	}, meta)
+	_ = viaEndTrial.EndTrial(true, meta)
+	if !agg.CurrentPeriod().Equals(viaEndTrial.CurrentPeriod()) {
+		t.Errorf("Activate and EndTrial produced different periods: %s vs %s",
+			agg.CurrentPeriod(), viaEndTrial.CurrentPeriod())
+	}
+}
+
 func TestChangePaymentMethod(t *testing.T) {
 	agg := createActiveAggregate(t)
 	meta := newTestMetadata()

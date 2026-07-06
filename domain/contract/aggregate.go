@@ -184,10 +184,20 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 }
 
 // Activate activates a contract.
+//
+// From Trialing, activation is a trial conversion: it is routed through
+// EndTrial(converted=true) so that both conversion paths — the batch
+// TrialExpirationProcessor and an integrator calling Activate directly — produce
+// identical state (status Active, initial billing period established,
+// trialConfig cleared) and record the same TrialEndedEvent (issue #146).
 func (a *ContractAggregate) Activate(metadata eventstore.EventMetadata) error {
 	if a.status != ContractStatusDraft && a.status != ContractStatusTrialing {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot activate contract: current status is %s", a.status))
+	}
+
+	if a.status == ContractStatusTrialing {
+		return a.EndTrial(true, metadata)
 	}
 
 	now := a.Clock().Now()
@@ -434,16 +444,31 @@ func (a *ContractAggregate) StartTrial(config TrialConfiguration, metadata event
 }
 
 // EndTrial ends a trial period.
+//
+// When converted=true the contract becomes Active and an initial billing period
+// is established from the billing interval anchored at the end time — the same
+// way Activate establishes it — so the converted contract participates in the
+// renewal/billing cycle (issue #146). When converted=false the contract is
+// cancelled and no period is set.
 func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMetadata) error {
 	if a.status != ContractStatusTrialing {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot end trial: current status is %s", a.status))
 	}
 
+	now := a.Clock().Now()
 	event := &TrialEndedEvent{
 		ContractID: a.contractID,
-		EndedAt:    a.Clock().Now(),
+		EndedAt:    now,
 		Converted:  converted,
+	}
+	if converted {
+		// Establish the initial billing period, mirroring Activate.
+		period, err := shared.NewDateRange(now, a.interval.AddTo(now))
+		if err != nil {
+			return err
+		}
+		event.CurrentPeriod = period
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -632,6 +657,22 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.trialConfig = nil
 		if e.Converted {
 			a.status = ContractStatusActive
+			period := e.CurrentPeriod
+			if period.IsZero() {
+				// Legacy TrialEndedEvent (schema v1) carried no current_period.
+				// Derive it deterministically from the billing interval —
+				// recovered from the earlier ContractCreatedEvent in this same
+				// replay — anchored at EndedAt, mirroring how Activate
+				// establishes the initial period. This keeps replay
+				// deterministic and prevents converted trials from silently
+				// falling out of the renewal/billing cycle (issue #146).
+				derived, err := shared.NewDateRange(e.EndedAt, a.interval.AddTo(e.EndedAt))
+				if err != nil {
+					return err
+				}
+				period = derived
+			}
+			a.currentPeriod = period
 		} else {
 			a.status = ContractStatusCancelled
 		}

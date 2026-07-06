@@ -231,6 +231,53 @@ func TestInMemoryContractRepository_FindDueForRenewal(t *testing.T) {
 	}
 }
 
+// TestInMemoryContractRepository_ConvertedTrialDueForRenewal is a regression
+// test for issue #146: a trial converted via EndTrial(true) must have a billing
+// period and therefore appear in FindDueForRenewal. Previously the converted
+// contract was Active with a zero-value period and silently fell out of the
+// renewal/billing cycle.
+func TestInMemoryContractRepository_ConvertedTrialDueForRenewal(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	store := NewInMemoryEventStore(clock)
+	repo := NewInMemoryContractRepository(store, clock)
+	ctx := context.Background()
+
+	accountID := shared.NewAccountID()
+	metadata := eventstore.EventMetadata{UserID: "test-user"}
+
+	agg := newTestContractAggregate(t, clock, accountID)
+	if err := agg.StartTrial(contract.TrialConfiguration{
+		TrialEndDate: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+		AutoConvert:  true,
+	}, metadata); err != nil {
+		t.Fatalf("StartTrial failed: %v", err)
+	}
+	// Convert the trial. EndTrial establishes the initial billing period from
+	// the (monthly) interval anchored at the current clock time (Jan 1).
+	if err := agg.EndTrial(true, metadata); err != nil {
+		t.Fatalf("EndTrial(converted=true) failed: %v", err)
+	}
+	if agg.Status() != contract.ContractStatusActive {
+		t.Fatalf("expected active after conversion, got %s", agg.Status())
+	}
+	if agg.CurrentPeriod().IsZero() {
+		t.Fatal("expected converted contract to have a non-zero billing period")
+	}
+	if err := repo.Save(ctx, agg); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// The monthly period runs Jan 1 -> Feb 1, so a Feb 1 query must find it.
+	asOf := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	results, err := repo.FindDueForRenewal(ctx, asOf)
+	if err != nil {
+		t.Fatalf("FindDueForRenewal failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected converted trial to be due for renewal, got %d contracts", len(results))
+	}
+}
+
 func TestInMemoryContractRepository_FindByIDAsOf(t *testing.T) {
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	store := NewInMemoryEventStore(clock)
