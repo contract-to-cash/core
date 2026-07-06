@@ -243,22 +243,63 @@ func (s *CreditNoteService) CreateCreditNote(
 	return cn, nil
 }
 
-// IssueCreditNote transitions a credit note from draft to issued and fires hooks.
-func (s *CreditNoteService) IssueCreditNote(ctx context.Context, creditNoteID shared.CreditNoteID) (*invoice.CreditNote, error) {
-	cn, err := s.creditNoteRepo.FindByID(ctx, creditNoteID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find credit note: %w", err)
-	}
+// creditNoteMaxRetries bounds how many times the credit-note transition methods
+// re-run their transaction closure on an optimistic-lock conflict (issue #151),
+// mirroring finalizeMaxRetries in BillingService.FinalizeInvoice.
+const creditNoteMaxRetries = 3
 
-	if err := cn.Issue(s.clock.Now()); err != nil {
+// txScopedCreditNoteRepo returns the transaction-scoped credit note repository,
+// falling back to the field repo when the caller wired an incomplete tx.Repos
+// set (mirrors CreateCreditNote / tx.Run's fill-from-fallback for joined
+// transactions).
+func (s *CreditNoteService) txScopedCreditNoteRepo(repos tx.Repos) invoice.CreditNoteRepository {
+	if repos.CreditNotes != nil {
+		return repos.CreditNotes
+	}
+	return s.creditNoteRepo
+}
+
+// IssueCreditNote transitions a credit note from draft to issued and fires hooks.
+//
+// Load → state check → transition → save run inside a single transaction and are
+// retried on an optimistic-lock conflict, following the FinalizeInvoice pattern
+// (issue #151). The credit note is loaded through the transaction-scoped
+// repository so the check-then-act is not split across the tx boundary: a
+// concurrent transition on the same note is either serialized (row lock) or its
+// Save is rejected with tx.ErrVersionConflict (issue #147 version machinery), in
+// which case RetryOnConflict re-reads the now-issued note and Issue rejects the
+// retry with invalid_state_transition. This guarantees OnCreditNoteIssued fires
+// exactly once per note, so downstream ledger postings are not double-applied.
+func (s *CreditNoteService) IssueCreditNote(ctx context.Context, creditNoteID shared.CreditNoteID) (*invoice.CreditNote, error) {
+	var cn *invoice.CreditNote
+	err := tx.RetryOnConflict(creditNoteMaxRetries, func() error {
+		var issued *invoice.CreditNote
+		runErr := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+			repo := s.txScopedCreditNoteRepo(repos)
+			loaded, findErr := repo.FindByID(txCtx, creditNoteID)
+			if findErr != nil {
+				return fmt.Errorf("failed to find credit note: %w", findErr)
+			}
+			if issueErr := loaded.Issue(s.clock.Now()); issueErr != nil {
+				return issueErr
+			}
+			if saveErr := repo.Save(txCtx, loaded); saveErr != nil {
+				return saveErr
+			}
+			issued = loaded
+			return nil
+		})
+		if runErr != nil {
+			return runErr
+		}
+		cn = issued
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 
-	if err := s.creditNoteRepo.Save(ctx, cn); err != nil {
-		return nil, fmt.Errorf("failed to save credit note: %w", err)
-	}
-
-	// Post-save hooks (non-fatal, outside transaction)
+	// Post-commit hooks (non-fatal, outside transaction)
 	pluginCtx := plugin.NewContext(ctx)
 	for _, hook := range s.registry.GetOnCreditNoteIssuedHooks() {
 		if hookErr := hook.OnCreditNoteIssued(pluginCtx, cn); hookErr != nil {
@@ -273,38 +314,77 @@ func (s *CreditNoteService) IssueCreditNote(ctx context.Context, creditNoteID sh
 }
 
 // ApplyCreditNote transitions a credit note from issued to applied (account credit).
+//
+// Load → state check → transition → save run inside a single transaction and are
+// retried on an optimistic-lock conflict (issue #151), so a concurrent Apply-vs-
+// Refund on the same issued note cannot both persist: the loser's Save is
+// rejected with tx.ErrVersionConflict, RetryOnConflict re-reads the now-applied
+// note, and Apply rejects the retry with invalid_state_transition.
 func (s *CreditNoteService) ApplyCreditNote(ctx context.Context, creditNoteID shared.CreditNoteID, creditAmount shared.Money) (*invoice.CreditNote, error) {
-	cn, err := s.creditNoteRepo.FindByID(ctx, creditNoteID)
+	var cn *invoice.CreditNote
+	err := tx.RetryOnConflict(creditNoteMaxRetries, func() error {
+		var applied *invoice.CreditNote
+		runErr := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+			repo := s.txScopedCreditNoteRepo(repos)
+			loaded, findErr := repo.FindByID(txCtx, creditNoteID)
+			if findErr != nil {
+				return fmt.Errorf("failed to find credit note: %w", findErr)
+			}
+			if applyErr := loaded.Apply(creditAmount); applyErr != nil {
+				return applyErr
+			}
+			if saveErr := repo.Save(txCtx, loaded); saveErr != nil {
+				return saveErr
+			}
+			applied = loaded
+			return nil
+		})
+		if runErr != nil {
+			return runErr
+		}
+		cn = applied
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to find credit note: %w", err)
-	}
-
-	if err := cn.Apply(creditAmount); err != nil {
 		return nil, err
 	}
-
-	if err := s.creditNoteRepo.Save(ctx, cn); err != nil {
-		return nil, fmt.Errorf("failed to save credit note: %w", err)
-	}
-
 	return cn, nil
 }
 
 // RefundCreditNote transitions a credit note from issued to refunded (payment refund).
+//
+// Load → state check → transition → save run inside a single transaction and are
+// retried on an optimistic-lock conflict (issue #151), mirroring ApplyCreditNote:
+// the loser of a concurrent Apply-vs-Refund is rejected with a clean domain error
+// rather than double-persisting.
 func (s *CreditNoteService) RefundCreditNote(ctx context.Context, creditNoteID shared.CreditNoteID, refundAmount shared.Money) (*invoice.CreditNote, error) {
-	cn, err := s.creditNoteRepo.FindByID(ctx, creditNoteID)
+	var cn *invoice.CreditNote
+	err := tx.RetryOnConflict(creditNoteMaxRetries, func() error {
+		var refunded *invoice.CreditNote
+		runErr := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+			repo := s.txScopedCreditNoteRepo(repos)
+			loaded, findErr := repo.FindByID(txCtx, creditNoteID)
+			if findErr != nil {
+				return fmt.Errorf("failed to find credit note: %w", findErr)
+			}
+			if refundErr := loaded.Refund(refundAmount); refundErr != nil {
+				return refundErr
+			}
+			if saveErr := repo.Save(txCtx, loaded); saveErr != nil {
+				return saveErr
+			}
+			refunded = loaded
+			return nil
+		})
+		if runErr != nil {
+			return runErr
+		}
+		cn = refunded
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to find credit note: %w", err)
-	}
-
-	if err := cn.Refund(refundAmount); err != nil {
 		return nil, err
 	}
-
-	if err := s.creditNoteRepo.Save(ctx, cn); err != nil {
-		return nil, fmt.Errorf("failed to save credit note: %w", err)
-	}
-
 	return cn, nil
 }
 
@@ -319,34 +399,51 @@ func (s *CreditNoteService) ReissueInvoice(ctx context.Context, originalInvoiceI
 		return nil, fmt.Errorf("billing service not configured: cannot reissue invoice")
 	}
 
-	original, err := s.invoiceRepo.FindByID(ctx, originalInvoiceID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find invoice: %w", err)
-	}
-
-	// Determine the root of the revision chain before entering transaction.
-	// If the original already has an originalInvoiceID (it's itself a revision),
-	// propagate that root. Otherwise, the original IS the root.
-	rootID := originalInvoiceID
-	if original.OriginalInvoiceID() != nil {
-		rootID = *original.OriginalInvoiceID()
-	}
-
 	// All writes are atomic within a SINGLE transaction. tx.Run stamps the
 	// transaction onto the context, and the inner
 	// BillingService.GenerateInvoice (also via tx.Run) detects and JOINS it
 	// rather than opening an independent nested transaction — so the void of the
 	// original and the creation of the replacement commit or roll back together
 	// even on real DB implementations (review #4).
-	var replacement *invoice.Invoice
-	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+	//
+	// The original invoice is loaded INSIDE the transaction through the
+	// transaction-scoped repository (issue #151), mirroring CreateCreditNote. On
+	// a backend honouring the invoice concurrency contract this serializes with a
+	// concurrent payment: if the invoice was paid between an out-of-tx read and
+	// the transaction, VoidWithReason acts on the current (paid) state and either
+	// rejects the void or the Save version-checks, instead of a stale copy
+	// silently overwriting a paid invoice with voided.
+	var (
+		original    *invoice.Invoice
+		replacement *invoice.Invoice
+	)
+	err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		invoiceRepo := repos.Invoices
+		if invoiceRepo == nil {
+			invoiceRepo = s.invoiceRepo
+		}
+
+		loaded, findErr := invoiceRepo.FindByID(txCtx, originalInvoiceID)
+		if findErr != nil {
+			return fmt.Errorf("failed to find invoice: %w", findErr)
+		}
+		original = loaded
+
+		// Determine the root of the revision chain. If the original already has
+		// an originalInvoiceID (it's itself a revision), propagate that root.
+		// Otherwise, the original IS the root.
+		rootID := originalInvoiceID
+		if original.OriginalInvoiceID() != nil {
+			rootID = *original.OriginalInvoiceID()
+		}
+
 		// Void the original inside the transaction so in-memory state
 		// is only mutated when the transaction will persist it.
 		if voidErr := original.VoidWithReason(reason); voidErr != nil {
 			return fmt.Errorf("failed to void original invoice: %w", voidErr)
 		}
 
-		if saveErr := repos.Invoices.Save(txCtx, original); saveErr != nil {
+		if saveErr := invoiceRepo.Save(txCtx, original); saveErr != nil {
 			return fmt.Errorf("failed to save voided invoice: %w", saveErr)
 		}
 
@@ -361,7 +458,7 @@ func (s *CreditNoteService) ReissueInvoice(ctx context.Context, originalInvoiceI
 		replacement.SetRevisionOf(originalInvoiceID)
 		replacement.SetOriginalInvoiceID(rootID)
 
-		if saveErr := repos.Invoices.Save(txCtx, replacement); saveErr != nil {
+		if saveErr := invoiceRepo.Save(txCtx, replacement); saveErr != nil {
 			return fmt.Errorf("failed to save linked replacement invoice: %w", saveErr)
 		}
 

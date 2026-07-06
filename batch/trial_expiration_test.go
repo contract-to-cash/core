@@ -30,7 +30,14 @@ func (m *mockTrialRepo) Save(_ context.Context, agg *contract.ContractAggregate)
 	return nil
 }
 
-func (m *mockTrialRepo) FindByID(_ context.Context, _ shared.ContractID) (*contract.ContractAggregate, error) {
+func (m *mockTrialRepo) FindByID(_ context.Context, id shared.ContractID) (*contract.ContractAggregate, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, agg := range m.contracts {
+		if agg.ContractID() == id {
+			return agg, nil
+		}
+	}
 	return nil, nil
 }
 
