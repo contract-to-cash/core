@@ -76,7 +76,8 @@ type CalculationContext struct {
     ctx                   context.Context
     contract              *contract.ContractAggregate
     invoice               *invoice.Invoice
-    subtotal              shared.Money           // 基本料金
+    productID             shared.ProductID       // 課金対象の Product ID（クーポン適用判定等に使用）
+    subtotal              shared.Money           // 基本料金（BeforeCalculation中はゼロ、後述）
     subtotalAfterDiscount shared.Money           // 割引後小計（TaxHookが参照）
     appliedDiscounts      []AppliedDiscount      // 適用された割引の記録
 }
@@ -103,9 +104,13 @@ func (c *CalculationContext) ContractID() shared.ContractID              {
     if c.contract == nil { return "" }
     return c.contract.ContractID()
 }
+func (c *CalculationContext) ProductID() shared.ProductID                { return c.productID }
 func (c *CalculationContext) Subtotal() shared.Money                     { return c.subtotal }
 func (c *CalculationContext) SubtotalAfterDiscount() shared.Money        { return c.subtotalAfterDiscount }
 func (c *CalculationContext) AppliedDiscounts() []AppliedDiscount        { /* コピーを返す */ }
+
+// SetProductID コアが基本料金算出前に Price から解決して設定する
+func (c *CalculationContext) SetProductID(id shared.ProductID) { c.productID = id }
 
 // SetSubtotal コアが基本料金算出後に設定する
 func (c *CalculationContext) SetSubtotal(s shared.Money) { c.subtotal = s }
@@ -122,6 +127,18 @@ func (c *CalculationContext) RecordDiscount(d AppliedDiscount) {
 func (c *CalculationContext) SetInvoice(inv *invoice.Invoice) { c.invoice = inv }
 func (c *CalculationContext) Invoice() *invoice.Invoice       { return c.invoice }
 ```
+
+> **⚠️ `BeforeCalculation` 中の `Subtotal()` はゼロ**: コアの請求パイプライン
+> (`BillingService.executeBillingPipeline`) は `CalculationContext` を
+> **subtotal=Zero** で生成し、`InvoiceLifecycleHook.BeforeCalculation` を発火した**後**に
+> `SetSubtotal(基本料金)` を呼ぶ。したがって:
+> - `BeforeCalculation` の中で `ctx.Subtotal()` を読むと **ゼロ**が返る（基本料金はまだ未設定）。
+> - `DiscountHook.CalculateDiscount` の時点では `ctx.Subtotal()` は基本料金を返す。
+> - `TaxHook.CalculateTax` の時点では `ctx.SubtotalAfterDiscount()` が割引後小計を返す。
+> - `ProductID()` は基本料金算出前（BeforeCalculation より前）に Price から解決されるため、
+>   `BeforeCalculation` でも参照できる。
+>
+> 基本料金に依存する前処理は `BeforeCalculation` ではなく `DiscountHook` 以降で行うこと。
 
 ### 2.3 汎用コンテキスト（非計算フック用）
 
@@ -622,18 +639,30 @@ Priority値に依存しないため、プラグイン登録順のミスで会計
 
 ```
 1. InvoiceLifecycleHook.BeforeCalculation()  ← 計算前処理
-2. 料金計算（コア、契約タイプに応じて分岐）
-3. DiscountHook.CalculateDiscount()          ← 割引計算（全DiscountHook）
+                                                ⚠️ この時点で ctx.Subtotal() は ZERO
+                                                   （ctx.ProductID() は参照可能）
+2. 基本料金をコンテキストへ設定（コア、契約タイプに応じて分岐）
+   → 以降 ctx.Subtotal() は基本料金を返す
+3. DiscountHook.CalculateDiscount()          ← 割引計算（全DiscountHook、ctx.Subtotal()=基本料金）
    → 割引上限ガード（割引合計 > subtotalの場合にcap）
-4. 小計算出（コア: subtotal - totalDiscount）
-5. TaxHook.CalculateTax()                    ← 税計算（割引後に対して）
+4. 小計算出（コア: subtotal - totalDiscount）→ ctx.SetSubtotalAfterDiscount()
+5. TaxHook.CalculateTax()                    ← 税計算（ctx.SubtotalAfterDiscount()に対して）
 6. 合計算出（コア: afterDiscount + totalTax）
-7. クレジット台帳からの充当（コア）          ← 残高があれば税込合計から差引
-8. 請求書をdraft状態で生成 → GracePeriod後にfinalize
-9. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理
+7. クレジット台帳からの充当（コア、FIFO）    ← 残高があれば税込合計から差引（tx内）
+8. 請求書をdraft状態で生成（コア、tx内）→ GracePeriod後に FinalizeInvoice で確定
+9. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理（**保存(Save)より前**に発火、tx内）
+10. 保存（コア、tx内）
 ```
 
-> **注**: このフロー順序は `architecture.md` セクション6.3 と同一。
+> **注**: このフロー順序は `architecture.md` セクション6.3 および `design-decisions.md`
+> セクション6.1 と同一。実コードは `application/service/billing_service.go` の
+> `executeBillingPipeline`（正準はソース）。
+>
+> **プラグイン可観測性の要点**:
+> - `BeforeCalculation` 中の `ctx.Subtotal()` は **ゼロ**（基本料金は手順2でコンテキストへ設定される）。
+> - `AfterCalculation` は請求書生成の**後・保存の前**に発火する（プラグインが受け取る請求書は
+>   まだ永続化されていない）。永続化済みを前提とする処理は `OnInvoiceIssuedHook`
+>   （`FinalizeInvoice` の保存後に発火）で行うこと。
 
 ### 5.2 Priority の役割（同一フック内の順序制御）
 
@@ -795,8 +824,10 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
             break
         }
 
-        discount := coupon.CalculateDiscount(subtotal)
-        var err error
+        discount, err := coupon.CalculateDiscount(subtotal)
+        if err != nil {
+            return shared.Money{}, fmt.Errorf("coupon discount calculation failed: %w", err)
+        }
         totalDiscount, err = totalDiscount.Add(discount)
         if err != nil {
             return shared.Money{}, fmt.Errorf("coupon discount accumulation failed: %w", err)
@@ -821,8 +852,10 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 package coupon
 
 import (
+    "math/big"
     "time"
-    
+
+    "github.com/contract-to-cash/core/domain/contract"
     "github.com/contract-to-cash/core/domain/shared"
 )
 
@@ -835,79 +868,100 @@ const (
     CouponTypeFixed      CouponType = "fixed"      // 固定額割引
 )
 
+// CodeType 共有プロモコードと1回限りのユニークコードを区別する
+type CodeType string
+
+const (
+    CodeTypeShared CodeType = "shared" // 複数アカウントが利用可能なプロモコード
+    CodeTypeUnique CodeType = "unique" // 特定の引換に割り当てられた1回限りコード
+)
+
 type Coupon struct {
-    id            CouponID
-    code          string
-    couponType    CouponType
-    value         *big.Rat         // 割合 or 固定額
-    currency      shared.Currency  // 固定額の場合の通貨
-    minAmount     *shared.Money    // 最低購入額
-    maxDiscount   *shared.Money    // 最大割引額
-    validFrom     time.Time
-    validUntil    time.Time
-    usageLimit    *int             // 使用回数制限
-    usedCount     int
-    applicableTo  []string         // 適用可能なプランID（空なら全て）
+    id                      CouponID
+    code                    string
+    codeType                CodeType
+    couponType              CouponType
+    value                   *big.Rat                // 割合(例 10/100) or 固定額
+    currency                shared.Currency         // 固定額の場合の通貨
+    minAmount               *shared.Money           // 最低購入額（nil=なし）
+    maxDiscount             *shared.Money           // 最大割引額（nil=上限なし）
+    validFrom               time.Time
+    validUntil              time.Time
+    usageLimit              *int                    // グローバル使用回数制限
+    usedCount               int
+    perAccountUsageLimit    *int                    // アカウントごとの使用回数上限（nil=無制限）
+    applicableTo            []shared.ProductID      // 適用可能な Product ID（空なら全 Product）
+    applicableContractTypes []contract.ContractType // 適用可能な契約タイプ（空なら全タイプ）
+    allowedAccountIDs       []shared.AccountID      // 許可リスト（空なら制限なし）
+    blockedAccountIDs       []shared.AccountID      // 拒否リスト
 }
 
-func (c *Coupon) Code() string {
-    return c.code
-}
+// 主要メソッド（抜粋。フィールドは非公開、getter/判定メソッド経由でアクセスする）:
+//   Code() / CodeType() / CouponType() / Value() / ValidFrom() / ValidUntil()
+//   MinAmount() / MaxDiscount() / UsageLimit() / UsedCount() / PerAccountUsageLimit()
+//   ApplicableTo() []shared.ProductID
+//   IsValid(at time.Time) bool
+//   IsApplicableToProduct(productID shared.ProductID) bool
+//   IsApplicableToContractType(ct contract.ContractType) bool
+//   IsAccountAllowed(accountID shared.AccountID) bool
+//   WithCodeType / WithPerAccountUsageLimit / WithAllowedAccountIDs /
+//   WithBlockedAccountIDs / WithApplicableContractTypes（ビルダー）
 
-func (c *Coupon) IsValid(at time.Time) bool {
-    if at.Before(c.validFrom) || at.After(c.validUntil) {
-        return false
-    }
-    if c.usageLimit != nil && c.usedCount >= *c.usageLimit {
-        return false
-    }
-    return true
-}
-
-func (c *Coupon) CalculateDiscount(subtotal shared.Money) shared.Money {
+// CalculateDiscount は (shared.Money, error) を返す。
+// maxDiscount の通貨が割引通貨と一致しない場合、上限を黙って捨てず error を返す（issue #148）。
+func (c *Coupon) CalculateDiscount(subtotal shared.Money) (shared.Money, error) {
     var discount shared.Money
-    
+
     switch c.couponType {
     case CouponTypePercentage:
         discount = subtotal.Multiply(c.value)
     case CouponTypeFixed:
         discount = shared.NewMoney(c.value, c.currency)
+    default:
+        return shared.Zero(subtotal.Currency()), nil
     }
-    
-    // 最大割引額の制限
+
+    // 最大割引額の制限（通貨不一致は error）
     if c.maxDiscount != nil {
-        maxAmt := c.maxDiscount.Amount()
-        if discount.Amount().Cmp(maxAmt) > 0 {
-            discount = *c.maxDiscount
+        capped, err := discount.Min(*c.maxDiscount)
+        if err != nil {
+            return shared.Money{}, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+                "coupon maxDiscount currency does not match discount currency")
         }
+        discount = capped
     }
-    
-    // 小計を超えない
-    if discount.Amount().Cmp(subtotal.Amount()) > 0 {
-        discount = subtotal
-    }
-    
-    return discount
+
+    return discount, nil
 }
 
-// CouponRepository クーポンリポジトリ
+// CouponRepository クーポンリポジトリ（実際のシグネチャは型付き ID を使う）
 type CouponRepository interface {
     FindByCode(ctx context.Context, code string) (*Coupon, error)
-    FindApplicable(ctx context.Context, contractID string, at time.Time) ([]*Coupon, error)
+    FindApplicable(ctx context.Context, contractID shared.ContractID, at time.Time) ([]*Coupon, error)
     Save(ctx context.Context, coupon *Coupon) error
-    RecordUsage(ctx context.Context, couponID CouponID, contractID string) error
+    RecordUsage(ctx context.Context, couponID CouponID, contractID shared.ContractID) error
 }
 ```
 
+> **注**: `CalculateDiscount` は「小計を超えない」clamp を行わない — 割引合計が subtotal を
+> 超えないガードは **コアの請求パイプライン**が担う（§5.1 手順3の割引上限ガード）。
+
 ## 7. 税計算プラグイン実装例
 
+> **📌 現行実装は最小構成（無条件10%）**: 公式 `plugins/tax` の `TaxCalculator` は
+> **請求先住所を受け取らず**、`JapaneseTaxCalculator` は管轄に関わらず一律10%を返す。
+> これは意図的な最小実装であり、**管轄別（JP/国外、軽減税率等）の税率判定は利用者が
+> `TaxCalculator` を差し替えて実装する拡張ポイント**である（住所別税率をコアに入れるのは
+> 機能追加要望であり、ドキュメント修正の対象ではない）。以下は現行コードに一致する。
+
 ```go
-// plugins/tax/plugin.go
+// plugins/tax/plugin.go & calculator.go
 package tax
 
 import (
     "context"
-    
+    "math/big"
+
     "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/plugin"
 )
@@ -932,466 +986,144 @@ func (p *TaxPlugin) Name() string    { return "tax" }
 func (p *TaxPlugin) Version() string { return "1.0.0" }
 func (p *TaxPlugin) Priority() int   { return p.priority }
 
-func (p *TaxPlugin) Initialize(ctx context.Context, config plugin.Config) error {
+// Initialize は config["priority"] があれば priority を上書きする
+func (p *TaxPlugin) Initialize(_ context.Context, config plugin.Config) error {
+    if v, ok := config["priority"]; ok {
+        if n, ok := v.(int); ok {
+            p.priority = n
+        }
+    }
     return nil
 }
 
-func (p *TaxPlugin) Shutdown(ctx context.Context) error {
-    return nil
-}
+func (p *TaxPlugin) Shutdown(_ context.Context) error { return nil }
 
 // CalculateTax TaxHookの実装
 // DiscountHookやInvoiceLifecycleHookの空実装は不要
 func (p *TaxPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.Money, error) {
-    contract := ctx.Contract()
     afterDiscount := ctx.SubtotalAfterDiscount()
-
-    // 請求先情報から税率を決定
-    taxRate := p.calculator.GetTaxRate(ctx.Context(), contract.BillingAddress())
-
+    // 現行実装は住所を参照しない（管轄別税率は利用者が TaxCalculator を差し替えて実装）
+    taxRate := p.calculator.GetTaxRate(ctx.Context())
     tax := afterDiscount.Multiply(taxRate)
-
     return tax, nil
 }
 
-// TaxCalculator 税率計算インターフェース
+// TaxCalculator 税率計算インターフェース（住所引数なしの最小 IF）
 type TaxCalculator interface {
-    GetTaxRate(ctx context.Context, address shared.Address) *big.Rat
+    GetTaxRate(ctx context.Context) *big.Rat
 }
 
-// JapaneseTaxCalculator 日本の消費税計算
+// JapaneseTaxCalculator 日本の消費税計算（管轄判定なし・一律10%）
 type JapaneseTaxCalculator struct{}
 
-func (c *JapaneseTaxCalculator) GetTaxRate(ctx context.Context, address shared.Address) *big.Rat {
-    // 日本国内は10%
-    if address.Country == "JP" {
-        return big.NewRat(10, 100)
-    }
-    // 国外は0%
-    return big.NewRat(0, 1)
+func (c *JapaneseTaxCalculator) GetTaxRate(_ context.Context) *big.Rat {
+    return big.NewRat(10, 100)
 }
 ```
+
+> **管轄対応の拡張例**: 越境請求で住所別の税率を適用したい場合は、`TaxCalculator` の
+> 実装を差し替える（例: `GetTaxRate` 内で `ctx` から請求先国を解決して分岐、または
+> `contract.BillingAddress()` を参照する独自 IF を定義する）。コアの `TaxHook` 契約は
+> `CalculateTax(ctx *CalculationContext)` のままなので、プラグイン側の差し替えで完結する。
 
 ## 8. アプリケーション層での統合
 
 ### 8.1 請求サービスでのプラグイン利用
 
+> **正準はソース**: 完全な実装は `application/service/billing_service.go` を参照。
+> 以下は請求パイプライン（`GenerateInvoice` → `executeBillingPipeline`）の**要点の抜粋**である。
+> フルコピーは陳腐化しやすいため掲載しない。設定・構築系は `docs/api/services.md` も参照。
+
+**設定・構築（要点）**
+
+- `BillingConfig`（`billing_config.go`）: `GracePeriod`（finalize までの猶予）/
+  `DaysUntilDue` / `CollectionMethod CollectionMethod`（`CollectionAutoCharge =
+  "charge_automatically"` または `CollectionSendInvoice = "send_invoice"`）/
+  `AllowPartialPayment bool`。検証付き構築は `NewBillingConfig(opts...)`。
+- `NewBillingService(contractRepo, invoiceRepo, usageRepo, balanceConfig, priceRepo,
+  productRepo, registry, config, clock, opts...)`。オプション: `WithBalanceRepo`（クレジット台帳、
+  nil 許容）/ `WithBillingTxManager`（既定は `NoopTxManager`）/ `WithBillingLogger`（既定は
+  `slog.Default()`）。`balanceRepo` / `logger` / `txManager` はフィールドとして保持される。
+
+**`GenerateInvoice(ctx, contractID shared.ContractID, billingPeriod shared.DateRange)` の流れ**
+
 ```go
-// application/service/billing_service.go
-package service
+// application/service/billing_service.go（抜粋・要点）
+func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) (*invoice.Invoice, error) {
+    // 1. 契約集約をロード（tx 中は tx スコープの repo 経由）
+    agg, err := s.contractRepoFor(ctx).FindByID(ctx, contractID)
+    // ...
 
-import (
-    "context"
+    // 2. ステータスガード: billable なステータスのみ請求可（draft/active/trialing/past_due/
+    //    suspended）。suspended は SuspensionBillingBehavior により skip/defer を拒否する
+    if !billableStatuses[agg.Status()] { /* business_rule DomainError */ }
 
-    "github.com/contract-to-cash/core/domain/balance"
-    "github.com/contract-to-cash/core/domain/contract"
-    "github.com/contract-to-cash/core/domain/invoice"
-    "github.com/contract-to-cash/core/domain/pricing"
-    "github.com/contract-to-cash/core/domain/product"
-    "github.com/contract-to-cash/core/domain/shared"
-    "github.com/contract-to-cash/core/plugin"
-)
+    // 3. 重複請求ガード（契約タイプ・ステータスに応じた既存請求書チェック）
+    if err = s.checkDuplicateInvoice(ctx, agg, billingPeriod); err != nil { return nil, err }
 
-// BillingConfig 請求処理設定
-type BillingConfig struct {
-    // GracePeriod 請求書確定（finalize）までの猶予期間
-    // この間に遅延UsageRecordの吸収やInvoiceLifecycleHookでの調整が可能
-    // デフォルト: 1時間
-    GracePeriod time.Duration
+    // 4. 基本料金の算出（Price エンティティ + PricingModel。従量は UsageSummary 集計）
+    subtotal, lineItems, err := s.calculateSubtotal(ctx, agg, billingPeriod)
 
-    // DaysUntilDue 請求書送付から支払い期限までの日数
-    // CollectionMethod が "send_invoice" の場合に使用
-    // デフォルト: 30日
-    DaysUntilDue int
-
-    // CollectionMethod 回収方法
-    //   "charge_automatically": 確定後に自動課金
-    //   "send_invoice": 請求書を送付し支払いを待つ
-    // デフォルト: "charge_automatically"
-    CollectionMethod string
-}
-
-type BillingService struct {
-    contractRepo contract.Repository
-    invoiceRepo  invoice.Repository
-    usageRepo    usage.Repository
-    balanceRepo   balance.Repository   // nil許容: クレジット機能未使用の場合（WithBalanceRepoオプションで設定）
-    balanceConfig balance.BalanceConfig
-    priceRepo    pricing.PriceRepository
-    productRepo  product.Repository
-    registry     *plugin.Registry
-    config       BillingConfig
-    clock        shared.Clock
-}
-
-// BillingServiceOption NewBillingServiceのオプション引数
-type BillingServiceOption func(*BillingService)
-
-// WithBalanceRepo balanceRepoを設定するオプション
-func WithBalanceRepo(repo balance.Repository) BillingServiceOption {
-    return func(s *BillingService) { s.balanceRepo = repo }
-}
-
-func NewBillingService(
-    contractRepo contract.Repository,
-    invoiceRepo invoice.Repository,
-    usageRepo usage.Repository,
-    balanceConfig balance.BalanceConfig,
-    priceRepo pricing.PriceRepository,
-    productRepo product.Repository,
-    registry *plugin.Registry,
-    config BillingConfig,
-    clock shared.Clock,
-    opts ...BillingServiceOption,
-) *BillingService {
-    s := &BillingService{
-        contractRepo:  contractRepo,
-        invoiceRepo:   invoiceRepo,
-        usageRepo:     usageRepo,
-        balanceConfig: balanceConfig,
-        priceRepo:     priceRepo,
-        productRepo:   productRepo,
-        registry:      registry,
-        config:        config,
-        clock:         clock,
-    }
-    for _, opt := range opts {
-        opt(s)
-    }
-    return s
-}
-
-// GenerateInvoice 請求書を生成する（draft状態）
-//
-// 契約タイプに応じた計算フロー:
-//   subscription  → 固定料金のみ
-//   usage_based   → 従量料金のみ（UsageRecord集計 + PricingModel適用）
-//   hybrid        → 固定料金 + 従量料金
-//
-// 生成された請求書はdraft状態。GracePeriod経過後に FinalizeInvoice() で確定する。
-func (s *BillingService) GenerateInvoice(
-    ctx context.Context,
-    contractID string,
-    billingPeriod shared.DateRange,
-) (*invoice.Invoice, error) {
-    // 契約取得
-    c, err := s.contractRepo.FindByID(ctx, shared.ContractID(contractID))
-    if err != nil {
-        return nil, err
-    }
-
-    // 2. 料金計算（契約タイプに応じて分岐）
-    subtotal, err := s.calculateSubtotal(ctx, c, billingPeriod)
-    if err != nil {
-        return nil, fmt.Errorf("subtotal calculation failed: %w", err)
-    }
-
-    calcCtx := plugin.NewCalculationContext(ctx, c, subtotal)
-
-    // 1. BeforeCalculation（InvoiceLifecycleHook）
-    for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
-        if err := hook.BeforeCalculation(calcCtx); err != nil {
-            return nil, fmt.Errorf("before calculation hook failed: %w", err)
-        }
-    }
-
-    // 3. 割引計算（DiscountHook のみ）
-    totalDiscount := shared.Zero(subtotal.Currency())
-    for _, hook := range s.registry.GetDiscountHooks() {
-        discount, err := hook.CalculateDiscount(calcCtx)
-        if err != nil {
-            return nil, fmt.Errorf("discount calculation failed: %w", err)
-        }
-        totalDiscount, err = totalDiscount.Add(discount)
-        if err != nil {
-            return nil, fmt.Errorf("discount accumulation failed: %w", err)
-        }
-    }
-
-    // 割引上限ガード: 割引合計がsubtotalを超えないようにする
-    // ゼロ金額請求書は正常ケース（全額割引等）として扱う
-    if totalDiscount.GreaterThan(subtotal) {
-        totalDiscount = subtotal
-    }
-
-    // 4. 小計算出（割引後）
-    afterDiscount, err := subtotal.Subtract(totalDiscount)
-    if err != nil {
-        return nil, fmt.Errorf("discount subtraction failed: %w", err)
-    }
-    calcCtx.SetSubtotalAfterDiscount(afterDiscount)
-
-    // 5. 税計算（TaxHook のみ、割引後の金額に対して）
-    totalTax := shared.Zero(subtotal.Currency())
-    for _, hook := range s.registry.GetTaxHooks() {
-        tax, err := hook.CalculateTax(calcCtx)
-        if err != nil {
-            return nil, fmt.Errorf("tax calculation failed: %w", err)
-        }
-        totalTax, err = totalTax.Add(tax)
-        if err != nil {
-            return nil, fmt.Errorf("tax accumulation failed: %w", err)
-        }
-    }
-
-    // 合計算出（税込）
-    total, err := afterDiscount.Add(totalTax)
-    if err != nil {
-        return nil, fmt.Errorf("total calculation failed: %w", err)
-    }
-
-    // 6. クレジット台帳からの充当（domain-model.md セクション9.5参照）
-    appliedBalance := shared.Zero(total.Currency())
-    if s.balanceRepo != nil {
-        credits, err := s.balanceRepo.FindAvailable(ctx, c.AccountID(), total.Currency())
-        if err != nil {
-            return nil, fmt.Errorf("credit lookup failed: %w", err)
-        }
-        for _, entry := range credits {
-            if entry.IsExpired(s.clock.Now()) {
-                continue
-            }
-            remaining, err := total.Subtract(appliedBalance) // まだ充当が必要な額
-            if err != nil {
-                return nil, fmt.Errorf("credit remaining calculation failed: %w", err)
-            }
-            if remaining.IsZero() {
-                break
-            }
-            apply, err := entry.RemainingAmount().Min(remaining)
-            if err != nil {
-                return nil, fmt.Errorf("credit min calculation failed: %w", err)
-            }
-            appliedBalance, err = appliedBalance.Add(apply)
-            if err != nil {
-                return nil, fmt.Errorf("credit accumulation failed: %w", err)
-            }
-            // BalanceApplication 作成 + BalanceEntry.remainingAmount 減算
-            // （同一DBトランザクション内でアトミックに実行 — domain-model.md 9.5参照）
-        }
-    }
-    amountDue, err := total.Subtract(appliedBalance)
-    if err != nil {
-        return nil, fmt.Errorf("amount due calculation failed: %w", err)
-    }
-
-    // 7. 請求書作成（draft状態）
-    inv := invoice.NewInvoice(
-        invoice.NewInvoiceID(),
-        c.AccountID(),
-        c.ID(),
-        subtotal,
-        totalDiscount,
-        totalTax,
-        invoice.WithStatus(invoice.InvoiceStatusDraft),
-        invoice.WithBillingPeriod(billingPeriod),
-        invoice.WithDueDate(s.calculateDueDate(billingPeriod)),
-        invoice.WithAppliedBalance(appliedBalance),
-        invoice.WithAmountDue(amountDue),
-    )
-    calcCtx.SetInvoice(inv)
-
-    // 8. AfterCalculation（InvoiceLifecycleHook）
-    for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
-        if err := hook.AfterCalculation(calcCtx, inv); err != nil {
-            return nil, fmt.Errorf("after calculation hook failed: %w", err)
-        }
-    }
-
-    // 保存（draft状態で保存。GracePeriod後にFinalizeInvoiceで確定）
-    if err := s.invoiceRepo.Save(ctx, inv); err != nil {
-        return nil, err
-    }
-
-    return inv, nil
-}
-
-// calculateSubtotal 契約タイプに応じた基本料金を算出する
-func (s *BillingService) calculateSubtotal(
-    ctx context.Context,
-    c *contract.Contract,
-    period shared.DateRange,
-) (shared.Money, error) {
-    switch c.ContractType() {
-
-    case contract.ContractTypeSubscription:
-        // サブスクリプション: 固定料金
-        return c.Price(), nil
-
-    case contract.ContractTypeUsageBased:
-        // 従量課金: UsageRecord集計 → PricingModel適用
-        return s.calculateUsageCharge(ctx, c, period)
-
-    case contract.ContractTypeOneTime:
-        // 買い切り: 固定料金（1回のみ）
-        return c.Price(), nil
-
-    default:
-        return shared.Money{}, fmt.Errorf("unknown contract type: %s", c.ContractType())
-    }
-}
-
-// calculateUsageCharge 従量料金を算出する
-//
-// フロー:
-//   1. 請求期間のUsageRecordを集計（UsageSummary取得）
-//   2. 含有枠（Included Allowance）があれば差し引き
-//   3. PricingModel（Graduated/Volume）で料金算出
-//
-// メータリング（生イベントの収集・集計）はOSSスコープ外。
-// 利用者がアプリケーション側で集計し、UsageRecordとして記録する。
-func (s *BillingService) calculateUsageCharge(
-    ctx context.Context,
-    c *contract.Contract,
-    period shared.DateRange,
-) (shared.Money, error) {
-    plan := c.Plan()
-    totalCharge := shared.Zero(c.Price().Currency())
-
-    for _, metric := range plan.UsageMetrics() {
-        // 1. 請求期間の使用量を集計
-        summary, err := s.usageRepo.GetSummary(ctx, c.ID(), metric.Name, period)
-        if err != nil {
-            return shared.Money{}, fmt.Errorf("usage summary failed for %s: %w", metric.Name, err)
-        }
-
-        // 2. 含有枠（Included Allowance）の差し引き
-        billableUsage := summary.TotalUsage
-        if metric.IncludedQuantity > 0 {
-            billableUsage -= metric.IncludedQuantity
-            if billableUsage < 0 {
-                billableUsage = 0
-            }
-        }
-
-        // 3. PricingModelで料金算出
-        charge := metric.PricingModel.CalculatePrice(billableUsage)
-        totalCharge, err = totalCharge.Add(charge)
-        if err != nil {
-            return shared.Money{}, fmt.Errorf("charge accumulation failed for %s: %w", metric.Name, err)
-        }
-    }
-
-    // 基本料金（ハイブリッド課金の固定部分）がある場合は加算
-    if basePrice := c.BasePrice(); !basePrice.IsZero() {
-        var err error
-        totalCharge, err = totalCharge.Add(basePrice)
-        if err != nil {
-            return shared.Money{}, fmt.Errorf("base price addition failed: %w", err)
-        }
-    }
-
-    return totalCharge, nil
-}
-
-// FinalizeInvoice 請求書を確定する
-// GracePeriod経過後に呼び出す。確定後は変更不可。
-// 保存成功後に OnInvoiceIssuedHook（メトリクス）を発火する（フックエラーは非致命・ログのみ）。
-//
-// 並行保証は Repository が並行制御契約（invoice.Repository.Save の godoc / issue #130）
-// を満たす場合にのみ成立する。楽観ロック実装では、敗者の Save が tx.ErrVersionConflict を
-// 返し、RetryOnConflict がクロージャを再実行する。再読込時には請求書が finalized 済みのため
-// Finalize が invalid_state_transition で拒否する。読みの直列化（行ロック / SERIALIZABLE）
-// でも同じ契約を満たせる。無条件 last-writer-wins のアダプタでは二重 finalize が成立し、
-// OnInvoiceIssued が二重発火し得る（アダプタ側 issue: contract-to-cash/adapters#12）。
-func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.InvoiceID) (*invoice.Invoice, error) {
-    // 読み込み・draft検査・状態遷移・保存を同一トランザクション内で行う
-    // （check-then-act を tx 境界で分割しない）。RetryOnConflict は Repository が
-    // 楽観ロック競合を報告したときにクロージャを再実行する。再実行時には請求書が
-    // finalized 済みのため Finalize が invalid_state_transition で拒否する
-    // （競合エラーではないので再試行されない）。
-    var inv *invoice.Invoice
-    err := tx.RetryOnConflict(finalizeMaxRetries, func() error {
-        var finalized *invoice.Invoice
-        runErr := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
-            loaded, findErr := repos.Invoices.FindByID(txCtx, invoiceID)
-            if findErr != nil {
-                return fmt.Errorf("failed to load invoice: %w", findErr)
-            }
-
-            // draft以外は invalid_state_transition の DomainError で拒否される
-            if finalizeErr := loaded.Finalize(); finalizeErr != nil {
-                return finalizeErr
-            }
-
-            // 保存（フックより先に永続化する）。並行 finalize では
-            // tx.ErrVersionConflict が返り得る。
-            if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
-                return saveErr
-            }
-            finalized = loaded
-            return nil
-        })
-        if runErr != nil {
-            return runErr
-        }
-        inv = finalized
-        return nil
-    })
-    if err != nil {
-        return nil, err
-    }
-
-    // 保存後のメトリクスフック（非致命）
-    pluginCtx := plugin.NewContext(ctx)
-    for _, hook := range s.registry.GetOnInvoiceIssuedHooks() {
-        if hookErr := hook.OnInvoiceIssued(pluginCtx, inv); hookErr != nil {
-            s.logger.Warn("OnInvoiceIssued hook failed", "hook", hook.Name(), "error", hookErr)
-        }
-    }
-
-    return inv, nil
-}
-
-// ProcessPriceChange 価格変更時のクレジット処理
-// ProrationResult.AdjustmentAmount < 0 の場合、BalancePolicy に従い分岐
-func (s *BillingService) ProcessPriceChange(ctx context.Context, contractID shared.ContractID, newPriceID shared.PriceID) error {
-    // 1. 日割り計算
-    proration, err := s.calculator.CalculateProration(ctx, contractID, newPriceID)
-    if err != nil {
-        return fmt.Errorf("proration calculation failed: %w", err)
-    }
-
-    c, err := s.contractRepo.FindByID(ctx, contractID)
-    if err != nil {
-        return err
-    }
-    accountID := c.AccountID()
-
-    // 2. AdjustmentAmount の符号で分岐
-    if proration.AdjustmentAmount.IsNegative() {
-        // ダウングレード: BalancePolicy に従う
-        switch s.balanceConfig.DowngradePolicy {
-        case balance.BalancePolicyLedger:
-            // クレジット台帳に積む
-            entry := balance.NewBalanceEntry(accountID, proration.AdjustmentAmount.Negate(), balance.BalanceReasonProration)
-            if err := s.balanceRepo.Save(ctx, entry); err != nil {
-                return fmt.Errorf("credit entry save failed: %w", err)
-            }
-        case balance.BalancePolicyRefund:
-            // 即時返金
-            if err := s.gateway.Refund(ctx, &port.RefundRequest{Amount: proration.AdjustmentAmount.Negate()}); err != nil {
-                return fmt.Errorf("refund failed: %w", err)
-            }
-        case balance.BalancePolicyNone:
-            // 何もしない
-        }
-    } else if !proration.AdjustmentAmount.IsZero() {
-        // アップグレード: 差額のみ請求
-        // 請求書を生成して決済
-    }
-
-    return nil
-}
-
-func (s *BillingService) calculateDueDate(period shared.DateRange) time.Time {
-    daysUntilDue := s.config.DaysUntilDue
-    if daysUntilDue == 0 {
-        daysUntilDue = 30
-    }
-    return period.End().AddDate(0, 0, daysUntilDue)
+    // 5. 共有パイプラインへ（RegenerateInvoice / GenerateProrationInvoice も同じ）
+    return s.executeBillingPipeline(ctx, pipelineInput{ /* agg, subtotal, lineItems, period, duplicateCheck */ })
 }
 ```
+
+`executeBillingPipeline` がプラグインフックを発火する中核であり、順序は §5.1 と一致する:
+
+```go
+func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipelineInput) (*invoice.Invoice, error) {
+    // コンテキストは subtotal=Zero で生成される（BeforeCalculation では Subtotal()=0）
+    calcCtx := plugin.NewCalculationContext(ctx, input.agg, shared.Zero(currency))
+
+    // ProductID を Price から解決してコンテキストへ（BeforeCalculation でも参照可能）
+    if priceID := input.agg.PriceID(); priceID != "" {
+        price, _ := s.priceRepo.FindByID(ctx, priceID)
+        calcCtx.SetProductID(price.ProductID())
+    }
+
+    // BeforeCalculation（この時点で Subtotal() はゼロ）
+    for _, h := range s.registry.GetInvoiceLifecycleHooks() { h.BeforeCalculation(calcCtx) }
+
+    calcCtx.SetSubtotal(subtotal) // ← ここで初めて基本料金がコンテキストへ
+
+    // DiscountHook → 割引上限ガード → SetSubtotalAfterDiscount
+    // TaxHook（SubtotalAfterDiscount に対して）→ total = afterDiscount + tax
+
+    invoiceID := shared.NewInvoiceID()
+    err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+        // tx 内で重複チェック再実行（issue #149）
+        if input.duplicateCheck != nil { /* ... */ }
+
+        // クレジット台帳から FIFO 充当（entry.Consume + BalanceApplication を作成、tx スコープ repo で保存）
+        appliedBalance := s.applyBalances(txCtx, repos.Balances, agg.AccountID(), invoiceID, total, currency)
+        amountDue := total.Subtract(appliedBalance)
+
+        // draft 請求書を生成（WithAllowPartialPayment(s.config.AllowPartialPayment) 等を伝播）
+        inv = invoice.NewInvoice(invoiceID, agg.AccountID(), input.contractID, subtotal, totalDiscount, totalTax, invOpts...)
+        calcCtx.SetInvoice(inv)
+
+        // AfterCalculation は **保存(Save)より前**に発火
+        for _, h := range s.registry.GetInvoiceLifecycleHooks() { h.AfterCalculation(calcCtx, inv) }
+
+        return repos.Invoices.Save(txCtx, inv) // 保存
+    })
+    return inv, err
+}
+```
+
+**その他のメソッド（実在するもの）**
+
+- `RegenerateInvoice` — void 済み請求書がある期間の再生成（revisionOf/originalInvoiceID をリンク）。
+- `GenerateProrationInvoice` — アップグレード差額（正の AdjustmentAmount のみ）を同パイプラインで請求。
+- `FinalizeInvoice` — draft→finalized を tx + `RetryOnConflict` で確定し、保存後に
+  `OnInvoiceIssuedHook`（非致命）を発火。
+
+> **注**: 旧版の本節に載っていた `ProcessPriceChange` / `calculateDueDate` は実コードに存在しない
+> （due date は `executeBillingPipeline` 内で `now.AddDate(0, 0, DaysUntilDue)` として算出される）。
+> ダウングレード時の BalancePolicy 分岐は `domain-model.md` を参照。従量課金の基本料金算出
+> （`calculateSubtotal` / `calculateUsageCharge`）は Price/Product エンティティ経由であり、
+> 廃止済みの `c.Plan()` は使用しない。
 
 ## 9. カスタムプラグイン作成ガイド
 
@@ -1488,17 +1220,21 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 
 ### 10.3 初版のフック設計について
 
-本ライブラリは初版（v1.0.0）から分割フック設計を採用している。
+本ライブラリは初版（v1.0.0）から**イベント単位の細粒度フック設計**を採用している。
+契約ライフサイクル・支払い・メトリクスは、粗粒度の統合 IF ではなく、各イベントごとの
+個別 IF に分かれている（`ContractLifecycleHook` / `PaymentHook` / `MetricsHook` という
+粗粒度インターフェースは**存在したことがない**）。
 
 ```
-DiscountHook          — 割引計算のみ
-TaxHook               — 税計算のみ
-InvoiceLifecycleHook  — 計算前後処理
-ContractLifecycleHook — 契約ライフサイクル
-PaymentHook           — 支払い処理
-MetricsHook           — メトリクス収集
-InvoiceGenerationHook — 請求書生成
+請求計算:        DiscountHook / TaxHook / InvoiceLifecycleHook
+契約ライフサイクル: OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook（7種）
+支払い:          BeforeChargeHook / AfterChargeHook / OnPaymentFailedHook / OnRefundHook（4種）
+メトリクス:       OnContractChangeHook / OnInvoiceIssuedHook / OnPaymentProcessedHook（3種）
+クレジットノート:   OnCreditNoteIssuedHook / OnInvoiceRevisedHook（2種）
+請求書生成:       InvoiceGenerationHook（1種）
 ```
+
+（完全な定義は §3、カテゴリ別一覧は §5.3 を参照。合計20種。）
 
 `InvoiceCalculationHook`（割引・税・ライフサイクルの統合インターフェース）は
 ISP違反と計算順序の脆さの懸念から、設計段階で分割を決定した。

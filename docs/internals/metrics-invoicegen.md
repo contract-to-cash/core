@@ -1224,68 +1224,97 @@ func (s *Service) Search(ctx context.Context, query *SearchQuery) (*SearchResult
 
 ---
 
-## 5. ディレクトリ構成（最終版）
+## 5. ディレクトリ構成
+
+> **⚠️ 重要 — 本ドキュメントのスコープ**: 本ドキュメントが説明する集計 (`metrics.Collector`,
+> `Store`, `Exporter`, `QueryService`) とインボイス発行 (`invoicegen.Renderer`, `Delivery`,
+> `Storage`, `Service`) の各 Adapter は **利用者（アダプタ）が実装するコア外のコンポーネント**である。
+> コアが提供するのは `plugin/` のフック IF までで、レンダリング・送付・保管・集計の実装は
+> 「BYO」で利用者が持ち込む（plugin-system.md §5.3 / architecture.md §6.2 の発火責任表を参照:
+> `InvoiceGenerationHook` はアダプタが発火する）。以前ここに掲載していた
+> `plugin/metrics/` `plugin/invoicegen/` パッケージや `subscription_service.go`,
+> `infrastructure/gateway/` は**実現しておらず、本リポジトリには存在しない**。
+
+### 5.1 本リポジトリ（コア）の実際の構成
+
+メトリクス／請求書生成に関係するフック IF は `plugin/` 直下にフラットに配置される
+（`plugin/metrics/` や `plugin/invoicegen/` というサブパッケージは存在しない）。
 
 ```
 github.com/contract-to-cash/core/
-├── domain/
-│   ├── contract/
-│   ├── invoice/
-│   ├── payment/
-│   ├── balance/
-│   ├── billing/
-│   ├── pricing/
-│   ├── product/
-│   ├── usage/
-│   └── shared/
+├── domain/                       # contract, invoice, payment, balance,
+│                                 #   billing, pricing, product, usage, shared
 │
 ├── application/
-│   ├── port/
-│   ├── query/
-│   ├── projection/
-│   ├── tx/
-│   └── service/
+│   ├── port/                     # PaymentGateway 等の外部連携 IF
+│   ├── query/                    # TemporalQueryService
+│   ├── projection/               # Projection（同期/非同期）
+│   ├── tx/                       # TxManager, Saga
+│   └── service/                  # 実サービス（subscription_service.go は存在しない）
 │       ├── billing_service.go
+│       ├── billing_config.go
 │       ├── payment_service.go
-│       └── subscription_service.go
+│       ├── credit_note_service.go
+│       └── snapshot_service.go
 │
 ├── eventstore/
-│   ├── store.go
-│   ├── event.go
-│   ├── aggregate.go
-│   └── snapshot.go
 │
-├── plugin/
+├── plugin/                       # フック IF はすべてフラット配置
 │   ├── plugin.go
 │   ├── registry.go
-│   ├── hooks.go
+│   ├── priority.go
 │   ├── context.go
-│   │
-│   ├── metrics/              # ★ 集計・分析 Adapter
-│   │   ├── types.go          # メトリクス型定義
-│   │   ├── adapter.go        # Collector, Store, Exporter IF
-│   │   ├── hook.go           # MetricsHook
-│   │   └── query_service.go  # レポートクエリ
-│   │
-│   └── invoicegen/           # ★ インボイス発行 Adapter
-│       ├── types.go          # InvoiceDocument等
-│       ├── adapter.go        # Renderer, Delivery, Storage IF
-│       ├── hook.go           # GenerationHook
-│       └── service.go        # インボイス発行サービス
+│   ├── context_payment.go
+│   ├── hooks.go                  # DiscountHook / TaxHook / InvoiceLifecycleHook
+│   ├── hooks_contract.go
+│   ├── hooks_payment.go
+│   ├── hooks_metrics.go          # OnContractChange / OnInvoiceIssued / OnPaymentProcessed
+│   ├── hooks_creditnote.go
+│   └── hooks_invoicegen.go       # InvoiceGenerationHook（+ InvoiceDocument / DeliveryResult）
 │
-├── plugins/                  # 公式プラグイン（実装例）
+├── batch/                        # ContractRenewal / TrialExpiration 等
+│
+├── plugins/                      # 公式プラグイン
 │   ├── coupon/
 │   ├── tax/
 │   └── invoicecleanup/
 │
 └── infrastructure/
-    ├── gateway/
-    └── inmemory/
+    └── inmemory/                 # 本リポジトリに含まれるのは inmemory/ のみ
 ```
+
+### 5.2 利用者が実装するアダプタ（コア外・参考構成）
+
+本ドキュメントの §2〜§3 で定義した Adapter 群は、利用者側リポジトリで以下のように配置する
+（パッケージ名・配置は一例）。これらは**コアには含まれない**。
+
+```
+（利用者リポジトリ）
+├── metrics/                      # 集計・分析 Adapter（利用者実装）
+│   ├── types.go                  #   ContractMetrics / RevenueMetrics 等
+│   ├── adapter.go                #   Collector, Store, Exporter IF
+│   └── query_service.go          #   レポートクエリ
+│
+└── invoicegen/                   # インボイス発行 Adapter（利用者実装）
+    ├── types.go                  #   InvoiceDocument 等（詳細版）
+    ├── adapter.go                #   Renderer, Delivery, Storage IF
+    └── service.go                #   発行サービス（各フェーズで InvoiceGenerationHook を発火）
+```
+
+> コアの `plugin.InvoiceGenerationHook`（`plugin/hooks_invoicegen.go`）は
+> `BuildDocument` / `AfterRender` / `AfterDelivery` の3メソッドを持つ最小 IF であり、
+> §3.3 の `GenerationHook`（`BuildInvoiceDocument` / `BeforeRender` / `BeforeDelivery` 等の
+> 拡張メソッドを含む）は利用者側での詳細設計例である。
 
 ---
 
 ## 6. サービスAでの実装例
+
+> **📌 コード例の注記**: 以下の例に現れる `github.com/contract-to-cash/core/plugin/metrics`
+> / `.../plugin/invoicegen` は**コアには存在しない**（§5参照）。集計・請求書生成 Adapter の型
+> （`Collector`, `Renderer`, `Service` 等）は利用者が実装するため、これらの import は
+> **利用者側パッケージの一例**として読むこと。コアが提供するのは `plugin` パッケージの
+> フック IF（`plugin.OnInvoiceIssuedHook` / `plugin.InvoiceGenerationHook` 等）のみ。
 
 ### 6.1 メトリクス収集実装
 

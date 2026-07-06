@@ -301,21 +301,30 @@ Saga）もこれらを設定せず、参照するプラグインフックもク�
 
 ```
 1. 計算前処理（InvoiceLifecycleHook.BeforeCalculation）
-2. 料金計算（契約タイプに応じて分岐）
-3. 割引適用（DiscountHook、割引上限ガード付き）
-4. 小計算出（subtotal - totalDiscount）
-5. 税計算（TaxHook、割引後に対して）
+   ※ この時点で ctx.Subtotal() は ZERO（基本料金は手順2でコンテキストへ設定）
+2. 基本料金の算出とコンテキストへの設定（契約タイプに応じて分岐）
+   → 以降 ctx.Subtotal() は基本料金を返す
+3. 割引適用（DiscountHook、割引上限ガード付き。ctx.Subtotal()=基本料金）
+4. 小計算出（subtotal - totalDiscount）→ ctx.SetSubtotalAfterDiscount()
+5. 税計算（TaxHook、ctx.SubtotalAfterDiscount()に対して）
 6. 合計算出（afterDiscount + totalTax）
-7. クレジット台帳からの充当（残高があれば差引）
-8. 請求書をdraft状態で生成
-9. 計算後処理（InvoiceLifecycleHook.AfterCalculation）
+7. クレジット台帳からの充当（残高があれば差引、FIFO・tx内）
+8. 請求書をdraft状態で生成（tx内）
+9. 計算後処理（InvoiceLifecycleHook.AfterCalculation）← 保存(Save)より前・tx内
+10. 保存（tx内）
 ```
 
 > このフロー順序は `architecture.md` セクション6.3 および `plugin-system.md` セクション5.1 と同一。
+> 実コードは `application/service/billing_service.go` の `executeBillingPipeline`（正準はソース）。
 
 **理由：**
 - 会計上正しい計算順序を保証
 - 税は割引後の金額に対して計算する必要がある
+
+**プラグイン可観測性の要点：**
+- `BeforeCalculation` 中の `ctx.Subtotal()` は **ゼロ**（基本料金はフックの後にコンテキストへ設定される）
+- `AfterCalculation` は請求書生成の**後・保存の前**に発火する（受け取る請求書は未永続化）。
+  永続化済みを前提とする処理は `OnInvoiceIssuedHook`（`FinalizeInvoice` の保存後に発火）で行う
 
 ### 6.2 トランザクション境界
 
