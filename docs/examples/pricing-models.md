@@ -29,11 +29,13 @@ price := pricing.NewPrice(productID, moneyJPY(3000), shared.CurrencyJPY,
 Different rates for different usage tiers (each tier priced independently):
 
 ```go
-model := pricing.NewTieredPrice([]pricing.Tier{
-    {UpTo: 100, UnitPrice: moneyJPY(10)},    // First 100: ¥10/unit
-    {UpTo: 500, UnitPrice: moneyJPY(8)},     // 101-500: ¥8/unit
-    {UpTo: 0, UnitPrice: moneyJPY(5)},       // 501+: ¥5/unit (unlimited)
-})
+// NewTieredPrice validates the tiers (sorted, single currency, UpTo=0 only last)
+// and returns an error on a misconfiguration.
+model, err := pricing.NewTieredPrice([]pricing.PriceTier{
+    {UpTo: 100, UnitPrice: moneyJPY(10), FlatFee: shared.Zero(shared.CurrencyJPY)}, // First 100: ¥10/unit
+    {UpTo: 500, UnitPrice: moneyJPY(8), FlatFee: shared.Zero(shared.CurrencyJPY)},  // 101-500: ¥8/unit
+    {UpTo: 0, UnitPrice: moneyJPY(5), FlatFee: shared.Zero(shared.CurrencyJPY)},    // 501+: ¥5/unit (unlimited)
+}, pricing.TieredPricingGraduated)
 // 250 units = (100 × ¥10) + (150 × ¥8) = ¥2,200
 ```
 
@@ -42,11 +44,12 @@ model := pricing.NewTieredPrice([]pricing.Tier{
 Single rate based on total volume (all units priced at the tier they fall into):
 
 ```go
-model := pricing.NewVolumePrice([]pricing.Tier{
-    {UpTo: 100, UnitPrice: moneyJPY(10)},    // 1-100 units: ¥10/unit
-    {UpTo: 500, UnitPrice: moneyJPY(8)},     // 101-500 units: ¥8/unit
-    {UpTo: 0, UnitPrice: moneyJPY(5)},       // 501+ units: ¥5/unit
-})
+// Volume pricing is the same constructor with the volume mode.
+model, err := pricing.NewTieredPrice([]pricing.PriceTier{
+    {UpTo: 100, UnitPrice: moneyJPY(10), FlatFee: shared.Zero(shared.CurrencyJPY)}, // 1-100 units: ¥10/unit
+    {UpTo: 500, UnitPrice: moneyJPY(8), FlatFee: shared.Zero(shared.CurrencyJPY)},  // 101-500 units: ¥8/unit
+    {UpTo: 0, UnitPrice: moneyJPY(5), FlatFee: shared.Zero(shared.CurrencyJPY)},    // 501+ units: ¥5/unit
+}, pricing.TieredPricingVolume)
 // 250 units = 250 × ¥8 = ¥2,000 (all at the ¥8 tier)
 ```
 

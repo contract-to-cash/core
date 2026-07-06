@@ -41,14 +41,14 @@ func main() {
 	fmt.Println("    Tier 3: 5,001+         calls  @ ¥5/call")
 	fmt.Println()
 
-	graduatedModel := pricing.TieredPrice{
-		Mode: pricing.TieredPricingGraduated,
-		Tiers: []pricing.PriceTier{
+	graduatedModel := mustTiered(pricing.NewTieredPrice(
+		[]pricing.PriceTier{
 			{UpTo: 1000, UnitPrice: moneyJPY(10), FlatFee: shared.Zero(shared.CurrencyJPY)},
 			{UpTo: 5000, UnitPrice: moneyJPY(8), FlatFee: shared.Zero(shared.CurrencyJPY)},
 			{UpTo: 0, UnitPrice: moneyJPY(5), FlatFee: shared.Zero(shared.CurrencyJPY)}, // 0 = unlimited
 		},
-	}
+		pricing.TieredPricingGraduated,
+	))
 
 	// ── 3. Volume Tiered Pricing ──
 	fmt.Println("--- 3. Volume Tiered Pricing ---")
@@ -58,14 +58,14 @@ func main() {
 	fmt.Println("    5,001+           -> all @ ¥5/call")
 	fmt.Println()
 
-	volumeModel := pricing.TieredPrice{
-		Mode: pricing.TieredPricingVolume,
-		Tiers: []pricing.PriceTier{
+	volumeModel := mustTiered(pricing.NewTieredPrice(
+		[]pricing.PriceTier{
 			{UpTo: 1000, UnitPrice: moneyJPY(10), FlatFee: shared.Zero(shared.CurrencyJPY)},
 			{UpTo: 5000, UnitPrice: moneyJPY(8), FlatFee: shared.Zero(shared.CurrencyJPY)},
 			{UpTo: 0, UnitPrice: moneyJPY(5), FlatFee: shared.Zero(shared.CurrencyJPY)},
 		},
-	}
+		pricing.TieredPricingVolume,
+	))
 
 	// ── 4. Usage-Based Pricing (with min/max) ──
 	fmt.Println("--- 4. Usage-Based Pricing ---")
@@ -143,4 +143,13 @@ func main() {
 
 func moneyJPY(amount int64) shared.Money {
 	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyJPY)
+}
+
+// mustTiered unwraps a NewTieredPrice result, panicking on a configuration error.
+// Demo code only — real callers should handle the error.
+func mustTiered(tp pricing.TieredPrice, err error) pricing.TieredPrice {
+	if err != nil {
+		panic(err)
+	}
+	return tp
 }

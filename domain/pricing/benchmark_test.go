@@ -32,7 +32,10 @@ func BenchmarkTieredPrice_Graduated_10Tiers(b *testing.B) {
 	// Last tier is unlimited
 	tiers[9].UpTo = 0
 
-	price := TieredPrice{Tiers: tiers, Mode: TieredPricingGraduated}
+	price, err := NewTieredPrice(tiers, TieredPricingGraduated)
+	if err != nil {
+		b.Fatalf("NewTieredPrice: %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -52,7 +55,10 @@ func BenchmarkTieredPrice_Volume_10Tiers(b *testing.B) {
 	}
 	tiers[9].UpTo = 0
 
-	price := TieredPrice{Tiers: tiers, Mode: TieredPricingVolume}
+	price, err := NewTieredPrice(tiers, TieredPricingVolume)
+	if err != nil {
+		b.Fatalf("NewTieredPrice: %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
