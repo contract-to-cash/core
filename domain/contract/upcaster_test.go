@@ -549,6 +549,65 @@ func TestLoadFromHistory_UpcastsLegacyTrialEndedConverted(t *testing.T) {
 	}
 }
 
+// TestNewEventsStampedV2_SkipUpcaster is the core replay-safety proof for issue
+// #153. Two claims:
+//  1. Events raised today carry their true schema version (2), not a hardcoded 1.
+//  2. A v2-stamped event passes through the contract upcaster chain UNTOUCHED —
+//     every contract upcaster's CanUpcast is fromVersion<=1, so a v2 event is
+//     skipped. This is what makes a future non-idempotent upcaster safe: it can
+//     never re-run against a freshly written event.
+func TestNewEventsStampedV2_SkipUpcaster(t *testing.T) {
+	// 1. Raising a ContractCreatedEvent through the aggregate stamps SchemaVersion 2.
+	agg := newTestAggregate()
+	if err := agg.Create(newTestCommand(), newTestMetadata()); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	created := agg.UncommittedEvents()
+	if len(created) != 1 || created[0].Type != EventTypeContractCreated {
+		t.Fatalf("expected 1 ContractCreatedEvent, got %+v", created)
+	}
+	if created[0].SchemaVersion != 2 {
+		t.Errorf("new ContractCreatedEvent must be stamped SchemaVersion 2, got %d", created[0].SchemaVersion)
+	}
+
+	// 2. Each v2 event type, stamped v2, must pass through the chain untouched.
+	chain := NewContractUpcasterChain()
+	cases := []struct {
+		name  string
+		etype eventstore.EventType
+		event eventstore.DomainEvent
+	}{
+		{"ContractCreated", EventTypeContractCreated, &ContractCreatedEvent{ContractID: "c1", Interval: pricing.Monthly(), CreatedAt: time.Now()}},
+		{"PriceChanged", EventTypePriceChanged, &PriceChangedEvent{ContractID: "c1", OldPriceID: "a", NewPriceID: "b", Policy: ChangePolicyImmediate}},
+		{"TrialEnded", EventTypeTrialEnded, &TrialEndedEvent{ContractID: "c1", Converted: true}},
+		{"ContractRenewed", EventTypeContractRenewed, &ContractRenewedEvent{ContractID: "c1", OldInterval: pricing.Monthly(), NewInterval: pricing.Yearly()}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sv, ok := tc.event.(eventstore.SchemaVersioned)
+			if !ok {
+				t.Fatalf("%s must implement SchemaVersioned", tc.name)
+			}
+			if sv.CurrentSchemaVersion() != 2 {
+				t.Fatalf("%s CurrentSchemaVersion = %d, want 2", tc.name, sv.CurrentSchemaVersion())
+			}
+
+			data, _ := json.Marshal(tc.event)
+			in := eventstore.Event{Type: tc.etype, SchemaVersion: 2, Data: data}
+			out, err := chain.Upcast(in)
+			if err != nil {
+				t.Fatalf("Upcast failed: %v", err)
+			}
+			if out.SchemaVersion != 2 {
+				t.Errorf("v2 event must remain v2 (upcaster skipped), got %d", out.SchemaVersion)
+			}
+			if string(out.Data) != string(in.Data) {
+				t.Errorf("v2 event payload must be untouched by upcaster\n in: %s\nout: %s", in.Data, out.Data)
+			}
+		})
+	}
+}
+
 func TestUpcasterChain_SkipsNonPriceEvents(t *testing.T) {
 	chain := NewContractUpcasterChain()
 

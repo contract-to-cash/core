@@ -24,14 +24,25 @@ func NewEventRegistry() *EventRegistry {
 // Register registers a DomainEvent type.
 // The event's EventType() is used as the key.
 // Goroutine-safe.
-func (r *EventRegistry) Register(event DomainEvent) {
+//
+// Registering an EventType that is already registered returns an error instead
+// of silently overwriting the prior mapping. A duplicate registration is a
+// programmer error (two distinct Go types claiming the same EventType, or the
+// same registration wired twice), and silently overwriting could route
+// deserialization to the wrong Go type. This mirrors plugin.Registry.Register,
+// which rejects duplicate plugin names.
+func (r *EventRegistry) Register(event DomainEvent) error {
 	t := reflect.TypeOf(event)
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if existing, exists := r.types[event.EventType()]; exists {
+		return fmt.Errorf("event type %q already registered to %s", event.EventType(), existing.Name())
+	}
 	r.types[event.EventType()] = t
+	return nil
 }
 
 // Deserialize converts a json.RawMessage to a typed DomainEvent.

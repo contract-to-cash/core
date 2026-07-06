@@ -13,6 +13,22 @@ type DomainEvent interface {
 	EventType() EventType
 }
 
+// SchemaVersioned is an optional interface a DomainEvent may implement to
+// self-declare the schema version its current in-memory payload serializes to.
+// BaseAggregate.RaiseEvent stamps the returned value onto the Event envelope;
+// events that do not implement it default to schema version 1.
+//
+// Implement this on an event whose current payload shape has diverged from its
+// original v1 form — i.e. an Upcaster exists to migrate legacy payloads up to
+// the current shape. Declaring the true version means freshly written events are
+// stamped at that version and therefore skip the Upcaster on replay (the
+// Upcaster's CanUpcast returns false for them) instead of being re-migrated on
+// every replay. Without this, a future non-idempotent Upcaster would corrupt
+// freshly written events that were mis-stamped as v1.
+type SchemaVersioned interface {
+	CurrentSchemaVersion() int
+}
+
 // Event is the persisted representation of a domain event.
 type Event struct {
 	ID             string          `json:"id"`

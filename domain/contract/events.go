@@ -7,6 +7,16 @@ import (
 	"github.com/contract-to-cash/core/eventstore"
 )
 
+// Compile-time assertions that the four schema-version-2 events self-declare
+// their current schema version (so RaiseEvent stamps them v2, not v1). These are
+// the events with a corresponding Upcaster in upcaster.go.
+var (
+	_ eventstore.SchemaVersioned = (*ContractCreatedEvent)(nil)
+	_ eventstore.SchemaVersioned = (*PriceChangedEvent)(nil)
+	_ eventstore.SchemaVersioned = (*TrialEndedEvent)(nil)
+	_ eventstore.SchemaVersioned = (*ContractRenewedEvent)(nil)
+)
+
 // Event type constants.
 const (
 	EventTypeContractCreated         eventstore.EventType = "contract.created"
@@ -42,6 +52,11 @@ type ContractCreatedEvent struct {
 }
 
 func (e *ContractCreatedEvent) EventType() eventstore.EventType { return EventTypeContractCreated }
+
+// CurrentSchemaVersion reports that the current ContractCreatedEvent payload is
+// schema version 2 (interval-based, post-#111). ContractCreatedEventUpcaster
+// migrates legacy v1 payloads (billing_cycle-only) up to this shape.
+func (e *ContractCreatedEvent) CurrentSchemaVersion() int { return 2 }
 
 // ContractActivatedEvent is raised when a contract is activated.
 type ContractActivatedEvent struct {
@@ -95,6 +110,11 @@ type PriceChangedEvent struct {
 }
 
 func (e *PriceChangedEvent) EventType() eventstore.EventType { return EventTypePriceChanged }
+
+// CurrentSchemaVersion reports that the current PriceChangedEvent payload is
+// schema version 2 (PriceID-based with a Policy field). PriceChangedEventUpcaster
+// migrates legacy v1 payloads (Money-based, no PriceID/Policy) up to this shape.
+func (e *PriceChangedEvent) CurrentSchemaVersion() int { return 2 }
 
 // PriceChangeScheduledEvent is raised when a price change is deferred to next renewal.
 type PriceChangeScheduledEvent struct {
@@ -152,6 +172,11 @@ type TrialEndedEvent struct {
 
 func (e *TrialEndedEvent) EventType() eventstore.EventType { return EventTypeTrialEnded }
 
+// CurrentSchemaVersion reports that the current TrialEndedEvent payload is schema
+// version 2 (carries current_period, added in issue #146). TrialEndedEventUpcaster
+// marks legacy v1 payloads v2 so the aggregate's Apply derives the missing period.
+func (e *TrialEndedEvent) CurrentSchemaVersion() int { return 2 }
+
 // PaymentMethodChangedEvent is raised when a contract's payment method changes.
 type PaymentMethodChangedEvent struct {
 	ContractID         shared.ContractID `json:"contract_id"`
@@ -178,6 +203,12 @@ type ContractRenewedEvent struct {
 }
 
 func (e *ContractRenewedEvent) EventType() eventstore.EventType { return EventTypeContractRenewed }
+
+// CurrentSchemaVersion reports that the current ContractRenewedEvent payload is
+// schema version 2 (interval-based old_interval/new_interval, post-#111).
+// ContractRenewedEventUpcaster migrates legacy v1 payloads (billing_cycle-only)
+// up to this shape.
+func (e *ContractRenewedEvent) CurrentSchemaVersion() int { return 2 }
 
 // ContractExpiredEvent is raised when a contract expires at the end of its period.
 type ContractExpiredEvent struct {

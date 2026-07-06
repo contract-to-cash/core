@@ -223,6 +223,12 @@ func (a *BaseAggregate) ClearUncommittedEvents() {
     a.uncommittedEvents = nil
 }
 
+// SchemaVersioned イベントが現行ペイロードのスキーマバージョンを自己申告する
+// オプショナルIF。RaiseEvent はこれを実装するイベントを申告値で刻み、未実装なら 1。
+type SchemaVersioned interface {
+    CurrentSchemaVersion() int
+}
+
 // RaiseEvent 型付きドメインイベントを発行
 // DomainEvent から EventType() を取得するため、文字列指定が不要
 func (a *BaseAggregate) RaiseEvent(domainEvent DomainEvent, metadata EventMetadata) error {
@@ -231,12 +237,21 @@ func (a *BaseAggregate) RaiseEvent(domainEvent DomainEvent, metadata EventMetada
         return err
     }
 
+    // 現行ペイロードが v1 から進化しているイベント（対応する Upcaster を持つ）は
+    // SchemaVersioned を実装して真のバージョンを刻む。これにより新規イベントは
+    // リプレイ時に Upcaster をスキップ（CanUpcast が false）し、非冪等な Upcaster を
+    // 将来導入しても書きたてのイベントが破損しない（issue #153）。未実装なら 1。
+    schemaVersion := 1
+    if sv, ok := domainEvent.(SchemaVersioned); ok {
+        schemaVersion = sv.CurrentSchemaVersion()
+    }
+
     event := Event{
         ID:            GenerateID(),
         StreamID:      a.id,
         Type:          domainEvent.EventType(),
         Version:       a.version + len(a.uncommittedEvents) + 1,
-        SchemaVersion: 1,
+        SchemaVersion: schemaVersion,
         Data:          jsonData,
         Metadata:      metadata,
         // OccurredAt はイベントの記録時刻（システム時刻）。
@@ -289,8 +304,15 @@ func NewEventRegistry() *EventRegistry {
 }
 
 // Register イベント型を登録
-func (r *EventRegistry) Register(event DomainEvent) {
+// 同一 EventType が既に登録済みの場合はエラーを返す（黙って上書きしない）。
+// 重複登録はプログラマエラー（別の Go 型が同じ EventType を主張、または二重配線）で、
+// 上書きするとデシリアライズが誤った型にルーティングされ得る（plugin.Registry.Register と同方針、issue #153）。
+func (r *EventRegistry) Register(event DomainEvent) error {
+    if _, exists := r.types[event.EventType()]; exists {
+        return fmt.Errorf("event type %q already registered", event.EventType())
+    }
     r.types[event.EventType()] = reflect.TypeOf(event)
+    return nil
 }
 
 // Deserialize イベントデータから型付きイベントを復元
@@ -466,14 +488,21 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 // exhaustive lint ツールで Apply 側の漏れは検出可能だが、Register 漏れは検出できない。
 var contractEventRegistry = func() *eventstore.EventRegistry {
     r := eventstore.NewEventRegistry()
-    r.Register(ContractCreatedEvent{})
-    r.Register(ContractActivatedEvent{})
-    r.Register(ContractSuspendedEvent{})
-    r.Register(ContractResumedEvent{})
-    r.Register(ContractCancelledEvent{})
-    r.Register(PriceChangedEvent{})
-    r.Register(TrialStartedEvent{})
-    r.Register(TrialEndedEvent{})
+    // Register はエラーを返す（重複登録を拒否）。パッケージ初期化時の重複は
+    // プログラマエラーなので mustRegister で panic して fail-fast する。
+    mustRegister := func(e eventstore.DomainEvent) {
+        if err := r.Register(e); err != nil {
+            panic(fmt.Sprintf("contract event registry: %v", err))
+        }
+    }
+    mustRegister(&ContractCreatedEvent{})
+    mustRegister(&ContractActivatedEvent{})
+    mustRegister(&ContractSuspendedEvent{})
+    mustRegister(&ContractResumedEvent{})
+    mustRegister(&ContractCancelledEvent{})
+    mustRegister(&PriceChangedEvent{})
+    mustRegister(&TrialStartedEvent{})
+    mustRegister(&TrialEndedEvent{})
     return r
 }()
 ```
@@ -1053,26 +1082,45 @@ type UpcasterChain struct {
     upcasters []Upcaster
 }
 
+// Upcast は不動点（どの Upcaster もこれ以上バージョンを進めない状態）まで
+// ループする。単一パスは登録順に依存し、v1→v2 が v2→v3 の後に登録されると
+// v1 イベントが v2 で止まる。不動点まで反復することで登録順非依存になる。
+// 進捗は SchemaVersion の厳密な増加で判定し、maxUpcastIterations で非収束を防ぐ（issue #153）。
 func (c *UpcasterChain) Upcast(event Event) (Event, error) {
-    current := event
-    for _, u := range c.upcasters {
-        if u.CanUpcast(current.Type, current.SchemaVersion) {
+    result := event
+    for iter := 0; iter < maxUpcastIterations; iter++ {
+        advanced := false
+        for _, u := range c.upcasters {
+            if !u.CanUpcast(result.Type, result.SchemaVersion) {
+                continue
+            }
+            before := result.SchemaVersion
             var err error
-            current, err = u.Upcast(current)
+            result, err = u.Upcast(result)
             if err != nil {
-                return event, err
+                return Event{}, err
+            }
+            if result.SchemaVersion > before {
+                advanced = true
             }
         }
+        if !advanced {
+            return result, nil
+        }
     }
-    return current, nil
+    return Event{}, fmt.Errorf("upcaster chain did not converge for %q", event.Type)
 }
 ```
 
 ### 10.3 契約イベントの登録済み Upcaster
 
 `domain/contract/upcaster.go` の `NewContractUpcasterChain()` が以下を登録する。
-すべて冪等で SchemaVersion を 2 に上げる（`RaiseEvent` は常に SchemaVersion=1 で書くため、
-新旧いずれのイベントもチェーンを通る）。
+すべて冪等で SchemaVersion を 2 に上げる。現行ペイロードが v2 の 4 イベント
+（`contract.created` / `contract.price_changed` / `contract.trial_ended` /
+`contract.renewed`）は `SchemaVersioned.CurrentSchemaVersion()` で 2 を自己申告するため、
+`RaiseEvent` が新規イベントを v2 で刻む。よって**新規イベントは各 Upcaster の
+`CanUpcast(fromVersion <= 1)` が false となりチェーンを素通り**し、履歴上の v1 イベント
+だけが変換される（issue #153）。
 
 | Upcaster | 対象イベント | 変換内容 |
 |----------|------------|---------|

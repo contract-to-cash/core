@@ -68,12 +68,20 @@ func (a *BaseAggregate) RaiseEvent(domainEvent DomainEvent, metadata EventMetada
 		return fmt.Errorf("failed to marshal domain event: %w", err)
 	}
 
+	// Determine the schema version to stamp. Events that self-declare via
+	// SchemaVersioned are stamped at their true current version so they skip the
+	// Upcaster on replay; all others default to 1.
+	schemaVersion := 1
+	if sv, ok := domainEvent.(SchemaVersioned); ok {
+		schemaVersion = sv.CurrentSchemaVersion()
+	}
+
 	event := Event{
 		ID:            shared.GenerateID(),
 		StreamID:      a.id,
 		Type:          domainEvent.EventType(),
 		Version:       a.version + len(a.uncommittedEvents) + 1,
-		SchemaVersion: 1,
+		SchemaVersion: schemaVersion,
 		Data:          data,
 		Metadata:      metadata,
 		OccurredAt:    a.clock.Now(),
