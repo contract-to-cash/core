@@ -221,6 +221,98 @@ func TestSaveAndLoadSnapshot(t *testing.T) {
 	}
 }
 
+// TestLoadSnapshot_ReturnsHighestVersionOutOfOrder verifies that LoadSnapshot
+// selects the highest-Version snapshot even when a stale snapshot is appended
+// after a newer one (e.g. a lagging rebuild worker). Returning the last-appended
+// snapshot would resume reconstruction from an older version and replay events
+// that predate it — silent corruption (issue #157).
+func TestLoadSnapshot_ReturnsHighestVersionOutOfOrder(t *testing.T) {
+	store := NewInMemoryEventStore(shared.SystemClock{})
+	ctx := context.Background()
+
+	newer := eventstore.Snapshot{
+		StreamID:  "stream-1",
+		Version:   200,
+		State:     json.RawMessage(`{"v":200}`),
+		AsOf:      time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC),
+		CreatedAt: time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC),
+	}
+	stale := eventstore.Snapshot{
+		StreamID:  "stream-1",
+		Version:   100,
+		State:     json.RawMessage(`{"v":100}`),
+		AsOf:      time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		CreatedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	// Save the newer snapshot first, then the stale one out of order.
+	if err := store.SaveSnapshot(ctx, newer); err != nil {
+		t.Fatalf("SaveSnapshot(newer) failed: %v", err)
+	}
+	if err := store.SaveSnapshot(ctx, stale); err != nil {
+		t.Fatalf("SaveSnapshot(stale) failed: %v", err)
+	}
+
+	loaded, err := store.LoadSnapshot(ctx, "stream-1")
+	if err != nil {
+		t.Fatalf("LoadSnapshot failed: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected snapshot, got nil")
+	}
+	if loaded.Version != 200 {
+		t.Errorf("expected highest version 200, got %d", loaded.Version)
+	}
+}
+
+// TestLoadSnapshotBefore_HighestOutOfOrder verifies that LoadSnapshotBefore
+// returns the latest snapshot (by CreatedAt) among those before the cutoff even
+// when saved out of order, rather than the last appended one.
+func TestLoadSnapshotBefore_HighestOutOfOrder(t *testing.T) {
+	store := NewInMemoryEventStore(shared.SystemClock{})
+	ctx := context.Background()
+
+	newer := eventstore.Snapshot{
+		StreamID:  "s",
+		Version:   7,
+		State:     json.RawMessage(`{}`),
+		AsOf:      time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC),
+		CreatedAt: time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC),
+	}
+	older := eventstore.Snapshot{
+		StreamID:  "s",
+		Version:   3,
+		State:     json.RawMessage(`{}`),
+		AsOf:      time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		CreatedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	// Out-of-order save: newer first, then older.
+	_ = store.SaveSnapshot(ctx, newer)
+	_ = store.SaveSnapshot(ctx, older)
+
+	// Cutoff after both: the latest (newer, v7) must win, not the last appended.
+	loaded, err := store.LoadSnapshotBefore(ctx, "s", time.Date(2025, 4, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("LoadSnapshotBefore failed: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected snapshot, got nil")
+	}
+	if loaded.Version != 7 {
+		t.Errorf("expected version 7 (latest before cutoff), got %d", loaded.Version)
+	}
+
+	// Cutoff between the two: only the older snapshot qualifies.
+	loaded, err = store.LoadSnapshotBefore(ctx, "s", time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("LoadSnapshotBefore failed: %v", err)
+	}
+	if loaded == nil || loaded.Version != 3 {
+		t.Fatalf("expected version 3 before Feb, got %v", loaded)
+	}
+}
+
 func TestAppend_SetsGlobalPosition(t *testing.T) {
 	store := NewInMemoryEventStore(shared.SystemClock{})
 	ctx := context.Background()

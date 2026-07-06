@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/contract-to-cash/core/domain/shared"
@@ -39,16 +38,24 @@ func (s *SnapshotService) ShouldCreateSnapshot(currentVersion int) bool {
 }
 
 // CreateSnapshot serializes the aggregate state and saves it as a snapshot.
-// The aggregate should implement eventstore.SnapshotMarshaler for correct
-// serialization of unexported fields. Falls back to json.Marshal otherwise.
+//
+// The aggregate MUST implement eventstore.SnapshotMarshaler. Event-sourced
+// aggregates hold their state in unexported fields, so a generic json.Marshal
+// would silently serialize an empty object ("{}") and a later LoadFromSnapshot
+// would restore an empty aggregate at a non-zero version — silent state
+// corruption. Rather than fall back to json.Marshal, CreateSnapshot returns an
+// error naming the required interface when it is not implemented (issue #157).
 func (s *SnapshotService) CreateSnapshot(ctx context.Context, agg eventstore.AggregateRoot) error {
-	var stateData []byte
-	var err error
-	if marshaler, ok := agg.(eventstore.SnapshotMarshaler); ok {
-		stateData, err = marshaler.MarshalSnapshot()
-	} else {
-		stateData, err = json.Marshal(agg)
+	marshaler, ok := agg.(eventstore.SnapshotMarshaler)
+	if !ok {
+		return shared.NewDomainError(
+			shared.ErrCodeValidation,
+			fmt.Sprintf("aggregate %T does not implement eventstore.SnapshotMarshaler; "+
+				"snapshotting event-sourced aggregates requires a MarshalSnapshot() method "+
+				"(a generic json.Marshal would serialize an empty {} and corrupt restores)", agg),
+		)
 	}
+	stateData, err := marshaler.MarshalSnapshot()
 	if err != nil {
 		return fmt.Errorf("failed to marshal aggregate state: %w", err)
 	}
