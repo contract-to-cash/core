@@ -20,7 +20,7 @@ Simple fixed amount per billing period:
 
 ```go
 price := pricing.NewPrice(productID, moneyJPY(3000), shared.CurrencyJPY,
-    pricing.BillingCycleMonthly, nil)
+    pricing.BillingCycleMonthly, nil, createdAt)
 // ¥3,000/month regardless of usage
 ```
 
@@ -61,7 +61,7 @@ product := product.NewProduct("API Service",
     }),
 )
 price := pricing.NewPrice(product.ID(), moneyJPY(5000), shared.CurrencyJPY,
-    pricing.BillingCycleMonthly, pricingModel)
+    pricing.BillingCycleMonthly, pricingModel, createdAt)
 // ¥5,000 base + usage charges for API calls beyond 1,000
 ```
 

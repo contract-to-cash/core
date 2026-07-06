@@ -95,6 +95,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Documentation: the README quick start (en/ja) and several published docs used
+  APIs removed in #111 and stale constructor signatures, so copy-pasted snippets
+  failed to compile (#160). Corrected `CreateContractCommand` to use
+  `Interval: pricing.Monthly()` (was the removed `BillingCycle` field), added the
+  required 6th `createdAt` argument to every `pricing.NewPrice(...)` example, fixed
+  `invoicecleanup.NewInvoiceCleanupPlugin(invoiceRepo)` (dropped the removed `clock`
+  argument), re-synced the stale Japanese i18n pages (`PlanID` → `PriceID`,
+  `GetBillingCycle()` → `GetInterval()`, `Renew` → `RenewWithInterval`) to the
+  current English sources, and wired the previously unlisted
+  `guides/postgres-payment-repository` and `research/2026-04-10-payment-idempotency-patterns`
+  docs into `website/sidebars.ts`.
 - Applied the `FinalizeInvoice` transaction pattern (in-tx load → state check →
   mutate → save, with `RetryOnConflict` where an optimistic-lock conflict can
   occur) to the remaining load-mutate-save-outside-tx sites (#151):

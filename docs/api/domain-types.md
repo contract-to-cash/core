@@ -417,7 +417,7 @@ Prices are **immutable after creation**. To change pricing, create a new Price.
 **Status constants**: `PriceStatusActive`, `PriceStatusArchived`
 
 ```go
-price := pricing.NewPrice(productID, amount, currency, billingCycle, pricingModel)
+price := pricing.NewPrice(productID, amount, currency, billingCycle, pricingModel, createdAt)
 
 price.ID() shared.PriceID
 price.ProductID() shared.ProductID

@@ -60,7 +60,6 @@ ULIDベースの識別子：
 | `PaymentID` | `NewPaymentID()` |
 | `ProductID` | `NewProductID()` |
 | `PriceID` | `NewPriceID()` |
-| `PlanID` | `NewPlanID()` |
 | `UsageRecordID` | `NewUsageRecordID()` |
 | `BalanceEntryID` | `NewBalanceEntryID()` |
 | `CreditNoteID` | `NewCreditNoteID()` |
@@ -114,7 +113,7 @@ agg := contract.NewContractAggregate(contractID, clock)
 
 **タイプ定数**: `ContractTypeOneTime`, `ContractTypeSubscription`, `ContractTypeUsageBased`
 
-**課金サイクル定数**: `BillingCycleDaily`, `BillingCycleWeekly`, `BillingCycleMonthly`, `BillingCycleYearly`
+**課金間隔（Billing interval）**: `pricing.BillingInterval`（`{unit, count}`）を使用する。便利なコンストラクタ: `pricing.Daily()`, `pricing.Weekly()`, `pricing.Monthly()`, `pricing.Yearly()`, `pricing.Quarterly()`, `pricing.SemiAnnual()`。`pricing.BillingCycle` 文字列定数（`BillingCycleDaily/Weekly/Monthly/Yearly`）は `Price` 構築・表示・アダプタ用に `pricing` パッケージ内へ残存するが、契約ドメインでは公開しない（#111 で撤去）。
 
 #### コマンド
 
@@ -127,7 +126,7 @@ agg := contract.NewContractAggregate(contractID, clock)
 | `Suspend(config, metadata)` | active, past_due | suspended |
 | `Resume(metadata)` | suspended | active |
 | `Cancel(reason, metadata)` | draft, trialing, active, suspended, past_due | cancelled |
-| `Renew(newBillingCycle BillingCycle, metadata)` | active | active（新期間） |
+| `RenewWithInterval(newInterval BillingInterval, metadata)` | active | active（新期間） |
 | `ChangePrice(priceID, policy, proration, metadata)` | active | active |
 | `UnscheduleChange(reason, metadata)` | active（保留あり） | active |
 
@@ -135,13 +134,12 @@ agg := contract.NewContractAggregate(contractID, clock)
 
 ```go
 type CreateContractCommand struct {
-    AccountID    shared.AccountID
-    PlanID       shared.PlanID
-    PriceID      shared.PriceID
-    ContractType ContractType
-    BillingCycle BillingCycle
-    Price        shared.Money
-    BasePrice    shared.Money
+    AccountID      shared.AccountID
+    PriceID        shared.PriceID
+    ContractType   ContractType
+    Interval       BillingInterval
+    Price          shared.Money
+    BasePrice      shared.Money
     AutoRenew      bool
     IdempotencyKey string
 }
@@ -173,10 +171,9 @@ const (
 ```go
 agg.ContractID() shared.ContractID
 agg.AccountID() shared.AccountID
-agg.PlanID() shared.PlanID
 agg.Status() ContractStatus
 agg.GetContractType() ContractType
-agg.GetBillingCycle() BillingCycle
+agg.GetInterval() BillingInterval
 agg.CurrentPeriod() shared.DateRange
 agg.TrialConfig() *TrialConfiguration
 agg.SuspensionConfig() *SuspensionConfiguration
@@ -211,7 +208,6 @@ type Repository interface {
     Save(ctx context.Context, aggregate *ContractAggregate) error
     FindByID(ctx context.Context, id shared.ContractID) (*ContractAggregate, error)
     FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*ContractAggregate, error)
-    FindActiveByPlanID(ctx context.Context, planID shared.PlanID) ([]*ContractAggregate, error)
     FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
     FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
     FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)
@@ -433,7 +429,7 @@ Priceは**作成後は不変**。価格変更には新しいPriceを作成。
 **ステータス定数**: `PriceStatusActive`, `PriceStatusArchived`
 
 ```go
-price := pricing.NewPrice(productID, amount, currency, billingCycle, pricingModel)
+price := pricing.NewPrice(productID, amount, currency, billingCycle, pricingModel, createdAt)
 
 price.ID() shared.PriceID
 price.ProductID() shared.ProductID

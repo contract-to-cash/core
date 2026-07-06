@@ -1461,6 +1461,7 @@ func NewPrice(
     currency shared.Currency,
     billingCycle BillingCycle,
     pricingModel PricingModel,
+    createdAt time.Time,
 ) *Price
 
 // NewPriceWithInterval は BillingInterval を直接受け取る（新規コード推奨）。
@@ -1470,6 +1471,7 @@ func NewPriceWithInterval(
     currency shared.Currency,
     interval BillingInterval,
     pricingModel PricingModel,
+    createdAt time.Time,
 ) *Price
 
 func (p *Price) ID() shared.PriceID

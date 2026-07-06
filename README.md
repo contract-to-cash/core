@@ -70,7 +70,7 @@ func main() {
 
     // Create a Price and Contract
     price := shared.NewMoney(new(big.Rat).SetInt64(3000), shared.CurrencyJPY)
-    pe := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil)
+    pe := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
     priceRepo.Save(ctx, pe)
 
     cID := shared.NewContractID()
@@ -78,7 +78,7 @@ func main() {
     agg.Create(contract.CreateContractCommand{
         AccountID: shared.AccountID("acct-001"),
         PriceID: pe.ID(), ContractType: contract.ContractTypeSubscription,
-        BillingCycle: contract.BillingCycleMonthly, Price: price, BasePrice: price,
+        Interval: pricing.Monthly(), Price: price, BasePrice: price,
     }, eventstore.EventMetadata{UserID: "system"})
     agg.Activate(eventstore.EventMetadata{UserID: "system"})
     contractRepo.Save(ctx, agg)

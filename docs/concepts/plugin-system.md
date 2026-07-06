@@ -118,7 +118,7 @@ couponPlugin := coupon.NewCouponPlugin(couponRepo, clock)
 Handles cleanup of draft and stale invoices:
 
 ```go
-cleanupPlugin := invoicecleanup.NewInvoiceCleanupPlugin(invoiceRepo, clock)
+cleanupPlugin := invoicecleanup.NewInvoiceCleanupPlugin(invoiceRepo)
 ```
 
 ## Next Steps
