@@ -73,7 +73,6 @@ type ContractAggregate struct {
 	autoRenew         bool
 	cancelAtPeriodEnd bool
 	pendingPriceID    *shared.PriceID
-	metadata          map[string]string
 	createdAt         time.Time
 	updatedAt         time.Time
 }
@@ -143,18 +142,6 @@ func (a *ContractAggregate) PendingPriceID() *shared.PriceID {
 
 // HasPendingChange returns whether there is a pending price change.
 func (a *ContractAggregate) HasPendingChange() bool { return a.pendingPriceID != nil }
-
-// GetMetadata returns a copy of the contract metadata.
-func (a *ContractAggregate) GetMetadata() map[string]string {
-	if a.metadata == nil {
-		return nil
-	}
-	cp := make(map[string]string, len(a.metadata))
-	for k, v := range a.metadata {
-		cp[k] = v
-	}
-	return cp
-}
 
 // CreatedAt returns the creation timestamp.
 func (a *ContractAggregate) CreatedAt() time.Time { return a.createdAt }
@@ -757,7 +744,6 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		AutoRenew:         a.autoRenew,
 		CancelAtPeriodEnd: a.cancelAtPeriodEnd,
 		PendingPriceID:    a.pendingPriceID,
-		Metadata:          a.metadata,
 		CreatedAt:         a.createdAt,
 		UpdatedAt:         a.updatedAt,
 	}
@@ -812,7 +798,6 @@ type contractSnapshotState struct {
 	AutoRenew         bool                     `json:"auto_renew"`
 	CancelAtPeriodEnd bool                     `json:"cancel_at_period_end"`
 	PendingPriceID    *shared.PriceID          `json:"pending_price_id,omitempty"`
-	Metadata          map[string]string        `json:"metadata,omitempty"`
 	CreatedAt         time.Time                `json:"created_at"`
 	UpdatedAt         time.Time                `json:"updated_at"`
 }
@@ -854,7 +839,6 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.autoRenew = state.AutoRenew
 	a.cancelAtPeriodEnd = state.CancelAtPeriodEnd
 	a.pendingPriceID = shared.PtrCopy(state.PendingPriceID)
-	a.metadata = state.Metadata
 	a.createdAt = state.CreatedAt
 	a.updatedAt = state.UpdatedAt
 	a.SetVersion(snapshot.Version)

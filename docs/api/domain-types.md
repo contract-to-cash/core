@@ -185,7 +185,6 @@ agg.AutoRenew() bool
 agg.CancelAtPeriodEnd() bool
 agg.PendingPriceID() *shared.PriceID
 agg.HasPendingChange() bool
-agg.GetMetadata() map[string]string
 agg.CreatedAt() time.Time
 agg.UpdatedAt() time.Time
 ```

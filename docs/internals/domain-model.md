@@ -436,9 +436,6 @@ type Address struct {
 package contract
 
 import (
-    "time"
-
-    "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/domain/pricing"
 )
 
@@ -478,24 +475,12 @@ const (
 // 旧 BillingCycle 文字列スキャフォールディングは #111 で撤去済み。
 type BillingInterval = pricing.BillingInterval
 
-type Contract struct {
-    id               shared.ContractID
-    accountID        shared.AccountID
-    status           ContractStatus
-    contractType     ContractType
-    interval         BillingInterval
-    currentPeriod    shared.DateRange
-    trialConfig      *TrialConfiguration
-    suspensionConfig *SuspensionConfiguration
-    paymentMethodID  *string           // 契約レベルの決済手段ID（nil = アカウントデフォルト）
-    price            shared.Money      // サブスクリプション/買い切りの固定料金
-    basePrice        shared.Money      // ハイブリッド課金の固定部分
-    metadata         map[string]string
-    createdAt        time.Time
-    updatedAt        time.Time
-    version          int
-}
 ```
+
+> **注（issue #159）**: 以前ここに定義されていた read-only な `Contract` エンティティ
+> （ContractAggregate の状態保持ミラー）は、コンストラクタ・パッケージ外参照が一切なく
+> 死にコードだったため削除済み。契約モデルは event-sourced な `ContractAggregate`
+> （§3.2）に一本化されている。読み取りモデル / Projection は利用者側の責務。
 
 ### 3.2 ContractAggregate（イベントソーシング対応）
 
@@ -539,7 +524,6 @@ type ContractAggregate struct {
     autoRenew         bool
     cancelAtPeriodEnd bool
     pendingPriceID    *shared.PriceID
-    metadata          map[string]string
     createdAt         time.Time
     updatedAt         time.Time
 }
@@ -584,7 +568,6 @@ func (a *ContractAggregate) AutoRenew() bool
 func (a *ContractAggregate) CancelAtPeriodEnd() bool
 func (a *ContractAggregate) PendingPriceID() *shared.PriceID
 func (a *ContractAggregate) HasPendingChange() bool
-func (a *ContractAggregate) GetMetadata() map[string]string
 func (a *ContractAggregate) CreatedAt() time.Time
 func (a *ContractAggregate) UpdatedAt() time.Time
 ```
