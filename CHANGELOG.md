@@ -95,6 +95,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Concurrent `BillingService.GenerateInvoice(contractID, samePeriod)` calls could
+  each pass the duplicate-invoice check (which ran BEFORE the transaction opened)
+  and both insert, producing two billable invoices for one period and a downstream
+  double charge (#149). The duplicate guard now also runs INSIDE the `tx.Run`
+  closure through the transaction-scoped repo for `GenerateInvoice`,
+  `RegenerateInvoice`, and (implicitly, via its intentional exemption)
+  `GenerateProrationInvoice`, so a backend that serializes the re-check (row lock /
+  SERIALIZABLE) closes the window. Because inserting a NEW invoice cannot raise an
+  optimistic-lock conflict, the fix also documents a per-period uniqueness contract
+  on `invoice.Repository.Save`: adapters MUST enforce a partial unique index on
+  `(contract_id, billing_period)` for non-voided, non-proration invoices and return
+  a `shared.ErrCodeConflict` `DomainError` on violation. The in-memory reference
+  repository now enforces this the same way (voided and proration invoices exempt,
+  so void-and-recreate and proration adjustments still work). New invoice-type
+  metadata constants (`invoice.MetadataKeyInvoiceType`, `InvoiceTypeProration`,
+  `InvoiceTypeRegeneration`) and an `Invoice.IsProration()` helper back the
+  exemption. Regression tests: a concurrent `GenerateInvoice` race (single winner,
+  losers get a clean conflict), `RegenerateInvoice` after void for the same period,
+  and distinct-period generation left unaffected.
 - Release workflow: the `resolve` job no longer fails on `main` pushes that
   carry no versioned `## [x.y.z]` heading. `grep` matching zero lines returns
   exit 1, which under `set -e -o pipefail` aborted the step before the

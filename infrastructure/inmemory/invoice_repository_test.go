@@ -451,3 +451,62 @@ func TestInMemoryInvoiceRepository_FindByIDAsOf(t *testing.T) {
 		t.Error("expected error for non-existent invoice")
 	}
 }
+
+// TestInMemoryInvoiceRepository_Save_PeriodUniqueness exercises the issue #149
+// per-period uniqueness constraint: a second DISTINCT non-voided invoice for the
+// same (contract, period) is rejected with a conflict DomainError, while voided
+// and proration invoices are exempt and may coexist with the period's invoice.
+func TestInMemoryInvoiceRepository_Save_PeriodUniqueness(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)}
+	repo := NewInMemoryInvoiceRepository(clock)
+	ctx := context.Background()
+
+	accountID := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	period, err := shared.NewDateRange(
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("NewDateRange failed: %v", err)
+	}
+
+	// First regular period invoice: accepted.
+	first := newTestInvoice(t, accountID, contractID, invoice.WithBillingPeriod(period))
+	if err := repo.Save(ctx, first); err != nil {
+		t.Fatalf("first Save should succeed: %v", err)
+	}
+
+	// Second DISTINCT non-voided invoice for the same period: rejected as conflict.
+	second := newTestInvoice(t, accountID, contractID, invoice.WithBillingPeriod(period))
+	err = repo.Save(ctx, second)
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) || domainErr.Code != shared.ErrCodeConflict {
+		t.Fatalf("expected conflict DomainError for duplicate period invoice, got: %v", err)
+	}
+
+	// Re-saving the SAME record (update / finalize) must not self-collide.
+	if err := repo.Save(ctx, first); err != nil {
+		t.Errorf("re-saving the same invoice must not conflict, got: %v", err)
+	}
+
+	// A proration invoice for the same period is exempt and coexists.
+	proration := newTestInvoice(t, accountID, contractID,
+		invoice.WithBillingPeriod(period),
+		invoice.WithMetadata(map[string]string{
+			invoice.MetadataKeyInvoiceType: invoice.InvoiceTypeProration,
+		}),
+	)
+	if err := repo.Save(ctx, proration); err != nil {
+		t.Errorf("proration invoice must be exempt from period uniqueness, got: %v", err)
+	}
+
+	// A voided invoice for the same period is exempt and coexists.
+	voided := newTestInvoice(t, accountID, contractID,
+		invoice.WithBillingPeriod(period),
+		invoice.WithStatus(invoice.InvoiceStatusVoided),
+	)
+	if err := repo.Save(ctx, voided); err != nil {
+		t.Errorf("voided invoice must be exempt from period uniqueness, got: %v", err)
+	}
+}

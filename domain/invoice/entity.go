@@ -22,6 +22,22 @@ const (
 	InvoiceStatusRefunded    InvoiceStatus = "refunded"
 )
 
+// MetadataKeyInvoiceType is the metadata key under which the billing pipeline
+// records which flow produced an invoice. The (contract_id, billing_period)
+// uniqueness contract documented on Repository.Save keys off this value:
+// proration invoices are exempt because they intentionally coexist with the
+// period's regular invoice.
+const MetadataKeyInvoiceType = "invoice_type"
+
+const (
+	// InvoiceTypeProration marks a proration adjustment invoice. Proration
+	// invoices are exempt from the per-period uniqueness constraint.
+	InvoiceTypeProration = "proration"
+	// InvoiceTypeRegeneration marks a void-and-recreate replacement invoice.
+	// It is a regular period invoice and DOES participate in uniqueness.
+	InvoiceTypeRegeneration = "regeneration"
+)
+
 // LineItem represents a single line on an invoice.
 type LineItem struct {
 	id          string
@@ -379,6 +395,14 @@ func (inv *Invoice) Metadata() map[string]string {
 		cp[k] = v
 	}
 	return cp
+}
+
+// IsProration reports whether the invoice is a proration adjustment, tagged via
+// MetadataKeyInvoiceType. Proration invoices are exempt from the per-period
+// uniqueness constraint documented on Repository.Save because they are designed
+// to coexist with the billing period's regular invoice.
+func (inv *Invoice) IsProration() bool {
+	return inv.metadata[MetadataKeyInvoiceType] == InvoiceTypeProration
 }
 
 // WithIssueDate sets the issue date.

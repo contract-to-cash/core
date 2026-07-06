@@ -43,6 +43,15 @@ func NewInMemoryInvoiceRepository(clock shared.Clock) *InMemoryInvoiceRepository
 // The first save of a given ID has no stored version to compare against and
 // always succeeds, so callers that construct a fresh invoice (LoadedVersion 0)
 // are unaffected.
+//
+// Per-period uniqueness (issue #149): this reference implementation also mirrors
+// the partial unique index recommended in invoice.Repository.Save. Saving a
+// non-voided, non-proration invoice with a non-zero billing period is rejected
+// with a shared.ErrCodeConflict DomainError if a DIFFERENT non-voided,
+// non-proration invoice already exists for the same (contract, period). This
+// closes the concurrent-GenerateInvoice window under the mutex the same way a
+// database unique index would. Voided and proration invoices are exempt so
+// void-and-recreate (RegenerateInvoice) and proration adjustments still work.
 func (r *InMemoryInvoiceRepository) Save(_ context.Context, inv *invoice.Invoice) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -53,12 +62,51 @@ func (r *InMemoryInvoiceRepository) Save(_ context.Context, inv *invoice.Invoice
 		}
 	}
 
+	if err := r.checkPeriodUniquenessLocked(inv); err != nil {
+		return err
+	}
+
 	r.invoices[inv.ID()] = inv
 	r.versions[inv.ID()] = inv.Version()
 	// Sync loadedVersion so subsequent saves from the same pointer (the common
 	// non-isolated in-memory case) compare against the just-persisted version.
 	inv.SetVersion(inv.Version())
 	return nil
+}
+
+// checkPeriodUniquenessLocked enforces the per-period uniqueness contract from
+// invoice.Repository.Save. It must be called with r.mu held. It rejects the save
+// when inv participates in the constraint and a DIFFERENT stored invoice already
+// occupies the same (contract, period) slot.
+func (r *InMemoryInvoiceRepository) checkPeriodUniquenessLocked(inv *invoice.Invoice) error {
+	if !participatesInPeriodUniqueness(inv) {
+		return nil
+	}
+	for id, existing := range r.invoices {
+		if id == inv.ID() {
+			continue // same record (update / finalize) never collides with itself
+		}
+		if !participatesInPeriodUniqueness(existing) {
+			continue
+		}
+		if existing.ContractID() == inv.ContractID() &&
+			existing.BillingPeriod().Start().Equal(inv.BillingPeriod().Start()) &&
+			existing.BillingPeriod().End().Equal(inv.BillingPeriod().End()) {
+			return shared.NewDomainError(shared.ErrCodeConflict,
+				"invoice already exists for this billing period")
+		}
+	}
+	return nil
+}
+
+// participatesInPeriodUniqueness reports whether inv is subject to the
+// (contract_id, billing_period) uniqueness constraint. Voided invoices,
+// proration adjustments, and invoices without a billing period are exempt —
+// matching the partial unique index recommended in invoice.Repository.Save.
+func participatesInPeriodUniqueness(inv *invoice.Invoice) bool {
+	return inv.Status() != invoice.InvoiceStatusVoided &&
+		!inv.IsProration() &&
+		!inv.BillingPeriod().IsZero()
 }
 
 // FindByID loads an invoice by its ID.
