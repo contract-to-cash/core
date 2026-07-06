@@ -92,7 +92,7 @@ func BenchmarkBalanceRepository_FindAvailable_100Entries(b *testing.B) {
 
 	// Populate 100 balance entries
 	for i := 0; i < 100; i++ {
-		entry := balance.NewBalanceEntry(
+		entry, _ := balance.NewBalanceEntry(
 			accountID,
 			shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 			balance.BalanceReasonManualAdjustment,

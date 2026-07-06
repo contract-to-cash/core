@@ -464,8 +464,11 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	inputMethodType := s.resolvePaymentMethodType("", input.PaymentMethod)
 
 	if err != nil {
-		// Create and persist a failed payment record for tracking
-		failedPayment := payment.NewPayment(
+		// Create and persist a failed payment record for tracking.
+		// amount was already validated non-negative by ValidatePayment above, so
+		// this construction cannot fail on the sign guard (issue #148); handle the
+		// error defensively regardless.
+		failedPayment, npErr := payment.NewPayment(
 			shared.NewPaymentID(),
 			invoiceID,
 			amount,
@@ -473,6 +476,9 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			"",
 			s.clock.Now(),
 		)
+		if npErr != nil {
+			return nil, fmt.Errorf("failed to construct failed-payment record: %w", npErr)
+		}
 		if failErr := failedPayment.Fail(err.Error()); failErr == nil {
 			// Best-effort save of failed payment record
 			_ = s.paymentRepo.Save(ctx, failedPayment)
@@ -517,7 +523,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			}
 		}
 
-		pendingPayment := payment.NewPayment(
+		pendingPayment, npErr := payment.NewPayment(
 			shared.NewPaymentID(),
 			invoiceID,
 			amount,
@@ -525,6 +531,9 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			chargeResp.TransactionID,
 			s.clock.Now(),
 		)
+		if npErr != nil {
+			return nil, fmt.Errorf("failed to construct pending payment record: %w", npErr)
+		}
 		if effectiveKey != "" {
 			pendingPayment.SetIdempotencyKey(effectiveKey)
 		}
@@ -624,7 +633,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// found, the closure reassigns p to the existing instance (Pending →
 	// Completed upgrade path or straight idempotent replay) and the fresh
 	// ID here is discarded. This is cheap and keeps the happy path simple.
-	p := payment.NewPayment(
+	p, npErr := payment.NewPayment(
 		shared.NewPaymentID(),
 		invoiceID,
 		amount,
@@ -632,6 +641,9 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		chargeResp.TransactionID,
 		s.clock.Now(),
 	)
+	if npErr != nil {
+		return nil, fmt.Errorf("failed to construct payment record: %w", npErr)
+	}
 	if effectiveKey != "" {
 		p.SetIdempotencyKey(effectiveKey)
 	}

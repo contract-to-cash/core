@@ -926,7 +926,7 @@ func TestProcessPayment_RequiresAction_Idempotency_ReturnsCachedPayment(t *testi
 	clock := newPaymentTestClock()
 	inv := newSimpleFinalizedInvoice()
 
-	existingPayment := payment.NewPayment(
+	existingPayment, _ := payment.NewPayment(
 		shared.NewPaymentID(),
 		inv.ID(),
 		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
@@ -1156,7 +1156,7 @@ func TestProcessPayment_Idempotency_DoesNotMutateInvoiceForDuplicateKey(t *testi
 	clock := newPaymentTestClock()
 	inv := newSimpleFinalizedInvoice()
 
-	existingPayment := payment.NewPayment(
+	existingPayment, _ := payment.NewPayment(
 		shared.NewPaymentID(),
 		inv.ID(),
 		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
@@ -2255,7 +2255,7 @@ func TestProcessPayment_CompensatedKey_InTxIdempotencyCheckUsesEffectiveKey(t *t
 	_ = store.MarkCompensated(context.Background(), "key-h2-orig", "effective-h2")
 
 	// Seed the repo with a completed payment under the EFFECTIVE key.
-	existing := payment.NewPayment(
+	existing, _ := payment.NewPayment(
 		shared.NewPaymentID(),
 		inv.ID(),
 		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
@@ -2672,7 +2672,7 @@ func TestProcessPayment_ExistingTerminalState_ShortCircuits_NoGatewayNoMarker(t 
 			store := newFakeIdempotencyStore()
 			gw := &trackingGateway{}
 
-			existing := payment.NewPayment(
+			existing, _ := payment.NewPayment(
 				shared.NewPaymentID(),
 				inv.ID(),
 				shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
@@ -2750,7 +2750,7 @@ func TestProcessPayment_ExistingTerminalState_DoesNotFireBeforeCharge(t *testing
 	invRepo := &mockInvoiceRepoForPayment{inv: inv}
 	paymentRepo := newFakePaymentRepo()
 
-	existing := payment.NewPayment(
+	existing, _ := payment.NewPayment(
 		shared.NewPaymentID(),
 		inv.ID(),
 		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
@@ -2855,7 +2855,7 @@ func TestProcessPayment_InTxLookup_UsesEffectiveKeyWhenResolved(t *testing.T) {
 	_ = store.MarkCompensated(context.Background(), "orig-d", "eff-d")
 
 	// Seed a Pending payment under the EFFECTIVE key.
-	seeded := payment.NewPayment(
+	seeded, _ := payment.NewPayment(
 		shared.NewPaymentID(),
 		inv.ID(),
 		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
@@ -2932,7 +2932,7 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 			inv := newSimpleFinalizedInvoice()
 
 			// Prepare the "delayed" terminal payment.
-			delayed := payment.NewPayment(
+			delayed, _ := payment.NewPayment(
 				shared.NewPaymentID(),
 				inv.ID(),
 				shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
@@ -3020,7 +3020,7 @@ func TestProcessPayment_ExistingRefunded_ReturnsError(t *testing.T) {
 
 	// Seed a Refunded payment under the input key (no store in play — this
 	// is the legacy path where input key == effective key).
-	existing := payment.NewPayment(
+	existing, _ := payment.NewPayment(
 		shared.NewPaymentID(),
 		inv.ID(),
 		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
@@ -3073,7 +3073,7 @@ func TestProcessPayment_ExistingFailed_ReturnsError(t *testing.T) {
 	invRepo := &mockInvoiceRepoForPayment{inv: inv}
 	paymentRepo := newFakePaymentRepo()
 
-	existing := payment.NewPayment(
+	existing, _ := payment.NewPayment(
 		shared.NewPaymentID(),
 		inv.ID(),
 		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),

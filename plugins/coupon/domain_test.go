@@ -76,7 +76,7 @@ func TestCoupon_CalculateDiscount_Percentage(t *testing.T) {
 	)
 
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	discount := c.CalculateDiscount(subtotal)
+	discount, _ := c.CalculateDiscount(subtotal)
 
 	expected := big.NewRat(1000, 1)
 	if discount.Amount().Cmp(expected) != 0 {
@@ -95,7 +95,7 @@ func TestCoupon_CalculateDiscount_Fixed(t *testing.T) {
 	)
 
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	discount := c.CalculateDiscount(subtotal)
+	discount, _ := c.CalculateDiscount(subtotal)
 
 	expected := big.NewRat(500, 1)
 	if discount.Amount().Cmp(expected) != 0 {
@@ -116,7 +116,7 @@ func TestCoupon_CalculateDiscount_MaxDiscountCap(t *testing.T) {
 
 	// 50% of 10000 = 5000, but maxDiscount caps at 500
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
-	discount := c.CalculateDiscount(subtotal)
+	discount, _ := c.CalculateDiscount(subtotal)
 
 	expected := big.NewRat(500, 1)
 	if discount.Amount().Cmp(expected) != 0 {

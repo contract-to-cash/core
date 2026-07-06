@@ -16,7 +16,7 @@ func BenchmarkConsume_Sequential(b *testing.B) {
 	// Pre-allocate entries for each iteration to avoid StopTimer/StartTimer overhead
 	entries := make([]*BalanceEntry, b.N)
 	for i := 0; i < b.N; i++ {
-		entries[i] = NewBalanceEntry(
+		entries[i], _ = NewBalanceEntry(
 			shared.AccountID("acc-bench"),
 			shared.NewMoney(big.NewRat(1000000, 1), shared.CurrencyJPY),
 			BalanceReasonManualAdjustment,
@@ -41,7 +41,7 @@ func BenchmarkConsume_FullyConsumed(b *testing.B) {
 	// Pre-allocate entries
 	entries := make([]*BalanceEntry, b.N)
 	for i := 0; i < b.N; i++ {
-		entries[i] = NewBalanceEntry(
+		entries[i], _ = NewBalanceEntry(
 			shared.AccountID("acc-bench"),
 			shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
 			BalanceReasonProration,
@@ -59,7 +59,7 @@ func BenchmarkIsExpired(b *testing.B) {
 	b.ReportAllocs()
 
 	expires := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	entry := NewBalanceEntry(
+	entry, _ := NewBalanceEntry(
 		shared.AccountID("acc-bench"),
 		shared.NewMoney(big.NewRat(5000, 1), shared.CurrencyJPY),
 		BalanceReasonGoodwill,

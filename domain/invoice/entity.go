@@ -157,6 +157,14 @@ type Invoice struct {
 	// populate these fields keep working unchanged.
 	version       int
 	loadedVersion int
+
+	// optErr captures a deferred validation error produced by a functional
+	// option. Options cannot return errors, so an option that detects an
+	// invariant violation (e.g. WithAppliedBalance encountering a currency
+	// mismatch) records it here; NewInvoice checks it after applying all options
+	// and returns it instead of silently leaving amountDue/balance inconsistent
+	// (issue #148). The first error wins.
+	optErr error
 }
 
 // InvoiceOption is a functional option for NewInvoice.
@@ -184,14 +192,25 @@ func WithDueDate(t time.Time) InvoiceOption {
 }
 
 // WithAppliedBalance sets the applied balance amount and recalculates amountDue and balance.
+//
+// If the applied balance is in a different currency than the invoice total, the
+// subtraction fails; rather than silently swallowing the error (which would
+// leave appliedBalance set to a foreign amount while amountDue/balance kept the
+// original total — an inconsistent invoice), the error is recorded on the
+// invoice and surfaced by NewInvoice (issue #148).
 func WithAppliedBalance(c shared.Money) InvoiceOption {
 	return func(inv *Invoice) {
 		inv.appliedBalance = c
 		amountDue, err := inv.total.Subtract(c)
-		if err == nil {
-			inv.amountDue = amountDue
-			inv.balance = amountDue
+		if err != nil {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainErrorWithCause(shared.ErrCodeCurrencyMismatch,
+					"currency mismatch between invoice total and applied balance", err)
+			}
+			return
 		}
+		inv.amountDue = amountDue
+		inv.balance = amountDue
 	}
 }
 
@@ -267,6 +286,11 @@ func NewInvoice(
 		opt(inv)
 	}
 
+	// Surface any deferred error recorded by a functional option (issue #148).
+	if inv.optErr != nil {
+		return nil, inv.optErr
+	}
+
 	return inv, nil
 }
 
@@ -294,6 +318,19 @@ func (inv *Invoice) ValidatePayment(amount shared.Money) error {
 		inv.status != InvoiceStatusPartialPaid && inv.status != InvoiceStatusOverdue {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot record payment: invoice status is %s", inv.status))
+	}
+
+	// Guard the financial invariant (issue #148): a negative payment would
+	// decrease paidAmount, inflate the balance, and could roll a Paid invoice
+	// back to partial_paid — this slips through when allowPartialPay is set,
+	// because the "leaves a balance" guard below only rejects underpayment, not
+	// negative payment. Zero is permitted: a zero-amount invoice (e.g. one fully
+	// covered by a discount or credit) is settled by a zero-amount payment, which
+	// is exactly what PaymentService.ProcessPayment submits when it defaults the
+	// amount to AmountDue(). A currency mismatch is surfaced by paidAmount.Add.
+	if amount.IsNegative() {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"payment amount must not be negative")
 	}
 
 	newPaid, err := inv.paidAmount.Add(amount)

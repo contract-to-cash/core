@@ -49,6 +49,16 @@ type Payment struct {
 }
 
 // NewPayment creates a new Payment.
+//
+// The amount must not be negative: a negative payment would corrupt refund and
+// invoice-balance math downstream (RecordRefund derives status from cumulative
+// totals, and RecordPayment would inflate the balance). Zero is permitted: a
+// zero-amount invoice (e.g. one fully covered by a discount or account credit)
+// is settled by a zero-amount payment, which is exactly what
+// PaymentService.ProcessPayment constructs when it defaults the charge amount to
+// the invoice's AmountDue(). Persistence adapters rebuild payments via
+// FromSnapshot, which bypasses this guard so replay of historically valid
+// payments is never blocked (issue #148).
 func NewPayment(
 	id shared.PaymentID,
 	invoiceID shared.InvoiceID,
@@ -56,7 +66,11 @@ func NewPayment(
 	method PaymentMethod,
 	gatewayTransactionID string,
 	processedAt time.Time,
-) *Payment {
+) (*Payment, error) {
+	if amount.IsNegative() {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			"payment amount must not be negative")
+	}
 	return &Payment{
 		id:                   id,
 		invoiceID:            invoiceID,
@@ -67,7 +81,7 @@ func NewPayment(
 		gatewayTransactionID: gatewayTransactionID,
 		processedAt:          processedAt,
 		metadata:             make(map[string]string),
-	}
+	}, nil
 }
 
 // --- Getters ---

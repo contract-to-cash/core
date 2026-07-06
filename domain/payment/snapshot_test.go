@@ -12,7 +12,7 @@ func TestPayment_Snapshot_RoundTrip(t *testing.T) {
 	t.Parallel()
 
 	processedAt := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
-	p := NewPayment(
+	p, _ := NewPayment(
 		shared.PaymentID("pay-1"),
 		shared.InvoiceID("inv-1"),
 		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
@@ -130,7 +130,7 @@ func TestPayment_FromSnapshot_ValidatesID(t *testing.T) {
 func TestPayment_ToSnapshot_IsIndependentCopy(t *testing.T) {
 	t.Parallel()
 
-	p := NewPayment(
+	p, _ := NewPayment(
 		shared.PaymentID("pay-1"),
 		shared.InvoiceID("inv-1"),
 		shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),

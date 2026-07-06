@@ -14,7 +14,7 @@ import (
 // payment's internal state.
 func TestPayment_FailureReason_GetterIsDefensivelyCopied(t *testing.T) {
 	amount := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
-	p := NewPayment(
+	p, _ := NewPayment(
 		shared.NewPaymentID(),
 		shared.NewInvoiceID(),
 		amount,
@@ -43,7 +43,7 @@ func TestPayment_FailureReason_GetterIsDefensivelyCopied(t *testing.T) {
 // nil from FailureReason() without panicking.
 func TestPayment_FailureReason_NilSafe(t *testing.T) {
 	amount := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
-	p := NewPayment(
+	p, _ := NewPayment(
 		shared.NewPaymentID(),
 		shared.NewInvoiceID(),
 		amount,

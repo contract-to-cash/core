@@ -110,7 +110,7 @@ func BenchmarkGenerateInvoice_WithCredits(b *testing.B) {
 	// Prepare 10 credit entries
 	credits := make([]*balance.BalanceEntry, 10)
 	for i := range credits {
-		credits[i] = balance.NewBalanceEntry(
+		credits[i], _ = balance.NewBalanceEntry(
 			agg.AccountID(),
 			benchMoney(500),
 			balance.BalanceReasonManualAdjustment,

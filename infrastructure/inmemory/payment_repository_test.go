@@ -13,7 +13,7 @@ import (
 
 func newTestPayment(t *testing.T, invoiceID shared.InvoiceID) *payment.Payment {
 	t.Helper()
-	return payment.NewPayment(
+	p, err := payment.NewPayment(
 		shared.NewPaymentID(),
 		invoiceID,
 		shared.NewMoney(new(big.Rat).SetInt64(5000), shared.CurrencyJPY),
@@ -21,6 +21,10 @@ func newTestPayment(t *testing.T, invoiceID shared.InvoiceID) *payment.Payment {
 		"gw_txn_123",
 		time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
 	)
+	if err != nil {
+		t.Fatalf("newTestPayment: %v", err)
+	}
+	return p
 }
 
 func TestInMemoryPaymentRepository_SaveAndFindByID(t *testing.T) {

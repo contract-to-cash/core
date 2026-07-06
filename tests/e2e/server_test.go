@@ -786,7 +786,7 @@ func handleCreateBalance(env *testEnv) http.HandlerFunc {
 			return
 		}
 
-		entry := balance.NewBalanceEntry(
+		entry, _ := balance.NewBalanceEntry(
 			shared.AccountID(req.AccountID),
 			moneyJPY(req.Amount),
 			balance.BalanceReason(req.Reason),

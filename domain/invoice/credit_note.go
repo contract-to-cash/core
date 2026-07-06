@@ -42,6 +42,14 @@ type CreditNoteItem struct {
 // NewCreditNoteItem creates a new CreditNoteItem.
 // The taxRate pointer is defensively copied so mutations to the caller's
 // *big.Rat do not leak into the item (see issue #96).
+//
+// The item amount must be positive. Because a CreditNoteItem is a value builder
+// consumed exclusively by NewCreditNote (a bare item never becomes persisted
+// state on its own), the non-positive / mixed-currency invariant is enforced
+// there — NewCreditNote rejects any item whose amount is zero, negative, or in a
+// currency other than the note's. This keeps the value builder allocation-free
+// and error-free while still guaranteeing no nonsensical amount is persisted
+// (issue #148).
 func NewCreditNoteItem(invoiceLineItemID, description string, amount shared.Money, taxRate *big.Rat, taxAmount shared.Money) CreditNoteItem {
 	var ownedTaxRate *big.Rat
 	if taxRate != nil {
@@ -147,6 +155,16 @@ func NewCreditNote(
 				fmt.Sprintf("credit note items must share a single currency: got %s and %s",
 					currency, item.amount.Currency()))
 		}
+		// Guard the financial invariant at the aggregate boundary (issue #148):
+		// a zero or negative item amount is meaningless and would let a bogus
+		// CreditAmount slip past the "exceeds total" guard in Apply/Refund, since
+		// Money.GreaterThan returns false on a currency mismatch and a negative
+		// subtotal skews the total.
+		if item.amount.IsNegative() || item.amount.IsZero() {
+			return nil, shared.NewDomainError(shared.ErrCodeValidation,
+				fmt.Sprintf("credit note item amount must be positive: got %s",
+					item.amount.Amount().RatString()))
+		}
 		s, err := subtotal.Add(item.amount)
 		if err != nil {
 			return nil, err
@@ -211,16 +229,40 @@ func (cn *CreditNote) Issue(issuedAt time.Time) error {
 	return nil
 }
 
+// validateAdjustmentAmount guards the currency and sign invariants shared by
+// Apply and Refund. Money.GreaterThan silently returns false on a currency
+// mismatch (see domain/shared/money.go), so an explicit currency check MUST
+// precede the "exceeds total" comparison; otherwise a foreign-currency amount
+// (e.g. USD 1,000,000 against a JPY note) would slip past it. A non-positive
+// amount is likewise rejected: applying or refunding a zero or negative credit
+// is meaningless and would persist a nonsensical CreditAmount/RefundAmount on
+// the issued note. Mirrors payment.ValidateRefund (issue #148).
+func (cn *CreditNote) validateAdjustmentAmount(amount shared.Money, label string) error {
+	if amount.Currency() != cn.total.Currency() {
+		return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+			fmt.Sprintf("%s amount currency %s does not match credit note currency %s",
+				label, amount.Currency(), cn.total.Currency()))
+	}
+	if amount.IsNegative() || amount.IsZero() {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("%s amount must be positive", label))
+	}
+	if amount.GreaterThan(cn.total) {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("%s amount %s exceeds total %s",
+				label, amount.Amount().RatString(), cn.total.Amount().RatString()))
+	}
+	return nil
+}
+
 // Apply transitions the credit note from issued to applied (credit applied to account).
 func (cn *CreditNote) Apply(creditAmount shared.Money) error {
 	if cn.status != CreditNoteStatusIssued {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot apply credit note in status %s", cn.status))
 	}
-	if creditAmount.GreaterThan(cn.total) {
-		return shared.NewDomainError(shared.ErrCodeBusinessRule,
-			fmt.Sprintf("credit amount %s exceeds total %s",
-				creditAmount.Amount().RatString(), cn.total.Amount().RatString()))
+	if err := cn.validateAdjustmentAmount(creditAmount, "credit"); err != nil {
+		return err
 	}
 	cn.creditAmount = creditAmount
 	cn.status = CreditNoteStatusApplied
@@ -237,10 +279,8 @@ func (cn *CreditNote) Refund(refundAmount shared.Money) error {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot refund credit note in status %s", cn.status))
 	}
-	if refundAmount.GreaterThan(cn.total) {
-		return shared.NewDomainError(shared.ErrCodeBusinessRule,
-			fmt.Sprintf("refund amount %s exceeds total %s",
-				refundAmount.Amount().RatString(), cn.total.Amount().RatString()))
+	if err := cn.validateAdjustmentAmount(refundAmount, "refund"); err != nil {
+		return err
 	}
 	cn.refundAmount = refundAmount
 	cn.status = CreditNoteStatusRefunded

@@ -821,7 +821,7 @@ func TestReissueInvoice_AppliesCreditsViaJoinedTransaction(t *testing.T) {
 
 	// Seed a 3000 JPY credit for the account.
 	balRepo := inmemory.NewInMemoryBalanceRepository(clock)
-	entry := balance.NewBalanceEntry(agg.AccountID(), jpy(3000), balance.BalanceReasonGoodwill, clock.Now())
+	entry, _ := balance.NewBalanceEntry(agg.AccountID(), jpy(3000), balance.BalanceReasonGoodwill, clock.Now())
 	if err := balRepo.Save(context.Background(), entry); err != nil {
 		t.Fatalf("failed to seed balance: %v", err)
 	}
