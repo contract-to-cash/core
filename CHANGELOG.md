@@ -112,6 +112,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     historically persisted prices always load (replay-safety), consistent with the
     rest of the snapshot path. All in-repo construction (tests, benchmarks, the
     `pricing-models-demo` example) now goes through `NewTieredPrice`.
+- `CouponPlugin.CalculateDiscount` no longer zeroes out a valid coupon when
+  stacking is disabled and the repository returns an invalid coupon (e.g.
+  expired) ahead of it (#158). Previously the plugin truncated the candidate
+  slice to `coupons[:1]` (and to `coupons[:MaxCouponsPerInvoice]`) *before* the
+  per-coupon validity checks (window, minAmount, currency, per-account limit)
+  ran, so a leading invalid coupon was the only one considered and the customer
+  received no discount despite holding a valid coupon. Selection is now
+  "first valid wins": the first coupon that passes every check is applied, and
+  `MaxCouponsPerInvoice` counts VALIDATED (applied) coupons rather than scanned
+  ones. Behavior is unchanged for the all-valid cases already covered by tests
+  (no-stacking, stacking with a cap, `MaxCouponsPerInvoice == 0` = unlimited).
 - `BillingService.GenerateInvoice` no longer produces immediately-due invoices
   from a zero-value `BillingConfig{}` (#154). `DaysUntilDue == 0` now falls back to
   a 30-day due date at usage time (`BillingConfig.effectiveDaysUntilDue`), matching
