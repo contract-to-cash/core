@@ -131,10 +131,23 @@ type TrialStartedEvent struct {
 func (e *TrialStartedEvent) EventType() eventstore.EventType { return EventTypeTrialStarted }
 
 // TrialEndedEvent is raised when a trial period ends.
+//
+// CurrentPeriod carries the initial billing period established when a trial
+// converts (Converted=true), mirroring ContractActivatedEvent.CurrentPeriod.
+// Without it a converted contract would be Active with a zero-value period and
+// would silently fall out of the renewal/billing cycle (issue #146). It is the
+// zero value when Converted=false (the contract is cancelled, no billing).
+//
+// Schema: added in SchemaVersion 2. Historical v1 payloads have no
+// current_period; TrialEndedEventUpcaster marks them v2 and the aggregate's
+// Apply derives the period from the billing interval anchored at EndedAt (the
+// interval is not carried on this event, only on the earlier
+// ContractCreatedEvent), so replay is deterministic.
 type TrialEndedEvent struct {
-	ContractID shared.ContractID `json:"contract_id"`
-	EndedAt    time.Time         `json:"ended_at"`
-	Converted  bool              `json:"converted"`
+	ContractID    shared.ContractID `json:"contract_id"`
+	EndedAt       time.Time         `json:"ended_at"`
+	Converted     bool              `json:"converted"`
+	CurrentPeriod shared.DateRange  `json:"current_period"`
 }
 
 func (e *TrialEndedEvent) EventType() eventstore.EventType { return EventTypeTrialEnded }

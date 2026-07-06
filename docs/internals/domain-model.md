@@ -686,9 +686,10 @@ type TrialStartedEvent struct {
 }
 
 type TrialEndedEvent struct {
-    ContractID shared.ContractID
-    EndedAt    time.Time
-    Converted  bool
+    ContractID    shared.ContractID
+    EndedAt       time.Time
+    Converted     bool
+    CurrentPeriod shared.DateRange // 転換時（Converted=true）の初期課金期間。SchemaVersion 2 で追加
 }
 
 type PaymentMethodChangedEvent struct {
@@ -767,6 +768,21 @@ type TrialConfiguration struct {
 `RequirePaymentMethod=true` の場合、支払い方法が未登録の契約は
 `batch.TrialExpirationProcessor` が自動変換をブロックし、失敗として記録する
 （契約は Trialing のまま。支払い方法を登録するか `RequirePaymentMethod` を外すまで変換されない）。
+
+**トライアル転換時の課金期間（issue #146）**: トライアルが転換する（`EndTrial(converted=true)`）と、
+契約は Active になると同時に `Activate` と同じ方法で初期課金期間（`currentPeriod`）が確立される
+（`interval` を `EndedAt` に加算した `[EndedAt, interval.AddTo(EndedAt))`）。これがないと転換済み契約は
+ゼロ値の期間を持ち、更新・請求サイクルから静かに脱落する。転換パスは 2 つあるが結果は一致する:
+
+- `batch.TrialExpirationProcessor` が呼ぶ `EndTrial(converted=true)`
+- 統合者が Trialing 契約に対して呼ぶ `Activate`（内部で `EndTrial(converted=true)` に委譲）
+
+どちらも「Active + 課金期間確立 + `trialConfig` クリア + `TrialEndedEvent`（converted=true）の記録」という
+同一の状態・イベントを生成する。`TrialEndedEvent.CurrentPeriod` は SchemaVersion 2 で追加された。
+歴史的な v1 ペイロード（`current_period` なし）は `TrialEndedEventUpcaster` が v2 にマークし、
+Apply が `interval`（先行する `ContractCreatedEvent` から復元される）を `EndedAt` に加算して期間を
+決定的に導出する（`interval` はこのイベントに載っていないため Upcaster では埋められない）。
+非転換（cancelled）の場合は期間を設定しない。
 
 ### 3.6 一時停止設定
 

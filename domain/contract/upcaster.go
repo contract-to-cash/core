@@ -175,11 +175,38 @@ func (u *ContractRenewedEventUpcaster) Upcast(event eventstore.Event) (eventstor
 	return event, nil
 }
 
+// TrialEndedEventUpcaster migrates historical TrialEndedEvent payloads (schema
+// version 1) to version 2. Version 2 added the current_period field so that a
+// converted trial establishes an initial billing period (issue #146).
+//
+// The period itself cannot be filled at the JSON level: the billing interval
+// needed to compute it lives on the earlier ContractCreatedEvent, not on this
+// event. So this upcaster only bumps SchemaVersion to 2 (idempotently); the
+// aggregate's Apply derives the period for legacy converted events from the
+// replayed interval anchored at EndedAt. A non-converted legacy event needs no
+// period. This keeps replay deterministic without corrupting the append-only
+// history.
+type TrialEndedEventUpcaster struct{}
+
+// CanUpcast returns true for TrialEndedEvent at schema version <= 1.
+func (u *TrialEndedEventUpcaster) CanUpcast(eventType eventstore.EventType, fromVersion int) bool {
+	return eventType == EventTypeTrialEnded && fromVersion <= 1
+}
+
+// Upcast bumps a TrialEndedEvent to schema version 2. It leaves the payload
+// otherwise untouched: a missing current_period deserializes to the zero
+// DateRange, which Apply recognizes as "legacy" and fills deterministically.
+func (u *TrialEndedEventUpcaster) Upcast(event eventstore.Event) (eventstore.Event, error) {
+	event.SchemaVersion = 2
+	return event, nil
+}
+
 // NewContractUpcasterChain returns an UpcasterChain with all contract upcasters.
 func NewContractUpcasterChain() *eventstore.UpcasterChain {
 	return eventstore.NewUpcasterChain(
 		&PriceChangedEventUpcaster{},
 		&ContractCreatedEventUpcaster{},
 		&ContractRenewedEventUpcaster{},
+		&TrialEndedEventUpcaster{},
 	)
 }
