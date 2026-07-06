@@ -153,11 +153,13 @@ func main() {
 	printStep("6. Contract Resumed", "Back to active on %s", clock.Now().Format("2006-01-02"))
 
 	// ── 7. Issue credits ──
-	balance1 := balance.NewBalanceEntry(accountID, moneyJPY(1000), balance.BalanceReasonGoodwill, clock.Now())
+	balance1, balErr1 := balance.NewBalanceEntry(accountID, moneyJPY(1000), balance.BalanceReasonGoodwill, clock.Now())
+	must("new balance1", balErr1)
 	must("save balance1", balanceRepo.Save(ctx, balance1))
 
 	clock.Advance(time.Hour)
-	balance2 := balance.NewBalanceEntry(accountID, moneyJPY(500), balance.BalanceReasonProration, clock.Now())
+	balance2, balErr2 := balance.NewBalanceEntry(accountID, moneyJPY(500), balance.BalanceReasonProration, clock.Now())
+	must("new balance2", balErr2)
 	must("save balance2", balanceRepo.Save(ctx, balance2))
 
 	printStep("7. Balance Entries Issued",

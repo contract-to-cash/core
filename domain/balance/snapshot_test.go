@@ -114,7 +114,7 @@ func TestBalanceEntry_FromSnapshot_ValidatesID(t *testing.T) {
 func TestBalanceEntry_ToSnapshot_IsIndependentCopy(t *testing.T) {
 	t.Parallel()
 
-	e := NewBalanceEntry(
+	e, _ := NewBalanceEntry(
 		shared.AccountID("acc-1"),
 		shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY),
 		BalanceReasonGoodwill,

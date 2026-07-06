@@ -15,7 +15,7 @@ import (
 func TestBalanceEntry_ExpiresAt_GetterIsDefensivelyCopied(t *testing.T) {
 	amount := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
 	createdAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	e := NewBalanceEntry(shared.NewAccountID(), amount, BalanceReasonGoodwill, createdAt)
+	e, _ := NewBalanceEntry(shared.NewAccountID(), amount, BalanceReasonGoodwill, createdAt)
 
 	expires := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 	e.SetExpiresAt(&expires)
@@ -41,7 +41,7 @@ func TestBalanceEntry_ExpiresAt_GetterIsDefensivelyCopied(t *testing.T) {
 func TestBalanceEntry_SetExpiresAt_IntakeIsDefensivelyCopied(t *testing.T) {
 	amount := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
 	createdAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	e := NewBalanceEntry(shared.NewAccountID(), amount, BalanceReasonGoodwill, createdAt)
+	e, _ := NewBalanceEntry(shared.NewAccountID(), amount, BalanceReasonGoodwill, createdAt)
 
 	expires := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 	e.SetExpiresAt(&expires)
@@ -60,7 +60,7 @@ func TestBalanceEntry_SetExpiresAt_IntakeIsDefensivelyCopied(t *testing.T) {
 func TestBalanceEntry_ExpiresAt_NilSafe(t *testing.T) {
 	amount := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
 	createdAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	e := NewBalanceEntry(shared.NewAccountID(), amount, BalanceReasonGoodwill, createdAt)
+	e, _ := NewBalanceEntry(shared.NewAccountID(), amount, BalanceReasonGoodwill, createdAt)
 
 	if e.ExpiresAt() != nil {
 		t.Errorf("expected nil ExpiresAt, got %v", e.ExpiresAt())
@@ -72,7 +72,7 @@ func TestBalanceEntry_ExpiresAt_NilSafe(t *testing.T) {
 func TestBalanceEntry_SetExpiresAt_NilIsAccepted(t *testing.T) {
 	amount := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
 	createdAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	e := NewBalanceEntry(shared.NewAccountID(), amount, BalanceReasonGoodwill, createdAt)
+	e, _ := NewBalanceEntry(shared.NewAccountID(), amount, BalanceReasonGoodwill, createdAt)
 
 	expires := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 	e.SetExpiresAt(&expires)

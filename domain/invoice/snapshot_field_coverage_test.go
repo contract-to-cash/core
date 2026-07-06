@@ -17,9 +17,13 @@ func TestInvoiceSnapshot_FieldCoverage(t *testing.T) {
 	// loadedVersion exists only to implement optimistic locking at load time;
 	// it is deliberately NOT stored separately in the snapshot
 	// (InvoiceFromSnapshot sets both version and loadedVersion from Version).
+	// optErr is a transient construction-only field: it carries a deferred
+	// functional-option validation error out of NewInvoice (issue #148) and is
+	// never part of persisted state, so it is intentionally absent from the
+	// snapshot.
 	assertFieldParity(t, "Invoice", reflect.TypeOf(Invoice{}),
 		"InvoiceSnapshot", reflect.TypeOf(InvoiceSnapshot{}),
-		"loadedversion")
+		"loadedversion", "opterr")
 }
 
 func TestLineItemSnapshot_FieldCoverage(t *testing.T) {

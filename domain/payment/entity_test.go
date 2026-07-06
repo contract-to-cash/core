@@ -16,7 +16,7 @@ func TestNewPayment(t *testing.T) {
 	gatewayTxID := "gw_tx_12345"
 	processedAt := time.Now().UTC()
 
-	p := NewPayment(id, invoiceID, amount, method, gatewayTxID, processedAt)
+	p, _ := NewPayment(id, invoiceID, amount, method, gatewayTxID, processedAt)
 
 	if p.ID() != id {
 		t.Errorf("expected id %s, got %s", id, p.ID())
@@ -70,7 +70,7 @@ func TestPaymentStatus_Constants(t *testing.T) {
 }
 
 func newTestPayment() *Payment {
-	return NewPayment(
+	p, err := NewPayment(
 		shared.NewPaymentID(),
 		shared.NewInvoiceID(),
 		shared.NewMoney(big.NewRat(5000, 1), shared.CurrencyJPY),
@@ -78,6 +78,10 @@ func newTestPayment() *Payment {
 		"gw_tx_test",
 		time.Now().UTC(),
 	)
+	if err != nil {
+		panic("newTestPayment: " + err.Error())
+	}
+	return p
 }
 
 func completePayment(t *testing.T, p *Payment) {

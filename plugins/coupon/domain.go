@@ -1,6 +1,7 @@
 package coupon
 
 import (
+	"fmt"
 	"math/big"
 	"time"
 
@@ -276,7 +277,13 @@ func (c *Coupon) IsAccountAllowed(accountID shared.AccountID) bool {
 // CalculateDiscount calculates the discount amount for the given subtotal.
 // For percentage type: subtotal * value, capped by maxDiscount if set.
 // For fixed type: the fixed value converted to Money, capped by maxDiscount if set.
-func (c *Coupon) CalculateDiscount(subtotal shared.Money) shared.Money {
+//
+// Returns an error if a maxDiscount cap is configured in a currency other than
+// the discount's. Previously the cap was silently dropped on a currency mismatch
+// (Money.Min returns an error that was ignored), which let an uncapped —
+// potentially unbounded — discount through. Surfacing the misconfiguration as an
+// error is safer than silently ignoring the cap (issue #148).
+func (c *Coupon) CalculateDiscount(subtotal shared.Money) (shared.Money, error) {
 	var discount shared.Money
 
 	switch c.couponType {
@@ -285,16 +292,21 @@ func (c *Coupon) CalculateDiscount(subtotal shared.Money) shared.Money {
 	case CouponTypeFixed:
 		discount = shared.NewMoney(c.value, c.currency)
 	default:
-		return shared.Zero(subtotal.Currency())
+		return shared.Zero(subtotal.Currency()), nil
 	}
 
-	// Apply maxDiscount cap
+	// Apply maxDiscount cap. A currency mismatch here means the cap cannot be
+	// enforced; fail loudly rather than dropping it and returning an uncapped
+	// discount.
 	if c.maxDiscount != nil {
 		capped, err := discount.Min(*c.maxDiscount)
-		if err == nil {
-			discount = capped
+		if err != nil {
+			return shared.Money{}, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+				fmt.Sprintf("coupon %s maxDiscount currency %s does not match discount currency %s",
+					c.code, c.maxDiscount.Currency(), discount.Currency()))
 		}
+		discount = capped
 	}
 
-	return discount
+	return discount, nil
 }

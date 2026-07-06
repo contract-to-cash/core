@@ -30,7 +30,7 @@ func newTestInvoice() *invoice.Invoice {
 }
 
 func newTestPayment(invoiceID shared.InvoiceID) *payment.Payment {
-	return payment.NewPayment(
+	p, err := payment.NewPayment(
 		shared.NewPaymentID(),
 		invoiceID,
 		jpy(10000),
@@ -38,6 +38,10 @@ func newTestPayment(invoiceID shared.InvoiceID) *payment.Payment {
 		"txn-001",
 		time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
 	)
+	if err != nil {
+		panic("newTestPayment: " + err.Error())
+	}
+	return p
 }
 
 func TestPaymentContext_NewAndGetters(t *testing.T) {

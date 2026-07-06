@@ -44,7 +44,22 @@ type BalanceEntry struct {
 
 // NewBalanceEntry creates a new BalanceEntry with the given parameters.
 // createdAt should be provided by the caller via Clock.Now().
-func NewBalanceEntry(accountID shared.AccountID, amount shared.Money, reason BalanceReason, createdAt time.Time) *BalanceEntry {
+//
+// The amount must not be negative. A negative credit is actively dangerous: it
+// would be applied as a debit — during invoice generation
+// RemainingAmount().Min(remaining) would return a negative amount and inflate
+// the invoice's amount due — so it is rejected at construction (issue #148).
+// Zero is permitted: a zero-amount entry is inert (nothing is ever consumed from
+// it, and it contributes nothing to available balance), and Consume relies on
+// being able to represent a fully-consumed / zero-balance entry. Persistence
+// adapters that rebuild an entry from a stored row use FromSnapshot, which
+// deliberately bypasses this guard so replay of historically valid entries is
+// never blocked.
+func NewBalanceEntry(accountID shared.AccountID, amount shared.Money, reason BalanceReason, createdAt time.Time) (*BalanceEntry, error) {
+	if amount.IsNegative() {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			"balance entry amount must not be negative")
+	}
 	return &BalanceEntry{
 		id:              shared.NewBalanceEntryID(),
 		accountID:       accountID,
@@ -52,7 +67,7 @@ func NewBalanceEntry(accountID shared.AccountID, amount shared.Money, reason Bal
 		remainingAmount: amount,
 		reason:          reason,
 		createdAt:       createdAt,
-	}
+	}, nil
 }
 
 // ID returns the credit entry ID.

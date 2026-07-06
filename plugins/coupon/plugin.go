@@ -147,9 +147,19 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 			continue
 		}
 
-		// Check minimum purchase amount
-		if c.minAmount != nil && subtotal.Amount().Cmp(c.minAmount.Amount()) < 0 {
-			continue
+		// Check minimum purchase amount. minAmount must be denominated in the
+		// invoice currency: comparing raw big.Rat amounts across currencies is
+		// meaningless (Money exposes no cross-currency comparison). A coupon whose
+		// minAmount is misconfigured in a foreign currency is skipped rather than
+		// aborting the whole calculation — consistent with the foreign-currency
+		// fixed-discount handling below (review W6 / issue #148).
+		if c.minAmount != nil {
+			if c.minAmount.Currency() != currency {
+				continue
+			}
+			if subtotal.Amount().Cmp(c.minAmount.Amount()) < 0 {
+				continue
+			}
 		}
 
 		// Check per-account usage limit
@@ -163,7 +173,10 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 			}
 		}
 
-		discount := c.CalculateDiscount(subtotal)
+		discount, err := c.CalculateDiscount(subtotal)
+		if err != nil {
+			return zero, fmt.Errorf("coupon: calculate discount: %w", err)
+		}
 
 		// Skip fixed-amount coupons denominated in a different currency from the
 		// invoice rather than aborting the entire calculation downstream when

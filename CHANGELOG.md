@@ -95,6 +95,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Money currency / sign guards were missing at several money-critical sites,
+  rooted in `Money.GreaterThan` returning `false` (rather than erroring) on a
+  currency mismatch (#148). All six verified sites now guard explicitly, mirroring
+  the reference `payment.ValidateRefund`:
+  - `CreditNote.Apply` / `CreditNote.Refund` reject a mismatched-currency amount
+    (`currency_mismatch`) and a non-positive amount (`validation_error`) before
+    the "exceeds total" check, so a foreign-currency or negative amount can no
+    longer be persisted onto an issued note. Version bumps (#147) are preserved.
+  - `Invoice.ValidatePayment` / `RecordPayment` reject a negative payment
+    (`validation_error`), which previously slipped through when partial payment
+    was enabled and decreased `paidAmount`. Zero remains accepted so a
+    zero-amount invoice can be settled by a zero payment.
+  - `invoice.WithAppliedBalance` no longer silently swallows a currency-mismatch
+    error: `NewInvoice` now surfaces it (via a deferred option-error field)
+    instead of leaving `amountDue`/`balance` inconsistent.
+  - `NewCreditNote` rejects any item whose amount is zero or negative
+    (`validation_error`); `NewCreditNoteItem`'s signature is unchanged.
+  - The coupon plugin now returns an error from `Coupon.CalculateDiscount` when a
+    `maxDiscount` cap is configured in a foreign currency (previously the cap was
+    silently dropped, yielding an unbounded discount), and skips a coupon whose
+    `minAmount` is denominated in a foreign currency (consistent with existing
+    foreign-currency fixed-discount handling).
+  - `pricing.NewUsagePrice` validates that `Minimum`/`Maximum` clamps share the
+    unit-price currency, since `UsagePrice.CalculatePrice` (a `PricingModel`
+    interface method that cannot return an error) would otherwise silently drop a
+    wrong-currency clamp. The broader currency-safe-`CalculatePrice` work is
+    tracked in #156.
+- **BREAKING** (pre-v1.0 API): `balance.NewBalanceEntry` and `payment.NewPayment`
+  now return `(*T, error)` so they can reject invalid amounts at construction.
+  `NewBalanceEntry` rejects a negative amount (a negative credit would be applied
+  as a debit and inflate an invoice's amount due) but permits zero;
+  `NewPayment` rejects a negative amount but permits zero. Snapshot-restore paths
+  (`FromSnapshot` family) deliberately bypass these guards, so replay of
+  historically valid entities is unaffected. Migrate call sites to handle the
+  returned error.
 - Concurrent `BillingService.GenerateInvoice(contractID, samePeriod)` calls could
   each pass the duplicate-invoice check (which ran BEFORE the transaction opened)
   and both insert, producing two billable invoices for one period and a downstream

@@ -328,7 +328,7 @@ func TestBillingWithCreditApplication(t *testing.T) {
 	agg := createActiveContractWithPrice(t, ctx, clock, contractRepo, priceRepo, price)
 
 	// Create a credit entry of 2000 JPY for the same account
-	creditEntry := balance.NewBalanceEntry(
+	creditEntry, _ := balance.NewBalanceEntry(
 		shared.AccountID("acc-001"),
 		moneyJPY(2000),
 		balance.BalanceReasonManualAdjustment,

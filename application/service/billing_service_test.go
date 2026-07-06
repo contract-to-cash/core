@@ -346,7 +346,7 @@ func TestGenerateInvoice_WithCredits(t *testing.T) {
 	price := jpy(10000)
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
 
-	creditEntry := balance.NewBalanceEntry(agg.AccountID(), jpy(3000), balance.BalanceReasonGoodwill, clock.Now())
+	creditEntry, _ := balance.NewBalanceEntry(agg.AccountID(), jpy(3000), balance.BalanceReasonGoodwill, clock.Now())
 	balanceRepo := &mockBalanceRepo{credits: []*balance.BalanceEntry{creditEntry}}
 
 	svc := NewBillingService(
@@ -1091,7 +1091,7 @@ func TestGenerateProrationInvoice_WithCredits(t *testing.T) {
 	price := jpy(10000)
 	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, price)
 
-	creditEntry := balance.NewBalanceEntry(agg.AccountID(), jpy(800), balance.BalanceReasonGoodwill, clock.Now())
+	creditEntry, _ := balance.NewBalanceEntry(agg.AccountID(), jpy(800), balance.BalanceReasonGoodwill, clock.Now())
 	balanceRepo := &mockBalanceRepo{credits: []*balance.BalanceEntry{creditEntry}}
 
 	svc := NewBillingService(
