@@ -246,6 +246,8 @@ inv := invoice.NewInvoice(id, accountID, contractID, subtotal, discountAmount, t
 
 ```go
 inv.Finalize() error           // draft → finalized
+inv.MarkIssued() error         // finalized → issued (delivery flows; integrator fires)
+inv.MarkOverdue(now time.Time) error // finalized|issued → overdue (now strictly after due date)
 inv.Void() error               // draft|finalized → voided
 inv.VoidWithReason(reason string) error  // any except voided|refunded → voided (with reason)
 inv.ValidatePayment(amount shared.Money) error    // finalized|issued|partial_paid|overdue → (validates payment amount)

@@ -909,13 +909,21 @@ const (
 
 // InvoiceStatus 状態遷移ルール:
 //   draft        → finalized（Finalize）| voided（Void）
-//   finalized    → issued | paid | partial_paid（RecordPayment）| voided（VoidWithReason）
-//   issued       → paid | partial_paid（RecordPayment）| overdue | voided（VoidWithReason）
+//   finalized    → issued（MarkIssued）| overdue（MarkOverdue）| paid | partial_paid（RecordPayment）| voided（VoidWithReason）
+//   issued       → paid | partial_paid（RecordPayment）| overdue（MarkOverdue）| voided（VoidWithReason）
 //   partial_paid → paid（残額入金）| refunded（MarkRefunded）| voided（VoidWithReason）
 //   overdue      → paid | partial_paid（RecordPayment）| voided（VoidWithReason）
 //   paid         → refunded（MarkRefunded）| voided（VoidWithReason）
 //   voided       → 終端状態（遷移なし。refunded へは遷移不可）
 //   refunded     → 終端状態（遷移なし）
+//
+// issued / overdue への遷移は #159 で追加された明示メソッドで行う（従来は snapshot 経由のみ）:
+//   - MarkIssued(): finalized → issued。送付（レンダリング/送信）はコアのスコープ外のため、
+//     発火は統合者の送付フロー。
+//   - MarkOverdue(now): finalized|issued → overdue。now が dueDate を厳密に過ぎている場合のみ。
+//     dueDate 未設定の請求書は overdue にできない。検出（FindOverdue 等）と発火は統合者の
+//     スケジューラ責務。partial_paid は入金済み情報を失わないため overdue へ遷移させない。
+//   どちらも楽観ロックの version を bump する（#147 のルール: 永続状態を変える全メソッドが bump）。
 //
 // MarkRefunded の遷移元は paid / partial_paid のみ（実際に入金があった請求書だけ返金しうる）。
 // voided は「入金前にキャンセルされた」別の終端状態であり、返金対象の入金が存在しないため
@@ -1000,6 +1008,8 @@ func WithRevisionOf(id shared.InvoiceID) InvoiceOption
 
 // 状態遷移メソッド
 func (inv *Invoice) Finalize() error
+func (inv *Invoice) MarkIssued() error
+func (inv *Invoice) MarkOverdue(now time.Time) error
 func (inv *Invoice) RecordPayment(amount shared.Money, paidAt time.Time) error
 func (inv *Invoice) ValidatePayment(amount shared.Money) error
 func (inv *Invoice) Void() error
