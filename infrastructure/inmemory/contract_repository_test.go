@@ -151,7 +151,7 @@ func TestInMemoryContractRepository_FindExpiring(t *testing.T) {
 	}
 }
 
-func TestInMemoryContractRepository_FindTrialsEndingSoon(t *testing.T) {
+func TestInMemoryContractRepository_FindTrialsEndingBefore(t *testing.T) {
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	store := NewInMemoryEventStore(clock)
 	repo := NewInMemoryContractRepository(store, clock)
@@ -174,9 +174,9 @@ func TestInMemoryContractRepository_FindTrialsEndingSoon(t *testing.T) {
 
 	// Trial ends on Jan 15. Query before Jan 20 should find it.
 	before := time.Date(2026, 1, 20, 0, 0, 0, 0, time.UTC)
-	results, err := repo.FindTrialsEndingSoon(ctx, before)
+	results, err := repo.FindTrialsEndingBefore(ctx, before)
 	if err != nil {
-		t.Fatalf("FindTrialsEndingSoon failed: %v", err)
+		t.Fatalf("FindTrialsEndingBefore failed: %v", err)
 	}
 	if len(results) != 1 {
 		t.Errorf("expected 1 trial ending soon, got %d", len(results))
@@ -184,9 +184,9 @@ func TestInMemoryContractRepository_FindTrialsEndingSoon(t *testing.T) {
 
 	// Query before Jan 10 should find none (trial ends after Jan 10).
 	beforeEarly := time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)
-	none, err := repo.FindTrialsEndingSoon(ctx, beforeEarly)
+	none, err := repo.FindTrialsEndingBefore(ctx, beforeEarly)
 	if err != nil {
-		t.Fatalf("FindTrialsEndingSoon failed: %v", err)
+		t.Fatalf("FindTrialsEndingBefore failed: %v", err)
 	}
 	if len(none) != 0 {
 		t.Errorf("expected 0 trials ending before Jan 10, got %d", len(none))

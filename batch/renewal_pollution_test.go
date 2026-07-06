@@ -64,7 +64,7 @@ func (r *isolatingRenewalRepo) FindExpiring(_ context.Context, _ time.Time) ([]*
 	return nil, nil
 }
 
-func (r *isolatingRenewalRepo) FindTrialsEndingSoon(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+func (r *isolatingRenewalRepo) FindTrialsEndingBefore(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
 

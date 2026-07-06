@@ -152,8 +152,8 @@ func (r *InMemoryContractRepository) FindExpiring(ctx context.Context, before ti
 	return result, nil
 }
 
-// FindTrialsEndingSoon returns trialing contracts whose trial ends before the given time.
-func (r *InMemoryContractRepository) FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*contract.ContractAggregate, error) {
+// FindTrialsEndingBefore returns trialing contracts whose trial ends before the given time.
+func (r *InMemoryContractRepository) FindTrialsEndingBefore(ctx context.Context, before time.Time) ([]*contract.ContractAggregate, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 

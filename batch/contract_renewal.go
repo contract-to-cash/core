@@ -152,6 +152,13 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 			return shared.NewDomainError(shared.ErrCodeBusinessRule,
 				"contract would expire at period end (cancelAtPeriodEnd or autoRenew=false)")
 		}
+		// Validate the same interval resolution the real run performs so a
+		// contract with a dangling PendingPriceID (a scheduled price change whose
+		// Price cannot be loaded) fails the dry run instead of passing it and
+		// then blowing up in production (issue #162 B2).
+		if _, err := p.resolveInterval(ctx, agg); err != nil {
+			return err
+		}
 		return nil
 	}
 
@@ -208,9 +215,17 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		pluginCtx := plugin.NewContext(ctx)
 
 		if newStatus == contract.ContractStatusExpired || newStatus == contract.ContractStatusCancelled {
+			// Distinguish natural term-end expiry from a deliberate cancellation
+			// so churn metrics stay accurate (issue #162 B3). Expired means the
+			// contract reached its term with autoRenew=false / cancelAtPeriodEnd;
+			// Cancelled means it was cancelled outright.
+			changeType := plugin.ContractChangeExpired
+			if newStatus == contract.ContractStatusCancelled {
+				changeType = plugin.ContractChangeCancelled
+			}
 			changeEvent := plugin.ContractChangeEvent{
 				ContractID: agg.ContractID(),
-				ChangeType: plugin.ContractChangeCancelled,
+				ChangeType: changeType,
 				OldStatus:  &oldStatus,
 				NewStatus:  &newStatus,
 				Timestamp:  p.clock.Now(),

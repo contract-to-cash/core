@@ -873,7 +873,7 @@ type Repository interface {
 
     // クエリ
     FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
-    FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
+    FindTrialsEndingBefore(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
     FindDueForRenewal(ctx context.Context, asOf time.Time) ([]*ContractAggregate, error)
 
     // 時点指定（イベントソーシング）

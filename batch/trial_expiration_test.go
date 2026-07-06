@@ -49,7 +49,7 @@ func (m *mockTrialRepo) FindExpiring(_ context.Context, _ time.Time) ([]*contrac
 	return nil, nil
 }
 
-func (m *mockTrialRepo) FindTrialsEndingSoon(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+func (m *mockTrialRepo) FindTrialsEndingBefore(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
 	return m.contracts, nil
 }
 

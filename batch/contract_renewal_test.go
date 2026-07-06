@@ -12,7 +12,125 @@ import (
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
+	"github.com/contract-to-cash/core/plugin"
 )
+
+// renewalChangeSpy records OnContractChange invocations for the renewal batch.
+type renewalChangeSpy struct {
+	mu          sync.Mutex
+	changeTypes []plugin.ContractChangeType
+}
+
+func (p *renewalChangeSpy) Name() string                                        { return "renewal-change-spy" }
+func (p *renewalChangeSpy) Version() string                                     { return "1.0.0" }
+func (p *renewalChangeSpy) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *renewalChangeSpy) Shutdown(_ context.Context) error                    { return nil }
+func (p *renewalChangeSpy) Priority() int                                       { return 500 }
+
+func (p *renewalChangeSpy) OnContractChange(_ *plugin.Context, event plugin.ContractChangeEvent) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.changeTypes = append(p.changeTypes, event.ChangeType)
+	return nil
+}
+
+// newExpiringContract creates an active contract with autoRenew=false so that a
+// real renewal run expires it.
+func newExpiringContract(id string) *contract.ContractAggregate {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
+	agg := contract.NewContractAggregate(shared.ContractID(id), clock)
+	meta := eventstore.EventMetadata{UserID: "test"}
+	cmd := contract.CreateContractCommand{
+		IdempotencyKey: "idem-batch-contract_renewal-expire",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      false,
+	}
+	if err := agg.Create(cmd, meta); err != nil {
+		panic("failed to create contract: " + err.Error())
+	}
+	if err := agg.Activate(meta); err != nil {
+		panic("failed to activate contract: " + err.Error())
+	}
+	return agg
+}
+
+// TestContractRenewalProcessor_Expired_FiresExpiredChange verifies that a
+// contract reaching natural term end (autoRenew=false) fires an OnContractChange
+// with ChangeType=Expired, distinct from a deliberate cancellation (issue #162 B3).
+func TestContractRenewalProcessor_Expired_FiresExpiredChange(t *testing.T) {
+	agg := newExpiringContract("c-expire")
+	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
+	spy := &renewalChangeSpy{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy: %v", err)
+	}
+
+	processor := NewContractRenewalProcessor(repo, nil, registry, processorClock(), nil, nil)
+
+	result, err := processor.Process(context.Background(), BatchOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Succeeded != 1 {
+		t.Errorf("Succeeded: got %d, want 1", result.Succeeded)
+	}
+	if agg.Status() != contract.ContractStatusExpired {
+		t.Errorf("status: got %s, want expired", agg.Status())
+	}
+	if len(spy.changeTypes) != 1 || spy.changeTypes[0] != plugin.ContractChangeExpired {
+		t.Errorf("OnContractChange type: got %v, want [expired]", spy.changeTypes)
+	}
+}
+
+// TestContractRenewalProcessor_DryRun_DanglingPendingPrice verifies the dry run
+// now validates interval resolution: a contract with a scheduled price change to
+// a Price that cannot be loaded FAILS the dry run instead of passing it and then
+// blowing up in production (issue #162 B2).
+func TestContractRenewalProcessor_DryRun_DanglingPendingPrice(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
+	agg := contract.NewContractAggregate(shared.ContractID("c-dangling"), clock)
+	meta := eventstore.EventMetadata{UserID: "test"}
+	cmd := contract.CreateContractCommand{
+		IdempotencyKey: "idem-batch-contract_renewal-dangling",
+		AccountID:      shared.AccountID("a1"),
+		PriceID:        shared.PriceID("price-monthly"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
+	}
+	if err := agg.Create(cmd, meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+	// Schedule an end-of-term change to a price that does NOT exist in the repo.
+	if err := agg.ChangePrice(shared.PriceID("price-missing"), contract.ChangePolicyEndOfTerm, nil, meta); err != nil {
+		t.Fatalf("ChangePrice failed: %v", err)
+	}
+
+	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
+	priceRepo := &mockPriceRepo{prices: map[shared.PriceID]*pricing.Price{}} // empty — pending price missing
+	processor := NewContractRenewalProcessor(repo, priceRepo, nil, processorClock(), nil, nil)
+
+	result, err := processor.Process(context.Background(), BatchOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("Failed: got %d, want 1 (dangling pending price must fail dry run)", result.Failed)
+	}
+	if result.Succeeded != 0 {
+		t.Errorf("Succeeded: got %d, want 0", result.Succeeded)
+	}
+}
 
 // mockPriceRepo is a simple mock for pricing.PriceRepository.
 type mockPriceRepo struct {
@@ -72,7 +190,7 @@ func (m *mockRenewalRepo) FindExpiring(_ context.Context, _ time.Time) ([]*contr
 	return nil, nil
 }
 
-func (m *mockRenewalRepo) FindTrialsEndingSoon(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+func (m *mockRenewalRepo) FindTrialsEndingBefore(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
 

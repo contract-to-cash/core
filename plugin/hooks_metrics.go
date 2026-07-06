@@ -20,6 +20,12 @@ const (
 	ContractChangeCancelled ContractChangeType = "cancelled"
 	ContractChangeRenewed   ContractChangeType = "renewed"
 	ContractChangeTrialEnd  ContractChangeType = "trial_end"
+	// ContractChangeExpired marks a contract that reached its natural term end
+	// (autoRenew=false or cancelAtPeriodEnd) and transitioned to Expired. It is
+	// distinct from ContractChangeCancelled (a deliberate mid-term cancellation)
+	// so churn metrics do not conflate voluntary cancellation with natural
+	// expiry (issue #162 B3).
+	ContractChangeExpired ContractChangeType = "expired"
 )
 
 // ContractChangeEvent carries information about a contract change for metrics hooks.
