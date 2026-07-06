@@ -32,11 +32,29 @@ billingService := service.NewBillingService(
 
 ```go
 type BillingConfig struct {
-    GracePeriod      time.Duration // Grace period for overdue invoices
-    DaysUntilDue     int           // Days from invoice creation to due date
-    CollectionMethod string        // "send_invoice" or "auto_charge"
+    GracePeriod         time.Duration    // Grace window before an invoice is finalized
+                                         //   (draft stays open to absorb late usage / hook
+                                         //   adjustments; NOT an overdue window). Default 1h.
+    DaysUntilDue        int              // Days from invoice creation to due date. Default 30.
+    CollectionMethod    CollectionMethod // service.CollectionAutoCharge ("charge_automatically")
+                                         //   or service.CollectionSendInvoice ("send_invoice").
+                                         //   Default CollectionAutoCharge.
+    AllowPartialPayment bool             // If true, generated invoices accept partial payment
+                                         //   (invoice.allowPartialPay). Default false.
 }
 ```
+
+`CollectionMethod` is a typed string with two values:
+
+```go
+const (
+    CollectionAutoCharge  CollectionMethod = "charge_automatically"
+    CollectionSendInvoice CollectionMethod = "send_invoice"
+)
+```
+
+Use `service.NewBillingConfig(opts...)` (with `WithGracePeriod` / `WithDaysUntilDue` /
+`WithCollectionMethod` / `WithAllowPartialPayment`) for validated construction with defaults.
 
 ### GenerateInvoice
 
@@ -48,8 +66,16 @@ func (s *BillingService) GenerateInvoice(
 ) (*invoice.Invoice, error)
 ```
 
-Executes the 14-step billing pipeline:
-1. Load contract → 2. BeforeCalculation hooks → 3. Calculate subtotal (Price-aware) → 4. Apply DiscountHooks → 5. Cap discounts → 6. After-discount subtotal → 7. Apply TaxHooks → 8. Calculate total → 9. Apply credits (FIFO) → 10. Amount due → 11. Create invoice → 12. Save → 13. AfterCalculation hooks → 14. Return
+Executes the billing pipeline (see `executeBillingPipeline` in `billing_service.go`):
+1. Load contract → 2. Status/duplicate guards → 3. Calculate subtotal (Price-aware) →
+4. BeforeCalculation hooks (**`ctx.Subtotal()` is 0 here**; the subtotal is set on the
+context *after* this hook) → 5. Apply DiscountHooks → 6. Cap discounts → 7. After-discount
+subtotal → 8. Apply TaxHooks → 9. Calculate total → 10. Apply credits (FIFO, in tx) →
+11. Amount due → 12. Create draft invoice (in tx) → 13. **AfterCalculation hooks (fired BEFORE
+Save — the invoice is not yet persisted)** → 14. Save (in tx) → return.
+
+For persistence-dependent work, use `OnInvoiceIssuedHook`, which fires after the save in
+`FinalizeInvoice`, not `AfterCalculation`.
 
 ---
 

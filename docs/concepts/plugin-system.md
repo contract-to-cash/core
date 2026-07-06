@@ -39,19 +39,29 @@ The plugin system provides **20 hook interfaces** across 6 categories:
 The core guarantees this execution order structurally — it does **not** depend on Priority values:
 
 ```
-1. InvoiceLifecycleHook.BeforeCalculation()
-2. Subtotal calculation (core, by contract type)
-3. DiscountHook.CalculateDiscount()        ← all DiscountHooks, priority-ordered
+1. InvoiceLifecycleHook.BeforeCalculation()   ← ctx.Subtotal() is ZERO here
+2. Subtotal populated on context (core, by contract type)
+                                              ← ctx.Subtotal() now returns the base price
+3. DiscountHook.CalculateDiscount()           ← all DiscountHooks, priority-ordered
    → Discount cap guard (discount ≤ subtotal)
 4. Subtotal after discount (core)
-5. TaxHook.CalculateTax()                  ← on post-discount amount
+5. TaxHook.CalculateTax()                     ← on ctx.SubtotalAfterDiscount()
 6. Total (core: afterDiscount + tax)
-7. Credit ledger consumption (core, FIFO)
-8. Invoice created as draft
-9. InvoiceLifecycleHook.AfterCalculation()
+7. Credit ledger consumption (core, FIFO, in tx)
+8. Invoice created as draft (in tx)
+9. InvoiceLifecycleHook.AfterCalculation()    ← fired BEFORE Save (invoice not yet persisted)
+10. Save (core, in tx)
 ```
 
 This means a `TaxHook` can never run before `DiscountHook`, regardless of Priority settings.
+
+:::warning Plugin-observable subtleties
+- During `BeforeCalculation`, `ctx.Subtotal()` returns **zero** — the core only sets the
+  subtotal on the context *after* this hook. `ctx.ProductID()` is already available. Do
+  base-price-dependent work in `DiscountHook` or later, not in `BeforeCalculation`.
+- `AfterCalculation` fires **before** the invoice is saved. For persistence-dependent
+  work use `OnInvoiceIssuedHook`, which fires after the save in `FinalizeInvoice`.
+:::
 
 ## Priority
 

@@ -126,6 +126,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current English sources, and wired the previously unlisted
   `guides/postgres-payment-repository` and `research/2026-04-10-payment-idempotency-patterns`
   docs into `website/sidebars.ts`.
+- Documentation: reconciled the canonical `docs/internals/` spec with the code (#161).
+  Relabeled phantom components in `payment-gateway.md` (`infrastructure/gateway/` /
+  `DefaultGatewayRouter` / `domain/payment/subscription_gateway.go`) as consumer-side
+  (BYO Gateway) reference sketches not shipped in this repo; relabeled
+  `metrics-invoicegen.md` §5's never-realized layout (`plugin/metrics/`,
+  `plugin/invoicegen/`, `subscription_service.go`) as consumer-side reference architecture
+  and corrected the in-repo paths (flat `plugin/hooks_*.go`, real services, `inmemory/`
+  only); replaced the heavily stale `plugin-system.md` §8.1 `BillingService` listing
+  (removed `c.Plan()`, phantom `ProcessPriceChange`/`calculateDueDate`) with an abridged
+  excerpt pointing at the source; unified the `BeforeCalculation` ordering across
+  `architecture.md`, `plugin-system.md`, `design-decisions.md`, and
+  `concepts/plugin-system.md`, adding an explicit note that `ctx.Subtotal()` is zero during
+  `BeforeCalculation` and `AfterCalculation` fires before Save; fixed `api/services.md`
+  `CollectionMethod` values (`charge_automatically`), added `AllowPartialPayment`, corrected
+  the `GracePeriod` description and the AfterCalculation/Save order; updated
+  `plugin-system.md` §2.2 (`productID`/`ProductID()`) and §6.2 (`Coupon` struct) to match
+  the code; and corrected the `plugins/tax` spec to document the actual unconditional-10%
+  minimal calculator with jurisdiction-aware calculation noted as a consumer extension point.
 - Applied the `FinalizeInvoice` transaction pattern (in-tx load → state check →
   mutate → save, with `RetryOnConflict` where an optimistic-lock conflict can
   occur) to the remaining load-mutate-save-outside-tx sites (#151):

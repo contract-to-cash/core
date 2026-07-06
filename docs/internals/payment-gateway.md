@@ -41,11 +41,19 @@ graph TB
 
 ### パッケージ配置方針
 
-| パッケージ | 配置するもの | 根拠 |
-|-----------|-------------|------|
-| `domain/payment/` | Payment エンティティ、ドメインイベント、Repository IF | 純粋なドメイン概念のみ |
-| `application/port/` | PaymentGateway IF, CustomerGateway IF, WebhookHandler IF, GatewayRouter IF, リクエスト/レスポンス型 | 外部決済サービスとの統合境界（ポート） |
-| `infrastructure/gateway/` | DefaultGatewayRouter, 各ゲートウェイ実装 | 具象実装（アダプタ） |
+| パッケージ | 配置するもの | 根拠 | 本リポジトリに含まれるか |
+|-----------|-------------|------|------|
+| `domain/payment/` | Payment エンティティ、ドメインイベント、Repository IF | 純粋なドメイン概念のみ | ✅ 含まれる |
+| `application/port/` | PaymentGateway IF, CustomerGateway IF, WebhookHandler IF, GatewayRouter IF, IdempotencyStore IF, リクエスト/レスポンス型 | 外部決済サービスとの統合境界（ポート） | ✅ 含まれる（`gateway.go` / `customer.go` / `webhook.go` / `router.go` / `idempotency_store.go`） |
+| `infrastructure/gateway/` | ゲートウェイ実装（Stripe/GMO等）、`GatewayRouter` の具象実装 | 具象実装（アダプタ） | ❌ **含まれない — 利用者実装（BYO Gateway）** |
+
+> **⚠️ 本リポジトリのスコープ（BYO Gateway）**: 本ライブラリは「BYO DB / BYO Gateway」型であり、
+> `infrastructure/` にはテスト・デモ用の `inmemory/` のみが含まれる。以下は
+> **利用者（またはアダプタリポジトリ）が実装する参考例**であり、本リポジトリのコードには存在しない:
+> - `infrastructure/gateway/`（各ゲートウェイ実装、および §5.2 の `DefaultGatewayRouter`）
+> - §3.5 の `SubscriptionGateway`
+>
+> コアが提供するのは `application/port/` のインターフェース（`GatewayRouter` を含む）までである。
 
 > `docs/architecture.md` の「Domain層は外部依存なし」原則に準拠するため、
 > HTTP ヘッダー・リダイレクト URL・生レスポンスバイト列等のインフラ詳細を
@@ -1008,9 +1016,15 @@ const (
 
 ### 3.5 定期課金インターフェース（オプション）
 
+> **📌 利用者実装の参考例（本リポジトリには含まれない）**: 以下の `SubscriptionGateway`
+> と関連型は、ゲートウェイ側でサブスクリプションを管理したい利用者向けの**設計スケッチ**である。
+> `domain/payment/subscription_gateway.go` は本リポジトリに存在しない（コアは契約・請求を
+> 自前で管理するため定期課金 IF を必要としない）。実装する場合は、インフラ詳細を含まない IF は
+> `application/port/` に置くのが本リポジトリの配置方針に沿う。
+
 ```go
-// domain/payment/subscription_gateway.go
-package payment
+// （参考例）application/port/subscription_gateway.go — 利用者が実装する場合の配置例
+package port
 
 import (
     "context"
@@ -1199,8 +1213,14 @@ type RoutingRule struct {
 
 ### 5.2 DefaultGatewayRouter 具象実装（インフラ層）
 
+> **📌 利用者実装の参考例（本リポジトリには含まれない）**: 以下の `DefaultGatewayRouter` は
+> §5.1 の `port.GatewayRouter` インターフェースの**具象実装の参考例**であり、
+> `infrastructure/gateway/router.go` は本リポジトリに存在しない。コアが提供するのは
+> §5.1 のインターフェースまでで、ルーティング実装はアダプタ層（利用者実装）が担う。
+> 以下はそのルーティングロジックの設計指針として掲載する。
+
 ```go
-// infrastructure/gateway/router.go
+// （参考例）infrastructure/gateway/router.go — 利用者が実装する具象ルーター
 package gateway
 
 import (
@@ -1825,10 +1845,11 @@ github.com/contract-to-cash/core/
 │   ├── query/
 │   ├── projection/
 │   ├── tx/
-│   └── service/
+│   └── service/                # 本リポジトリの実サービス
 │       ├── billing_service.go
 │       ├── payment_service.go  # ★ 決済サービス
-│       └── subscription_service.go
+│       ├── credit_note_service.go
+│       └── snapshot_service.go
 │
 ├── plugin/
 │
@@ -1839,15 +1860,16 @@ github.com/contract-to-cash/core/
 │   ├── tax/
 │   └── invoicecleanup/
 │
-└── infrastructure/             # 参照実装（オプション）
-    ├── gateway/
-    │   ├── stripe/             # Stripe実装例
-    │   │   ├── gateway.go
-    │   │   ├── customer.go
-    │   │   └── webhook.go
-    │   └── mock/               # テスト用モック
-    │       └── gateway.go
-    └── inmemory/
+└── infrastructure/
+    ├── inmemory/               # ✅ 本リポジトリに含まれる（テスト・デモ用）
+    │
+    └── gateway/                # ❌ 本リポジトリには含まれない（利用者実装・BYO Gateway）
+        ├── stripe/             #    Stripe実装例（利用者が作成）
+        │   ├── gateway.go
+        │   ├── customer.go
+        │   └── webhook.go
+        └── mock/               #    テスト用モック（利用者が作成）
+            └── gateway.go
 ```
 
 ---

@@ -265,11 +265,11 @@ The core structurally guarantees the accounting-correct calculation order. Plugi
 ```mermaid
 flowchart LR
     subgraph Pipeline["BillingService Invoice Generation"]
-        A["1. Load contract"] --> B["2. Calculate base price"]
-        B --> C["3. BeforeCalculation hook"]
+        A["1. Load contract"] --> B["2. BeforeCalculation hook (ctx.Subtotal()=0)"]
+        B --> C["3. Populate subtotal on context"]
         C --> D["4. DiscountHook"]
         D --> E["5. Discount cap guard"]
-        E --> F["6. Subtotal = base - discount"]
+        E --> F["6. Subtotal after discount"]
         F --> G["7. TaxHook"]
         G --> H["8. Total = subtotal + tax"]
         H --> I["9. Credit application (FIFO)"]
@@ -279,22 +279,29 @@ flowchart LR
     end
 ```
 
-**Calculation order detail:**
+**Calculation order detail** (plugin-observable; matches `executeBillingPipeline` in `application/service/billing_service.go`):
 
-1. `InvoiceLifecycleHook.BeforeCalculation()` -- Pre-calculation processing
-2. Base price calculation (core, branched by contract type)
+1. `InvoiceLifecycleHook.BeforeCalculation()` -- Pre-calculation processing.
+   **`ctx.Subtotal()` returns ZERO here** — the core creates the `CalculationContext`
+   with a zero subtotal and only calls `SetSubtotal` *after* this hook. (`ctx.ProductID()`
+   is already available, resolved from the contract's Price.)
+2. Base price is computed (core, branched by contract type) and populated onto the context;
+   from here `ctx.Subtotal()` returns the base price.
    - subscription: fixed price
    - usage_based: UsageRecord aggregation -> included allowance deduction -> PricingModel
    - one_time: fixed price (once)
    - hybrid: base price + usage charge
-3. `DiscountHook.CalculateDiscount()` -- Discount calculation
+3. `DiscountHook.CalculateDiscount()` -- Discount calculation (`ctx.Subtotal()` = base price)
    - Discount cap guard: total discount is capped at subtotal
-4. Subtotal computation (core: subtotal - totalDiscount)
-5. `TaxHook.CalculateTax()` -- Tax on post-discount amount
+4. Subtotal after discount (core: subtotal - totalDiscount) -> `ctx.SetSubtotalAfterDiscount()`
+5. `TaxHook.CalculateTax()` -- Tax on `ctx.SubtotalAfterDiscount()`
 6. Total computation (core: afterDiscount + totalTax)
-7. Credit ledger application (core) -- FIFO deduction from balance
-8. Create draft invoice -> finalize after GracePeriod
-9. `InvoiceLifecycleHook.AfterCalculation()` -- Post-calculation processing
+7. Credit ledger application (core, inside the transaction) -- FIFO deduction from balance
+8. Create draft invoice (core, inside the transaction) -> finalize after GracePeriod via `FinalizeInvoice`
+9. `InvoiceLifecycleHook.AfterCalculation()` -- Post-calculation processing, fired **before Save**
+   (the invoice the plugin receives is not yet persisted; use `OnInvoiceIssuedHook`, fired
+   after the save in `FinalizeInvoice`, for persistence-dependent work)
+10. Save (core, inside the transaction)
 
 ## 7. Related Documents
 
