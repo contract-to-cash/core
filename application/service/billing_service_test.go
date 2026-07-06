@@ -118,6 +118,9 @@ func (m *mockBalanceRepo) FindApplicationsByInvoice(_ context.Context, _ shared.
 	return nil, nil
 }
 func (m *mockBalanceRepo) SaveRefund(_ context.Context, _ *balance.BalanceRefund) error { return nil }
+func (m *mockBalanceRepo) FindExpired(_ context.Context, _ time.Time) ([]*balance.BalanceEntry, error) {
+	return nil, nil
+}
 func (m *mockBalanceRepo) FindByAccountID(_ context.Context, _ shared.AccountID, _ shared.Currency) ([]*balance.BalanceEntry, error) {
 	return nil, nil
 }
@@ -166,12 +169,13 @@ func newTestContractAggregateWithPriceID(clock shared.Clock, contractType contra
 	cid := shared.NewContractID()
 	agg := contract.NewContractAggregate(cid, clock)
 	_ = agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      priceID,
-		ContractType: contractType,
-		Interval:     pricing.Monthly(),
-		Price:        price,
-		BasePrice:    price,
+		IdempotencyKey: "idem-service-billing_service-1",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        priceID,
+		ContractType:   contractType,
+		Interval:       pricing.Monthly(),
+		Price:          price,
+		BasePrice:      price,
 	}, eventstore.EventMetadata{UserID: "test"})
 	_ = agg.Activate(eventstore.EventMetadata{UserID: "test"})
 	return agg
@@ -514,12 +518,13 @@ func newDraftContractAggregateWithPrice(clock shared.Clock, price shared.Money) 
 	cid := shared.NewContractID()
 	agg := contract.NewContractAggregate(cid, clock)
 	_ = agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      priceEntity.ID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        price,
-		BasePrice:    price,
+		IdempotencyKey: "idem-service-billing_service-2",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        priceEntity.ID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          price,
+		BasePrice:      price,
 	}, eventstore.EventMetadata{UserID: "test"})
 	return agg, priceEntity
 }

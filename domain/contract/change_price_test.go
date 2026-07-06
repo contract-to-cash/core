@@ -489,13 +489,14 @@ func TestCreate_WithPriceID(t *testing.T) {
 	meta := newTestMetadata()
 
 	cmd := CreateContractCommand{
-		AccountID:    shared.AccountID("acc-001"),
-		PriceID:      shared.PriceID("price-001"),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        newTestMoney(),
-		BasePrice:    newTestMoney(),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-contract-change_price-1",
+		AccountID:      shared.AccountID("acc-001"),
+		PriceID:        shared.PriceID("price-001"),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          newTestMoney(),
+		BasePrice:      newTestMoney(),
+		AutoRenew:      true,
 	}
 
 	if err := agg.Create(cmd, meta); err != nil {

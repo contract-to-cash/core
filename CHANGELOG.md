@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **Dead-code inventory (#159, applying the #116 delete-unused policy)**:
+  - Removed the read-only `contract.Contract` entity (`domain/contract/entity.go`)
+    — a state-stored mirror of `ContractAggregate` with no constructor, zero
+    package-external references, and 0% coverage. `ContractStatus` /
+    `ContractType` / the `BillingInterval` alias remain. The event-sourced
+    `ContractAggregate` is the single contract model; read models / projections
+    are the consumer's concern.
+  - Removed the write-never `ContractAggregate.metadata` field and
+    `GetMetadata()`: no event ever set it and no setter existed, so it survived
+    only through the snapshot round-trip — an adapter-populated value would
+    diverge between snapshot restore and event replay. Historical snapshots
+    that still carry a `metadata` key deserialize fine (unknown JSON keys are
+    ignored); no snapshot schema bump.
+  - Dropped the never-implemented `IdempotencyConfig{TTL}` claim from
+    design-decisions 4.1; key TTL/expiry is an adapter concern.
+
 - **BREAKING**: dropped the deprecated `BillingCycle` backward-compat
   scaffolding from the contract domain before v1.0 (#111). Removed:
   `CreateContractCommand.BillingCycle` (use `Interval BillingInterval`),
@@ -26,6 +42,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (pre-v1.0 domain behavior): `ContractAggregate.Create` now
+  REQUIRES a non-empty `CreateContractCommand.IdempotencyKey` and rejects an
+  empty key with a `validation` DomainError (#159). The key was declared
+  required by design-decisions 4.1 but never validated nor persisted — a dead
+  field that let retried creations produce duplicate contracts. The key is now
+  carried on `ContractCreatedEvent` (`idempotency_key`, SchemaVersion 2 → 3;
+  the new `ContractCreatedIdempotencyKeyUpcaster` bumps historical v1/v2
+  payloads, which replay with an empty key that `Apply` tolerates), exposed via
+  `ContractAggregate.IdempotencyKey()`, and stored in the contract snapshot
+  (empty in legacy snapshots). Enforcement boundary: the core validates
+  PRESENCE; UNIQUENESS is the repository/adapter's contract — see the new
+  godoc note on `contract.Repository.Save` (recommended partial unique index +
+  `ErrCodeConflict`, mirroring the #149 invoice per-period pattern). Migration:
+  pass a caller-generated key (e.g. a request ID) in every
+  `CreateContractCommand`.
+- **BREAKING** (pre-v1.0 API): `balance.Repository` gains
+  `FindExpired(ctx, asOf) ([]*BalanceEntry, error)` (#159) — expired,
+  not-yet-forfeited entries in creation order; the scan feeding the new
+  `batch.BalanceExpirationProcessor`. BYO-DB implementations must add it (the
+  in-memory reference implementation is included).
+- design-decisions 3.2 now records the batch-processor implementation status
+  honestly (#159): `InvoiceGenerator` / `PaymentRetry` / `UsageAggregator` are
+  NOT shipped as processors (integrator-scheduler scope); shipped processors
+  are `ContractRenewalProcessor`, `TrialExpirationProcessor`, and the new
+  `BalanceExpirationProcessor`.
 - **BREAKING** (pre-v1.0 API): `port.WebhookDeduplicator` gains a second method,
   `MarkProcessed(ctx, eventID, ttl) error`, splitting webhook deduplication into
   a CHECK phase (`IsDuplicate`) and a RECORD phase (`MarkProcessed`) (#155).
@@ -165,6 +206,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Invoice.MarkIssued()` and `Invoice.MarkOverdue(now)` (#159): explicit
+  transitions to the previously snapshot-only `issued` and `overdue` statuses
+  (the defect class fixed for `refunded` in #99). `MarkIssued` is
+  finalized → issued, fired by the integrator's delivery flow; `MarkOverdue`
+  is finalized|issued → overdue, only when `now` is strictly after the due
+  date (no due date ⇒ rejected), fired by the integrator's dunning scheduler
+  (e.g. after `Repository.FindOverdue`). `partial_paid` deliberately does not
+  transition to overdue. Both bump the optimistic-locking version per the
+  #147 rule; both statuses remain accepted from snapshots.
+- `batch.BalanceExpirationProcessor` (#159): forfeits expired credit-ledger
+  entries. `BalanceEntry` supported an expiry and `FindAvailable` filtered
+  expired entries out of billing, but nothing transitioned them — expired
+  credit sat as live-looking non-zero rows forever. New
+  `BalanceEntry.MarkExpired(now)` zeroes the remaining amount (original
+  amount + expiry kept for audit; fully-consumed entries are an idempotent
+  no-op; a forfeiting expiry bumps the optimistic-lock version so it cannot
+  race a concurrent `Consume`). The processor mirrors
+  `ContractRenewalProcessor` exactly: dry-run / ContinueOnError / Concurrency,
+  scan outside the tx, per-entry load-mutate-save inside the tx boundary
+  (#151). Scheduling remains the consumer's concern.
 - Transactional cumulative over-credit cap for `CreditNoteService.CreateCreditNote`
   (#124): the load-invoice → aggregate-existing-credit-notes → cumulative-cap-check
   → save sequence now runs inside a single `tx.Run` transaction. The invoice is

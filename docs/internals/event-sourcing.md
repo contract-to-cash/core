@@ -1115,17 +1115,19 @@ func (c *UpcasterChain) Upcast(event Event) (Event, error) {
 ### 10.3 契約イベントの登録済み Upcaster
 
 `domain/contract/upcaster.go` の `NewContractUpcasterChain()` が以下を登録する。
-すべて冪等で SchemaVersion を 2 に上げる。現行ペイロードが v2 の 4 イベント
-（`contract.created` / `contract.price_changed` / `contract.trial_ended` /
-`contract.renewed`）は `SchemaVersioned.CurrentSchemaVersion()` で 2 を自己申告するため、
-`RaiseEvent` が新規イベントを v2 で刻む。よって**新規イベントは各 Upcaster の
-`CanUpcast(fromVersion <= 1)` が false となりチェーンを素通り**し、履歴上の v1 イベント
-だけが変換される（issue #153）。
+すべて冪等。versioned なイベントは `SchemaVersioned.CurrentSchemaVersion()` で
+現行バージョンを自己申告するため（`contract.created` は v3、
+`contract.price_changed` / `contract.trial_ended` / `contract.renewed` は v2）、
+`RaiseEvent` が新規イベントを現行バージョンで刻む。よって**新規イベントは各
+Upcaster の `CanUpcast` が false となりチェーンを素通り**し、履歴上の旧バージョン
+イベントだけが変換される（issue #153）。v1 の `contract.created` は
+チェーンの不動点ループにより v1→v2→v3 と 2 段で変換される。
 
 | Upcaster | 対象イベント | 変換内容 |
 |----------|------------|---------|
 | `PriceChangedEventUpcaster` | `contract.price_changed` | Money ベース v1 → PriceID ベース v2（`policy` / `*_price_id` を補完） |
-| `ContractCreatedEventUpcaster` | `contract.created` | 旧 `billing_cycle` → `interval` |
+| `ContractCreatedEventUpcaster` | `contract.created` | 旧 `billing_cycle` → `interval`（v1 → v2） |
+| `ContractCreatedIdempotencyKeyUpcaster` | `contract.created` | v2 → v3（`idempotency_key` 追加、issue #159）。SchemaVersion を上げるのみ — 歴史的イベントのキーは復元不能（記録されていない）ため空のまま。Apply が空を許容する |
 | `ContractRenewedEventUpcaster` | `contract.renewed` | 旧 `old/new_billing_cycle` → `old/new_interval` |
 | `TrialEndedEventUpcaster` | `contract.trial_ended` | v1 → v2（`current_period` 追加、issue #146）。SchemaVersion を上げるのみ |
 

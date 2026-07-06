@@ -204,13 +204,14 @@ func TestGenerateInvoice_SequentialDistinctPeriods_Unaffected_Integration(t *tes
 	}
 	agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 	if err := agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.AccountID("acc-149-periods"),
-		PriceID:      priceEntity.ID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        price,
-		BasePrice:    price,
-		AutoRenew:    true,
+		IdempotencyKey: "idem-integration-duplicate_invoice_concurrency-1",
+		AccountID:      shared.AccountID("acc-149-periods"),
+		PriceID:        priceEntity.ID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          price,
+		BasePrice:      price,
+		AutoRenew:      true,
 	}, emptyMetadata()); err != nil {
 		t.Fatalf("failed to create contract: %v", err)
 	}

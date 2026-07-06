@@ -62,11 +62,12 @@ func TestOnContractCancel_VoidsDraftAndFinalized(t *testing.T) {
 	// Create contract aggregate and cancel it
 	agg := contract.NewContractAggregate(contractID, clock)
 	_ = agg.Create(contract.CreateContractCommand{
-		AccountID:    accountID,
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        jpy(10000),
-		BasePrice:    jpy(10000),
+		IdempotencyKey: "idem-invoicecleanup-plugin-1",
+		AccountID:      accountID,
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          jpy(10000),
+		BasePrice:      jpy(10000),
 	}, eventstore.EventMetadata{UserID: "test"})
 	_ = agg.Activate(eventstore.EventMetadata{UserID: "test"})
 	_ = agg.Cancel("customer request", eventstore.EventMetadata{UserID: "test"})
@@ -105,11 +106,12 @@ func TestOnContractCancel_NoInvoices(t *testing.T) {
 	contractID := shared.NewContractID()
 	agg := contract.NewContractAggregate(contractID, clock)
 	_ = agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        jpy(1000),
-		BasePrice:    jpy(1000),
+		IdempotencyKey: "idem-invoicecleanup-plugin-2",
+		AccountID:      shared.NewAccountID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          jpy(1000),
+		BasePrice:      jpy(1000),
 	}, eventstore.EventMetadata{UserID: "test"})
 	_ = agg.Activate(eventstore.EventMetadata{UserID: "test"})
 	_ = agg.Cancel("no reason", eventstore.EventMetadata{UserID: "test"})

@@ -198,15 +198,19 @@ type BatchOptions struct {
 }
 ```
 
-**主要なバッチ処理：**
-| 処理 | 説明 |
-|------|------|
-| `InvoiceGenerator` | 定期請求書生成 |
-| `ContractRenewal` | 契約自動更新 |
-| `PaymentRetry` | 失敗決済リトライ |
-| `TrialExpiration` | トライアル終了処理 |
-| `UsageAggregator` | 従量課金集計 |
-| `BalanceExpiration` | 有効期限切れ残高（クレジット）の失効処理 |
+**主要なバッチ処理（実装状況は issue #159 の棚卸しで確定）：**
+| 処理 | 実装 | 説明 |
+|------|------|------|
+| `ContractRenewal` | ✅ `batch.ContractRenewalProcessor` | 契約自動更新 |
+| `TrialExpiration` | ✅ `batch.TrialExpirationProcessor` | トライアル終了処理 |
+| `BalanceExpiration` | ✅ `batch.BalanceExpirationProcessor`（#159 で追加） | 有効期限切れ残高（クレジット）の失効処理。`balance.Repository.FindExpired` でスキャンし、`BalanceEntry.MarkExpired` で残高を没収する |
+| `InvoiceGenerator` | ❌ 未実装（利用者スケジューラ側の実装例として定義のみ） | 定期請求書生成 — `BillingService.GenerateInvoice` を利用者のスケジューラから呼ぶ |
+| `PaymentRetry` | ❌ 未実装（利用者スケジューラ側の実装例として定義のみ） | 失敗決済リトライ — `PaymentService.ProcessPayment` + Dunning 状態を利用者側で組み合わせる |
+| `UsageAggregator` | ❌ 未実装（利用者スケジューラ側の実装例として定義のみ) | 従量課金集計 — 集計は `GenerateInvoice` の従量パスが内部で行う |
+
+未実装の 3 種は「コアがプロセッサを提供する」と読める宣言だったが実体がなかったため、
+#159 の方針（#116 の delete-unused と同じ枠組み）に基づき「未実装・利用者責務」と明記する。
+具体的な利用者要望が出た時点で `BatchProcessor` 実装として追加する。
 
 **理由：**
 - スケジューラは環境依存（cron, Kubernetes CronJob, Cloud Scheduler等）
@@ -214,25 +218,43 @@ type BatchOptions struct {
 
 ## 4. 冪等性
 
-### 4.1 冪等性キー
+### 4.1 冪等性キー（issue #159 で強制境界を確定）
 
-| 決定 | **契約作成で必須、TTLは利用者設定可能（デフォルト24h）** |
+| 決定 | **コアは「存在」を強制し、「一意性」はリポジトリ/アダプタの契約とする** |
 |------|---------------------------------------------------|
 
 ```go
 type CreateContractCommand struct {
-    IdempotencyKey string // 必須
+    IdempotencyKey string // 必須。Create が空を validation エラーで拒否
     // ...
-}
-
-type IdempotencyConfig struct {
-    TTL time.Duration // デフォルト: 24 * time.Hour
 }
 ```
 
+**強制の分担（issue #159）：**
+
+- **コア（強制済み）**: `ContractAggregate.Create` は空の `IdempotencyKey` を
+  `validation` の DomainError で拒否し、キーを `ContractCreatedEvent`
+  （SchemaVersion 3 で `idempotency_key` を追加）に載せる。集約は
+  `IdempotencyKey()` getter を持ち、スナップショットにも保存される。
+- **リポジトリ/アダプタ（利用者責務）**: キーの**一意性**強制はコアには不可能
+  （単一集約の境界を越えるため）。永続層がユニークインデックス等で
+  at-most-once 作成を保証する — 推奨 DDL と衝突時の
+  `shared.ErrCodeConflict` 返却の契約は `contract.Repository.Save` の godoc に
+  記載（#149 の請求書期間一意性パターンのミラー）。歴史的イベント（キーが空）は
+  制約の対象外とする。
+- **TTL**: 旧記載の `IdempotencyConfig{TTL}` 型はコードに存在したことがなく、
+  削除した（#116 の「未使用宣言は削除」方針）。キーの保持期間・失効は
+  アダプタの関心事であり、必要なら利用者がインデックス側で実装する。
+
+**後方互換：**
+- 歴史的な `ContractCreatedEvent`（v1/v2、キー未記録）は
+  `ContractCreatedIdempotencyKeyUpcaster` が SchemaVersion を 3 に上げるのみで、
+  キーは空のままリプレイされる（`Apply` が空を許容）。リプレイは壊れない。
+
 **理由：**
 - ネットワーク障害等でのリトライ時に重複作成を防止
-- TTLを設けることでストレージ圧迫を防ぐ
+- 宣言だけで強制されない「死にフィールド」状態（#159 指摘）を解消し、
+  強制境界（コア=存在 / アダプタ=一意性）を明文化する
 
 ## 5. 監査ログ
 
@@ -377,7 +399,8 @@ type Event struct {
 | 請求 | 部分入金 | 選択可能 | 不許可 |
 | 請求 | バッチ | インターフェースのみ | フル実装 |
 | 冪等性 | スコープ | 契約作成 | 全操作 |
-| 冪等性 | TTL | 設定可能 | 固定 |
+| 冪等性 | 強制境界 | コア=存在 / アダプタ=一意性 | コアで一意性強制 |
+| 冪等性 | TTL | アダプタ責務 | コアで固定 |
 | 監査 | UserID | 必須 | オプション |
 | 監査 | IP/UA | オプション | 必須 |
 | プラグイン | 実行順序 | 会計基準 | 任意 |

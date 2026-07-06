@@ -43,6 +43,13 @@ var contractEventRegistry = func() *eventstore.EventRegistry {
 }()
 
 // CreateContractCommand holds the parameters for creating a new contract.
+//
+// IdempotencyKey is REQUIRED (design-decisions.md section 4.1): Create rejects
+// an empty key with a validation DomainError. The key is carried on
+// ContractCreatedEvent so persistence adapters can enforce at-most-once
+// creation with a unique index — see the uniqueness note on Repository.Save.
+// The core validates presence only; uniqueness enforcement is the
+// repository/adapter's contract.
 type CreateContractCommand struct {
 	IdempotencyKey string
 	AccountID      shared.AccountID
@@ -60,6 +67,7 @@ type ContractAggregate struct {
 
 	contractID        shared.ContractID
 	accountID         shared.AccountID
+	idempotencyKey    string
 	status            ContractStatus
 	contractType      ContractType
 	interval          BillingInterval
@@ -73,7 +81,6 @@ type ContractAggregate struct {
 	autoRenew         bool
 	cancelAtPeriodEnd bool
 	pendingPriceID    *shared.PriceID
-	metadata          map[string]string
 	createdAt         time.Time
 	updatedAt         time.Time
 }
@@ -91,6 +98,14 @@ func (a *ContractAggregate) ContractID() shared.ContractID { return a.contractID
 
 // AccountID returns the account ID.
 func (a *ContractAggregate) AccountID() shared.AccountID { return a.accountID }
+
+// IdempotencyKey returns the creation idempotency key (issue #159).
+//
+// It is empty for aggregates replayed from history recorded before the key
+// was carried on ContractCreatedEvent (schema version < 3) and for legacy
+// snapshots; it is always non-empty for contracts created since, because
+// Create validates it.
+func (a *ContractAggregate) IdempotencyKey() string { return a.idempotencyKey }
 
 // Status returns the current status.
 func (a *ContractAggregate) Status() ContractStatus { return a.status }
@@ -144,18 +159,6 @@ func (a *ContractAggregate) PendingPriceID() *shared.PriceID {
 // HasPendingChange returns whether there is a pending price change.
 func (a *ContractAggregate) HasPendingChange() bool { return a.pendingPriceID != nil }
 
-// GetMetadata returns a copy of the contract metadata.
-func (a *ContractAggregate) GetMetadata() map[string]string {
-	if a.metadata == nil {
-		return nil
-	}
-	cp := make(map[string]string, len(a.metadata))
-	for k, v := range a.metadata {
-		cp[k] = v
-	}
-	return cp
-}
-
 // CreatedAt returns the creation timestamp.
 func (a *ContractAggregate) CreatedAt() time.Time { return a.createdAt }
 
@@ -170,20 +173,25 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 	}
 
 	now := a.Clock().Now()
+	if cmd.IdempotencyKey == "" {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"IdempotencyKey must be set")
+	}
 	if cmd.Interval.IsZero() {
 		return shared.NewDomainError(shared.ErrCodeValidation,
 			"Interval must be set")
 	}
 	event := &ContractCreatedEvent{
-		ContractID:   a.contractID,
-		AccountID:    cmd.AccountID,
-		PriceID:      cmd.PriceID,
-		Price:        cmd.Price,
-		BasePrice:    cmd.BasePrice,
-		Interval:     cmd.Interval,
-		ContractType: cmd.ContractType,
-		AutoRenew:    cmd.AutoRenew,
-		CreatedAt:    now,
+		ContractID:     a.contractID,
+		AccountID:      cmd.AccountID,
+		PriceID:        cmd.PriceID,
+		IdempotencyKey: cmd.IdempotencyKey,
+		Price:          cmd.Price,
+		BasePrice:      cmd.BasePrice,
+		Interval:       cmd.Interval,
+		ContractType:   cmd.ContractType,
+		AutoRenew:      cmd.AutoRenew,
+		CreatedAt:      now,
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -596,6 +604,9 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *ContractCreatedEvent:
 		a.contractID = e.ContractID
 		a.accountID = e.AccountID
+		// Empty for historical events recorded before schema version 3 (the
+		// key was never persisted); replay must tolerate that (issue #159).
+		a.idempotencyKey = e.IdempotencyKey
 		a.priceID = e.PriceID
 		a.price = e.Price
 		a.basePrice = e.BasePrice
@@ -744,6 +755,7 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		SchemaVersion:     contractSnapshotSchemaVersion,
 		ContractID:        a.contractID,
 		AccountID:         a.accountID,
+		IdempotencyKey:    a.idempotencyKey,
 		Status:            a.status,
 		ContractType:      a.contractType,
 		Interval:          a.interval,
@@ -757,7 +769,6 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		AutoRenew:         a.autoRenew,
 		CancelAtPeriodEnd: a.cancelAtPeriodEnd,
 		PendingPriceID:    a.pendingPriceID,
-		Metadata:          a.metadata,
 		CreatedAt:         a.createdAt,
 		UpdatedAt:         a.updatedAt,
 	}
@@ -799,6 +810,7 @@ type contractSnapshotState struct {
 	SchemaVersion     int                      `json:"schema_version,omitempty"`
 	ContractID        shared.ContractID        `json:"contract_id"`
 	AccountID         shared.AccountID         `json:"account_id"`
+	IdempotencyKey    string                   `json:"idempotency_key,omitempty"` // added with issue #159; empty in legacy snapshots
 	Status            ContractStatus           `json:"status"`
 	ContractType      ContractType             `json:"contract_type"`
 	Interval          BillingInterval          `json:"interval,omitempty"` // Flexible billing interval
@@ -812,7 +824,6 @@ type contractSnapshotState struct {
 	AutoRenew         bool                     `json:"auto_renew"`
 	CancelAtPeriodEnd bool                     `json:"cancel_at_period_end"`
 	PendingPriceID    *shared.PriceID          `json:"pending_price_id,omitempty"`
-	Metadata          map[string]string        `json:"metadata,omitempty"`
 	CreatedAt         time.Time                `json:"created_at"`
 	UpdatedAt         time.Time                `json:"updated_at"`
 }
@@ -826,6 +837,9 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 
 	a.contractID = state.ContractID
 	a.accountID = state.AccountID
+	// Empty in snapshots written before issue #159 — tolerated, mirroring
+	// replay of historical ContractCreatedEvent payloads without the key.
+	a.idempotencyKey = state.IdempotencyKey
 	a.status = state.Status
 	a.contractType = state.ContractType
 	if !state.Interval.IsZero() {
@@ -854,7 +868,6 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.autoRenew = state.AutoRenew
 	a.cancelAtPeriodEnd = state.CancelAtPeriodEnd
 	a.pendingPriceID = shared.PtrCopy(state.PendingPriceID)
-	a.metadata = state.Metadata
 	a.createdAt = state.CreatedAt
 	a.updatedAt = state.UpdatedAt
 	a.SetVersion(snapshot.Version)

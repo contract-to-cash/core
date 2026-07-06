@@ -56,12 +56,13 @@ func createActiveContractWithPrice(
 	agg := contract.NewContractAggregate(contractID, clock)
 
 	err := agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.AccountID("acc-001"),
-		PriceID:      priceEntity.ID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        price,
-		BasePrice:    price,
+		IdempotencyKey: "idem-integration-billing_flow-1",
+		AccountID:      shared.AccountID("acc-001"),
+		PriceID:        priceEntity.ID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          price,
+		BasePrice:      price,
 	}, emptyMetadata())
 	if err != nil {
 		t.Fatalf("failed to create contract: %v", err)

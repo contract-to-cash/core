@@ -148,8 +148,9 @@ type Invoice struct {
 
 	// Optimistic-locking support (mirrors balance.BalanceEntry, issue #130 / #147).
 	// version is bumped by EVERY state transition that changes persisted state
-	// (Finalize, RecordPayment, Void, VoidWithReason, MarkRefunded, and the
-	// revision-chain link setters SetRevisionOf / SetOriginalInvoiceID).
+	// (Finalize, MarkIssued, MarkOverdue, RecordPayment, Void, VoidWithReason,
+	// MarkRefunded, and the revision-chain link setters SetRevisionOf /
+	// SetOriginalInvoiceID).
 	// loadedVersion records the version observed when the invoice was loaded from
 	// persistence; repositories compare it against the stored version on Save to
 	// reject a check-then-act race (tx.ErrVersionConflict). A brand-new invoice
@@ -311,6 +312,71 @@ func (inv *Invoice) Finalize() error {
 	return nil
 }
 
+// MarkIssued transitions the invoice from finalized to issued.
+//
+// "Issued" records that the finalized invoice has been delivered to the
+// customer (rendered/sent through the consumer's invoice-generation adapter,
+// see docs/internals/metrics-invoicegen.md). The core never calls this itself
+// — delivery is out of core scope — but provides the transition so that
+// delivery flows do not have to reach the status via persistence-adapter
+// snapshots only (issue #159; same defect class as the refunded fix in #99).
+//
+// Only Finalized invoices can be issued: a draft has not been confirmed, and
+// paid / partial_paid / overdue / voided / refunded invoices are already past
+// the delivery point. ValidatePayment / RecordPayment accept issued invoices,
+// and VoidWithReason can void them, so downstream flows are unchanged.
+//
+// Like Finalize, it bumps the optimistic-locking version so two concurrently
+// loaded copies cannot both be issued: a repository honoring the concurrency
+// contract rejects the second Save with tx.ErrVersionConflict (issue #147).
+func (inv *Invoice) MarkIssued() error {
+	if inv.status != InvoiceStatusFinalized {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot issue invoice in status %s", inv.status))
+	}
+	inv.status = InvoiceStatusIssued
+	inv.version++
+	return nil
+}
+
+// MarkOverdue transitions the invoice to overdue once its due date has passed.
+//
+// The caller supplies the current time (via shared.Clock — never time.Now()
+// directly) and the transition is only permitted when `now` is strictly after
+// the due date; an invoice with no due date set cannot become overdue. The
+// core never calls this itself: detecting overdue invoices is a scheduling
+// concern (the consumer's dunning batch / scheduler finds candidates, e.g. via
+// Repository.FindOverdue, and applies the transition). This closes the gap
+// where the overdue status was reachable only via persistence-adapter
+// snapshots (issue #159; same defect class as the refunded fix in #99).
+//
+// Allowed source states are Finalized and Issued — the unpaid, pre-collection
+// states. Partial_paid is deliberately NOT transitioned: it already encodes
+// that money was collected, and RecordPayment resolves an overdue invoice to
+// paid/partial_paid the same way it does a finalized one (ValidatePayment
+// accepts overdue), so flipping partial_paid to overdue would lose payment
+// state for no downstream benefit.
+//
+// Like Finalize, it bumps the optimistic-locking version (issue #147).
+func (inv *Invoice) MarkOverdue(now time.Time) error {
+	if inv.status != InvoiceStatusFinalized && inv.status != InvoiceStatusIssued {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot mark invoice overdue in status %s", inv.status))
+	}
+	if inv.dueDate.IsZero() {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"cannot mark invoice overdue: no due date is set")
+	}
+	if !now.After(inv.dueDate) {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("cannot mark invoice overdue: due date %s has not passed",
+				inv.dueDate.Format(time.RFC3339)))
+	}
+	inv.status = InvoiceStatusOverdue
+	inv.version++
+	return nil
+}
+
 // ValidatePayment checks if a payment of the given amount can be accepted
 // without modifying the invoice state. This is useful for pre-charge validation.
 func (inv *Invoice) ValidatePayment(amount shared.Money) error {
@@ -451,9 +517,10 @@ func WithIssueDate(t time.Time) InvoiceOption {
 func (inv *Invoice) AllowPartialPay() bool { return inv.allowPartialPay }
 
 // Version returns the current optimistic-locking version. It is incremented by
-// every state transition that changes persisted state — Finalize,
-// RecordPayment, Void, VoidWithReason, MarkRefunded, and the revision-chain
-// link setters SetRevisionOf / SetOriginalInvoiceID. See issues #130 and #147.
+// every state transition that changes persisted state — Finalize, MarkIssued,
+// MarkOverdue, RecordPayment, Void, VoidWithReason, MarkRefunded, and the
+// revision-chain link setters SetRevisionOf / SetOriginalInvoiceID. See issues
+// #130 and #147.
 func (inv *Invoice) Version() int { return inv.version }
 
 // LoadedVersion returns the version observed when this invoice was loaded from

@@ -321,13 +321,16 @@ func handleCreateContract(env *testEnv) http.HandlerFunc {
 
 		autoRenew := req.AutoRenew == nil || *req.AutoRenew // default true
 		err := agg.Create(contract.CreateContractCommand{
-			AccountID:    shared.AccountID(req.AccountID),
-			PriceID:      price.ID(),
-			ContractType: contract.ContractType(req.ContractType),
-			Interval:     pricing.BillingCycleToInterval(pricing.BillingCycle(req.BillingCycle)),
-			Price:        moneyJPY(req.Price),
-			BasePrice:    moneyJPY(req.Price),
-			AutoRenew:    autoRenew,
+			// The e2e server mints a fresh key per request; a real integration
+			// would take it from the client request to make retries idempotent.
+			IdempotencyKey: "idem-" + string(contractID),
+			AccountID:      shared.AccountID(req.AccountID),
+			PriceID:        price.ID(),
+			ContractType:   contract.ContractType(req.ContractType),
+			Interval:       pricing.BillingCycleToInterval(pricing.BillingCycle(req.BillingCycle)),
+			Price:          moneyJPY(req.Price),
+			BasePrice:      moneyJPY(req.Price),
+			AutoRenew:      autoRenew,
 		}, emptyMetadata())
 		if err != nil {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())

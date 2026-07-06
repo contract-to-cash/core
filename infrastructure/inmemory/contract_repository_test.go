@@ -18,13 +18,14 @@ func newTestContractAggregate(t *testing.T, clock shared.Clock, accountID shared
 	agg := contract.NewContractAggregate(contractID, clock)
 
 	cmd := contract.CreateContractCommand{
-		AccountID:    accountID,
-		PriceID:      shared.NewPriceID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(new(big.Rat).SetInt64(980), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(new(big.Rat).SetInt64(980), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-inmemory-contract_repository-1",
+		AccountID:      accountID,
+		PriceID:        shared.NewPriceID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(new(big.Rat).SetInt64(980), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(new(big.Rat).SetInt64(980), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}
 	metadata := eventstore.EventMetadata{UserID: "test-user"}
 	if err := agg.Create(cmd, metadata); err != nil {

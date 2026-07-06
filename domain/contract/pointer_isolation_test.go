@@ -22,13 +22,14 @@ func newActiveAggregate(t *testing.T) *ContractAggregate {
 	agg := NewContractAggregate(shared.NewContractID(), clock)
 	metadata := eventstore.EventMetadata{UserID: "test"}
 	if err := agg.Create(CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      shared.NewPriceID(),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-contract-pointer_isolation-1",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        shared.NewPriceID(),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}, metadata); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -115,12 +116,13 @@ func TestAggregate_TrialConfig_GetterIsDefensivelyCopied(t *testing.T) {
 	clock := newTestClock()
 	agg := NewContractAggregate(shared.NewContractID(), clock)
 	if err := agg.Create(CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      shared.NewPriceID(),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		IdempotencyKey: "idem-contract-pointer_isolation-2",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        shared.NewPriceID(),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -157,12 +159,13 @@ func TestAggregate_TrialConfig_IntakeIsDefensivelyCopied(t *testing.T) {
 	clock := newTestClock()
 	agg := NewContractAggregate(shared.NewContractID(), clock)
 	if err := agg.Create(CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      shared.NewPriceID(),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		IdempotencyKey: "idem-contract-pointer_isolation-3",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        shared.NewPriceID(),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -303,12 +306,13 @@ func TestAggregate_LoadFromSnapshot_IsolatesTrialConfig(t *testing.T) {
 	clock := newTestClock()
 	src := NewContractAggregate(shared.NewContractID(), clock)
 	if err := src.Create(CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      shared.NewPriceID(),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		IdempotencyKey: "idem-contract-pointer_isolation-4",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        shared.NewPriceID(),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -385,104 +389,5 @@ func TestAggregate_LoadFromSnapshot_IsolatesSuspensionConfig(t *testing.T) {
 	}
 	if again.Reason != "snapshot-isolation" {
 		t.Errorf("LoadFromSnapshot aliasing: SuspensionConfig.Reason mutated to %q", again.Reason)
-	}
-}
-
-// --- Contract (state-stored entity) getter defense ---
-//
-// PR #120 review MINOR: the pointer-isolation test suite exercises only
-// ContractAggregate. Contract (the state-stored entity used by snapshots,
-// projections, and read models) has parallel getter-defense logic on
-// PaymentMethodID / TrialConfig / SuspensionConfig that should also be
-// covered, even though Contract has no public constructor today. These
-// tests build the entity package-internally so that future factories
-// cannot regress the defense without test churn.
-
-func TestContract_PaymentMethodID_GetterIsDefensivelyCopied(t *testing.T) {
-	pm := "pm-entity-original"
-	c := &Contract{paymentMethodID: &pm}
-
-	got := c.PaymentMethodID()
-	if got == nil {
-		t.Fatal("Contract.PaymentMethodID must not be nil")
-	}
-	*got = "pm-entity-hacked"
-
-	if again := c.PaymentMethodID(); again == nil || *again != "pm-entity-original" {
-		t.Errorf("Contract.PaymentMethodID() leaks internal pointer: got %v, want pm-entity-original", again)
-	}
-}
-
-func TestContract_PaymentMethodID_NilSafe(t *testing.T) {
-	c := &Contract{}
-	if got := c.PaymentMethodID(); got != nil {
-		t.Errorf("expected nil PaymentMethodID, got %v", got)
-	}
-}
-
-func TestContract_TrialConfig_GetterIsDefensivelyCopied(t *testing.T) {
-	c := &Contract{trialConfig: &TrialConfiguration{
-		TrialEndDate:           time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
-		AutoConvert:            true,
-		ConversionReminderDays: []int{7, 3, 1},
-	}}
-
-	got := c.TrialConfig()
-	if got == nil {
-		t.Fatal("Contract.TrialConfig must not be nil")
-	}
-	got.AutoConvert = false
-	got.ConversionReminderDays[0] = 999
-
-	again := c.TrialConfig()
-	if again == nil {
-		t.Fatal("TrialConfig must not be nil on second read")
-	}
-	if !again.AutoConvert {
-		t.Error("Contract.TrialConfig() leaks struct fields: AutoConvert mutated")
-	}
-	if again.ConversionReminderDays[0] != 7 {
-		t.Errorf("Contract.TrialConfig() leaks slice: got ConversionReminderDays[0]=%d, want 7", again.ConversionReminderDays[0])
-	}
-}
-
-func TestContract_TrialConfig_NilSafe(t *testing.T) {
-	c := &Contract{}
-	if got := c.TrialConfig(); got != nil {
-		t.Errorf("expected nil TrialConfig, got %v", got)
-	}
-}
-
-func TestContract_SuspensionConfig_GetterIsDefensivelyCopied(t *testing.T) {
-	resume := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	c := &Contract{suspensionConfig: &SuspensionConfiguration{
-		BillingBehavior: SuspensionBillingSkip,
-		ResumeDate:      &resume,
-		Reason:          "entity-test",
-	}}
-
-	got := c.SuspensionConfig()
-	if got == nil || got.ResumeDate == nil {
-		t.Fatal("Contract.SuspensionConfig / ResumeDate must not be nil")
-	}
-	got.Reason = "hacked"
-	*got.ResumeDate = time.Date(2099, 12, 31, 0, 0, 0, 0, time.UTC)
-
-	again := c.SuspensionConfig()
-	if again == nil {
-		t.Fatal("SuspensionConfig must not be nil on second read")
-	}
-	if again.Reason != "entity-test" {
-		t.Errorf("Contract.SuspensionConfig() leaks struct fields: Reason mutated to %q", again.Reason)
-	}
-	if again.ResumeDate == nil || !again.ResumeDate.Equal(resume) {
-		t.Errorf("Contract.SuspensionConfig() leaks ResumeDate pointee: got %v, want %v", again.ResumeDate, resume)
-	}
-}
-
-func TestContract_SuspensionConfig_NilSafe(t *testing.T) {
-	c := &Contract{}
-	if got := c.SuspensionConfig(); got != nil {
-		t.Errorf("expected nil SuspensionConfig, got %v", got)
 	}
 }

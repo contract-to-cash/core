@@ -91,12 +91,13 @@ func newActiveContract(id string) *contract.ContractAggregate {
 	agg := contract.NewContractAggregate(shared.ContractID(id), clock)
 
 	cmd := contract.CreateContractCommand{
-		AccountID:    shared.AccountID("a1"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-batch-contract_renewal-1",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}
 	meta := eventstore.EventMetadata{UserID: "test"}
 	if err := agg.Create(cmd, meta); err != nil {
@@ -203,12 +204,13 @@ func TestContractRenewalProcessor_DryRun_AutoRenewFalse(t *testing.T) {
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
 	agg := contract.NewContractAggregate(shared.ContractID("c1"), clock)
 	cmd := contract.CreateContractCommand{
-		AccountID:    shared.AccountID("a1"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		AutoRenew:    false,
+		IdempotencyKey: "idem-batch-contract_renewal-2",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      false,
 	}
 	meta := eventstore.EventMetadata{UserID: "test"}
 	if err := agg.Create(cmd, meta); err != nil {
@@ -260,12 +262,13 @@ func TestContractRenewalProcessor_StopOnError(t *testing.T) {
 	cancelledAgg := contract.NewContractAggregate(shared.ContractID("c-fail"), cancelledClock)
 	meta := eventstore.EventMetadata{UserID: "test"}
 	cmd := contract.CreateContractCommand{
-		AccountID:    shared.AccountID("a1"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-batch-contract_renewal-3",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}
 	if err := cancelledAgg.Create(cmd, meta); err != nil {
 		t.Fatalf("failed to create cancelled contract: %v", err)
@@ -339,12 +342,13 @@ func TestContractRenewalProcessor_ContinueOnError(t *testing.T) {
 	cancelledAgg := contract.NewContractAggregate(shared.ContractID("c-fail"), cancelledClock)
 	meta := eventstore.EventMetadata{UserID: "test"}
 	cmd := contract.CreateContractCommand{
-		AccountID:    shared.AccountID("a1"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-batch-contract_renewal-4",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}
 	if err := cancelledAgg.Create(cmd, meta); err != nil {
 		t.Fatalf("failed to create cancelled contract: %v", err)
@@ -391,13 +395,14 @@ func TestContractRenewalProcessor_BillingCycleChange(t *testing.T) {
 	meta := eventstore.EventMetadata{UserID: "test"}
 
 	cmd := contract.CreateContractCommand{
-		AccountID:    shared.AccountID("a1"),
-		PriceID:      shared.PriceID("price-monthly"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-batch-contract_renewal-5",
+		AccountID:      shared.AccountID("a1"),
+		PriceID:        shared.PriceID("price-monthly"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}
 	if err := agg.Create(cmd, meta); err != nil {
 		t.Fatalf("Create failed: %v", err)

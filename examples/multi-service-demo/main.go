@@ -76,7 +76,8 @@ func main() {
 	vpsID := shared.NewContractID()
 	vps := contract.NewContractAggregate(vpsID, clock)
 	must("create vps", vps.Create(contract.CreateContractCommand{
-		AccountID: accountID, PriceID: "price-vps-standard",
+		IdempotencyKey: "idem-multi-service-demo-demo-1",
+		AccountID:      accountID, PriceID: "price-vps-standard",
 		ContractType: contract.ContractTypeSubscription,
 		Interval:     pricing.Monthly(),
 		Price:        moneyJPY(5000), BasePrice: moneyJPY(5000),
@@ -90,7 +91,8 @@ func main() {
 	sslID := shared.NewContractID()
 	ssl := contract.NewContractAggregate(sslID, clock)
 	must("create ssl", ssl.Create(contract.CreateContractCommand{
-		AccountID: accountID, PriceID: "price-ssl-wildcard",
+		IdempotencyKey: "idem-multi-service-demo-demo-2",
+		AccountID:      accountID, PriceID: "price-ssl-wildcard",
 		ContractType: contract.ContractTypeSubscription,
 		Interval:     pricing.Yearly(),
 		Price:        moneyJPY(20000), BasePrice: moneyJPY(20000),
@@ -104,7 +106,8 @@ func main() {
 	domID := shared.NewContractID()
 	dom := contract.NewContractAggregate(domID, clock)
 	must("create domain", dom.Create(contract.CreateContractCommand{
-		AccountID: accountID, PriceID: "price-domain-jp",
+		IdempotencyKey: "idem-multi-service-demo-demo-3",
+		AccountID:      accountID, PriceID: "price-domain-jp",
 		ContractType: contract.ContractTypeSubscription,
 		Interval:     pricing.Yearly(),
 		Price:        moneyJPY(1500), BasePrice: moneyJPY(1500),

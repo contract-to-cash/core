@@ -95,13 +95,14 @@ func setupContractWithCreateAndActivate(t *testing.T, store eventstore.Store, co
 	// Create event
 	createEvents := createContractEvents(t, contractID, clockCreate, func(agg *contract.ContractAggregate, meta eventstore.EventMetadata) error {
 		return agg.Create(contract.CreateContractCommand{
-			AccountID:    shared.AccountID("acc-001"),
-			PriceID:      shared.PriceID("price-001"),
-			ContractType: contract.ContractTypeSubscription,
-			Interval:     pricing.Monthly(),
-			Price:        testMoney(),
-			BasePrice:    testMoney(),
-			AutoRenew:    true,
+			IdempotencyKey: "idem-query-temporal_query_service-1",
+			AccountID:      shared.AccountID("acc-001"),
+			PriceID:        shared.PriceID("price-001"),
+			ContractType:   contract.ContractTypeSubscription,
+			Interval:       pricing.Monthly(),
+			Price:          testMoney(),
+			BasePrice:      testMoney(),
+			AutoRenew:      true,
 		}, meta)
 	})
 	appendEvents(t, store, streamID, createEvents, 0)
@@ -383,12 +384,13 @@ func TestGetContractAsOf_WithSnapshot_FiltersEventsCorrectly(t *testing.T) {
 	// Create contract at t1
 	createEvents := createContractEvents(t, contractID, t1, func(agg *contract.ContractAggregate, meta eventstore.EventMetadata) error {
 		return agg.Create(contract.CreateContractCommand{
-			AccountID:    shared.AccountID("acc-002"),
-			PriceID:      shared.PriceID("price-002"),
-			ContractType: contract.ContractTypeSubscription,
-			Interval:     pricing.Monthly(),
-			Price:        testMoney(),
-			BasePrice:    testMoney(),
+			IdempotencyKey: "idem-query-temporal_query_service-2",
+			AccountID:      shared.AccountID("acc-002"),
+			PriceID:        shared.PriceID("price-002"),
+			ContractType:   contract.ContractTypeSubscription,
+			Interval:       pricing.Monthly(),
+			Price:          testMoney(),
+			BasePrice:      testMoney(),
 		}, meta)
 	})
 	appendEvents(t, store, streamID, createEvents, 0)

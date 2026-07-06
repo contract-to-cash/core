@@ -436,9 +436,6 @@ type Address struct {
 package contract
 
 import (
-    "time"
-
-    "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/domain/pricing"
 )
 
@@ -478,24 +475,12 @@ const (
 // 旧 BillingCycle 文字列スキャフォールディングは #111 で撤去済み。
 type BillingInterval = pricing.BillingInterval
 
-type Contract struct {
-    id               shared.ContractID
-    accountID        shared.AccountID
-    status           ContractStatus
-    contractType     ContractType
-    interval         BillingInterval
-    currentPeriod    shared.DateRange
-    trialConfig      *TrialConfiguration
-    suspensionConfig *SuspensionConfiguration
-    paymentMethodID  *string           // 契約レベルの決済手段ID（nil = アカウントデフォルト）
-    price            shared.Money      // サブスクリプション/買い切りの固定料金
-    basePrice        shared.Money      // ハイブリッド課金の固定部分
-    metadata         map[string]string
-    createdAt        time.Time
-    updatedAt        time.Time
-    version          int
-}
 ```
+
+> **注（issue #159）**: 以前ここに定義されていた read-only な `Contract` エンティティ
+> （ContractAggregate の状態保持ミラー）は、コンストラクタ・パッケージ外参照が一切なく
+> 死にコードだったため削除済み。契約モデルは event-sourced な `ContractAggregate`
+> （§3.2）に一本化されている。読み取りモデル / Projection は利用者側の責務。
 
 ### 3.2 ContractAggregate（イベントソーシング対応）
 
@@ -508,9 +493,13 @@ import (
     "github.com/contract-to-cash/core/eventstore"
 )
 
-// CreateContractCommand はContract作成時のパラメータを保持する
+// CreateContractCommand はContract作成時のパラメータを保持する。
+// IdempotencyKey は必須（design-decisions §4.1、issue #159）: Create が空を
+// validation エラーで拒否し、キーは ContractCreatedEvent（schema v3）に載る。
+// コアが強制するのは「存在」まで — キーの一意性はリポジトリ/アダプタが
+// ユニークインデックス等で強制する（contract.Repository.Save の godoc 参照）。
 type CreateContractCommand struct {
-    IdempotencyKey string
+    IdempotencyKey string // 必須。空は validation エラー
     AccountID      shared.AccountID
     PriceID        shared.PriceID
     ContractType   ContractType
@@ -539,7 +528,6 @@ type ContractAggregate struct {
     autoRenew         bool
     cancelAtPeriodEnd bool
     pendingPriceID    *shared.PriceID
-    metadata          map[string]string
     createdAt         time.Time
     updatedAt         time.Time
 }
@@ -584,7 +572,6 @@ func (a *ContractAggregate) AutoRenew() bool
 func (a *ContractAggregate) CancelAtPeriodEnd() bool
 func (a *ContractAggregate) PendingPriceID() *shared.PriceID
 func (a *ContractAggregate) HasPendingChange() bool
-func (a *ContractAggregate) GetMetadata() map[string]string
 func (a *ContractAggregate) CreatedAt() time.Time
 func (a *ContractAggregate) UpdatedAt() time.Time
 ```
@@ -615,15 +602,16 @@ const (
 )
 
 type ContractCreatedEvent struct {
-    ContractID   shared.ContractID
-    AccountID    shared.AccountID
-    PriceID      shared.PriceID
-    Price        shared.Money
-    BasePrice    shared.Money
-    Interval     BillingInterval
-    ContractType ContractType
-    AutoRenew    bool
-    CreatedAt    time.Time
+    ContractID     shared.ContractID
+    AccountID      shared.AccountID
+    PriceID        shared.PriceID
+    IdempotencyKey string          // SchemaVersion 3 で追加（issue #159）。歴史的イベントでは空
+    Price          shared.Money
+    BasePrice      shared.Money
+    Interval       BillingInterval
+    ContractType   ContractType
+    AutoRenew      bool
+    CreatedAt      time.Time
 }
 
 type ContractActivatedEvent struct {
@@ -926,13 +914,21 @@ const (
 
 // InvoiceStatus 状態遷移ルール:
 //   draft        → finalized（Finalize）| voided（Void）
-//   finalized    → issued | paid | partial_paid（RecordPayment）| voided（VoidWithReason）
-//   issued       → paid | partial_paid（RecordPayment）| overdue | voided（VoidWithReason）
+//   finalized    → issued（MarkIssued）| overdue（MarkOverdue）| paid | partial_paid（RecordPayment）| voided（VoidWithReason）
+//   issued       → paid | partial_paid（RecordPayment）| overdue（MarkOverdue）| voided（VoidWithReason）
 //   partial_paid → paid（残額入金）| refunded（MarkRefunded）| voided（VoidWithReason）
 //   overdue      → paid | partial_paid（RecordPayment）| voided（VoidWithReason）
 //   paid         → refunded（MarkRefunded）| voided（VoidWithReason）
 //   voided       → 終端状態（遷移なし。refunded へは遷移不可）
 //   refunded     → 終端状態（遷移なし）
+//
+// issued / overdue への遷移は #159 で追加された明示メソッドで行う（従来は snapshot 経由のみ）:
+//   - MarkIssued(): finalized → issued。送付（レンダリング/送信）はコアのスコープ外のため、
+//     発火は統合者の送付フロー。
+//   - MarkOverdue(now): finalized|issued → overdue。now が dueDate を厳密に過ぎている場合のみ。
+//     dueDate 未設定の請求書は overdue にできない。検出（FindOverdue 等）と発火は統合者の
+//     スケジューラ責務。partial_paid は入金済み情報を失わないため overdue へ遷移させない。
+//   どちらも楽観ロックの version を bump する（#147 のルール: 永続状態を変える全メソッドが bump）。
 //
 // MarkRefunded の遷移元は paid / partial_paid のみ（実際に入金があった請求書だけ返金しうる）。
 // voided は「入金前にキャンセルされた」別の終端状態であり、返金対象の入金が存在しないため
@@ -1017,6 +1013,8 @@ func WithRevisionOf(id shared.InvoiceID) InvoiceOption
 
 // 状態遷移メソッド
 func (inv *Invoice) Finalize() error
+func (inv *Invoice) MarkIssued() error
+func (inv *Invoice) MarkOverdue(now time.Time) error
 func (inv *Invoice) RecordPayment(amount shared.Money, paidAt time.Time) error
 func (inv *Invoice) ValidatePayment(amount shared.Money) error
 func (inv *Invoice) Void() error
@@ -1814,6 +1812,16 @@ func NewBalanceEntry(accountID shared.AccountID, amount shared.Money, reason Bal
 // 消費が発生した場合は version をインクリメントする。
 func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error)
 
+// MarkExpired は期限切れエントリの残高を没収し、没収額を返す（issue #159）。
+// 「失効」= remainingAmount のゼロ化（status フィールドは持たない。ゼロ残高は
+// IsFullyConsumed / FindAvailable / GetBalance すべてで不活性になる）。
+// originalAmount と expiresAt は監査用に保持される。
+// ガード: expiresAt 未設定・未失効は business_rule エラー。全消費済みは
+// ゼロ没収・version 非バンプの冪等 no-op（バッチ再実行安全）。
+// 没収が発生した場合は Consume 同様 version をインクリメントする（楽観ロック）。
+// 発火は batch.BalanceExpirationProcessor（スケジューラは利用者側）。
+func (e *BalanceEntry) MarkExpired(now time.Time) (shared.Money, error)
+
 func (e *BalanceEntry) IsExpired(now time.Time) bool
 func (e *BalanceEntry) IsFullyConsumed() bool
 func (e *BalanceEntry) Version() int
@@ -1885,6 +1893,14 @@ type Repository interface {
 
     // 返金記録
     SaveRefund(ctx context.Context, refund *BalanceRefund) error
+
+    // FindByAccountID 全エントリ取得（全消費・期限切れ含む、作成時刻昇順）
+    FindByAccountID(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*BalanceEntry, error)
+
+    // FindExpired 期限切れかつ残高が未没収（remainingAmount > 0）のエントリを
+    // 作成時刻昇順で返す（issue #159）。batch.BalanceExpirationProcessor の
+    // スキャンに使用。契約側の FindDueForRenewal に相当。
+    FindExpired(ctx context.Context, asOf time.Time) ([]*BalanceEntry, error)
 }
 ```
 

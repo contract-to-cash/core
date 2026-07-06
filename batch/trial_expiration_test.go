@@ -100,12 +100,13 @@ func newTrialingContract(id string, autoConvert bool) *contract.ContractAggregat
 	agg := contract.NewContractAggregate(shared.ContractID(id), clock)
 
 	cmd := contract.CreateContractCommand{
-		AccountID:    shared.AccountID("a1"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-batch-trial_expiration-1",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}
 	meta := eventstore.EventMetadata{UserID: "test"}
 	if err := agg.Create(cmd, meta); err != nil {
@@ -248,11 +249,12 @@ func TestTrialExpirationProcessor_NonTrialingContract_Fails(t *testing.T) {
 	agg := contract.NewContractAggregate(shared.ContractID("c-active"), clock)
 	meta := eventstore.EventMetadata{UserID: "test"}
 	cmd := contract.CreateContractCommand{
-		AccountID:    shared.AccountID("a1"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		IdempotencyKey: "idem-batch-trial_expiration-2",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}
 	if err := agg.Create(cmd, meta); err != nil {
 		t.Fatalf("Create failed: %v", err)
@@ -371,12 +373,13 @@ func newTrialingContractRequiringPM(id string, paymentMethodID string) *contract
 	agg := contract.NewContractAggregate(shared.ContractID(id), clock)
 
 	cmd := contract.CreateContractCommand{
-		AccountID:    shared.AccountID("a1"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-batch-trial_expiration-3",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}
 	meta := eventstore.EventMetadata{UserID: "test"}
 	if err := agg.Create(cmd, meta); err != nil {
@@ -494,12 +497,13 @@ func newTrialingContractWithEnd(id string, autoConvert bool, trialEnd time.Time)
 	agg := contract.NewContractAggregate(shared.ContractID(id), clock)
 
 	cmd := contract.CreateContractCommand{
-		AccountID:    shared.AccountID("a1"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-batch-trial_expiration-4",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}
 	meta := eventstore.EventMetadata{UserID: "test"}
 	if err := agg.Create(cmd, meta); err != nil {

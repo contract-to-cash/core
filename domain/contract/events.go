@@ -7,9 +7,10 @@ import (
 	"github.com/contract-to-cash/core/eventstore"
 )
 
-// Compile-time assertions that the four schema-version-2 events self-declare
-// their current schema version (so RaiseEvent stamps them v2, not v1). These are
-// the events with a corresponding Upcaster in upcaster.go.
+// Compile-time assertions that the schema-versioned events self-declare their
+// current schema version (so RaiseEvent stamps them with it, not v1). These are
+// the events with a corresponding Upcaster in upcaster.go. ContractCreatedEvent
+// is at v3 (idempotency_key, issue #159); the others are at v2.
 var (
 	_ eventstore.SchemaVersioned = (*ContractCreatedEvent)(nil)
 	_ eventstore.SchemaVersioned = (*PriceChangedEvent)(nil)
@@ -39,24 +40,36 @@ const (
 )
 
 // ContractCreatedEvent is raised when a new contract is created.
+//
+// IdempotencyKey carries the caller-supplied creation idempotency key
+// (required by ContractAggregate.Create since issue #159) so that
+// persistence adapters can enforce at-most-once contract creation with a
+// unique index — see the uniqueness note on Repository.Save. It was added in
+// SchemaVersion 3; historical v1/v2 payloads have no idempotency_key and
+// deserialize with an empty string, which Apply tolerates (replay of
+// pre-#159 history must never fail).
 type ContractCreatedEvent struct {
-	ContractID   shared.ContractID `json:"contract_id"`
-	AccountID    shared.AccountID  `json:"account_id"`
-	PriceID      shared.PriceID    `json:"price_id"`
-	Price        shared.Money      `json:"price"`
-	Interval     BillingInterval   `json:"interval,omitempty"` // Flexible billing interval
-	ContractType ContractType      `json:"contract_type"`
-	BasePrice    shared.Money      `json:"base_price"`
-	AutoRenew    bool              `json:"auto_renew"`
-	CreatedAt    time.Time         `json:"created_at"`
+	ContractID     shared.ContractID `json:"contract_id"`
+	AccountID      shared.AccountID  `json:"account_id"`
+	PriceID        shared.PriceID    `json:"price_id"`
+	IdempotencyKey string            `json:"idempotency_key,omitempty"` // added in schema v3 (issue #159)
+	Price          shared.Money      `json:"price"`
+	Interval       BillingInterval   `json:"interval,omitempty"` // Flexible billing interval
+	ContractType   ContractType      `json:"contract_type"`
+	BasePrice      shared.Money      `json:"base_price"`
+	AutoRenew      bool              `json:"auto_renew"`
+	CreatedAt      time.Time         `json:"created_at"`
 }
 
 func (e *ContractCreatedEvent) EventType() eventstore.EventType { return EventTypeContractCreated }
 
 // CurrentSchemaVersion reports that the current ContractCreatedEvent payload is
-// schema version 2 (interval-based, post-#111). ContractCreatedEventUpcaster
-// migrates legacy v1 payloads (billing_cycle-only) up to this shape.
-func (e *ContractCreatedEvent) CurrentSchemaVersion() int { return 2 }
+// schema version 3 (carries idempotency_key, issue #159). Version 2 was the
+// interval-based shape (post-#111). ContractCreatedEventUpcaster migrates
+// legacy v1 payloads (billing_cycle-only) to the v2 shape, and
+// ContractCreatedIdempotencyKeyUpcaster marks v2 payloads v3 (a missing
+// idempotency_key deserializes to "", which Apply tolerates).
+func (e *ContractCreatedEvent) CurrentSchemaVersion() int { return 3 }
 
 // ContractActivatedEvent is raised when a contract is activated.
 type ContractActivatedEvent struct {
