@@ -477,3 +477,48 @@ func TestInvoice_FromSnapshot_PointerIndependence(t *testing.T) {
 		t.Error("InvoiceFromSnapshot: Invoice.Metadata map was shared")
 	}
 }
+
+// TestInvoice_Snapshot_PreservesVersion verifies that the optimistic-locking
+// version survives a ToSnapshot / InvoiceFromSnapshot round trip and that
+// loadedVersion is restored from the same field. Covers the RecordPayment path,
+// which began bumping the version in issue #147.
+func TestInvoice_Snapshot_PreservesVersion(t *testing.T) {
+	t.Parallel()
+
+	inv, err := NewInvoice(
+		shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+	)
+	if err != nil {
+		t.Fatalf("NewInvoice: %v", err)
+	}
+	if err := inv.Finalize(); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	if err := inv.RecordPayment(shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("RecordPayment: %v", err)
+	}
+	want := inv.Version()
+	if want == 0 {
+		t.Fatalf("precondition: expected non-zero version after Finalize+RecordPayment, got 0")
+	}
+
+	snap := inv.ToSnapshot()
+	if snap.Version != want {
+		t.Errorf("snapshot Version = %d, want %d", snap.Version, want)
+	}
+
+	restored, err := InvoiceFromSnapshot(snap)
+	if err != nil {
+		t.Fatalf("InvoiceFromSnapshot: %v", err)
+	}
+	if got := restored.Version(); got != want {
+		t.Errorf("restored Version = %d, want %d", got, want)
+	}
+	if got := restored.LoadedVersion(); got != want {
+		t.Errorf("restored LoadedVersion = %d, want %d", got, want)
+	}
+}

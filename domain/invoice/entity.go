@@ -130,13 +130,15 @@ type Invoice struct {
 	voidReason        string
 	refundReason      string
 
-	// Optimistic-locking support (mirrors balance.BalanceEntry, issue #130).
-	// version is bumped by state transitions that must not race (currently
-	// Finalize). loadedVersion records the version observed when the invoice
-	// was loaded from persistence; repositories compare it against the stored
-	// version on Save to reject a check-then-act race (tx.ErrVersionConflict).
-	// A brand-new invoice starts at version 0 / loadedVersion 0, so callers
-	// and adapters that never populate these fields keep working unchanged.
+	// Optimistic-locking support (mirrors balance.BalanceEntry, issue #130 / #147).
+	// version is bumped by EVERY state transition that changes persisted state
+	// (Finalize, RecordPayment, Void, VoidWithReason, MarkRefunded, and the
+	// revision-chain link setters SetRevisionOf / SetOriginalInvoiceID).
+	// loadedVersion records the version observed when the invoice was loaded from
+	// persistence; repositories compare it against the stored version on Save to
+	// reject a check-then-act race (tx.ErrVersionConflict). A brand-new invoice
+	// starts at version 0 / loadedVersion 0, so callers and adapters that never
+	// populate these fields keep working unchanged.
 	version       int
 	loadedVersion int
 }
@@ -329,6 +331,12 @@ func (inv *Invoice) RecordPayment(amount shared.Money, paidAt time.Time) error {
 		inv.status = InvoiceStatusPartialPaid
 	}
 
+	// Bump the optimistic-locking version so two concurrently loaded copies
+	// cannot both record a payment: a repository honoring the concurrency
+	// contract rejects the second Save with tx.ErrVersionConflict, preventing
+	// silent under-reporting of paidAmount (issue #147).
+	inv.version++
+
 	return nil
 }
 
@@ -382,7 +390,9 @@ func WithIssueDate(t time.Time) InvoiceOption {
 func (inv *Invoice) AllowPartialPay() bool { return inv.allowPartialPay }
 
 // Version returns the current optimistic-locking version. It is incremented by
-// state transitions that must not race (currently Finalize). See issue #130.
+// every state transition that changes persisted state — Finalize,
+// RecordPayment, Void, VoidWithReason, MarkRefunded, and the revision-chain
+// link setters SetRevisionOf / SetOriginalInvoiceID. See issues #130 and #147.
 func (inv *Invoice) Version() int { return inv.version }
 
 // LoadedVersion returns the version observed when this invoice was loaded from
@@ -405,12 +415,17 @@ func (inv *Invoice) SetVersion(v int) {
 
 // Void transitions the invoice to voided status.
 // Only Draft and Finalized invoices can be voided.
+//
+// Like Finalize, it bumps the optimistic-locking version so a concurrent Void
+// vs RecordPayment race cannot both persist: the second Save is rejected with
+// tx.ErrVersionConflict under a compliant repository (issue #147).
 func (inv *Invoice) Void() error {
 	if inv.status != InvoiceStatusDraft && inv.status != InvoiceStatusFinalized {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot void invoice in status %s", inv.status))
 	}
 	inv.status = InvoiceStatusVoided
+	inv.version++
 	return nil
 }
 
@@ -428,6 +443,10 @@ func (inv *Invoice) VoidWithReason(reason string) error {
 	}
 	inv.status = InvoiceStatusVoided
 	inv.voidReason = reason
+	// Bump the optimistic-locking version (issue #147): a VoidWithReason racing
+	// a RecordPayment on the same loaded version must not silently lose the
+	// payment. A compliant repository rejects the second Save.
+	inv.version++
 	return nil
 }
 
@@ -501,16 +520,25 @@ func (inv *Invoice) VoidReason() string { return inv.voidReason }
 // SetRevisionOf sets the revision link to the direct parent invoice.
 // revisionOf points to the immediate predecessor in the revision chain.
 // This is used after invoice creation to link a replacement to its direct parent.
+//
+// It bumps the optimistic-locking version because it mutates persisted state
+// (issue #147): a compliant repository must be able to detect a lost update on
+// the revision-link write the same way it does for status transitions.
 func (inv *Invoice) SetRevisionOf(id shared.InvoiceID) {
 	inv.revisionOf = &id
+	inv.version++
 }
 
 // SetOriginalInvoiceID sets the root invoice ID of the revision chain.
 // originalInvoiceID always points to the first invoice in the chain,
 // regardless of how many revisions have occurred.
 // This is used after invoice creation to link a replacement to the chain root.
+//
+// Like SetRevisionOf, it bumps the optimistic-locking version because it
+// mutates persisted state (issue #147).
 func (inv *Invoice) SetOriginalInvoiceID(id shared.InvoiceID) {
 	inv.originalInvoiceID = &id
+	inv.version++
 }
 
 // PaymentMethodID returns a defensive copy of the invoice-level payment

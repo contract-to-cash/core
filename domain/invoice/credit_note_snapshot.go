@@ -43,6 +43,10 @@ type CreditNoteSnapshot struct {
 	RefundAmount shared.Money
 	IssuedAt     *time.Time
 	CreatedAt    time.Time
+	// Version is the optimistic-locking version (issue #147). The entity's
+	// loadedVersion is not stored separately: CreditNoteFromSnapshot restores
+	// both version and loadedVersion from this single field.
+	Version int
 }
 
 // ToSnapshot returns a flat, independent copy of the credit note's internal state.
@@ -90,6 +94,7 @@ func (cn *CreditNote) ToSnapshot() CreditNoteSnapshot {
 		RefundAmount: cn.refundAmount,
 		IssuedAt:     issuedAt,
 		CreatedAt:    cn.createdAt,
+		Version:      cn.version,
 	}
 }
 
@@ -147,5 +152,9 @@ func CreditNoteFromSnapshot(s CreditNoteSnapshot) (*CreditNote, error) {
 		refundAmount: s.RefundAmount,
 		issuedAt:     issuedAt,
 		createdAt:    s.CreatedAt,
+		// loadedVersion is set to Version so the next Save through a repository
+		// with optimistic locking compares against the correct baseline (#147).
+		version:       s.Version,
+		loadedVersion: s.Version,
 	}, nil
 }

@@ -88,6 +88,20 @@ type CreditNote struct {
 	refundAmount shared.Money
 	issuedAt     *time.Time
 	createdAt    time.Time
+
+	// Optimistic-locking support (mirrors invoice.Invoice, issue #147).
+	// version is bumped by EVERY state transition that changes persisted state
+	// (Issue, Apply, Refund, Void). Without it, an issued credit note loaded by
+	// two callers could be Apply()'d by one and Refund()'d by the other and both
+	// succeed — crediting the account AND refunding the gateway while recording
+	// only one outcome. loadedVersion records the version observed at load time;
+	// a repository honoring the concurrency contract (see
+	// CreditNoteRepository.Save) compares it against the stored version on Save
+	// and rejects a mismatch with tx.ErrVersionConflict. A brand-new credit note
+	// starts at version 0 / loadedVersion 0, so adapters that never populate
+	// these fields keep working unchanged.
+	version       int
+	loadedVersion int
 }
 
 // CreditNoteOption is a functional option for NewCreditNote.
@@ -193,6 +207,7 @@ func (cn *CreditNote) Issue(issuedAt time.Time) error {
 	}
 	cn.status = CreditNoteStatusIssued
 	cn.issuedAt = &issuedAt
+	cn.version++
 	return nil
 }
 
@@ -209,6 +224,10 @@ func (cn *CreditNote) Apply(creditAmount shared.Money) error {
 	}
 	cn.creditAmount = creditAmount
 	cn.status = CreditNoteStatusApplied
+	// Bump the optimistic-locking version (issue #147): a concurrent Apply vs
+	// Refund on the same issued credit note must not both persist. A compliant
+	// repository rejects the second Save with tx.ErrVersionConflict.
+	cn.version++
 	return nil
 }
 
@@ -225,6 +244,9 @@ func (cn *CreditNote) Refund(refundAmount shared.Money) error {
 	}
 	cn.refundAmount = refundAmount
 	cn.status = CreditNoteStatusRefunded
+	// Bump the optimistic-locking version (issue #147): see Apply for the
+	// Apply-vs-Refund race this guards against.
+	cn.version++
 	return nil
 }
 
@@ -236,6 +258,7 @@ func (cn *CreditNote) Void() error {
 			fmt.Sprintf("cannot void credit note in status %s", cn.status))
 	}
 	cn.status = CreditNoteStatusVoided
+	cn.version++
 	return nil
 }
 
@@ -270,3 +293,26 @@ func (cn *CreditNote) IssuedAt() *time.Time {
 	return &v
 }
 func (cn *CreditNote) CreatedAt() time.Time { return cn.createdAt }
+
+// Version returns the current optimistic-locking version. It is incremented by
+// every state transition that changes persisted state — Issue, Apply, Refund,
+// and Void. See issue #147.
+func (cn *CreditNote) Version() int { return cn.version }
+
+// LoadedVersion returns the version observed when this credit note was loaded
+// from persistence. Repository implementations compare it against the stored
+// version on Save to detect a concurrent modification (issue #147).
+func (cn *CreditNote) LoadedVersion() int { return cn.loadedVersion }
+
+// SetVersion sets the version and records it as the loaded version.
+// Repository implementations call this after a successful Save so that
+// subsequent saves from the same pointer compare against the just-persisted
+// version instead of a stale baseline.
+//
+// For initial reconstitution from persistence, prefer CreditNoteFromSnapshot,
+// which restores version and loadedVersion atomically alongside all other
+// fields.
+func (cn *CreditNote) SetVersion(v int) {
+	cn.version = v
+	cn.loadedVersion = v
+}
