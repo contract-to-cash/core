@@ -69,6 +69,67 @@ func TestOptimisticLocking(t *testing.T) {
 	}
 }
 
+func TestAppend_RejectsNonContiguousVersion(t *testing.T) {
+	store := NewInMemoryEventStore(shared.SystemClock{})
+	ctx := context.Background()
+
+	// Gap: expectedVersion 0 requires the first event to be version 1, but it is 2.
+	gap := makeEvent("stream-1", 2, time.Now().UTC())
+	err := store.Append(ctx, "stream-1", []eventstore.Event{gap}, 0)
+	if err == nil {
+		t.Fatal("expected error for non-contiguous first event version, got nil")
+	}
+	domErr, ok := err.(*shared.DomainError)
+	if !ok {
+		t.Fatalf("expected DomainError, got %T", err)
+	}
+	if domErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected error code %s, got %s", shared.ErrCodeValidation, domErr.Code)
+	}
+
+	// Nothing should have been persisted.
+	events, err := store.Load(ctx, "stream-1")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events after rejected append, got %d", len(events))
+	}
+}
+
+func TestAppend_RejectsNonContiguousBatch(t *testing.T) {
+	store := NewInMemoryEventStore(shared.SystemClock{})
+	ctx := context.Background()
+
+	// First event 1 is fine, but the second jumps from 2 to 4.
+	e1 := makeEvent("s", 1, time.Now().UTC())
+	e2 := makeEvent("s", 3, time.Now().UTC())
+	err := store.Append(ctx, "s", []eventstore.Event{e1, e2}, 0)
+	if err == nil {
+		t.Fatal("expected error for non-contiguous batch, got nil")
+	}
+	if domErr, ok := err.(*shared.DomainError); !ok || domErr.Code != shared.ErrCodeValidation {
+		t.Fatalf("expected validation DomainError, got %v", err)
+	}
+}
+
+func TestAppend_ContiguousAfterExisting(t *testing.T) {
+	store := NewInMemoryEventStore(shared.SystemClock{})
+	ctx := context.Background()
+
+	if err := store.Append(ctx, "s", []eventstore.Event{makeEvent("s", 1, time.Now().UTC())}, 0); err != nil {
+		t.Fatalf("first append failed: %v", err)
+	}
+	// Continuing from version 1 with event version 2 is contiguous and valid.
+	if err := store.Append(ctx, "s", []eventstore.Event{makeEvent("s", 2, time.Now().UTC())}, 1); err != nil {
+		t.Fatalf("contiguous append failed: %v", err)
+	}
+	// But an event version that does not follow expectedVersion is rejected.
+	if err := store.Append(ctx, "s", []eventstore.Event{makeEvent("s", 5, time.Now().UTC())}, 2); err == nil {
+		t.Fatal("expected rejection of non-contiguous continuation, got nil")
+	}
+}
+
 func TestLoadUntil(t *testing.T) {
 	store := NewInMemoryEventStore(shared.SystemClock{})
 	ctx := context.Background()

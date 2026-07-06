@@ -13,23 +13,32 @@ import (
 // contractEventRegistry is the package-level event registry for contract events.
 var contractEventRegistry = func() *eventstore.EventRegistry {
 	r := eventstore.NewEventRegistry()
-	r.Register(&ContractCreatedEvent{})
-	r.Register(&ContractActivatedEvent{})
-	r.Register(&ContractSuspendedEvent{})
-	r.Register(&ContractResumedEvent{})
-	r.Register(&ContractCancelledEvent{})
-	r.Register(&PriceChangedEvent{})
-	r.Register(&TrialStartedEvent{})
-	r.Register(&TrialEndedEvent{})
-	r.Register(&PaymentMethodChangedEvent{})
-	r.Register(&ContractRenewedEvent{})
-	r.Register(&ContractExpiredEvent{})
-	r.Register(&CancellationScheduledEvent{})
-	r.Register(&CancellationUnscheduledEvent{})
-	r.Register(&PriceChangeScheduledEvent{})
-	r.Register(&PriceChangeUnscheduledEvent{})
-	r.Register(&ContractPastDueEvent{})
-	r.Register(&ContractRecoveredEvent{})
+	// A duplicate registration is a programmer error surfaced at package init
+	// (two events claiming the same EventType, or a registration wired twice),
+	// so fail fast with a panic rather than propagate an error through this var
+	// initializer.
+	mustRegister := func(event eventstore.DomainEvent) {
+		if err := r.Register(event); err != nil {
+			panic(fmt.Sprintf("contract event registry: %v", err))
+		}
+	}
+	mustRegister(&ContractCreatedEvent{})
+	mustRegister(&ContractActivatedEvent{})
+	mustRegister(&ContractSuspendedEvent{})
+	mustRegister(&ContractResumedEvent{})
+	mustRegister(&ContractCancelledEvent{})
+	mustRegister(&PriceChangedEvent{})
+	mustRegister(&TrialStartedEvent{})
+	mustRegister(&TrialEndedEvent{})
+	mustRegister(&PaymentMethodChangedEvent{})
+	mustRegister(&ContractRenewedEvent{})
+	mustRegister(&ContractExpiredEvent{})
+	mustRegister(&CancellationScheduledEvent{})
+	mustRegister(&CancellationUnscheduledEvent{})
+	mustRegister(&PriceChangeScheduledEvent{})
+	mustRegister(&PriceChangeUnscheduledEvent{})
+	mustRegister(&ContractPastDueEvent{})
+	mustRegister(&ContractRecoveredEvent{})
 	return r
 }()
 

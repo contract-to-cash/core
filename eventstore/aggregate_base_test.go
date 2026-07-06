@@ -65,6 +65,40 @@ func TestBaseAggregate_RaiseEvent(t *testing.T) {
 	}
 }
 
+// versionedEvent implements SchemaVersioned, self-declaring schema version 3.
+type versionedEvent struct {
+	Message string `json:"message"`
+}
+
+func (e *versionedEvent) EventType() EventType      { return "versioned.created" }
+func (e *versionedEvent) CurrentSchemaVersion() int { return 3 }
+
+// TestBaseAggregate_RaiseEvent_SchemaVersioned verifies RaiseEvent stamps the
+// self-declared schema version for events implementing SchemaVersioned, and
+// still defaults to 1 for events that do not.
+func TestBaseAggregate_RaiseEvent_SchemaVersioned(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)}
+	agg := NewBaseAggregate("agg-sv", clock)
+
+	if err := agg.RaiseEvent(&versionedEvent{Message: "hi"}, EventMetadata{UserID: "u"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := agg.RaiseEvent(&sampleEvent{Message: "plain"}, EventMetadata{UserID: "u"}); err != nil {
+		t.Fatal(err)
+	}
+
+	events := agg.UncommittedEvents()
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[0].SchemaVersion != 3 {
+		t.Errorf("expected self-declared schema version 3, got %d", events[0].SchemaVersion)
+	}
+	if events[1].SchemaVersion != 1 {
+		t.Errorf("expected default schema version 1 for non-SchemaVersioned event, got %d", events[1].SchemaVersion)
+	}
+}
+
 func TestBaseAggregate_MultipleEvents(t *testing.T) {
 	clock := shared.FixedClock{FixedTime: time.Now().UTC()}
 	agg := NewBaseAggregate("agg-2", clock)

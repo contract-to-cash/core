@@ -33,7 +33,9 @@ func TestBaseAggregate_ClockAndIncrementVersion(t *testing.T) {
 // TestEventRegistry_DeserializeInvalidJSON exercises the unmarshal error path.
 func TestEventRegistry_DeserializeInvalidJSON(t *testing.T) {
 	registry := NewEventRegistry()
-	registry.Register(&testEvent{})
+	if err := registry.Register(&testEvent{}); err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
 
 	_, err := registry.Deserialize("test.event", json.RawMessage(`{invalid json`))
 	if err == nil {

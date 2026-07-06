@@ -34,6 +34,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract snapshots (schema_version 0/1) are converted to an interval on
   `LoadFromSnapshot`; new snapshots record `schema_version: 2`. No data migration
   is required — existing streams and snapshots replay correctly.
+- **Event Sourcing — schema-version self-declaration** (#153): `RaiseEvent` no
+  longer hardcodes `SchemaVersion: 1`. A new optional `eventstore.SchemaVersioned`
+  interface (`CurrentSchemaVersion() int`) lets an event self-declare the version
+  its current payload serializes to; `RaiseEvent` stamps that value (default 1 for
+  events that do not implement it). The four semantically-v2 contract events
+  (`contract.created`, `contract.price_changed`, `contract.trial_ended`,
+  `contract.renewed`) now declare version 2, so freshly written events are stamped
+  v2 and **skip the upcaster chain on replay** (each upcaster's `CanUpcast` is
+  `fromVersion <= 1`). This removes the per-replay rewrite cost for new events and
+  closes the latent hazard whereby a future non-idempotent upcaster would corrupt
+  freshly written events mis-stamped as v1. Historical v1 events still upcast to v2
+  as before — fully backward compatible, no data migration.
+- `eventstore.UpcasterChain.Upcast` now iterates to a fixpoint (bounded by
+  `maxUpcastIterations`) instead of a single pass, so a multi-hop migration
+  converges regardless of upcaster registration order (e.g. a v1→v2 upcaster
+  registered after the v2→v3 upcaster it feeds). A non-converging upcaster returns
+  an error rather than looping forever.
+
+### Fixed
+
+- `eventstore.EventRegistry.Register` now returns an `error` and rejects a
+  duplicate `EventType` registration instead of silently overwriting the prior
+  Go-type mapping (which could route deserialization to the wrong type), mirroring
+  `plugin.Registry.Register` (#153). The contract package's registry initializer
+  fails fast via a `mustRegister` panic on duplicates (a programmer error at init).
+- `inmemory.InMemoryEventStore.Append` now validates event `Version` contiguity
+  against `expectedVersion` (events must be numbered `expectedVersion+1, +2, …`),
+  rejecting a gapped/out-of-order batch with a `validation_error` before it can
+  corrupt the append-only log (#153).
 
 ### Added
 

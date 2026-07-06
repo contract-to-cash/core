@@ -98,6 +98,62 @@ func TestUpcasterChain_AppliesInSequence(t *testing.T) {
 	}
 }
 
+// TestUpcasterChain_ConvergesOutOfOrder verifies the fixpoint loop reaches the
+// terminal schema version even when a v1->v2 upcaster is registered AFTER the
+// v2->v3 upcaster it feeds. A single forward pass would stop at v2.
+func TestUpcasterChain_ConvergesOutOfOrder(t *testing.T) {
+	const et EventType = "test.event"
+	// Deliberately reversed order: addField (2->3) before rename (1->2).
+	chain := NewUpcasterChain(
+		addFieldUpcaster{eventType: et},
+		renameUpcaster{eventType: et},
+	)
+
+	in := Event{
+		Type:          et,
+		SchemaVersion: 1,
+		Data:          json.RawMessage(`{"old_name":"hello"}`),
+	}
+	out, err := chain.Upcast(in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.SchemaVersion != 3 {
+		t.Fatalf("expected fixpoint schema version 3 regardless of order, got %d", out.SchemaVersion)
+	}
+
+	var result testEvent
+	if err := json.Unmarshal(out.Data, &result); err != nil {
+		t.Fatalf("failed to unmarshal upcast data: %v", err)
+	}
+	if result.Name != "hello" {
+		t.Errorf("expected name %q after rename upcast, got %q", "hello", result.Name)
+	}
+	if result.Value != 42 {
+		t.Errorf("expected value 42 after add-field upcast, got %d", result.Value)
+	}
+}
+
+// cyclingUpcaster always claims it can upcast and keeps bumping the version
+// without ever converging, to exercise the max-iterations guard.
+type cyclingUpcaster struct{}
+
+func (u cyclingUpcaster) CanUpcast(_ EventType, _ int) bool { return true }
+func (u cyclingUpcaster) Upcast(event Event) (Event, error) {
+	event.SchemaVersion++
+	return event, nil
+}
+
+// TestUpcasterChain_NonConvergingIsBounded verifies a non-converging upcaster
+// terminates with an error instead of spinning forever.
+func TestUpcasterChain_NonConvergingIsBounded(t *testing.T) {
+	chain := NewUpcasterChain(cyclingUpcaster{})
+	_, err := chain.Upcast(Event{Type: "test.event", SchemaVersion: 1})
+	if err == nil {
+		t.Fatal("expected non-convergence error, got nil")
+	}
+}
+
 func TestUpcasterChain_SkipsNonMatching(t *testing.T) {
 	chain := NewUpcasterChain(
 		renameUpcaster{eventType: "other.event"},

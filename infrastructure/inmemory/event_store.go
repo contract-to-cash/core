@@ -51,6 +51,20 @@ func (s *InMemoryEventStore) Append(_ context.Context, streamID string, events [
 			fmt.Sprintf("expected version %d but stream %q is at version %d", expectedVersion, streamID, currentVersion))
 	}
 
+	// Validate Version contiguity: appended events must be numbered sequentially
+	// starting at expectedVersion+1. A gap or out-of-order Version means the
+	// events were built against a stale aggregate version and would corrupt the
+	// append-only log (breaking optimistic locking and temporal replay), so
+	// reject the batch rather than persist a discontinuous stream.
+	for i := range events {
+		wantVersion := expectedVersion + i + 1
+		if events[i].Version != wantVersion {
+			return shared.NewDomainError(shared.ErrCodeValidation,
+				fmt.Sprintf("event %d for stream %q has version %d but expected contiguous version %d",
+					i, streamID, events[i].Version, wantVersion))
+		}
+	}
+
 	now := s.clock.Now()
 	for i := range events {
 		events[i].RecordedAt = now
