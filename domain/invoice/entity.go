@@ -230,9 +230,15 @@ func WithAllowPartialPayment(allow bool) InvoiceOption {
 }
 
 // WithLineItems sets the line items.
+//
+// The slice is defensively copied so a post-construction mutation of the
+// caller's slice (items[i] = ... or an append reusing the backing array) cannot
+// rewrite the invoice's persisted line items. LineItems() already returns a copy
+// on read; this closes the same hole on intake (issue #162 L-6).
 func WithLineItems(items []LineItem) InvoiceOption {
 	return func(inv *Invoice) {
-		inv.lineItems = items
+		inv.lineItems = make([]LineItem, len(items))
+		copy(inv.lineItems, items)
 	}
 }
 
@@ -652,7 +658,15 @@ func (inv *Invoice) VoidReason() string { return inv.voidReason }
 // It bumps the optimistic-locking version because it mutates persisted state
 // (issue #147): a compliant repository must be able to detect a lost update on
 // the revision-link write the same way it does for status transitions.
+//
+// A self-reference (id == inv.ID()) is rejected as a no-op: an invoice cannot be
+// a revision of itself, and linking one would create a cycle in the revision
+// chain that breaks chain traversal. The mutation and version bump are skipped
+// in that case (issue #162 L-9).
 func (inv *Invoice) SetRevisionOf(id shared.InvoiceID) {
+	if id == inv.id {
+		return
+	}
 	inv.revisionOf = &id
 	inv.version++
 }
@@ -664,7 +678,15 @@ func (inv *Invoice) SetRevisionOf(id shared.InvoiceID) {
 //
 // Like SetRevisionOf, it bumps the optimistic-locking version because it
 // mutates persisted state (issue #147).
+//
+// A self-reference (id == inv.ID()) is rejected as a no-op: the chain root is by
+// definition an EARLIER invoice, so pointing an invoice's original-link at
+// itself would corrupt revision-chain traversal. The mutation and version bump
+// are skipped in that case (issue #162 L-9).
 func (inv *Invoice) SetOriginalInvoiceID(id shared.InvoiceID) {
+	if id == inv.id {
+		return
+	}
 	inv.originalInvoiceID = &id
 	inv.version++
 }

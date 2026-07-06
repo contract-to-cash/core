@@ -179,14 +179,20 @@ func IsVersionConflict(err error) bool {
 	return false
 }
 
-// RetryOnConflict retries fn up to maxRetries times when it returns an
-// optimistic-lock conflict (see IsVersionConflict — either the
-// ErrVersionConflict sentinel or a shared.ErrCodeVersionConflict DomainError).
-// Non-conflict errors are returned immediately without retry. No backoff is
-// applied — optimistic lock conflicts resolve on immediate retry.
-func RetryOnConflict(maxRetries int, fn func() error) error {
+// RetryOnConflict runs fn up to maxAttempts times (the FIRST call plus retries),
+// retrying only when fn returns an optimistic-lock conflict (see
+// IsVersionConflict — either the ErrVersionConflict sentinel or a
+// shared.ErrCodeVersionConflict DomainError). Non-conflict errors are returned
+// immediately without retry. No backoff is applied — optimistic lock conflicts
+// resolve on immediate retry.
+//
+// The parameter is the total attempt COUNT, not the number of retries after the
+// first call: maxAttempts=1 runs fn exactly once with no retry, maxAttempts=3
+// runs it at most three times. It was renamed from the misleading maxRetries to
+// match the loop's actual semantics (issue #162 L4).
+func RetryOnConflict(maxAttempts int, fn func() error) error {
 	var err error
-	for i := 0; i < maxRetries; i++ {
+	for i := 0; i < maxAttempts; i++ {
 		err = fn()
 		if err == nil {
 			return nil

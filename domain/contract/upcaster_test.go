@@ -284,6 +284,29 @@ func TestContractCreatedEventUpcaster_BillingCycleToInterval(t *testing.T) {
 	}
 }
 
+// TestContractCreatedEventUpcaster_UnknownBillingCycleErrors verifies the
+// upcaster surfaces an error for an unrecognized legacy billing_cycle instead of
+// silently rewriting it as Monthly, which would corrupt the migrated interval
+// (issue #162 L-4).
+func TestContractCreatedEventUpcaster_UnknownBillingCycleErrors(t *testing.T) {
+	u := &ContractCreatedEventUpcaster{}
+
+	legacy := map[string]interface{}{
+		"contract_id":   "c1",
+		"account_id":    "acc-1",
+		"price_id":      "price-1",
+		"billing_cycle": "biweekly", // not one of daily/weekly/monthly/yearly
+		"contract_type": "subscription",
+		"created_at":    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	data, _ := json.Marshal(legacy)
+	event := eventstore.Event{Type: EventTypeContractCreated, SchemaVersion: 1, Data: data}
+
+	if _, err := u.Upcast(event); err == nil {
+		t.Fatal("expected error for unknown legacy billing_cycle, got nil")
+	}
+}
+
 func TestContractCreatedEventUpcaster_PreservesExistingInterval(t *testing.T) {
 	u := &ContractCreatedEventUpcaster{}
 

@@ -66,17 +66,24 @@ func (s *InMemoryEventStore) Append(_ context.Context, streamID string, events [
 	}
 
 	now := s.clock.Now()
+	// Stamp RecordedAt/GlobalPosition on COPIES rather than on the caller's slice
+	// elements. The caller (e.g. contract_repository.Save) may keep referencing
+	// its UncommittedEvents slice; mutating those structs in place would leak
+	// store-assigned fields back into the caller's aggregate (issue #162 I3).
+	stored := make([]eventstore.Event, len(events))
 	for i := range events {
-		events[i].RecordedAt = now
+		e := events[i]
+		e.RecordedAt = now
 		s.position++
-		events[i].GlobalPosition = s.position
-		s.streams[streamID] = append(s.streams[streamID], events[i])
-		s.allEvents = append(s.allEvents, events[i])
+		e.GlobalPosition = s.position
+		stored[i] = e
+		s.streams[streamID] = append(s.streams[streamID], e)
+		s.allEvents = append(s.allEvents, e)
 	}
 
-	// Notify subscribers.
+	// Notify subscribers with the stored copies.
 	for _, ch := range s.subscribers {
-		for _, e := range events {
+		for _, e := range stored {
 			select {
 			case ch <- e:
 			default:

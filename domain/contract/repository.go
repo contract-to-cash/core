@@ -41,8 +41,12 @@ type Repository interface {
 	// FindExpiring returns contracts expiring before the given time.
 	FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
 
-	// FindTrialsEndingSoon returns trialing contracts whose trial ends before the given time.
-	FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
+	// FindTrialsEndingBefore returns trialing contracts whose TrialEndDate is
+	// strictly before the given time. Called by the trial-expiration batch with
+	// `now`, it yields trials that have ALREADY ended (renamed from the
+	// misleading FindTrialsEndingSoon, which read as "ending in the near future"
+	// — issue #162 B4).
+	FindTrialsEndingBefore(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
 
 	// FindByIDAsOf loads a contract aggregate as of a specific point in time.
 	FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)

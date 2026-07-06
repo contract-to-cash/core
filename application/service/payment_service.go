@@ -480,8 +480,18 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			return nil, fmt.Errorf("failed to construct failed-payment record: %w", npErr)
 		}
 		if failErr := failedPayment.Fail(err.Error()); failErr == nil {
-			// Best-effort save of failed payment record
-			_ = s.paymentRepo.Save(ctx, failedPayment)
+			// Best-effort save of failed payment record. A save failure here is
+			// non-fatal (the gateway charge already failed, so there is nothing
+			// to reconcile), but it must not be swallowed silently: without the
+			// record, operators lose the audit trail of the failed attempt.
+			// Log at Warn so the drop is observable (issue #162 L1).
+			if saveErr := s.paymentRepo.Save(ctx, failedPayment); saveErr != nil {
+				s.logger.Warn("failed to persist failed-payment record (audit trail dropped)",
+					"paymentID", failedPayment.ID(),
+					"invoiceID", invoiceID,
+					"error", saveErr,
+				)
+			}
 		}
 		// Execute OnPaymentFailed hooks with PaymentContext
 		failCtx := plugin.NewPaymentContext(ctx, failedPayment, inv)

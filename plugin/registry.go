@@ -328,21 +328,33 @@ func (r *Registry) GetOnInvoiceRevisedHooks() []OnInvoiceRevisedHook {
 }
 
 // sortByPriority sorts a slice of Plugin by Priority() in ascending order.
+//
+// A stable sort is used so that plugins sharing the same Priority keep their
+// relative input order. For InitializeAll/ShutdownAll the input is gathered
+// from the plugins map (unordered), so the tie-break is only meaningful within
+// a single call; see sortedCopy for the registration-order guarantee that
+// applies to the per-hook getters.
 func sortByPriority(plugins []Plugin) {
-	sort.Slice(plugins, func(i, j int) bool {
+	sort.SliceStable(plugins, func(i, j int) bool {
 		return plugins[i].Priority() < plugins[j].Priority()
 	})
 }
 
 // sortedCopy returns a priority-sorted copy of a hook slice.
 // The type constraint ensures the element implements Plugin.
+//
+// The sort is STABLE and the source slice is kept in registration order (hooks
+// are appended in Register call order), so plugins that share the same Priority
+// execute in the order they were registered. This makes same-priority ordering
+// deterministic instead of depending on Go's unstable-sort internals (issue
+// #162 P1).
 func sortedCopy[T Plugin](hooks []T) []T {
 	if len(hooks) == 0 {
 		return nil
 	}
 	cp := make([]T, len(hooks))
 	copy(cp, hooks)
-	sort.Slice(cp, func(i, j int) bool {
+	sort.SliceStable(cp, func(i, j int) bool {
 		return cp[i].Priority() < cp[j].Priority()
 	})
 	return cp

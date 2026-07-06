@@ -41,6 +41,12 @@ func NewCalculationContext(ctx context.Context, c *contract.ContractAggregate, s
 func (cc *CalculationContext) Context() context.Context { return cc.ctx }
 
 // Contract returns the contract aggregate.
+//
+// READ-ONLY: plugins must treat the returned aggregate as read-only. It is the
+// live aggregate the core is billing, not a copy — calling a state-transition
+// method on it (Activate, Suspend, RenewWithInterval, …) raises an uncommitted
+// event that the core's next Save would silently persist, corrupting the event
+// stream. Use the getters (ContractID, Status, …) only (issue #162 P3).
 func (cc *CalculationContext) Contract() *contract.ContractAggregate { return cc.contract }
 
 // Subtotal returns the current subtotal.
@@ -95,6 +101,13 @@ func (cc *CalculationContext) ProductID() shared.ProductID { return cc.productID
 func (cc *CalculationContext) SetProductID(id shared.ProductID) { cc.productID = id }
 
 // Context provides a generic context for non-calculation hooks.
+//
+// Concurrency: Context is NOT safe for concurrent use. The core fires each hook
+// sequentially and owns the Context for the duration of a single hook
+// invocation, so the metadata map is expected to be accessed by one goroutine
+// at a time. A hook that stashes the Context and mutates its metadata from a
+// spawned goroutine (or shares it across concurrent hook chains) races on the
+// map and must provide its own synchronization (issue #162 P2).
 type Context struct {
 	ctx      context.Context
 	metadata map[string]interface{}

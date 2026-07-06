@@ -76,7 +76,7 @@ graph TB
 **Strict rules:**
 
 - `domain/` must have zero external dependencies (stdlib + `ulid` only)
-- `application/` depends only on `domain/`, never on `infrastructure/`
+- `application/` depends on `domain/` plus the infrastructure-free base packages `eventstore/` and `plugin/` (see the dependency graph in 2.2), never on `infrastructure/`
 - Dependencies always point inward (Dependency Inversion)
 - Interfaces are defined in `domain/` or `application/port/`; implementations live in `infrastructure/`
 

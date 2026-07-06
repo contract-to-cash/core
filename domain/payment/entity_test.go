@@ -525,7 +525,6 @@ func TestPayment_MarkChargedBack_AllInvalidStates(t *testing.T) {
 	}{
 		{"from pending", PaymentStatusPending},
 		{"from failed", PaymentStatusFailed},
-		{"from partially_refunded", PaymentStatusPartiallyRefunded},
 		{"from refunded", PaymentStatusRefunded},
 		{"from charged_back", PaymentStatusChargedBack},
 	}
@@ -536,6 +535,19 @@ func TestPayment_MarkChargedBack_AllInvalidStates(t *testing.T) {
 				t.Errorf("expected error calling MarkChargedBack() from %s", tt.status)
 			}
 		})
+	}
+}
+
+// TestPayment_MarkChargedBack_FromPartiallyRefunded verifies a chargeback is
+// permitted after a partial refund: real-world chargebacks routinely follow a
+// partial refund when the customer disputes the remaining charge (issue #162 L-9).
+func TestPayment_MarkChargedBack_FromPartiallyRefunded(t *testing.T) {
+	p := paymentInState(t, PaymentStatusPartiallyRefunded)
+	if err := p.MarkChargedBack(); err != nil {
+		t.Fatalf("unexpected error charging back a partially_refunded payment: %v", err)
+	}
+	if p.Status() != PaymentStatusChargedBack {
+		t.Errorf("expected charged_back, got %s", p.Status())
 	}
 }
 

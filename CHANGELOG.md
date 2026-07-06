@@ -6,6 +6,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Low-priority batch cleanup (#162)** — a group of small, low-risk correctness
+  and clarity fixes surfaced by the 2026-07-06 review:
+  - **BREAKING (pre-v1.0)**: renamed `contract.Repository.FindTrialsEndingSoon`
+    to `FindTrialsEndingBefore`. The method returns trials whose `TrialEndDate`
+    is before the given time (i.e. already ended when called with `now`); the old
+    name read as "ending in the near future". Update repository implementations
+    and callers.
+  - Plugin execution order within a single hook type is now deterministic:
+    `Registry` sorts same-priority hooks with a STABLE sort, so plugins sharing a
+    `Priority` run in registration order instead of an arbitrary order (P1).
+  - `batch.ContractRenewalProcessor` dry run now validates billing-interval
+    resolution, so a contract with a dangling `PendingPriceID` fails the dry run
+    instead of passing it and failing in production (B2).
+  - Natural term-end expiry now fires `OnContractChange` with the new
+    `plugin.ContractChangeExpired` type instead of `ContractChangeCancelled`, so
+    churn metrics no longer conflate expiry with voluntary cancellation (B3).
+  - `shared.DateRange.UnmarshalJSON` normalizes both bounds to UTC (matching
+    `NewDateRange`); it deliberately still tolerates a historically-persisted
+    inverted range to stay replay-safe (L-3).
+  - Contract upcasters now surface an error on an unknown legacy `billing_cycle`
+    (via the new `pricing.BillingCycleToIntervalStrict`) instead of silently
+    migrating it to Monthly (L-4).
+  - `payment.Payment.MarkChargedBack` is now permitted from `partially_refunded`
+    (real-world chargebacks follow partial refunds), not only from `completed` (L-9).
+  - Defensive intake copies for `invoice.NewCreditNote` items and
+    `invoice.WithLineItems`; `Invoice.SetRevisionOf` / `SetOriginalInvoiceID`
+    now reject a self-reference as a no-op (L-6, L-9).
+  - `application/tx.RetryOnConflict`'s parameter was renamed `maxRetries` →
+    `maxAttempts` to match its actual "total attempt count" semantics (L4).
+  - `BillingService` invoice-generation paths gained the nil guards after
+    `FindByID` that `FinalizeInvoice` already had (L5).
+  - Non-code hardening/clarity: in-memory event store `Append` no longer mutates
+    the caller's event slice (I3); `PaymentService` logs (Warn) the previously
+    swallowed failed-payment save error (L1); godoc notes on plugin `Context`
+    single-goroutine ownership (P2), read-only live-aggregate access via
+    `CalculationContext`/`PaymentContext` (P3), `ProjectionService.RegisterProjector`
+    ordering (L3), `UsagePrice.Minimum` at zero usage (L-2), the contract-aggregate
+    Apply/RaiseEvent ordering (L-8), and `invoicecleanup` partial-void semantics
+    (C5). Corrected the `application/` dependency wording in `CLAUDE.md` and
+    `docs/architecture.md` (L6).
+
 ### Removed
 
 - **Dead-code inventory (#159, applying the #116 delete-unused policy)**:

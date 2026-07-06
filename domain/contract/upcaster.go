@@ -87,8 +87,19 @@ func legacyBillingCycle(raw map[string]json.RawMessage, key string) (pricing.Bil
 
 // marshalInterval converts a BillingCycle to the canonical interval JSON
 // ({"unit":...,"count":...}).
+//
+// It uses the STRICT conversion so an unrecognized legacy billing_cycle surfaces
+// as an upcaster error instead of being silently rewritten as Monthly, which
+// would corrupt the migrated interval (issue #162 L-4). Only the four historical
+// cycle values (daily/weekly/monthly/yearly) were ever persisted, so a real
+// stream never hits the error path; a garbage value means the payload is already
+// corrupt and must fail loudly rather than replay as a wrong interval.
 func marshalInterval(cycle pricing.BillingCycle) (json.RawMessage, error) {
-	return json.Marshal(pricing.BillingCycleToInterval(cycle))
+	interval, ok := pricing.BillingCycleToIntervalStrict(cycle)
+	if !ok {
+		return nil, fmt.Errorf("upcaster: unknown legacy billing_cycle %q (expected daily, weekly, monthly, or yearly)", cycle)
+	}
+	return json.Marshal(interval)
 }
 
 // ContractCreatedEventUpcaster migrates historical ContractCreatedEvent payloads

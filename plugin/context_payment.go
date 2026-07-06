@@ -12,6 +12,13 @@ import (
 // PaymentContext provides type-safe context for payment hooks.
 // It follows the same pattern as CalculationContext for billing hooks.
 // PaymentService already loads the invoice, so no additional DB queries are needed.
+//
+// READ-ONLY: the Payment, Invoice, and Contract exposed here are the live
+// aggregates/entities the core is operating on, not copies. Plugins must treat
+// them as read-only — mutating them (e.g. calling a state-transition method on
+// the contract, or RecordPayment on the invoice) can corrupt the core's own
+// persistence of the same objects. Use the getters for inspection only
+// (issue #162 P3).
 type PaymentContext struct {
 	ctx      context.Context
 	payment  *payment.Payment

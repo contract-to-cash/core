@@ -37,7 +37,7 @@ infrastructure/  ドメイン IF の実装（現在は inmemory/ のみ。DB 実
 **絶対に守るルール:**
 
 - `domain/` から外部パッケージへの依存は禁止（stdlib + `github.com/oklog/ulid/v2` のみ）
-- `application/` は `domain/` のみに依存。`infrastructure/` には依存しない
+- `application/` は `domain/` を中心に、コアの基盤パッケージ（`eventstore/` / `plugin/`）にも依存してよい（依存グラフは architecture.md 2.2 参照）。ただし `infrastructure/` には依存しない
 - 依存の方向は常に外→内（Dependency Inversion）
 - インターフェースは `domain/` または `application/port/` に定義し、実装は `infrastructure/` に置く
 - パッケージ間の循環依存を絶対に作らない

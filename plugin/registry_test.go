@@ -151,6 +151,38 @@ func TestPriorityOrdering(t *testing.T) {
 	}
 }
 
+// TestPriorityOrdering_StableWithinSamePriority verifies that plugins sharing
+// the same Priority are returned in registration order — a stable sort keeps
+// the relative order deterministic instead of leaving it to the unstable-sort
+// internals (issue #162 P1).
+func TestPriorityOrdering_StableWithinSamePriority(t *testing.T) {
+	r := NewRegistry()
+
+	names := []string{"a", "b", "c", "d", "e"}
+	for _, n := range names {
+		p := &discountOnlyPlugin{
+			basePlugin: basePlugin{name: n, version: "1.0.0", priority: PriorityNormal},
+		}
+		if err := r.Register(p); err != nil {
+			t.Fatalf("unexpected error registering %q: %v", n, err)
+		}
+	}
+
+	// Multiple calls must yield the identical registration order every time.
+	for iter := 0; iter < 5; iter++ {
+		hooks := r.GetDiscountHooks()
+		if len(hooks) != len(names) {
+			t.Fatalf("expected %d hooks, got %d", len(names), len(hooks))
+		}
+		for i, n := range names {
+			if hooks[i].Name() != n {
+				t.Fatalf("iter %d: expected hook %d to be %q (registration order), got %q",
+					iter, i, n, hooks[i].Name())
+			}
+		}
+	}
+}
+
 func TestInitializeAll(t *testing.T) {
 	r := NewRegistry()
 	p := &discountOnlyPlugin{

@@ -40,8 +40,15 @@ func NewUsagePrice(unitPrice shared.Money, minimum, maximum *shared.Money) (Usag
 }
 
 // CalculatePrice calculates usage * UnitPrice, clamped by Minimum and Maximum.
-// Zero usage returns zero money; negative usage panics (see the PricingModel
-// contract and assertNonNegativeUsage).
+//
+// Zero usage returns zero money — the Minimum clamp is DELIBERATELY NOT applied
+// when usage is zero (issue #162 L-2). Minimum is a floor on the charge for a
+// period in which the metered resource was actually used; a period with no usage
+// at all bills nothing. A consumer that wants an unconditional periodic minimum
+// (a floor that applies even at zero usage) should model it as a separate flat
+// base charge (e.g. a hybrid contract) rather than expecting UsagePrice.Minimum
+// to cover it. Negative usage panics (see the PricingModel contract and
+// assertNonNegativeUsage).
 func (p UsagePrice) CalculatePrice(usage int64) shared.Money {
 	assertNonNegativeUsage("UsagePrice", usage)
 	if usage == 0 {

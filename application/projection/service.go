@@ -48,6 +48,13 @@ func NewProjectionService(eventStore eventstore.Store, options ProjectionOptions
 }
 
 // RegisterProjector adds a projector to the service.
+//
+// NOT concurrency-safe with Start/RebuildAll: register all projectors during
+// single-threaded setup BEFORE calling Start (or RebuildAll). The projectors
+// slice is read without synchronization by ProcessEvent, so appending to it
+// while Start's event loop is running is a data race and may cause a projector
+// to miss events. If dynamic registration after Start is required, the caller
+// must provide external synchronization (issue #162 L3).
 func (s *ProjectionService) RegisterProjector(p Projector) {
 	s.projectors = append(s.projectors, p)
 }

@@ -208,7 +208,7 @@ type Repository interface {
     FindByID(ctx context.Context, id shared.ContractID) (*ContractAggregate, error)
     FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*ContractAggregate, error)
     FindExpiring(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
-    FindTrialsEndingSoon(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
+    FindTrialsEndingBefore(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
     FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)
     FindDueForRenewal(ctx context.Context, asOf time.Time) ([]*ContractAggregate, error)
 }

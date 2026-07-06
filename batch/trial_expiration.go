@@ -68,9 +68,9 @@ func NewTrialExpirationProcessor(
 // Process finds trialing contracts whose trial has ended and ends their trials.
 func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOptions) (*BatchResult, error) {
 	now := p.clock.Now()
-	// FindTrialsEndingSoon(ctx, now) returns trialing contracts whose
+	// FindTrialsEndingBefore(ctx, now) returns trialing contracts whose
 	// TrialEndDate is before `now` — i.e. trials that have already expired.
-	contracts, err := p.contractRepo.FindTrialsEndingSoon(ctx, now)
+	contracts, err := p.contractRepo.FindTrialsEndingBefore(ctx, now)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find expired trials: %w", err)
 	}
@@ -196,7 +196,7 @@ func (p *TrialExpirationProcessor) processOne(ctx context.Context, agg *contract
 	// failed Save never leaves a half-ended trial — carrying dangling uncommitted
 	// events and an advanced status — behind for the next batch run. On a real
 	// adapter FindByID materializes a fresh aggregate from history, so the
-	// instance returned by FindTrialsEndingSoon is never mutated when the trial
+	// instance returned by FindTrialsEndingBefore is never mutated when the trial
 	// end fails to persist. Save runs BEFORE hooks to prevent a "notified but not
 	// persisted" inconsistency.
 	var (

@@ -193,12 +193,23 @@ func (i *BillingInterval) UnmarshalJSON(data []byte) error {
 }
 
 // BillingCycleToInterval converts a BillingCycle string to a BillingInterval.
-// Unknown cycles default to Monthly().
+// Unknown cycles default to Monthly(). Callers that must NOT silently accept an
+// unrecognized cycle (e.g. event upcasters migrating historical payloads) should
+// use BillingCycleToIntervalStrict instead (issue #162 L-4).
 func BillingCycleToInterval(cycle BillingCycle) BillingInterval {
 	if interval, ok := billingCycleToIntervalMap[string(cycle)]; ok {
 		return interval
 	}
 	return Monthly()
+}
+
+// BillingCycleToIntervalStrict converts a BillingCycle string to a
+// BillingInterval, reporting via the boolean whether the cycle was recognized.
+// Unlike BillingCycleToInterval it does NOT silently fall back to Monthly for an
+// unknown cycle — the caller decides how to handle the miss (issue #162 L-4).
+func BillingCycleToIntervalStrict(cycle BillingCycle) (BillingInterval, bool) {
+	interval, ok := billingCycleToIntervalMap[string(cycle)]
+	return interval, ok
 }
 
 // IntervalToBillingCycle converts a BillingInterval to a BillingCycle string.

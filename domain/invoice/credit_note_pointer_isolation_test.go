@@ -45,6 +45,40 @@ func TestNewCreditNoteItem_TaxRate_IntakeIsDefensivelyCopied(t *testing.T) {
 	}
 }
 
+// TestNewCreditNote_Items_IntakeIsDefensivelyCopied verifies that mutating the
+// caller's items slice after passing it to NewCreditNote does NOT alter the
+// note's stored line items (issue #162 L-6).
+func TestNewCreditNote_Items_IntakeIsDefensivelyCopied(t *testing.T) {
+	createdAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	items := []CreditNoteItem{
+		NewCreditNoteItem("li-1", "refund", jpy(1000), big.NewRat(10, 100), jpy(100)),
+	}
+	cn, err := NewCreditNote(
+		shared.NewCreditNoteID(),
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		CreditNoteReasonOrderChange,
+		items,
+		createdAt,
+	)
+	if err != nil {
+		t.Fatalf("NewCreditNote: %v", err)
+	}
+
+	// Overwrite the caller's backing array element after construction.
+	items[0] = NewCreditNoteItem("hacked", "tampered", jpy(999999), nil, jpy(0))
+
+	got := cn.Items()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(got))
+	}
+	if got[0].InvoiceLineItemID() != "li-1" || got[0].Amount().Amount().Cmp(big.NewRat(1000, 1)) != 0 {
+		t.Errorf("NewCreditNote does not defend items slice at intake: got id=%q amount=%s",
+			got[0].InvoiceLineItemID(), got[0].Amount().Amount().RatString())
+	}
+}
+
 // --- CreditNote.IssuedAt ---
 
 func TestCreditNote_IssuedAt_GetterIsDefensivelyCopied(t *testing.T) {
