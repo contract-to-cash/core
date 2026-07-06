@@ -144,6 +144,13 @@ type pipelineInput struct {
 	lineItems  []invoice.LineItem
 	period     shared.DateRange // billing period for the invoice
 	extraOpts  []invoice.InvoiceOption
+	// duplicateCheck, when non-nil, re-runs the duplicate-invoice guard INSIDE
+	// the tx.Run closure through the transaction-scoped repo (issue #149). The
+	// pre-tx check is a cheap fast-fail, but the authoritative check must run in
+	// the transaction so a backend that serializes reads (row lock / SERIALIZABLE)
+	// closes the concurrent-insert window. Proration invoices pass nil because
+	// they intentionally coexist with the period's regular invoice.
+	duplicateCheck func(ctx context.Context) error
 }
 
 // invoiceRepoFor returns the transaction-scoped invoice repository when ctx
@@ -214,6 +221,13 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 		subtotal:   subtotal,
 		lineItems:  lineItems,
 		period:     billingPeriod,
+		// Re-run the same duplicate guard inside the transaction so a
+		// serializing backend closes the concurrent-generate window; the
+		// in-memory repo's per-period uniqueness backstops non-serializing
+		// backends (issue #149).
+		duplicateCheck: func(txCtx context.Context) error {
+			return s.checkDuplicateInvoice(txCtx, agg, billingPeriod)
+		},
 	})
 }
 
@@ -305,7 +319,7 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 		extraOpts = append(extraOpts, invoice.WithOriginalInvoiceID(voidedInv.ID()))
 	}
 	extraOpts = append(extraOpts, invoice.WithMetadata(map[string]string{
-		"invoice_type": "regeneration",
+		invoice.MetadataKeyInvoiceType: invoice.InvoiceTypeRegeneration,
 	}))
 
 	return s.executeBillingPipeline(ctx, pipelineInput{
@@ -315,6 +329,12 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 		lineItems:  lineItems,
 		period:     billingPeriod,
 		extraOpts:  extraOpts,
+		// In-tx re-check (issue #149): reject if a non-voided invoice appeared
+		// for this period between the pre-tx check and the save. The voided
+		// original is excluded, so void-and-recreate still succeeds.
+		duplicateCheck: func(txCtx context.Context) error {
+			return s.rejectIfActivePeriodInvoice(txCtx, contractID, billingPeriod)
+		},
 	})
 }
 
@@ -391,10 +411,10 @@ func (s *BillingService) GenerateProrationInvoice(ctx context.Context, contractI
 
 	// Mark the invoice as a proration invoice via metadata
 	prorationMeta := map[string]string{
-		"invoice_type":   "proration",
-		"effective_date": proration.EffectiveDate.Format(time.RFC3339),
-		"credit_amount":  proration.CreditAmount.Amount().RatString(),
-		"charge_amount":  proration.ChargeAmount.Amount().RatString(),
+		invoice.MetadataKeyInvoiceType: invoice.InvoiceTypeProration,
+		"effective_date":               proration.EffectiveDate.Format(time.RFC3339),
+		"credit_amount":                proration.CreditAmount.Amount().RatString(),
+		"charge_amount":                proration.ChargeAmount.Amount().RatString(),
 	}
 
 	return s.executeBillingPipeline(ctx, pipelineInput{
@@ -486,6 +506,18 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 	// nested one — see review #4.
 	var inv *invoice.Invoice
 	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		// Re-run the duplicate-invoice guard INSIDE the transaction through the
+		// tx-scoped repo before doing any work (issue #149). On a backend that
+		// serializes reads (row lock / SERIALIZABLE) this closes the window where
+		// two concurrent GenerateInvoice calls both pass the pre-tx check and both
+		// insert. The repository's per-period uniqueness (invoice.Repository.Save)
+		// is the backstop for non-serializing backends.
+		if input.duplicateCheck != nil {
+			if dupErr := input.duplicateCheck(txCtx); dupErr != nil {
+				return dupErr
+			}
+		}
+
 		// Apply credits (FIFO, skip expired)
 		appliedBalance := shared.Zero(currency)
 		if repos.Balances != nil {
@@ -845,6 +877,26 @@ func (s *BillingService) applyBalances(ctx context.Context, balanceRepo balance.
 	}
 
 	return totalApplied, nil
+}
+
+// rejectIfActivePeriodInvoice returns a conflict DomainError when a non-voided
+// invoice already exists for the given contract and billing period. It reads
+// through the transaction-scoped repo (when active) so it observes writes made
+// earlier in the same transaction. RegenerateInvoice uses it as its in-tx
+// duplicate re-check (issue #149): the voided original is excluded, so
+// void-and-recreate for the same period still succeeds.
+func (s *BillingService) rejectIfActivePeriodInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) error {
+	existing, err := s.invoiceRepoFor(ctx).FindByContractAndPeriod(ctx, contractID, billingPeriod)
+	if err != nil {
+		return fmt.Errorf("failed to check existing invoices for period: %w", err)
+	}
+	for _, inv := range existing {
+		if inv.Status() != invoice.InvoiceStatusVoided {
+			return shared.NewDomainError(shared.ErrCodeConflict,
+				"invoice already exists for this billing period")
+		}
+	}
+	return nil
 }
 
 // checkDuplicateInvoice prevents duplicate invoice generation based on contract state.

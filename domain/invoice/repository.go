@@ -32,6 +32,40 @@ type Repository interface {
 	// fire OnInvoiceIssued twice. See infrastructure/inmemory for a reference
 	// optimistic-locking implementation and contract-to-cash/adapters#12 for
 	// the adapter-side tracking issue.
+	//
+	// Per-period uniqueness contract (issue #149): implementations MUST also
+	// prevent two DISTINCT non-voided invoices from existing for the same
+	// (contract_id, billing_period). BillingService.GenerateInvoice /
+	// RegenerateInvoice re-check for a duplicate inside their tx.Run closure
+	// through the transaction-scoped repo, but a check-then-insert of a NEW
+	// invoice cannot raise an optimistic-lock conflict (there is no prior
+	// version to compare), so under READ COMMITTED two concurrent
+	// GenerateInvoice(contractID, samePeriod) calls can both pass the re-check
+	// and both insert — producing two billable invoices for one period and a
+	// downstream double charge. The storage backend must close that window:
+	//
+	//   - Postgres / MySQL (recommended): a PARTIAL UNIQUE INDEX on
+	//     (contract_id, period_start, period_end) restricted to non-voided,
+	//     non-proration invoices, e.g.
+	//       CREATE UNIQUE INDEX ux_invoice_period
+	//         ON invoices (contract_id, period_start, period_end)
+	//         WHERE status <> 'voided'
+	//           AND coalesce(metadata->>'invoice_type','') <> 'proration';
+	//   - Read serialization: a SELECT ... FOR UPDATE / SERIALIZABLE guard that
+	//     serializes the duplicate re-check against the concurrent insert.
+	//
+	// PRORATION and VOIDED invoices are EXEMPT: proration adjustments (see
+	// Invoice.IsProration / InvoiceTypeProration) intentionally coexist with the
+	// period's regular invoice, and void-and-recreate leaves the voided original
+	// alongside its replacement. The constraint therefore ranges over non-voided,
+	// non-proration invoices only. A regeneration replacement
+	// (InvoiceTypeRegeneration) IS a regular period invoice and participates.
+	//
+	// When the constraint fires, Save MUST return a shared.DomainError with code
+	// shared.ErrCodeConflict so the losing GenerateInvoice caller surfaces a clean
+	// "invoice already exists for this billing period" conflict rather than a raw
+	// driver error. See infrastructure/inmemory for a reference implementation
+	// that mirrors the partial unique index above.
 	Save(ctx context.Context, invoice *Invoice) error
 	FindByID(ctx context.Context, id shared.InvoiceID) (*Invoice, error)
 	FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*Invoice, error)
