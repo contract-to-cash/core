@@ -87,13 +87,14 @@ func main() {
 
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create", agg.Create(contract.CreateContractCommand{
-		AccountID:    accountID,
-		PriceID:      priceEntity.ID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        moneyJPY(5000),
-		BasePrice:    moneyJPY(5000),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-hosting-integration-demo-demo-1",
+		AccountID:      accountID,
+		PriceID:        priceEntity.ID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          moneyJPY(5000),
+		BasePrice:      moneyJPY(5000),
+		AutoRenew:      true,
 	}, metadata))
 
 	// Fire OnContractCreate hooks

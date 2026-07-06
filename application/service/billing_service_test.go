@@ -166,12 +166,13 @@ func newTestContractAggregateWithPriceID(clock shared.Clock, contractType contra
 	cid := shared.NewContractID()
 	agg := contract.NewContractAggregate(cid, clock)
 	_ = agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      priceID,
-		ContractType: contractType,
-		Interval:     pricing.Monthly(),
-		Price:        price,
-		BasePrice:    price,
+		IdempotencyKey: "idem-service-billing_service-1",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        priceID,
+		ContractType:   contractType,
+		Interval:       pricing.Monthly(),
+		Price:          price,
+		BasePrice:      price,
 	}, eventstore.EventMetadata{UserID: "test"})
 	_ = agg.Activate(eventstore.EventMetadata{UserID: "test"})
 	return agg
@@ -514,12 +515,13 @@ func newDraftContractAggregateWithPrice(clock shared.Clock, price shared.Money) 
 	cid := shared.NewContractID()
 	agg := contract.NewContractAggregate(cid, clock)
 	_ = agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      priceEntity.ID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        price,
-		BasePrice:    price,
+		IdempotencyKey: "idem-service-billing_service-2",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        priceEntity.ID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          price,
+		BasePrice:      price,
 	}, eventstore.EventMetadata{UserID: "test"})
 	return agg, priceEntity
 }

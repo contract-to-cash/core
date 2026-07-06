@@ -41,11 +41,12 @@ func main() {
 	// ── T1: April 1 - Create and activate contract (¥3,000/month) ──
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create", agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.AccountID("acct-001"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        moneyJPY(3000),
-		BasePrice:    moneyJPY(3000),
+		IdempotencyKey: "idem-event-sourcing-demo-demo-1",
+		AccountID:      shared.AccountID("acct-001"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          moneyJPY(3000),
+		BasePrice:      moneyJPY(3000),
 	}, metadata))
 	must("activate", agg.Activate(metadata))
 	must("save", contractRepo.Save(ctx, agg))

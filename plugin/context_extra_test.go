@@ -19,11 +19,12 @@ func newTestContract(t *testing.T, contractID shared.ContractID) *contract.Contr
 	agg := contract.NewContractAggregate(contractID, clock)
 	price := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	if err := agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        price,
-		BasePrice:    price,
+		IdempotencyKey: "idem-plugin-context_extra-1",
+		AccountID:      shared.NewAccountID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          price,
+		BasePrice:      price,
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
 		t.Fatalf("failed to create contract: %v", err)
 	}

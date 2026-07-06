@@ -22,13 +22,14 @@ func newActiveAggregate(t *testing.T) *ContractAggregate {
 	agg := NewContractAggregate(shared.NewContractID(), clock)
 	metadata := eventstore.EventMetadata{UserID: "test"}
 	if err := agg.Create(CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      shared.NewPriceID(),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-contract-pointer_isolation-1",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        shared.NewPriceID(),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
 	}, metadata); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -115,12 +116,13 @@ func TestAggregate_TrialConfig_GetterIsDefensivelyCopied(t *testing.T) {
 	clock := newTestClock()
 	agg := NewContractAggregate(shared.NewContractID(), clock)
 	if err := agg.Create(CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      shared.NewPriceID(),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		IdempotencyKey: "idem-contract-pointer_isolation-2",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        shared.NewPriceID(),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -157,12 +159,13 @@ func TestAggregate_TrialConfig_IntakeIsDefensivelyCopied(t *testing.T) {
 	clock := newTestClock()
 	agg := NewContractAggregate(shared.NewContractID(), clock)
 	if err := agg.Create(CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      shared.NewPriceID(),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		IdempotencyKey: "idem-contract-pointer_isolation-3",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        shared.NewPriceID(),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -303,12 +306,13 @@ func TestAggregate_LoadFromSnapshot_IsolatesTrialConfig(t *testing.T) {
 	clock := newTestClock()
 	src := NewContractAggregate(shared.NewContractID(), clock)
 	if err := src.Create(CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		PriceID:      shared.NewPriceID(),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		BasePrice:    shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		IdempotencyKey: "idem-contract-pointer_isolation-4",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        shared.NewPriceID(),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}

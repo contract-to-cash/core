@@ -93,12 +93,13 @@ func main() {
 	contractID := shared.NewContractID()
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create", agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.AccountID("acct-vip-001"),
-		PriceID:      priceEntity.ID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        moneyJPY(10000),
-		BasePrice:    moneyJPY(10000),
+		IdempotencyKey: "idem-plugin-pipeline-demo-demo-1",
+		AccountID:      shared.AccountID("acct-vip-001"),
+		PriceID:        priceEntity.ID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          moneyJPY(10000),
+		BasePrice:      moneyJPY(10000),
 	}, eventstore.EventMetadata{UserID: "admin"}))
 	must("activate", agg.Activate(eventstore.EventMetadata{UserID: "admin"}))
 	must("save", contractRepo.Save(ctx, agg))

@@ -31,11 +31,12 @@ func newTestMetadata() eventstore.EventMetadata {
 
 func newTestCommand() CreateContractCommand {
 	return CreateContractCommand{
-		AccountID:    shared.AccountID("acc-001"),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        newTestMoney(),
-		BasePrice:    newTestMoney(),
+		IdempotencyKey: "idem-contract-aggregate-1",
+		AccountID:      shared.AccountID("acc-001"),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          newTestMoney(),
+		BasePrice:      newTestMoney(),
 	}
 }
 
@@ -1393,10 +1394,11 @@ func TestRenew_CancelAtPeriodEnd_ResetsCancelFlag(t *testing.T) {
 func TestCreate_NoInterval_ReturnsError(t *testing.T) {
 	agg := newTestAggregate()
 	cmd := CreateContractCommand{
-		AccountID:    shared.AccountID("acc-001"),
-		ContractType: ContractTypeSubscription,
-		Price:        newTestMoney(),
-		BasePrice:    newTestMoney(),
+		IdempotencyKey: "idem-contract-aggregate-2",
+		AccountID:      shared.AccountID("acc-001"),
+		ContractType:   ContractTypeSubscription,
+		Price:          newTestMoney(),
+		BasePrice:      newTestMoney(),
 		// Interval unset
 	}
 	err := agg.Create(cmd, newTestMetadata())
@@ -1418,12 +1420,13 @@ func TestRenewWithInterval_SetsOldInterval(t *testing.T) {
 
 	// Create with Quarterly interval
 	cmd := CreateContractCommand{
-		AccountID:    shared.AccountID("acc-001"),
-		ContractType: ContractTypeSubscription,
-		Interval:     pricing.Quarterly(),
-		Price:        newTestMoney(),
-		BasePrice:    newTestMoney(),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-contract-aggregate-3",
+		AccountID:      shared.AccountID("acc-001"),
+		ContractType:   ContractTypeSubscription,
+		Interval:       pricing.Quarterly(),
+		Price:          newTestMoney(),
+		BasePrice:      newTestMoney(),
+		AutoRenew:      true,
 	}
 	if err := agg.Create(cmd, meta); err != nil {
 		t.Fatalf("Create failed: %v", err)

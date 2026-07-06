@@ -493,9 +493,13 @@ import (
     "github.com/contract-to-cash/core/eventstore"
 )
 
-// CreateContractCommand はContract作成時のパラメータを保持する
+// CreateContractCommand はContract作成時のパラメータを保持する。
+// IdempotencyKey は必須（design-decisions §4.1、issue #159）: Create が空を
+// validation エラーで拒否し、キーは ContractCreatedEvent（schema v3）に載る。
+// コアが強制するのは「存在」まで — キーの一意性はリポジトリ/アダプタが
+// ユニークインデックス等で強制する（contract.Repository.Save の godoc 参照）。
 type CreateContractCommand struct {
-    IdempotencyKey string
+    IdempotencyKey string // 必須。空は validation エラー
     AccountID      shared.AccountID
     PriceID        shared.PriceID
     ContractType   ContractType
@@ -598,15 +602,16 @@ const (
 )
 
 type ContractCreatedEvent struct {
-    ContractID   shared.ContractID
-    AccountID    shared.AccountID
-    PriceID      shared.PriceID
-    Price        shared.Money
-    BasePrice    shared.Money
-    Interval     BillingInterval
-    ContractType ContractType
-    AutoRenew    bool
-    CreatedAt    time.Time
+    ContractID     shared.ContractID
+    AccountID      shared.AccountID
+    PriceID        shared.PriceID
+    IdempotencyKey string          // SchemaVersion 3 で追加（issue #159）。歴史的イベントでは空
+    Price          shared.Money
+    BasePrice      shared.Money
+    Interval       BillingInterval
+    ContractType   ContractType
+    AutoRenew      bool
+    CreatedAt      time.Time
 }
 
 type ContractActivatedEvent struct {

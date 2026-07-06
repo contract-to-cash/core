@@ -19,11 +19,12 @@ func newCancelledContract(t *testing.T, contractID shared.ContractID, clock shar
 	t.Helper()
 	agg := contract.NewContractAggregate(contractID, clock)
 	if err := agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.NewAccountID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        jpy(10000),
-		BasePrice:    jpy(10000),
+		IdempotencyKey: "idem-invoicecleanup-plugin_extra-1",
+		AccountID:      shared.NewAccountID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          jpy(10000),
+		BasePrice:      jpy(10000),
 	}, eventstore.EventMetadata{UserID: "test"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}

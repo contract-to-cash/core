@@ -24,11 +24,12 @@ func TestContractFullLifecycle(t *testing.T) {
 
 	// Step 1: Create → draft
 	err := agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.AccountID("acc-lifecycle"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        moneyJPY(3000),
-		BasePrice:    moneyJPY(3000),
+		IdempotencyKey: "idem-integration-contract_lifecycle-1",
+		AccountID:      shared.AccountID("acc-lifecycle"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          moneyJPY(3000),
+		BasePrice:      moneyJPY(3000),
 	}, emptyMetadata())
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
@@ -87,11 +88,12 @@ func TestTrialLifecycle(t *testing.T) {
 
 	// Create → draft
 	err := agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.AccountID("acc-trial"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        moneyJPY(1000),
-		BasePrice:    moneyJPY(1000),
+		IdempotencyKey: "idem-integration-contract_lifecycle-2",
+		AccountID:      shared.AccountID("acc-trial"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          moneyJPY(1000),
+		BasePrice:      moneyJPY(1000),
 	}, emptyMetadata())
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
@@ -125,11 +127,12 @@ func TestTrialLifecycleNotConverted(t *testing.T) {
 	agg := contract.NewContractAggregate(contractID, clock)
 
 	err := agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.AccountID("acc-trial-no"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        moneyJPY(1000),
-		BasePrice:    moneyJPY(1000),
+		IdempotencyKey: "idem-integration-contract_lifecycle-3",
+		AccountID:      shared.AccountID("acc-trial-no"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          moneyJPY(1000),
+		BasePrice:      moneyJPY(1000),
 	}, emptyMetadata())
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
@@ -164,11 +167,12 @@ func TestEventReplayReconstructsState(t *testing.T) {
 
 	// Build up history: create → activate → suspend
 	err := agg.Create(contract.CreateContractCommand{
-		AccountID:    shared.AccountID("acc-replay"),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        moneyJPY(7500),
-		BasePrice:    moneyJPY(7500),
+		IdempotencyKey: "idem-integration-contract_lifecycle-4",
+		AccountID:      shared.AccountID("acc-replay"),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          moneyJPY(7500),
+		BasePrice:      moneyJPY(7500),
 	}, emptyMetadata())
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
@@ -228,11 +232,12 @@ func TestInvalidStateTransitions(t *testing.T) {
 	t.Run("cannot activate cancelled contract", func(t *testing.T) {
 		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 		_ = agg.Create(contract.CreateContractCommand{
-			AccountID:    shared.AccountID("acc-x"),
-			ContractType: contract.ContractTypeSubscription,
-			Interval:     pricing.Monthly(),
-			Price:        moneyJPY(1000),
-			BasePrice:    moneyJPY(1000),
+			IdempotencyKey: "idem-integration-contract_lifecycle-5",
+			AccountID:      shared.AccountID("acc-x"),
+			ContractType:   contract.ContractTypeSubscription,
+			Interval:       pricing.Monthly(),
+			Price:          moneyJPY(1000),
+			BasePrice:      moneyJPY(1000),
 		}, emptyMetadata())
 		_ = agg.Activate(emptyMetadata())
 		_ = agg.Cancel("test", emptyMetadata())
@@ -246,11 +251,12 @@ func TestInvalidStateTransitions(t *testing.T) {
 	t.Run("cannot suspend draft contract", func(t *testing.T) {
 		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 		_ = agg.Create(contract.CreateContractCommand{
-			AccountID:    shared.AccountID("acc-x"),
-			ContractType: contract.ContractTypeSubscription,
-			Interval:     pricing.Monthly(),
-			Price:        moneyJPY(1000),
-			BasePrice:    moneyJPY(1000),
+			IdempotencyKey: "idem-integration-contract_lifecycle-6",
+			AccountID:      shared.AccountID("acc-x"),
+			ContractType:   contract.ContractTypeSubscription,
+			Interval:       pricing.Monthly(),
+			Price:          moneyJPY(1000),
+			BasePrice:      moneyJPY(1000),
 		}, emptyMetadata())
 
 		err := agg.Suspend(contract.SuspensionConfiguration{
@@ -265,11 +271,12 @@ func TestInvalidStateTransitions(t *testing.T) {
 	t.Run("cannot resume active contract", func(t *testing.T) {
 		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
 		_ = agg.Create(contract.CreateContractCommand{
-			AccountID:    shared.AccountID("acc-x"),
-			ContractType: contract.ContractTypeSubscription,
-			Interval:     pricing.Monthly(),
-			Price:        moneyJPY(1000),
-			BasePrice:    moneyJPY(1000),
+			IdempotencyKey: "idem-integration-contract_lifecycle-7",
+			AccountID:      shared.AccountID("acc-x"),
+			ContractType:   contract.ContractTypeSubscription,
+			Interval:       pricing.Monthly(),
+			Price:          moneyJPY(1000),
+			BasePrice:      moneyJPY(1000),
 		}, emptyMetadata())
 		_ = agg.Activate(emptyMetadata())
 

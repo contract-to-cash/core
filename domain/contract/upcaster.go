@@ -128,6 +128,33 @@ func (u *ContractCreatedEventUpcaster) Upcast(event eventstore.Event) (eventstor
 	return event, nil
 }
 
+// ContractCreatedIdempotencyKeyUpcaster migrates ContractCreatedEvent payloads
+// from schema version 2 to version 3. Version 3 added the idempotency_key
+// field (issue #159) so persistence adapters can enforce at-most-once contract
+// creation.
+//
+// The key itself cannot be recovered for historical events — it was never
+// recorded — so this upcaster only bumps SchemaVersion to 3 (idempotently,
+// mirroring TrialEndedEventUpcaster): a missing idempotency_key deserializes
+// to the empty string, which the aggregate's Apply tolerates. Replay of
+// pre-#159 history therefore never fails. A v1 payload reaches v3 through the
+// UpcasterChain fixpoint loop: ContractCreatedEventUpcaster raises it to v2
+// (billing_cycle → interval), then this upcaster raises it to v3.
+type ContractCreatedIdempotencyKeyUpcaster struct{}
+
+// CanUpcast returns true for ContractCreatedEvent at schema version <= 2.
+func (u *ContractCreatedIdempotencyKeyUpcaster) CanUpcast(eventType eventstore.EventType, fromVersion int) bool {
+	return eventType == EventTypeContractCreated && fromVersion <= 2
+}
+
+// Upcast bumps a ContractCreatedEvent to schema version 3. It leaves the
+// payload otherwise untouched: a missing idempotency_key deserializes to "",
+// which Apply recognizes as "historical event, key never recorded".
+func (u *ContractCreatedIdempotencyKeyUpcaster) Upcast(event eventstore.Event) (eventstore.Event, error) {
+	event.SchemaVersion = 3
+	return event, nil
+}
+
 // ContractRenewedEventUpcaster migrates historical ContractRenewedEvent payloads
 // that carried only the deprecated old_billing_cycle/new_billing_cycle strings
 // into the interval-based schema (old_interval/new_interval). It is idempotent
@@ -206,6 +233,7 @@ func NewContractUpcasterChain() *eventstore.UpcasterChain {
 	return eventstore.NewUpcasterChain(
 		&PriceChangedEventUpcaster{},
 		&ContractCreatedEventUpcaster{},
+		&ContractCreatedIdempotencyKeyUpcaster{},
 		&ContractRenewedEventUpcaster{},
 		&TrialEndedEventUpcaster{},
 	)

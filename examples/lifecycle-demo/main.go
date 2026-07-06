@@ -65,13 +65,14 @@ func main() {
 
 	agg := contract.NewContractAggregate(contractID, clock)
 	must("create", agg.Create(contract.CreateContractCommand{
-		AccountID:    accountID,
-		PriceID:      priceEntity.ID(),
-		ContractType: contract.ContractTypeSubscription,
-		Interval:     pricing.Monthly(),
-		Price:        moneyJPY(3000),
-		BasePrice:    moneyJPY(3000),
-		AutoRenew:    true,
+		IdempotencyKey: "idem-lifecycle-demo-demo-1",
+		AccountID:      accountID,
+		PriceID:        priceEntity.ID(),
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          moneyJPY(3000),
+		BasePrice:      moneyJPY(3000),
+		AutoRenew:      true,
 	}, metadata))
 	must("save", contractRepo.Save(ctx, agg))
 	recordTransition("Draft")
