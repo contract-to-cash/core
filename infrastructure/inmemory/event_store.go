@@ -196,7 +196,12 @@ func (s *InMemoryEventStore) SaveSnapshot(_ context.Context, snapshot eventstore
 	return nil
 }
 
-// LoadSnapshot loads the latest snapshot for a stream.
+// LoadSnapshot loads the highest-Version snapshot for a stream.
+//
+// It selects the maximum Version rather than the most recently appended
+// snapshot: an out-of-order SaveSnapshot (e.g. a lagging rebuild worker saving
+// a stale snapshot after a newer one) must not cause reads to resume from an
+// older snapshot and replay events that predate it (issue #157).
 func (s *InMemoryEventStore) LoadSnapshot(_ context.Context, streamID string) (*eventstore.Snapshot, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -205,11 +210,25 @@ func (s *InMemoryEventStore) LoadSnapshot(_ context.Context, streamID string) (*
 	if len(snaps) == 0 {
 		return nil, nil
 	}
-	latest := snaps[len(snaps)-1]
-	return &latest, nil
+	best := snaps[0]
+	for i := 1; i < len(snaps); i++ {
+		if snaps[i].Version > best.Version {
+			best = snaps[i]
+		}
+	}
+	return &best, nil
 }
 
-// LoadSnapshotBefore loads the latest snapshot before a given time.
+// LoadSnapshotBefore loads the latest snapshot created before a given time.
+//
+// The cut is on CreatedAt (wall-clock), matching the postgres reference
+// (SELECT ... WHERE created_at < ? ORDER BY created_at DESC LIMIT 1) and the
+// temporal-query consistency guard (review W7), which selects by CreatedAt and
+// then rejects snapshots whose Version exceeds the asOf event horizon. Among the
+// candidates it returns the one with the greatest CreatedAt (tie-broken by
+// higher Version) rather than the last appended, so an out-of-order SaveSnapshot
+// cannot make it return a non-latest snapshot (same class of bug as LoadSnapshot;
+// issue #157).
 func (s *InMemoryEventStore) LoadSnapshotBefore(_ context.Context, streamID string, before time.Time) (*eventstore.Snapshot, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -217,7 +236,11 @@ func (s *InMemoryEventStore) LoadSnapshotBefore(_ context.Context, streamID stri
 	snaps := s.snapshots[streamID]
 	var best *eventstore.Snapshot
 	for i := range snaps {
-		if snaps[i].CreatedAt.Before(before) {
+		if !snaps[i].CreatedAt.Before(before) {
+			continue
+		}
+		if best == nil || snaps[i].CreatedAt.After(best.CreatedAt) ||
+			(snaps[i].CreatedAt.Equal(best.CreatedAt) && snaps[i].Version > best.Version) {
 			snap := snaps[i]
 			best = &snap
 		}

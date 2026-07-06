@@ -99,13 +99,27 @@ func TestNewBillingConfig_ZeroGracePeriod_Allowed(t *testing.T) {
 }
 
 func TestNewBillingConfig_ZeroDaysUntilDue_Allowed(t *testing.T) {
-	// Zero DaysUntilDue means "due immediately" — valid use case
+	// Zero DaysUntilDue is a valid stored value; validate() does not reject it.
+	// It is a sentinel meaning "use the default at usage time": GenerateInvoice
+	// resolves it via effectiveDaysUntilDue() to a 30-day due date rather than an
+	// immediately-due invoice (see TestBillingConfig_effectiveDaysUntilDue).
 	cfg, err := NewBillingConfig(WithDaysUntilDue(0))
 	if err != nil {
 		t.Fatalf("NewBillingConfig() returned error: %v", err)
 	}
 	if cfg.DaysUntilDue != 0 {
 		t.Errorf("DaysUntilDue = %d, want 0", cfg.DaysUntilDue)
+	}
+}
+
+func TestBillingConfig_effectiveDaysUntilDue(t *testing.T) {
+	// Zero value falls back to the documented 30-day default.
+	if got := (BillingConfig{}).effectiveDaysUntilDue(); got != defaultDaysUntilDue {
+		t.Errorf("zero-value effectiveDaysUntilDue() = %d, want %d", got, defaultDaysUntilDue)
+	}
+	// Explicit value is respected verbatim.
+	if got := (BillingConfig{DaysUntilDue: 45}).effectiveDaysUntilDue(); got != 45 {
+		t.Errorf("explicit effectiveDaysUntilDue() = %d, want 45", got)
 	}
 }
 
