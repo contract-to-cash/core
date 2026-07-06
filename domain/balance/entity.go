@@ -164,6 +164,51 @@ func (e *BalanceEntry) SetVersion(v int) {
 // Repository implementations compare this against the stored version on save.
 func (e *BalanceEntry) LoadedVersion() int { return e.loadedVersion }
 
+// MarkExpired forfeits the remaining amount of an expired entry and returns
+// the forfeited amount (issue #159).
+//
+// "Expiring" a credit means zeroing its remaining amount: BalanceEntry has no
+// status field, and a zero remaining amount already makes the entry inert
+// everywhere (IsFullyConsumed becomes true, FindAvailable / GetBalance skip
+// it, Consume takes nothing from it). The original amount and the expiry
+// timestamp stay on the entry for audit. Without this transition, expired
+// credit merely stops being offered by FindAvailable while its
+// remainingAmount keeps reporting a live-looking balance forever — the gap
+// batch.BalanceExpirationProcessor closes.
+//
+// Guards:
+//   - The entry must have an expiry set and be expired as of `now`
+//     (business_rule error otherwise). `now` comes from shared.Clock — never
+//     time.Now() directly.
+//   - An already fully-consumed entry is a no-op: it returns a zero forfeit
+//     and does NOT bump the version (mirroring Consume's zero-consumption
+//     behavior), so re-running the expiration batch is idempotent.
+//
+// Like Consume, a forfeiting MarkExpired increments the optimistic-locking
+// version so a concurrent Consume (e.g. the billing pipeline applying this
+// credit) and the expiration batch cannot both persist from the same loaded
+// version: a repository honoring the concurrency contract rejects the second
+// Save with tx.ErrVersionConflict.
+func (e *BalanceEntry) MarkExpired(now time.Time) (shared.Money, error) {
+	if e.expiresAt == nil {
+		return shared.Money{}, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"balance entry has no expiration set")
+	}
+	if !e.IsExpired(now) {
+		return shared.Money{}, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"balance entry has not expired yet")
+	}
+	forfeited := e.remainingAmount
+	if forfeited.IsZero() {
+		// Already fully consumed (or already expired by a previous run):
+		// nothing to forfeit, no version bump — idempotent.
+		return forfeited, nil
+	}
+	e.remainingAmount = shared.Zero(e.remainingAmount.Currency())
+	e.version++
+	return forfeited, nil
+}
+
 // Consume reduces the remaining amount by the given amount and increments the version.
 // Returns the actually consumed amount (may be less than requested if insufficient balance).
 func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error) {

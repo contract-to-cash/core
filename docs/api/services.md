@@ -320,3 +320,17 @@ type BatchResult struct {
     Errors    []error
 }
 ```
+
+Provided processors (scheduling is the consumer's concern — run them from your
+cron / CronJob / Cloud Scheduler):
+
+```go
+batch.NewContractRenewalProcessor(contractRepo, priceRepo, registry, clock, txManager, logger)
+batch.NewTrialExpirationProcessor(contractRepo, registry, clock, txManager, logger)
+batch.NewBalanceExpirationProcessor(balanceRepo, clock, txManager, logger) // forfeits expired credit (issue #159)
+```
+
+`InvoiceGenerator` / `PaymentRetry` / `UsageAggregator` from the
+design-decisions batch list are NOT shipped as processors — see
+design-decisions.md section 3.2 for what to call from your own scheduler
+instead.

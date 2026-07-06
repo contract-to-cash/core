@@ -1812,6 +1812,16 @@ func NewBalanceEntry(accountID shared.AccountID, amount shared.Money, reason Bal
 // 消費が発生した場合は version をインクリメントする。
 func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error)
 
+// MarkExpired は期限切れエントリの残高を没収し、没収額を返す（issue #159）。
+// 「失効」= remainingAmount のゼロ化（status フィールドは持たない。ゼロ残高は
+// IsFullyConsumed / FindAvailable / GetBalance すべてで不活性になる）。
+// originalAmount と expiresAt は監査用に保持される。
+// ガード: expiresAt 未設定・未失効は business_rule エラー。全消費済みは
+// ゼロ没収・version 非バンプの冪等 no-op（バッチ再実行安全）。
+// 没収が発生した場合は Consume 同様 version をインクリメントする（楽観ロック）。
+// 発火は batch.BalanceExpirationProcessor（スケジューラは利用者側）。
+func (e *BalanceEntry) MarkExpired(now time.Time) (shared.Money, error)
+
 func (e *BalanceEntry) IsExpired(now time.Time) bool
 func (e *BalanceEntry) IsFullyConsumed() bool
 func (e *BalanceEntry) Version() int
@@ -1883,6 +1893,14 @@ type Repository interface {
 
     // 返金記録
     SaveRefund(ctx context.Context, refund *BalanceRefund) error
+
+    // FindByAccountID 全エントリ取得（全消費・期限切れ含む、作成時刻昇順）
+    FindByAccountID(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*BalanceEntry, error)
+
+    // FindExpired 期限切れかつ残高が未没収（remainingAmount > 0）のエントリを
+    // 作成時刻昇順で返す（issue #159）。batch.BalanceExpirationProcessor の
+    // スキャンに使用。契約側の FindDueForRenewal に相当。
+    FindExpired(ctx context.Context, asOf time.Time) ([]*BalanceEntry, error)
 }
 ```
 

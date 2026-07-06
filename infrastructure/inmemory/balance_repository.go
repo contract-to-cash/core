@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/balance"
@@ -181,6 +182,36 @@ func (r *InMemoryBalanceRepository) SaveRefund(_ context.Context, refund *balanc
 
 	r.refunds = append(r.refunds, refund)
 	return nil
+}
+
+// FindExpired returns entries whose expiry has passed as of asOf and whose
+// remaining amount is still non-zero (i.e. expired credit not yet forfeited by
+// MarkExpired), ordered by creation time ascending. Feeds
+// batch.BalanceExpirationProcessor (issue #159).
+func (r *InMemoryBalanceRepository) FindExpired(_ context.Context, asOf time.Time) ([]*balance.BalanceEntry, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var result []*balance.BalanceEntry
+	for _, entry := range r.entries {
+		if !entry.IsExpired(asOf) {
+			continue
+		}
+		if entry.IsFullyConsumed() {
+			continue
+		}
+		clone, err := cloneBalanceEntry(entry)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, clone)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt().Before(result[j].CreatedAt())
+	})
+
+	return result, nil
 }
 
 // FindByAccountID returns all balance entries for an account and currency,

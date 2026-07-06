@@ -198,15 +198,19 @@ type BatchOptions struct {
 }
 ```
 
-**主要なバッチ処理：**
-| 処理 | 説明 |
-|------|------|
-| `InvoiceGenerator` | 定期請求書生成 |
-| `ContractRenewal` | 契約自動更新 |
-| `PaymentRetry` | 失敗決済リトライ |
-| `TrialExpiration` | トライアル終了処理 |
-| `UsageAggregator` | 従量課金集計 |
-| `BalanceExpiration` | 有効期限切れ残高（クレジット）の失効処理 |
+**主要なバッチ処理（実装状況は issue #159 の棚卸しで確定）：**
+| 処理 | 実装 | 説明 |
+|------|------|------|
+| `ContractRenewal` | ✅ `batch.ContractRenewalProcessor` | 契約自動更新 |
+| `TrialExpiration` | ✅ `batch.TrialExpirationProcessor` | トライアル終了処理 |
+| `BalanceExpiration` | ✅ `batch.BalanceExpirationProcessor`（#159 で追加） | 有効期限切れ残高（クレジット）の失効処理。`balance.Repository.FindExpired` でスキャンし、`BalanceEntry.MarkExpired` で残高を没収する |
+| `InvoiceGenerator` | ❌ 未実装（利用者スケジューラ側の実装例として定義のみ） | 定期請求書生成 — `BillingService.GenerateInvoice` を利用者のスケジューラから呼ぶ |
+| `PaymentRetry` | ❌ 未実装（利用者スケジューラ側の実装例として定義のみ） | 失敗決済リトライ — `PaymentService.ProcessPayment` + Dunning 状態を利用者側で組み合わせる |
+| `UsageAggregator` | ❌ 未実装（利用者スケジューラ側の実装例として定義のみ) | 従量課金集計 — 集計は `GenerateInvoice` の従量パスが内部で行う |
+
+未実装の 3 種は「コアがプロセッサを提供する」と読める宣言だったが実体がなかったため、
+#159 の方針（#116 の delete-unused と同じ枠組み）に基づき「未実装・利用者責務」と明記する。
+具体的な利用者要望が出た時点で `BatchProcessor` 実装として追加する。
 
 **理由：**
 - スケジューラは環境依存（cron, Kubernetes CronJob, Cloud Scheduler等）

@@ -2,6 +2,7 @@ package balance
 
 import (
 	"context"
+	"time"
 
 	"github.com/contract-to-cash/core/domain/shared"
 )
@@ -29,4 +30,15 @@ type Repository interface {
 	// FindByAccountID returns all balance entries for an account and currency,
 	// including fully consumed and expired entries, ordered by creation time.
 	FindByAccountID(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*BalanceEntry, error)
+
+	// FindExpired returns entries whose expiry has passed as of `asOf` and
+	// whose remaining amount is still non-zero — i.e. expired credit that has
+	// not yet been forfeited by MarkExpired. Entries without an expiry and
+	// fully consumed entries are excluded. Results are ordered by creation
+	// time ascending for deterministic batch processing.
+	//
+	// This is the scan feeding batch.BalanceExpirationProcessor (issue #159),
+	// the counterpart of contract.Repository.FindDueForRenewal for the credit
+	// ledger.
+	FindExpired(ctx context.Context, asOf time.Time) ([]*BalanceEntry, error)
 }
