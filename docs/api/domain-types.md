@@ -436,10 +436,12 @@ type PricingModel interface {
 }
 
 // Flat pricing (nil PricingModel on Price)
-// Tiered pricing (graduated — each tier priced independently)
-pricing.TieredPrice{Tiers: []pricing.PriceTier{...}, Mode: pricing.TieredPricingGraduated}
+// Tiered pricing — construct via NewTieredPrice, which validates the tiers
+// (sorted ascending by UpTo, UpTo=0 only on the last tier, single currency) and
+// returns (TieredPrice, error). Graduated: each tier priced independently.
+pricing.NewTieredPrice([]pricing.PriceTier{...}, pricing.TieredPricingGraduated)
 // Volume pricing (all units at the tier they fall into)
-pricing.TieredPrice{Tiers: []pricing.PriceTier{...}, Mode: pricing.TieredPricingVolume}
+pricing.NewTieredPrice([]pricing.PriceTier{...}, pricing.TieredPricingVolume)
 ```
 
 ---

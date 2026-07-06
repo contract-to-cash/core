@@ -86,6 +86,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `pricing.TieredPrice` gains a validating constructor `NewTieredPrice(tiers, mode)`
+  and no longer silently mis-bills a misconfigured tiered price (#156). Previously
+  `TieredPrice` took its tiers through exported fields with no validation, so two
+  misconfigurations passed silently: (1) tiers not sorted ascending by `UpTo` made
+  the graduated `tierCapacity = UpTo - prevUpTo` go negative, producing a **negative
+  tier charge**; and (2) mixing currencies across a tier's `UnitPrice`/`FlatFee`
+  made the internal `Money.Add` fail, and every failure was swallowed to
+  `shared.Zero(currency)` — a broken price **billed ¥0 with no error**.
+  - `NewTieredPrice` validates: at least one tier; a known mode
+    (`graduated`/`volume`); tiers sorted strictly ascending by `UpTo`; `UpTo == 0`
+    (unlimited) only on the last tier and `UpTo > 0` on every non-last tier; and a
+    single currency across all tiers' `UnitPrice`/`FlatFee`. It returns a
+    `shared.DomainError` (`validation_error`, or `currency_mismatch` for the
+    currency rule), mirroring `NewUsagePrice`'s style (#148).
+  - `CalculatePrice` no longer swallows `Money.Add` errors to zero. Because the
+    constructor makes a currency mismatch impossible, the remaining Add failures
+    are impossible-by-construction; a bypassed constructor now surfaces the
+    invariant violation by panicking (via `mustAddTier`) rather than billing zero,
+    the same policy as `assertNonNegativeUsage`. The `CalculatePrice` signature is
+    unchanged (it is a `PricingModel` interface method that cannot return an error).
+  - The exported fields remain writable for backward compatibility and persistence
+    reconstruction. Snapshot restore (`Price.FromSnapshot`) carries the stored
+    `PricingModel` through as-is and does not re-run `NewTieredPrice`, so
+    historically persisted prices always load (replay-safety), consistent with the
+    rest of the snapshot path. All in-repo construction (tests, benchmarks, the
+    `pricing-models-demo` example) now goes through `NewTieredPrice`.
 - `eventstore.EventRegistry.Register` now returns an `error` and rejects a
   duplicate `EventType` registration instead of silently overwriting the prior
   Go-type mapping (which could route deserialization to the wrong type), mirroring

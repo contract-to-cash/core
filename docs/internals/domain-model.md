@@ -1571,6 +1571,22 @@ type PriceTier struct {
     FlatFee   shared.Money // この段階の固定料金
 }
 
+// NewTieredPrice は検証付きコンストラクタ（issue #156）。
+// 以下の不変条件を検証し、違反時は shared.DomainError を返す:
+//   - tier が1つ以上ある（validation_error）
+//   - mode が graduated / volume のいずれか（validation_error）
+//   - tier が UpTo 昇順に厳密ソート済み（validation_error）
+//   - UpTo==0（無制限）は最終 tier のみ、非最終 tier は UpTo>0（validation_error）
+//   - 全 tier の UnitPrice / FlatFee が単一通貨（currency_mismatch）
+// 未ソート tier による負の課金や、通貨混在による ¥0 黙殺を構築時に排除する。
+// 公開フィールドは後方互換のため書き込み可能だが、リポジトリ内の構築は
+// すべて本コンストラクタを経由する。
+func NewTieredPrice(tiers []PriceTier, mode TieredPricingMode) (TieredPrice, error)
+
+// CalculatePrice は上記不変条件を前提とする。コンストラクタを迂回した
+// 通貨混在 tier では、¥0 を黙って返さず panic する（assertNonNegativeUsage と同方針）。
+// 履歴価格の復元（Price.FromSnapshot）は本コンストラクタを通らず、保存済み
+// PricingModel をそのまま透過するため常にロード可能（リプレイ安全性）。
 func (p TieredPrice) CalculatePrice(usage int64) shared.Money
 
 // UsagePrice 従量料金
