@@ -73,7 +73,7 @@ func main() {
     price := shared.NewMoney(new(big.Rat).SetInt64(3000), shared.CurrencyJPY)
     priceEntity := pricing.NewPrice(
         shared.NewProductID(), price, shared.CurrencyJPY,
-        pricing.BillingCycleMonthly, nil,
+        pricing.BillingCycleMonthly, nil, clock.Now(),
     )
     priceRepo.Save(ctx, priceEntity)
 

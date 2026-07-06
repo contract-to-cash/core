@@ -23,6 +23,7 @@ const sidebars: SidebarsConfig = {
         'guides/custom-plugin',
         'guides/temporal-queries',
         'guides/payment-integration',
+        'guides/postgres-payment-repository',
         'guides/performance',
       ],
     },
@@ -66,6 +67,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Research',
       items: [
+        'research/2026-04-10-payment-idempotency-patterns',
         'research/2026-03-28-billing-interval-industry-standards',
         'research/2026-03-28-invoice-reissue-industry-standards',
         'research/2026-01-30-design-review-improvements',

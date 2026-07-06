@@ -20,7 +20,7 @@ go run ./examples/pricing-models-demo/
 
 ```go
 price := pricing.NewPrice(productID, moneyJPY(3000), shared.CurrencyJPY,
-    pricing.BillingCycleMonthly, nil)
+    pricing.BillingCycleMonthly, nil, createdAt)
 // 使用量に関係なく月額¥3,000
 ```
 
@@ -61,7 +61,7 @@ product := product.NewProduct("APIサービス",
     }),
 )
 price := pricing.NewPrice(product.ID(), moneyJPY(5000), shared.CurrencyJPY,
-    pricing.BillingCycleMonthly, pricingModel)
+    pricing.BillingCycleMonthly, pricingModel, createdAt)
 // 基本料金¥5,000 + 1,000回を超えるAPIコールの従量課金
 ```
 
