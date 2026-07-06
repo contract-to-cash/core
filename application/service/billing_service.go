@@ -203,6 +203,10 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 	if err != nil {
 		return nil, fmt.Errorf("failed to load contract: %w", err)
 	}
+	if agg == nil {
+		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
+			fmt.Sprintf("contract %s not found", contractID))
+	}
 
 	// Status guard: only billable statuses can generate invoices
 	if !billableStatuses[agg.Status()] {
@@ -269,6 +273,10 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 	agg, err := s.contractRepoFor(ctx).FindByID(ctx, contractID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load contract: %w", err)
+	}
+	if agg == nil {
+		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
+			fmt.Sprintf("contract %s not found", contractID))
 	}
 
 	// Status guard: same as GenerateInvoice
@@ -371,6 +379,10 @@ func (s *BillingService) GenerateProrationInvoice(ctx context.Context, contractI
 	if err != nil {
 		return nil, fmt.Errorf("failed to load contract: %w", err)
 	}
+	if agg == nil {
+		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
+			fmt.Sprintf("contract %s not found", contractID))
+	}
 
 	// Proration invoices are only valid for active contracts
 	if agg.Status() != contract.ContractStatusActive {
@@ -459,6 +471,10 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 		priceEntity, priceErr := s.priceRepo.FindByID(ctx, priceID)
 		if priceErr != nil {
 			return nil, fmt.Errorf("failed to load price for product resolution: %w", priceErr)
+		}
+		if priceEntity == nil {
+			return nil, shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("price %s not found", priceID))
 		}
 		calcCtx.SetProductID(priceEntity.ProductID())
 	}
@@ -725,6 +741,10 @@ func (s *BillingService) calculateSubtotal(ctx context.Context, agg *contract.Co
 	if err != nil {
 		return shared.Money{}, nil, fmt.Errorf("failed to load price: %w", err)
 	}
+	if price == nil {
+		return shared.Money{}, nil, shared.NewDomainError(shared.ErrCodeNotFound,
+			fmt.Sprintf("price %s not found", agg.PriceID()))
+	}
 
 	// 4. Use Price entity amount
 	effectiveAmount := price.Amount()
@@ -765,6 +785,10 @@ func (s *BillingService) calculateUsageCharge(
 	prod, err := s.productRepo.FindByID(ctx, price.ProductID())
 	if err != nil {
 		return shared.Money{}, nil, fmt.Errorf("failed to load product: %w", err)
+	}
+	if prod == nil {
+		return shared.Money{}, nil, shared.NewDomainError(shared.ErrCodeNotFound,
+			fmt.Sprintf("product %s not found", price.ProductID()))
 	}
 
 	totalCharge := baseAmount // start with base price

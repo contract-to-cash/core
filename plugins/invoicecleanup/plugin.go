@@ -47,6 +47,17 @@ func (p *InvoiceCleanupPlugin) Initialize(_ context.Context, config plugin.Confi
 func (p *InvoiceCleanupPlugin) Shutdown(_ context.Context) error { return nil }
 
 // OnContractCancel voids any Draft or Finalized invoices for the cancelled contract.
+//
+// Partial-progress semantics (issue #162 C5): each invoice is voided and saved
+// independently in the loop below, so if the Nth Save fails the first N-1
+// invoices are already voided and persisted. The hook returns the error at that
+// point WITHOUT rolling back the earlier voids — there is no surrounding
+// transaction here. The operation is safe to retry: Void is only attempted on
+// Draft/Finalized invoices, and an already-voided invoice is skipped by the
+// status filter, so a re-run resumes from where it failed. A per-invoice
+// optimistic-lock conflict (a concurrent writer bumped the version) likewise
+// surfaces as an error the caller can retry; wrap the hook invocation in
+// tx.RetryOnConflict if that race is expected under load.
 func (p *InvoiceCleanupPlugin) OnContractCancel(ctx *plugin.Context, c *contract.ContractAggregate) error {
 	invoices, err := p.invoiceRepo.FindUnpaidByContract(ctx.Context(), c.ContractID())
 	if err != nil {

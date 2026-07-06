@@ -609,3 +609,39 @@ func TestLoadSnapshotBefore(t *testing.T) {
 		t.Errorf("expected nil, got version %d", loaded.Version)
 	}
 }
+
+// TestAppend_DoesNotMutateCallerSlice verifies Append stamps RecordedAt/
+// GlobalPosition on stored COPIES and leaves the caller's event structs
+// untouched, so an aggregate that keeps referencing its UncommittedEvents slice
+// does not have store-assigned fields leak back into it (issue #162 I3).
+func TestAppend_DoesNotMutateCallerSlice(t *testing.T) {
+	store := NewInMemoryEventStore(shared.SystemClock{})
+	ctx := context.Background()
+
+	e1 := makeEvent("stream-1", 1, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	events := []eventstore.Event{e1}
+
+	if err := store.Append(ctx, "stream-1", events, 0); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	if !events[0].RecordedAt.IsZero() {
+		t.Errorf("Append must not stamp RecordedAt on the caller's slice: got %v", events[0].RecordedAt)
+	}
+	if events[0].GlobalPosition != 0 {
+		t.Errorf("Append must not stamp GlobalPosition on the caller's slice: got %d", events[0].GlobalPosition)
+	}
+
+	// The stored copy must carry the stamped fields.
+	stored, err := store.Load(ctx, "stream-1")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("expected 1 stored event, got %d", len(stored))
+	}
+	if stored[0].RecordedAt.IsZero() || stored[0].GlobalPosition == 0 {
+		t.Errorf("stored event missing stamped fields: RecordedAt=%v GlobalPosition=%d",
+			stored[0].RecordedAt, stored[0].GlobalPosition)
+	}
+}
