@@ -84,69 +84,11 @@ func (g *integrationGateway) ListPaymentMethods(_ context.Context, _ string) ([]
 	return nil, fmt.Errorf("not implemented")
 }
 
-// isolatingInvoiceRepo wraps an invoice.Repository and returns a FRESH
-// (snapshot-round-tripped) invoice instance on every FindByID call. This
-// simulates the per-transaction snapshot isolation a real RDBMS provides,
-// preventing concurrent PaymentService callers from accidentally sharing
-// the same *Invoice pointer via the in-memory repo.
-//
-// Without this isolation, two goroutines that both load "the same" invoice
-// see a single shared pointer whose state is concurrently mutated by
-// RecordPayment — which is not what happens in production (Postgres would
-// hand each tx a fresh row snapshot), and it masks the #97 race behind a
-// pre-existing invariant violation on the invoice.
-type isolatingInvoiceRepo struct {
-	inner invoice.Repository
-}
-
-func (r *isolatingInvoiceRepo) Save(ctx context.Context, inv *invoice.Invoice) error {
-	return r.inner.Save(ctx, inv)
-}
-
-func (r *isolatingInvoiceRepo) FindByID(ctx context.Context, id shared.InvoiceID) (*invoice.Invoice, error) {
-	inv, err := r.inner.FindByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	snap := inv.ToSnapshot()
-	clone, err := invoice.InvoiceFromSnapshot(snap)
-	if err != nil {
-		return nil, err
-	}
-	return clone, nil
-}
-
-func (r *isolatingInvoiceRepo) FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*invoice.Invoice, error) {
-	return r.inner.FindByContractID(ctx, contractID)
-}
-
-func (r *isolatingInvoiceRepo) FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*invoice.Invoice, error) {
-	return r.inner.FindByAccountID(ctx, accountID)
-}
-
-func (r *isolatingInvoiceRepo) FindOverdue(ctx context.Context) ([]*invoice.Invoice, error) {
-	return r.inner.FindOverdue(ctx)
-}
-
-func (r *isolatingInvoiceRepo) FindByStatus(ctx context.Context, status invoice.InvoiceStatus) ([]*invoice.Invoice, error) {
-	return r.inner.FindByStatus(ctx, status)
-}
-
-func (r *isolatingInvoiceRepo) FindByIDAsOf(ctx context.Context, id shared.InvoiceID, asOf time.Time) (*invoice.Invoice, error) {
-	return r.inner.FindByIDAsOf(ctx, id, asOf)
-}
-
-func (r *isolatingInvoiceRepo) FindByContractAndStatus(ctx context.Context, contractID shared.ContractID, status invoice.InvoiceStatus) ([]*invoice.Invoice, error) {
-	return r.inner.FindByContractAndStatus(ctx, contractID, status)
-}
-
-func (r *isolatingInvoiceRepo) FindByContractAndPeriod(ctx context.Context, contractID shared.ContractID, period shared.DateRange) ([]*invoice.Invoice, error) {
-	return r.inner.FindByContractAndPeriod(ctx, contractID, period)
-}
-
-func (r *isolatingInvoiceRepo) FindUnpaidByContract(ctx context.Context, contractID shared.ContractID) ([]*invoice.Invoice, error) {
-	return r.inner.FindUnpaidByContract(ctx, contractID)
-}
+// Note (issue #152): the in-memory invoice repository now returns an isolated
+// snapshot copy from every read on its own, mirroring the per-transaction
+// snapshot isolation a real RDBMS provides. The tests below therefore use the
+// raw *InMemoryInvoiceRepository directly; the previous isolatingInvoiceRepo
+// wrapper that hand-rolled this isolation has been removed as redundant.
 
 // recordingAfterChargePlugin implements plugin.AfterChargeHook and
 // captures each invocation's invoice snapshot (status + paidAmount) so
@@ -707,13 +649,13 @@ func TestPaymentIdempotency_ConcurrentSuccess_Race_Integration(t *testing.T) {
 
 	gw := &integrationGateway{}
 
-	// isolatingInvoiceRepo mirrors a real RDBMS's per-tx snapshot
-	// isolation: each FindByID returns a fresh clone so the two
-	// goroutines do not accidentally share a single *Invoice pointer
-	// whose paidAmount would be mutated by the first RecordPayment call.
-	// Without this, the in-memory repo's pointer sharing masks the #97
-	// payment-record race behind a spurious invoice invariant error.
-	isolatedInvoiceRepo := &isolatingInvoiceRepo{inner: invoiceRepo}
+	// The in-memory invoice repository isolates every read (issue #152),
+	// mirroring a real RDBMS's per-tx snapshot isolation: each FindByID
+	// returns a fresh clone so the two goroutines do not accidentally share a
+	// single *Invoice pointer whose paidAmount would be mutated by the first
+	// RecordPayment call. Without that isolation the pointer sharing would mask
+	// the #97 payment-record race behind a spurious invoice invariant error.
+	isolatedInvoiceRepo := invoiceRepo
 
 	// rendezvousPaymentRepo blocks every Save until both goroutines
 	// have reached it simultaneously. This deterministically reproduces
@@ -1025,7 +967,8 @@ func TestPaymentIdempotency_ConcurrentSuccess_AbortedTxSimulation_Integration(t 
 
 	gw := &integrationGateway{}
 
-	isolatedInvoiceRepo := &isolatingInvoiceRepo{inner: invoiceRepo}
+	// The in-memory invoice repository isolates reads natively (issue #152).
+	isolatedInvoiceRepo := invoiceRepo
 	racedPaymentRepo := newRendezvousPaymentRepo(paymentRepo, 2)
 	abortedRepo := &abortedTxRepoWrapper{inner: racedPaymentRepo}
 

@@ -46,14 +46,34 @@ func (r *InMemoryBalanceRepository) Save(_ context.Context, entry *balance.Balan
 		}
 	}
 
-	r.entries[entry.ID()] = entry
+	// Store an ISOLATED copy (snapshot round-trip), not the caller's pointer, so
+	// the caller's later mutations to entry cannot leak into the repository or
+	// into concurrent readers (issue #152). FromSnapshot restores version and
+	// loadedVersion together, matching the just-persisted baseline.
+	stored, err := cloneBalanceEntry(entry)
+	if err != nil {
+		return err
+	}
+	r.entries[entry.ID()] = stored
 	r.versions[entry.ID()] = entry.Version()
 	// Update loadedVersion so subsequent saves from the same pointer don't conflict.
 	entry.SetVersion(entry.Version())
 	return nil
 }
 
+// cloneBalanceEntry returns an isolated deep copy of entry via the snapshot
+// round-trip. FromSnapshot restores version and loadedVersion from the single
+// stored version field, so the clone carries the same optimistic-locking
+// baseline as the original.
+func cloneBalanceEntry(entry *balance.BalanceEntry) (*balance.BalanceEntry, error) {
+	return balance.FromSnapshot(entry.ToSnapshot())
+}
+
 // FindByID loads a balance entry by its ID.
+//
+// Returns an ISOLATED copy (snapshot round-trip) so concurrent load-modify
+// callers never share a live pointer, and the optimistic lock in Save becomes
+// observable through the raw repository (issue #152).
 func (r *InMemoryBalanceRepository) FindByID(_ context.Context, id shared.BalanceEntryID) (*balance.BalanceEntry, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -63,7 +83,7 @@ func (r *InMemoryBalanceRepository) FindByID(_ context.Context, id shared.Balanc
 		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
 			fmt.Sprintf("balance entry %s not found", id))
 	}
-	return entry, nil
+	return cloneBalanceEntry(entry)
 }
 
 // FindAvailable returns available credit entries for an account and currency.
@@ -87,7 +107,11 @@ func (r *InMemoryBalanceRepository) FindAvailable(_ context.Context, accountID s
 		if entry.IsFullyConsumed() {
 			continue
 		}
-		result = append(result, entry)
+		clone, err := cloneBalanceEntry(entry)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, clone)
 	}
 
 	// Sort by createdAt ascending (FIFO).
@@ -173,7 +197,11 @@ func (r *InMemoryBalanceRepository) FindByAccountID(_ context.Context, accountID
 		if entry.OriginalAmount().Currency() != currency {
 			continue
 		}
-		result = append(result, entry)
+		clone, err := cloneBalanceEntry(entry)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, clone)
 	}
 
 	sort.Slice(result, func(i, j int) bool {

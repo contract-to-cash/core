@@ -52,7 +52,15 @@ func (r *InMemoryCreditNoteRepository) Save(_ context.Context, cn *invoice.Credi
 		}
 	}
 
-	r.creditNotes[cn.ID()] = cn
+	// Store an ISOLATED copy (snapshot round-trip), not the caller's pointer, so
+	// the caller's later mutations to cn cannot leak into the repository or into
+	// concurrent readers (issue #152). CreditNoteFromSnapshot restores version
+	// and loadedVersion together, matching the just-persisted baseline.
+	stored, err := cloneCreditNote(cn)
+	if err != nil {
+		return err
+	}
+	r.creditNotes[cn.ID()] = stored
 	r.versions[cn.ID()] = cn.Version()
 	// Sync loadedVersion so subsequent saves from the same pointer (the common
 	// non-isolated in-memory case) compare against the just-persisted version.
@@ -60,7 +68,19 @@ func (r *InMemoryCreditNoteRepository) Save(_ context.Context, cn *invoice.Credi
 	return nil
 }
 
+// cloneCreditNote returns an isolated deep copy of cn via the snapshot
+// round-trip. CreditNoteFromSnapshot restores version and loadedVersion from the
+// single stored version field, so the clone carries the same optimistic-locking
+// baseline as the original.
+func cloneCreditNote(cn *invoice.CreditNote) (*invoice.CreditNote, error) {
+	return invoice.CreditNoteFromSnapshot(cn.ToSnapshot())
+}
+
 // FindByID loads a credit note by its ID.
+//
+// Returns an ISOLATED copy (snapshot round-trip) so concurrent load-modify
+// callers never share a live pointer, and the optimistic lock in Save becomes
+// observable through the raw repository (issue #152).
 func (r *InMemoryCreditNoteRepository) FindByID(_ context.Context, id shared.CreditNoteID) (*invoice.CreditNote, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -70,7 +90,7 @@ func (r *InMemoryCreditNoteRepository) FindByID(_ context.Context, id shared.Cre
 		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
 			fmt.Sprintf("credit note %s not found", id))
 	}
-	return cn, nil
+	return cloneCreditNote(cn)
 }
 
 // FindByInvoiceID returns all credit notes for an invoice.
@@ -81,7 +101,11 @@ func (r *InMemoryCreditNoteRepository) FindByInvoiceID(_ context.Context, invoic
 	var result []*invoice.CreditNote
 	for _, cn := range r.creditNotes {
 		if cn.InvoiceID() == invoiceID {
-			result = append(result, cn)
+			clone, err := cloneCreditNote(cn)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -95,7 +119,11 @@ func (r *InMemoryCreditNoteRepository) FindByAccountID(_ context.Context, accoun
 	var result []*invoice.CreditNote
 	for _, cn := range r.creditNotes {
 		if cn.AccountID() == accountID {
-			result = append(result, cn)
+			clone, err := cloneCreditNote(cn)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -109,7 +137,11 @@ func (r *InMemoryCreditNoteRepository) FindByContractID(_ context.Context, contr
 	var result []*invoice.CreditNote
 	for _, cn := range r.creditNotes {
 		if cn.ContractID() == contractID {
-			result = append(result, cn)
+			clone, err := cloneCreditNote(cn)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil
@@ -123,7 +155,11 @@ func (r *InMemoryCreditNoteRepository) FindByStatus(_ context.Context, status in
 	var result []*invoice.CreditNote
 	for _, cn := range r.creditNotes {
 		if cn.Status() == status {
-			result = append(result, cn)
+			clone, err := cloneCreditNote(cn)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, clone)
 		}
 	}
 	return result, nil

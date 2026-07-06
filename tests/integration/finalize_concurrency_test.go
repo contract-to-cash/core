@@ -46,9 +46,9 @@ func (p *countingInvoiceIssuedPlugin) count() int {
 // TestFinalizeInvoice_ConcurrentFinalize_SingleWinner_Integration is the #130
 // end-to-end regression test. Many goroutines finalize the same draft invoice
 // at once through BillingService.FinalizeInvoice, backed by the in-memory
-// invoice repository (which enforces the optimistic-locking contract) wrapped
-// in isolatingInvoiceRepo (which hands each call an independent snapshot, as a
-// real RDBMS would). Exactly one call must finalize the invoice and fire
+// invoice repository, which enforces the optimistic-locking contract AND hands
+// each read an independent snapshot copy (issue #152), as a real RDBMS
+// would. Exactly one call must finalize the invoice and fire
 // OnInvoiceIssued; every other call must be rejected with
 // invalid_state_transition (the RetryOnConflict loser re-reads the finalized
 // row). Without optimistic locking every caller would succeed and the metrics
@@ -58,7 +58,8 @@ func TestFinalizeInvoice_ConcurrentFinalize_SingleWinner_Integration(t *testing.
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)}
 
 	inner := inmemory.NewInMemoryInvoiceRepository(clock)
-	isolated := &isolatingInvoiceRepo{inner: inner}
+	// The in-memory repository isolates reads natively (issue #152).
+	isolated := inner
 
 	spy := &countingInvoiceIssuedPlugin{}
 	registry := plugin.NewRegistry()
