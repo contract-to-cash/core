@@ -88,6 +88,50 @@ type ProcessPaymentInput struct {
 type RefundInput struct {
 	Amount *shared.Money
 	Reason port.RefundReason
+
+	// IdempotencyKey optionally pins the gateway-facing idempotency key for
+	// this refund. Leave empty (the common case) to let [PaymentService.Refund]
+	// derive a deterministic key from the payment — see the Refund godoc for
+	// the derivation scheme and its guarantees. Supplying an explicit key mirrors
+	// [ProcessPaymentInput.IdempotencyKey] and is intended for callers that
+	// already own an end-to-end idempotency token (e.g. a request ID threaded
+	// from an HTTP/gRPC edge). The caller then owns the contract that RETRIES of
+	// the same logical refund reuse the SAME key while DISTINCT refunds of the
+	// same payment use DIFFERENT keys; violating it reintroduces the double-refund
+	// window this field exists to close.
+	IdempotencyKey string
+}
+
+// deriveRefundIdempotencyKey builds a deterministic gateway idempotency key for
+// a refund of paymentID whose cumulative refunded total, BEFORE this attempt, is
+// priorRefunded.
+//
+// Scheme: "refund-<paymentID>-<currency>-<priorRefunded as a big.Rat string>".
+//
+// Why prior cumulative refunded amount is the right discriminator:
+//
+//   - A payment's refundedAmount is monotonically non-decreasing: every
+//     successful RecordRefund adds a positive amount (ValidateRefund rejects
+//     non-positive amounts). So the pre-refund cumulative total uniquely
+//     identifies the "next" refund attempt in the payment's refund sequence.
+//   - Two RETRIES of the SAME attempt (e.g. after a gateway timeout, or two
+//     concurrent callers that both loaded the same un-refunded state) observe
+//     the SAME priorRefunded → derive the SAME key → the gateway collapses them
+//     into ONE real refund (Stripe/Adyen/GMO PG/PayPal all dedupe on the
+//     idempotency key). This is what closes the double-refund window.
+//   - Two DISTINCT partial refunds (a 3000 refund followed by a later 2000
+//     refund) observe DIFFERENT priorRefunded (0, then 3000) → derive DIFFERENT
+//     keys → both legitimately reach the gateway.
+//
+// The key is independent of the requested amount on purpose: a concurrent
+// "second" refund that shares the same prior cumulative total is, by
+// definition, racing the same slot in the sequence and MUST collide so the
+// gateway can dedupe it — even if the caller asked for a different amount.
+// Callers who genuinely need two different-amount refunds issue them
+// sequentially (distinct prior cumulative totals) or supply explicit distinct
+// [RefundInput.IdempotencyKey] values.
+func deriveRefundIdempotencyKey(paymentID shared.PaymentID, priorRefunded shared.Money) string {
+	return fmt.Sprintf("refund-%s-%s-%s", paymentID, priorRefunded.Currency(), priorRefunded.Amount().RatString())
 }
 
 // PaymentServiceOption configures optional dependencies of PaymentService.
@@ -892,7 +936,54 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	return p, nil
 }
 
-// Refund processes a refund for a payment.
+// Refund processes a refund for a payment (issue #150).
+//
+// # Gateway idempotency key (money-safety)
+//
+// The gateway refund is ALWAYS sent with a non-empty idempotency key. The key
+// is either the caller-supplied [RefundInput.IdempotencyKey] or, when that is
+// empty, a deterministic key derived from the payment and its pre-refund
+// cumulative refunded total (see [deriveRefundIdempotencyKey]). This is the
+// core of the fix: a caller that retries after a gateway timeout, and two
+// concurrent callers that both loaded the same un-refunded state, all derive
+// the SAME key for the SAME logical refund, so the gateway collapses the
+// duplicate calls into a SINGLE real refund instead of moving money twice.
+// Distinct refunds of the same payment (sequential partials) derive DIFFERENT
+// keys and are not deduped.
+//
+// # Transaction boundary and gateway placement
+//
+// This method follows the same policy as [PaymentService.ProcessPayment]: the
+// gateway call happens BEFORE the local transaction, never inside it. Two
+// reasons:
+//
+//   - A refund cannot be compensated (unlike a charge, which ProcessPayment can
+//     unwind via Void/Refund). Holding a DB transaction open across the slow,
+//     failure-prone network call to the gateway — and then rolling it back —
+//     would leave money moved with no local record and no way to reverse it.
+//     Keeping the gateway call outside the tx means the ONLY thing the tx does
+//     is the local, reversible bookkeeping.
+//   - Safety under concurrency/retry is provided by the deterministic gateway
+//     idempotency key above, exactly as ProcessPayment relies on the gateway's
+//     idempotent replay of Charge.
+//
+// The local bookkeeping (re-load → RecordRefund → Save) runs INSIDE tx.Run so
+// that the check-then-act is not split across the transaction boundary. Re-load
+// happens through the transaction-scoped repository, so on a backend that
+// honours the payment [payment.Repository] concurrency contract (row lock /
+// SELECT ... FOR UPDATE / SERIALIZABLE), a concurrent second refund observes
+// the winner's already-recorded state and RecordRefund rejects it with a domain
+// error (invalid_state_transition or over-refund). The money never moved twice
+// because the gateway deduped the two calls under one key. On a last-writer-wins
+// backend the local guard is weaker, but the gateway key still prevents the
+// double refund — the worst case is a redundant local write, not lost money.
+//
+// tx.Run (not raw RunInTx) joins an outer transaction if the caller already
+// started one, and stamps the tx onto the context.
+//
+// # Hooks
+//
+// OnRefund hooks fire after successful persistence and are non-fatal.
 func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID, input RefundInput) error {
 	// Load payment
 	p, err := s.paymentRepo.FindByID(ctx, paymentID)
@@ -921,10 +1012,20 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		return fmt.Errorf("refund validation failed: %w", err)
 	}
 
+	// Derive the gateway idempotency key. The pre-refund cumulative refunded
+	// total is read here (before the gateway call and before the tx) so that a
+	// retry of THIS attempt — which re-loads the payment while nothing has been
+	// committed — reads the same prior total and derives the same key.
+	refundKey := input.IdempotencyKey
+	if refundKey == "" {
+		refundKey = deriveRefundIdempotencyKey(paymentID, p.RefundedAmount())
+	}
+
 	refundReq := &port.RefundRequest{
-		TransactionID: p.GatewayTransactionID(),
-		Amount:        input.Amount,
-		Reason:        input.Reason,
+		TransactionID:  p.GatewayTransactionID(),
+		Amount:         input.Amount,
+		Reason:         input.Reason,
+		IdempotencyKey: refundKey,
 	}
 
 	_, err = s.gateway.Refund(ctx, refundReq)
@@ -932,18 +1033,48 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		return fmt.Errorf("gateway refund failed: %w", err)
 	}
 
-	// Phase 3: local save in transaction. tx.Run (not raw RunInTx) so this joins
-	// an outer transaction if the caller already started one, and stamps the tx
-	// onto the context for any nested tx.Run (review M2).
+	// Phase 3: local bookkeeping inside a transaction. Re-load the payment
+	// through the tx-scoped repository so the load + RecordRefund + Save is a
+	// single check-then-act under the transaction's isolation, closing the
+	// concurrency window (issue #150). RecordRefund re-runs ValidateRefund, so a
+	// concurrent refund that already committed makes this one fail with a domain
+	// error rather than double-recording.
+	var recorded *payment.Payment
+	var recordRejected bool
 	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
-		if refundErr := p.RecordRefund(refundAmount); refundErr != nil {
+		loaded, findErr := repos.Payments.FindByID(txCtx, paymentID)
+		if findErr != nil {
+			return fmt.Errorf("failed to reload payment for refund: %w", findErr)
+		}
+		if refundErr := loaded.RecordRefund(refundAmount); refundErr != nil {
+			// Domain rejection (already refunded / over-refund) — typically a
+			// concurrent refund that recorded first. Flag it so the outer code
+			// distinguishes this benign case from a genuine persistence failure.
+			recordRejected = true
 			return refundErr
 		}
-		return repos.Payments.Save(txCtx, p)
+		if saveErr := repos.Payments.Save(txCtx, loaded); saveErr != nil {
+			return saveErr
+		}
+		recorded = loaded
+		return nil
 	})
 	if err != nil {
-		// Gateway refund succeeded but local save failed — this requires manual reconciliation.
-		// Refunds cannot be reversed, so we log at Error level.
+		if recordRejected {
+			// The in-tx re-validation rejected the refund. Because the gateway
+			// idempotency key is deterministic, a concurrent refund of the same
+			// attempt was collapsed by the gateway into a single real refund —
+			// the winner recorded it. No money moved twice, so this is NOT a
+			// reconciliation event: surface the domain error cleanly.
+			s.logger.Info("refund rejected on in-tx re-validation (concurrent refund likely recorded first)",
+				"paymentID", paymentID,
+				"refundAmount", refundAmount,
+				"error", err,
+			)
+			return fmt.Errorf("refund not recorded (already refunded by a concurrent operation): %w", err)
+		}
+		// Gateway refund succeeded but local persistence failed — this requires
+		// manual reconciliation. Refunds cannot be reversed, so we log at Error level.
 		s.logger.Error("local save failed after gateway refund (MANUAL RECONCILIATION REQUIRED)",
 			"paymentID", paymentID,
 			"refundAmount", refundAmount,
@@ -951,6 +1082,7 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		)
 		return fmt.Errorf("local save failed after gateway refund (MANUAL RECONCILIATION REQUIRED): %w", err)
 	}
+	p = recorded
 
 	// Phase 4: post-commit hooks (non-fatal)
 	inv, invErr := s.invoiceRepo.FindByID(ctx, p.InvoiceID())
