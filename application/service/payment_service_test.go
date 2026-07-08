@@ -187,6 +187,9 @@ func (m *mockCustomerGateway) GetCustomer(_ context.Context, _ string) (*port.Cu
 	return m.customer, m.err
 }
 func (m *mockCustomerGateway) DeleteCustomer(_ context.Context, _ string) error { return nil }
+func (m *mockCustomerGateway) SetDefaultPaymentMethod(_ context.Context, _, _ string) error {
+	return nil
+}
 
 type mockEventStore struct{}
 

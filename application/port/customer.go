@@ -11,6 +11,9 @@ type CustomerGateway interface {
 	UpdateCustomer(ctx context.Context, req *UpdateCustomerRequest) (*Customer, error)
 	GetCustomer(ctx context.Context, customerID string) (*Customer, error)
 	DeleteCustomer(ctx context.Context, customerID string) error
+	// SetDefaultPaymentMethod sets the customer's default payment method used for
+	// automatic charges when no invoice- or contract-level method is specified.
+	SetDefaultPaymentMethod(ctx context.Context, customerID, paymentMethodID string) error
 }
 
 // CreateCustomerRequest is the input for creating a customer.
