@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `port.CustomerGateway.SetDefaultPaymentMethod(ctx, customerID, paymentMethodID)`:
+  sets the customer's default payment method used for automatic charges when no
+  invoice- or contract-level method is specified, complementing the existing
+  Level 3 default-payment-method resolution in `PaymentService.ResolvePaymentMethod`.
+  **BREAKING**: external `CustomerGateway` implementations must implement this
+  method.
+
 ### Changed
 
 - **Low-priority batch cleanup (#162)** — a group of small, low-risk correctness
