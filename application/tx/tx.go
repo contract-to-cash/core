@@ -8,6 +8,7 @@ package tx
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
@@ -54,13 +55,83 @@ type TxManager interface {
 
 // NoopTxManager is a TxManager that executes the closure without transaction
 // wrapping. Used by in-memory implementations and tests.
+//
+// A NoopTxManager provides NO atomicity: if a multi-write flow fails partway
+// (e.g. the billing pipeline consumes credit ledger entries and then the invoice
+// Save fails), earlier writes are NOT rolled back and the data is left corrupt.
+// Production deployments that wire real database repositories MUST supply a real
+// TxManager. Because omitting one leaves the code compiling and passing
+// happy-path tests, write-side services and batch processors emit a Warn-level
+// log at construction when they fall back to a default NoopTxManager
+// (see WarnIfDefaultNoop). Intentional in-memory/test/demo usage should opt in
+// via NewNoopTxManagerExplicit (or a service's WithoutTransactions option) to
+// acknowledge the trade-off and suppress that warning.
 type NoopTxManager struct {
 	r Repos
+	// explicit records that this noop manager was chosen deliberately (via
+	// NewNoopTxManagerExplicit), which suppresses the non-atomic warning that
+	// WarnIfDefaultNoop would otherwise emit for a silently-defaulted noop.
+	explicit bool
 }
 
 // NewNoopTxManager creates a NoopTxManager that passes the given repos through.
+//
+// This is the DEFAULT, non-explicit variant: a write-side service or batch
+// processor that falls back to it because no TxManager was wired will warn via
+// WarnIfDefaultNoop. For intentional in-memory/test/demo usage that should not
+// warn, use NewNoopTxManagerExplicit.
 func NewNoopTxManager(r Repos) *NoopTxManager {
 	return &NoopTxManager{r: r}
+}
+
+// NewNoopTxManagerExplicit creates a NoopTxManager marked as a deliberate,
+// acknowledged choice. It behaves identically to NewNoopTxManager at runtime but
+// suppresses the non-atomic warning emitted by WarnIfDefaultNoop. Use it in
+// in-memory demos, examples, and tests where the absence of real transactions is
+// intentional and understood.
+func NewNoopTxManagerExplicit(r Repos) *NoopTxManager {
+	return &NoopTxManager{r: r, explicit: true}
+}
+
+// IsNoop reports whether m is a NoopTxManager — i.e. provides no transactional
+// atomicity guarantees. Callers use this (rather than fragile string or
+// reflection checks) to detect a missing real transaction manager.
+func IsNoop(m TxManager) bool {
+	_, ok := m.(*NoopTxManager)
+	return ok
+}
+
+// IsExplicitNoop reports whether m is a NoopTxManager that was constructed via
+// NewNoopTxManagerExplicit (a deliberate opt-in). It is false for the default
+// NewNoopTxManager, which is what a service falls back to when no TxManager was
+// wired.
+func IsExplicitNoop(m TxManager) bool {
+	n, ok := m.(*NoopTxManager)
+	return ok && n.explicit
+}
+
+// WarnIfDefaultNoop emits a single Warn-level log if txm is a default
+// (non-explicit) NoopTxManager, signalling that multi-write operations will run
+// without atomicity. Write-side services and batch processors call this ONCE at
+// construction so a consumer who wires real repositories but forgets the
+// TxManager option gets a loud runtime signal instead of silent corruption under
+// partial failure.
+//
+// component names the constructing service/processor; remedy is a short hint
+// naming the concrete option or argument to wire (e.g.
+// "wire WithBillingTxManager(...)"). Explicit noop managers
+// (NewNoopTxManagerExplicit) and real TxManagers produce no log.
+func WarnIfDefaultNoop(logger *slog.Logger, txm TxManager, component, remedy string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if IsNoop(txm) && !IsExplicitNoop(txm) {
+		logger.Warn(
+			"running without a transaction manager: multi-write operations are NOT atomic and can corrupt data under partial failure",
+			"component", component,
+			"remedy", remedy,
+		)
+	}
 }
 
 // RunInTx calls fn directly with the stored repos (no transaction).
@@ -190,7 +261,15 @@ func IsVersionConflict(err error) bool {
 // first call: maxAttempts=1 runs fn exactly once with no retry, maxAttempts=3
 // runs it at most three times. It was renamed from the misleading maxRetries to
 // match the loop's actual semantics (issue #162 L4).
+//
+// A maxAttempts <= 0 is clamped to 1, so fn always runs at least once. Returning
+// nil without ever invoking fn (the previous behaviour) is a silent no-op that
+// reports success while doing no work — a subtle correctness hazard; running once
+// is the least-surprise behaviour (issue #187).
 func RetryOnConflict(maxAttempts int, fn func() error) error {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
 	var err error
 	for i := 0; i < maxAttempts; i++ {
 		err = fn()

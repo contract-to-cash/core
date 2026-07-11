@@ -72,10 +72,22 @@ func WithBalanceRepo(repo balance.Repository) BillingServiceOption {
 }
 
 // WithBillingTxManager sets the transaction manager for the BillingService.
-// If not provided, a NoopTxManager is used (no transaction wrapping).
+// If not provided, a NoopTxManager is used (no transaction wrapping) and a
+// Warn-level log is emitted at construction (see WithoutTransactions to opt out).
 func WithBillingTxManager(tm tx.TxManager) BillingServiceOption {
 	return func(s *BillingService) {
 		s.txManager = tm
+	}
+}
+
+// WithoutTransactions explicitly opts the BillingService into running without a
+// transaction manager (the multi-write billing pipeline will NOT be atomic).
+// Use it for in-memory demos and tests where that trade-off is intentional; it
+// suppresses the non-atomic warning that a silently-defaulted NoopTxManager
+// would otherwise emit. Do NOT use it in production with real repositories.
+func WithoutTransactions() BillingServiceOption {
+	return func(s *BillingService) {
+		s.suppressTxWarning = true
 	}
 }
 
@@ -93,6 +105,9 @@ type BillingService struct {
 	clock         shared.Clock
 	logger        *slog.Logger
 	txManager     tx.TxManager
+	// suppressTxWarning records an explicit WithoutTransactions() opt-in so the
+	// default-NoopTxManager warning is not emitted for intentional non-atomic use.
+	suppressTxWarning bool
 }
 
 // NewBillingService creates a new BillingService.
@@ -128,12 +143,18 @@ func NewBillingService(
 		s.logger = slog.Default()
 	}
 	if s.txManager == nil {
-		s.txManager = tx.NewNoopTxManager(tx.Repos{
+		repos := tx.Repos{
 			Contracts: contractRepo,
 			Invoices:  invoiceRepo,
 			Balances:  s.balanceRepo,
-		})
+		}
+		if s.suppressTxWarning {
+			s.txManager = tx.NewNoopTxManagerExplicit(repos)
+		} else {
+			s.txManager = tx.NewNoopTxManager(repos)
+		}
 	}
+	tx.WarnIfDefaultNoop(s.logger, s.txManager, "BillingService", "wire WithBillingTxManager(...) (or WithoutTransactions() to acknowledge non-atomic in-memory use)")
 	return s
 }
 

@@ -1052,6 +1052,18 @@ func (c *JapaneseTaxCalculator) GetTaxRate(_ context.Context) *big.Rat {
   productRepo, registry, config, clock, opts...)`。オプション: `WithBalanceRepo`（クレジット台帳、
   nil 許容）/ `WithBillingTxManager`（既定は `NoopTxManager`）/ `WithBillingLogger`（既定は
   `slog.Default()`）。`balanceRepo` / `logger` / `txManager` はフィールドとして保持される。
+  - **`TxManager` は本番では必須**（issue #187）。`WithBillingTxManager` を省くと既定の
+    `tx.NewNoopTxManager` にフォールバックし、請求パイプラインの複数書き込み
+    （クレジット台帳 FIFO 充当 → Invoice 保存）が**非アトミック**になる。Invoice 保存が失敗すると
+    クレジットだけ消費され請求書が存在しない破損状態が残る。`PaymentService` /
+    `CreditNoteService`、各バッチプロセッサも同様に本番では実 `TxManager` を配線する。
+  - この見落としは静かなので、**既定 Noop へフォールバックした場合は構築時に `Warn` ログを 1 回出す**
+    （`tx.WarnIfDefaultNoop`）。インメモリ/デモ/テストで意図的にトランザクション無しにする場合は
+    `WithoutTransactions()`（`PaymentService` は `WithoutPaymentTransactions()`、
+    `CreditNoteService` は `WithoutCreditNoteTransactions()`）または
+    `tx.NewNoopTxManagerExplicit(...)` で明示的にオプトインし、警告を抑止する。
+    詳細と破損パターンの列挙は `docs/guides/integration.md` の
+    「Transaction Manager (REQUIRED for production)」節を参照。
 
 **`GenerateInvoice(ctx, contractID shared.ContractID, billingPeriod shared.DateRange)` の流れ**
 

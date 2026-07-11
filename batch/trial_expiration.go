@@ -40,7 +40,10 @@ type TrialExpirationProcessor struct {
 var _ BatchProcessor = (*TrialExpirationProcessor)(nil)
 
 // NewTrialExpirationProcessor creates a new TrialExpirationProcessor.
-// If txManager is nil, a NoopTxManager is used.
+// If txManager is nil, a default NoopTxManager is used and a Warn-level log is
+// emitted (trial-end writes will NOT be atomic). Pass a real TxManager for
+// production, or tx.NewNoopTxManagerExplicit(...) to acknowledge intentional
+// non-atomic in-memory/test use and suppress the warning.
 func NewTrialExpirationProcessor(
 	contractRepo contract.Repository,
 	registry *plugin.Registry,
@@ -56,6 +59,7 @@ func NewTrialExpirationProcessor(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	tx.WarnIfDefaultNoop(logger, txManager, "TrialExpirationProcessor", "pass a real TxManager to NewTrialExpirationProcessor (or tx.NewNoopTxManagerExplicit(...) to acknowledge non-atomic in-memory use)")
 	return &TrialExpirationProcessor{
 		contractRepo: contractRepo,
 		registry:     registry,

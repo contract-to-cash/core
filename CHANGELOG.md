@@ -53,6 +53,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   successfully-processed event. This closes the "events appended while the
   projector was down are never delivered" gap: a restart resumes exactly where
   it left off. The checkpoint is never advanced past a failed event.
+- **Loud signal for the silent no-transaction default (#187)** — write-side
+  services (`BillingService`, `PaymentService`, `CreditNoteService`) and batch
+  processors (`ContractRenewalProcessor`, `TrialExpirationProcessor`,
+  `BalanceExpirationProcessor`) now emit a **`Warn`-level log once at
+  construction** when they fall back to the default `NoopTxManager`, which runs
+  multi-write flows without atomicity. Wiring the manager (`WithBillingTxManager`
+  etc.) or opting into no-transactions explicitly suppresses it.
+  - New `tx` helpers: `tx.NewNoopTxManagerExplicit(repos)` (deliberate opt-in
+    that does not warn), `tx.IsNoop`, `tx.IsExplicitNoop`, and
+    `tx.WarnIfDefaultNoop(logger, txm, component, remedy)`.
+  - New service options `service.WithoutTransactions()`,
+    `service.WithoutPaymentTransactions()`, and
+    `service.WithoutCreditNoteTransactions()` for intentional in-memory/test/demo
+    use without triggering the warning.
+  - `docs/guides/integration.md` gains a "Transaction Manager (REQUIRED for
+    production)" section enumerating the concrete corruption shapes (credits
+    consumed with no invoice in the billing pipeline; void-without-replacement in
+    `ReissueInvoice`).
 - `port.CustomerGateway.SetDefaultPaymentMethod(ctx, customerID, paymentMethodID)`:
   sets the customer's default payment method used for automatic charges when no
   invoice- or contract-level method is specified, complementing the existing
@@ -240,6 +258,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   construction, display formatting, and adapter code reading third-party strings.
 - Migrate call sites: set `Interval: pricing.Monthly()` (or `Daily/Weekly/Yearly/`
   `Quarterly/SemiAnnual`) instead of `BillingCycle`, and read `GetInterval()`.
+
+### Fixed
+
+- **`tx.RetryOnConflict` no longer silently succeeds without running `fn` (#187)**
+  — a `maxAttempts <= 0` previously returned `nil` without ever invoking the
+  closure, reporting success while doing no work. It is now clamped to `1`, so
+  `fn` always runs at least once and its result (or error) is surfaced.
 
 ### Changed
 

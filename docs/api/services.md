@@ -23,7 +23,7 @@ billingService := service.NewBillingService(
     clock,         // shared.Clock
     // Optional:
     service.WithBalanceRepo(balanceRepo),       // balance.Repository (via option)
-    service.WithBillingTxManager(txManager),    // tx.TxManager (via option, defaults to NoopTxManager)
+    service.WithBillingTxManager(txManager),    // tx.TxManager — REQUIRED for production; without it, defaults to NoopTxManager (non-atomic, warns at construction)
     service.WithBillingLogger(logger),          // *slog.Logger (via option, defaults to slog.Default())
 )
 ```
@@ -112,7 +112,7 @@ paymentService := service.NewPaymentService(
     clock,         // shared.Clock
     // Optional:
     service.WithCustomerGateway(customerGateway),  // port.CustomerGateway — fallback resolution
-    service.WithPaymentTxManager(txManager),       // tx.TxManager (defaults to NoopTxManager)
+    service.WithPaymentTxManager(txManager),       // tx.TxManager — REQUIRED for production; without it, defaults to NoopTxManager (non-atomic, warns at construction)
     service.WithPaymentLogger(logger),             // *slog.Logger (defaults to slog.Default())
 )
 ```
@@ -168,7 +168,7 @@ creditNoteService := service.NewCreditNoteService(
     clock,          // shared.Clock
     // Optional:
     service.WithBillingService(billingService),     // *BillingService — required for ReissueInvoice
-    service.WithCreditNoteTxManager(txManager),     // tx.TxManager (defaults to NoopTxManager)
+    service.WithCreditNoteTxManager(txManager),     // tx.TxManager — REQUIRED for production; without it, defaults to NoopTxManager (non-atomic, warns at construction)
     service.WithCreditNoteLogger(logger),           // *slog.Logger (defaults to slog.Default())
 )
 ```
