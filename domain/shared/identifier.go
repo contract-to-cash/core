@@ -51,7 +51,35 @@ type MetricName string
 
 func (m MetricName) String() string { return string(m) }
 
+// ulidEntropy is the process-wide entropy source for generateULID.
+//
+// It is a concurrency-safe (mutex-locked) MONOTONIC reader over crypto/rand:
+// within the same millisecond, each successive ULID's entropy component is a
+// strictly-increasing increment over the previous one, so creation order ==
+// lexicographic order even for IDs minted in the same millisecond (issue #197
+// follow-up). A plain crypto/rand reader — the previous implementation — gave
+// two same-millisecond ULIDs a RANDOM relative order, which broke the
+// documented "IDs are sortable by creation order" guarantee exactly when it
+// matters (tight loops, batch generation, fast CI machines).
+//
+// crypto/rand is retained as the base entropy (rather than switching to
+// ulid.Make()/DefaultEntropy, whose entropy is a time-seeded math/rand PRNG) so
+// IDs stay unpredictable; Monotonic only constrains ordering within a
+// millisecond, adding a bounded random increment per ID. The inc=0 argument
+// selects the library default (random increments up to math.MaxUint32), whose
+// 80-bit entropy space makes same-millisecond overflow practically impossible.
+var ulidEntropy = &ulid.LockedMonotonicReader{
+	MonotonicReader: ulid.Monotonic(rand.Reader, 0),
+}
+
 // generateULID builds a new ULID string.
+//
+// Ordering guarantee: ULIDs from this function are strictly increasing in
+// creation order, INCLUDING within the same millisecond — the timestamp
+// component orders across milliseconds and the monotonic entropy source
+// (ulidEntropy) orders within one. Code may therefore rely on "greater ID =>
+// created later" for IDs minted by this process (e.g. the latest-voided-invoice
+// selection in BillingService.RegenerateInvoice).
 //
 // This is the single deliberate exception to the project-wide "no time.Now();
 // always go through shared.Clock" rule. The time value here is only the ULID
@@ -61,7 +89,7 @@ func (m MetricName) String() string { return string(m) }
 // as a direct time.Now() call avoids threading a Clock through every
 // NewXxxID() constructor and every call site that generates an ID.
 func generateULID() string {
-	return ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
+	return ulid.MustNew(ulid.Timestamp(time.Now()), ulidEntropy).String()
 }
 
 // NewAccountID generates a new unique AccountID.

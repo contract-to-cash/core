@@ -72,6 +72,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `ConversionReminderDays` are rejected.
 - **Application / eventstore / batch consistency gaps (#197)** — a batch of
   correctness fixes across the service, plugin, batch, and in-memory layers:
+  - **Monotonic ULID generation**: `generateULID()` (all `NewXxxID()` constructors
+    and `GenerateID()`) now uses a process-wide `ulid.LockedMonotonicReader` over
+    crypto/rand, so IDs minted within the same millisecond are strictly increasing
+    in creation order. Previously same-millisecond IDs had random relative order,
+    breaking the documented "IDs are lexicographically sortable by creation order"
+    guarantee (and making the latest-voided-invoice selection below nondeterministic
+    on fast machines). Behavioral only — the ULID format is unchanged, and
+    crypto/rand entropy is retained (deliberately not switched to `ulid.Make()`,
+    whose default entropy is a time-seeded math/rand PRNG).
   - **Upcaster order-dependence**: `ContractCreatedIdempotencyKeyUpcaster.CanUpcast`
     now matches `fromVersion == 2` (was `<= 2`). Registered before
     `ContractCreatedEventUpcaster`, the old guard let a v1 payload jump straight to
