@@ -118,6 +118,9 @@ func (m *mockBalanceRepo) FindApplicationsByInvoice(_ context.Context, _ shared.
 	return nil, nil
 }
 func (m *mockBalanceRepo) SaveRefund(_ context.Context, _ *balance.BalanceRefund) error { return nil }
+func (m *mockBalanceRepo) FindRefundsByInvoice(_ context.Context, _ shared.InvoiceID) ([]*balance.BalanceRefund, error) {
+	return nil, nil
+}
 func (m *mockBalanceRepo) FindExpired(_ context.Context, _ time.Time) ([]*balance.BalanceEntry, error) {
 	return nil, nil
 }

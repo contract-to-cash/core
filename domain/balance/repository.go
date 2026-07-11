@@ -27,6 +27,12 @@ type Repository interface {
 	FindApplicationsByInvoice(ctx context.Context, invoiceID shared.InvoiceID) ([]*BalanceApplication, error)
 	SaveRefund(ctx context.Context, refund *BalanceRefund) error
 
+	// FindRefundsByInvoice returns all credit refunds recorded against an invoice.
+	// The void-restoration flow (issue #184) uses it to skip applications whose
+	// consumed credit was already restored, making a double void / transaction
+	// retry idempotent. Results ordering is unspecified.
+	FindRefundsByInvoice(ctx context.Context, invoiceID shared.InvoiceID) ([]*BalanceRefund, error)
+
 	// FindByAccountID returns all balance entries for an account and currency,
 	// including fully consumed and expired entries, ordered by creation time.
 	FindByAccountID(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*BalanceEntry, error)

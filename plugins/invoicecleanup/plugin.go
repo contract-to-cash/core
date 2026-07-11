@@ -58,6 +58,17 @@ func (p *InvoiceCleanupPlugin) Shutdown(_ context.Context) error { return nil }
 // optimistic-lock conflict (a concurrent writer bumped the version) likewise
 // surfaces as an error the caller can retry; wrap the hook invocation in
 // tx.RetryOnConflict if that race is expected under load.
+//
+// Credit-safety (issue #184): an invoice that already consumed account credit
+// (AppliedBalance() > 0) is deliberately SKIPPED rather than voided. This plugin
+// has no balance repository and no surrounding transaction, so it cannot restore
+// the consumed credit atomically the way CreditNoteService.ReissueInvoice /
+// BillingService.RegenerateInvoice do. Blindly voiding such an invoice here would
+// destroy account-scoped credit on contract cancellation (silent customer money
+// loss). Leaving it in place is the safe default: the integrator can reverse it
+// deliberately through a void path that restores the credit. The skip is silent
+// (this plugin holds no logger); an invoice left un-voided is inert for a
+// cancelled contract and causes no further billing.
 func (p *InvoiceCleanupPlugin) OnContractCancel(ctx *plugin.Context, c *contract.ContractAggregate) error {
 	invoices, err := p.invoiceRepo.FindUnpaidByContract(ctx.Context(), c.ContractID())
 	if err != nil {
@@ -66,6 +77,11 @@ func (p *InvoiceCleanupPlugin) OnContractCancel(ctx *plugin.Context, c *contract
 
 	for _, inv := range invoices {
 		if inv.Status() == invoice.InvoiceStatusDraft || inv.Status() == invoice.InvoiceStatusFinalized {
+			// Skip invoices that consumed credit: voiding here would destroy it
+			// (issue #184). See the method doc for the rationale.
+			if !inv.AppliedBalance().IsZero() {
+				continue
+			}
 			if err := inv.Void(); err != nil {
 				return fmt.Errorf("invoice-cleanup: failed to void invoice %s: %w", inv.ID(), err)
 			}

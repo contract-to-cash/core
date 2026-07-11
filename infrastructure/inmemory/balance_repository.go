@@ -184,6 +184,22 @@ func (r *InMemoryBalanceRepository) SaveRefund(_ context.Context, refund *balanc
 	return nil
 }
 
+// FindRefundsByInvoice returns all credit refunds recorded against an invoice
+// (issue #184). Used by the void-restoration flow to skip already-restored
+// applications, keeping a double void / retry idempotent.
+func (r *InMemoryBalanceRepository) FindRefundsByInvoice(_ context.Context, invoiceID shared.InvoiceID) ([]*balance.BalanceRefund, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var result []*balance.BalanceRefund
+	for _, ref := range r.refunds {
+		if ref.InvoiceID == invoiceID {
+			result = append(result, ref)
+		}
+	}
+	return result, nil
+}
+
 // FindExpired returns entries whose expiry has passed as of asOf and whose
 // remaining amount is still non-zero (i.e. expired credit not yet forfeited by
 // MarkExpired), ordered by creation time ascending. Feeds

@@ -6,6 +6,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Voiding an invoice now restores the credit balance it consumed (#184)** —
+  previously, when an invoice that had drawn down account credit (via FIFO
+  `applyBalances`) was voided, the consumed `BalanceEntry` amounts were never
+  returned to the ledger: the credit stayed consumed against the dead invoice
+  forever (silent customer money loss). This affected
+  `CreditNoteService.ReissueInvoice` (the replacement billed full price while the
+  credit stayed spent) and `plugins/invoicecleanup` (account-scoped credit
+  destroyed on contract cancellation). The fix:
+  - New `balance.BalanceEntry.Restore(amount)` — the inverse of `Consume`:
+    returns consumed credit, rejects negative amounts and restoring more than was
+    consumed, bumps the optimistic-lock version, and deliberately ignores expiry
+    (a restored-but-expired entry is swept later by
+    `batch.BalanceExpirationProcessor`).
+  - New `BillingService.RestoreBalancesForVoidedInvoice(ctx, invoiceID)` and the
+    internal reversal it wraps: reads `FindApplicationsByInvoice`, restores each
+    consumed entry, and records a `BalanceRefund` audit row. Idempotent — a
+    double void / retry restores each application at most once, guarded by the
+    new refund records.
+  - Wired into the void paths in the same transaction:
+    `CreditNoteService.ReissueInvoice` restores before generating the
+    replacement, and `BillingService.RegenerateInvoice` restores the voided
+    invoice's credit before re-applying it.
+  - `plugins/invoicecleanup` now **skips** (does not void) Draft/Finalized
+    invoices with `AppliedBalance() > 0`, since it cannot restore credit
+    atomically; such invoices are left for a credit-restoring void path.
+  - **BREAKING**: `balance.Repository` gains
+    `FindRefundsByInvoice(ctx, invoiceID)`, and `balance.BalanceRefund` gains
+    `InvoiceID` / `ApplicationID` fields. Custom `balance.Repository`
+    implementations must implement the new method.
+
 ### Added
 
 - `port.CustomerGateway.SetDefaultPaymentMethod(ctx, customerID, paymentMethodID)`:

@@ -1812,6 +1812,21 @@ func NewBalanceEntry(accountID shared.AccountID, amount shared.Money, reason Bal
 // 消費が発生した場合は version をインクリメントする。
 func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error)
 
+// Restore は消費済みクレジットをエントリへ戻す（Consume の逆操作、issue #184）。
+// 請求書を void した際に、その請求書が消費したクレジットを台帳へ返却するために使う。
+// ガード:
+//   - amount が負の場合は validation エラー（負の復元は消費になってしまう）。
+//   - amount の通貨がエントリと不一致なら error（Money.Add が検証）。
+//   - remainingAmount + amount が originalAmount を超える場合は business_rule エラー
+//     （消費した以上を戻すとクレジットを捏造することになるため）。
+// ゼロ金額は version 非バンプの冪等 no-op（Consume と対称）。
+// 復元が発生した場合は version をインクリメントする（楽観ロック）。
+// 有効期限セマンティクス: Restore は expiresAt を参照しない。期限切れエントリにも
+// クレジットを戻す（さもなくば void 復元が消失する）。復元後に期限切れのエントリは
+// FindAvailable / GetBalance では提供されず、batch.BalanceExpirationProcessor の
+// MarkExpired で通常の失効経路を通じて没収される。
+func (e *BalanceEntry) Restore(amount shared.Money) error
+
 // MarkExpired は期限切れエントリの残高を没収し、没収額を返す（issue #159）。
 // 「失効」= remainingAmount のゼロ化（status フィールドは持たない。ゼロ残高は
 // IsFullyConsumed / FindAvailable / GetBalance すべてで不活性になる）。
@@ -1851,14 +1866,21 @@ type BalanceApplication struct {
     AppliedAt      time.Time
 }
 
-// BalanceRefund クレジット残高からの返金記録
-// BalanceConfig.AllowManualRefund = true の場合のみ作成可能
+// BalanceRefund クレジット残高の返却（復元）記録
+// 請求書 void 時に、その請求書が消費したクレジットを台帳へ戻した記録（issue #184）。
+// BalanceApplication の対となる監査証跡。
 type BalanceRefund struct {
     ID             string
     BalanceEntryID shared.BalanceEntryID
     AccountID      shared.AccountID
     Amount         shared.Money
     RefundedAt     time.Time
+    // InvoiceID このクレジット復元の起点となった void 済み請求書。
+    // void 復元の冪等性に使う（二重 void / リトライは既存 refund を見てスキップ）。
+    InvoiceID shared.InvoiceID
+    // ApplicationID 復元対象の BalanceApplication。1 請求書が複数エントリを消費し得る
+    // ため、application 単位で冪等性を担保する。
+    ApplicationID string
 }
 ```
 
@@ -1891,8 +1913,13 @@ type Repository interface {
     SaveApplication(ctx context.Context, app *BalanceApplication) error
     FindApplicationsByInvoice(ctx context.Context, invoiceID shared.InvoiceID) ([]*BalanceApplication, error)
 
-    // 返金記録
+    // 返金（復元）記録
     SaveRefund(ctx context.Context, refund *BalanceRefund) error
+
+    // FindRefundsByInvoice 請求書に対して記録された復元 refund を返す（issue #184）。
+    // void 復元フローが、既に復元済みの application をスキップして二重 void /
+    // リトライを冪等にするために使う。
+    FindRefundsByInvoice(ctx context.Context, invoiceID shared.InvoiceID) ([]*BalanceRefund, error)
 
     // FindByAccountID 全エントリ取得（全消費・期限切れ含む、作成時刻昇順）
     FindByAccountID(ctx context.Context, accountID shared.AccountID, currency shared.Currency) ([]*BalanceEntry, error)
@@ -1924,6 +1951,38 @@ type Repository interface {
   |   - 実請求額 > 0: 決済実行
   |   - 実請求額 = 0: 決済不要（全額クレジットで充当）
 ```
+
+#### void 時のクレジット復元（issue #184）
+
+請求書を void すると、その請求書が消費したクレジットは台帳へ **復元** されなければ
+ならない（さもなくば void 済み請求書に対してクレジットが消費されたまま残り、顧客の
+残高が黙って失われる）。復元は消費（applyBalances）の逆操作:
+
+```
+void 復元（BillingService.restoreBalances）:
+  1. FindApplicationsByInvoice(invoiceID) で消費記録を取得
+  2. FindRefundsByInvoice(invoiceID) で復元済み application を除外（冪等ガード）
+  3. 各 application について:
+     - FindByID で消費元 BalanceEntry をロード
+     - BalanceEntry.Restore(application.Amount) で remainingAmount を戻す
+     - Save（楽観ロック）
+     - BalanceRefund レコード作成（InvoiceID / ApplicationID をリンク）
+```
+
+- **冪等性**: 復元済み application（同一 invoice の BalanceRefund が存在）はスキップ。
+  二重 void / トランザクションリトライでも各 application の復元は高々1回。
+  復元全体は呼び出し側のトランザクション内で実行され、途中失敗は全体ロールバックする。
+- **有効期限**: 期限切れエントリにも復元する（`BalanceEntry.Restore` は expiresAt を
+  参照しない）。復元後に期限切れのエントリは `batch.BalanceExpirationProcessor` が
+  通常の失効経路で没収する。
+- **発火箇所**:
+  - `BillingService.RegenerateInvoice`（void-and-recreate）— パイプライン内で
+    クレジット再適用の**前**に voided 請求書の消費分を復元する。
+  - `BillingService.RestoreBalancesForVoidedInvoice`（公開 API）—
+    `CreditNoteService.ReissueInvoice` が original を void した後、置換請求書を
+    生成する**前**に同一トランザクション内で呼ぶ。
+  - `plugins/invoicecleanup` は例外: 残高復元手段もトランザクションも持たないため、
+    `AppliedBalance() > 0` の請求書は **void せずスキップ**する（クレジット破壊を回避）。
 
 #### トランザクション戦略
 

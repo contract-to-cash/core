@@ -447,6 +447,17 @@ func (s *CreditNoteService) ReissueInvoice(ctx context.Context, originalInvoiceI
 			return fmt.Errorf("failed to save voided invoice: %w", saveErr)
 		}
 
+		// Return any credit the original invoice consumed back to the ledger
+		// BEFORE generating the replacement (issue #184). Without this the
+		// replacement's own credit application would find zero balance and bill
+		// full price while the credit stays consumed against the now-voided
+		// invoice forever. Runs inside this same transaction (the BillingService
+		// joins it), so the void, the credit restoration, and the replacement's
+		// re-application commit or roll back together. Idempotent on retry.
+		if restoreErr := s.billingSvc.RestoreBalancesForVoidedInvoice(txCtx, originalInvoiceID); restoreErr != nil {
+			return fmt.Errorf("failed to restore credits from voided invoice: %w", restoreErr)
+		}
+
 		// Generate replacement via BillingService
 		var genErr error
 		replacement, genErr = s.billingSvc.GenerateInvoice(txCtx, original.ContractID(), original.BillingPeriod())
