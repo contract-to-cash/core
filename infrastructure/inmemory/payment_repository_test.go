@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
 )
@@ -281,5 +284,154 @@ func TestInMemoryPaymentRepository_Save_EmptyKeyNotEnforced(t *testing.T) {
 	}
 	if err := repo.Save(ctx, p2); err != nil {
 		t.Errorf("empty-key Save must be allowed, got: %v", err)
+	}
+}
+
+// TestInMemoryPaymentRepository_Save_VersionConflict verifies the #190
+// optimistic-locking contract: two callers that both FindByID the same
+// completed payment and each RecordRefund + Save must not both persist. The
+// second Save (whose LoadedVersion is now stale) is rejected with an error that
+// tx.IsVersionConflict recognizes.
+func TestInMemoryPaymentRepository_Save_VersionConflict(t *testing.T) {
+	repo := NewInMemoryPaymentRepository()
+	ctx := context.Background()
+
+	base := newTestPayment(t, shared.NewInvoiceID())
+	if err := base.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := repo.Save(ctx, base); err != nil {
+		t.Fatalf("seed Save failed: %v", err)
+	}
+
+	// Two independent loads observe the same stored version.
+	loadA, err := repo.FindByID(ctx, base.ID())
+	if err != nil {
+		t.Fatalf("load A: %v", err)
+	}
+	loadB, err := repo.FindByID(ctx, base.ID())
+	if err != nil {
+		t.Fatalf("load B: %v", err)
+	}
+
+	amount := shared.NewMoney(new(big.Rat).SetInt64(3000), shared.CurrencyJPY)
+	if err := loadA.RecordRefund(amount); err != nil {
+		t.Fatalf("A RecordRefund: %v", err)
+	}
+	if err := repo.Save(ctx, loadA); err != nil {
+		t.Fatalf("A Save must win, got: %v", err)
+	}
+
+	// B loaded the pre-refund version; its Save must be rejected.
+	if err := loadB.RecordRefund(amount); err != nil {
+		t.Fatalf("B RecordRefund: %v", err)
+	}
+	err = repo.Save(ctx, loadB)
+	if err == nil {
+		t.Fatal("expected version conflict on stale Save, got nil")
+	}
+	if !tx.IsVersionConflict(err) {
+		t.Errorf("expected a version conflict error, got: %v", err)
+	}
+
+	// The winner's refund is the only one recorded.
+	stored, err := repo.FindByID(ctx, base.ID())
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	if stored.RefundedAmount().Amount().Cmp(big.NewRat(3000, 1)) != 0 {
+		t.Errorf("expected refunded 3000 (one refund), got %s",
+			stored.RefundedAmount().Amount().RatString())
+	}
+	if stored.Status() != payment.PaymentStatusPartiallyRefunded {
+		t.Errorf("expected partially_refunded, got %s", stored.Status())
+	}
+}
+
+// TestInMemoryPaymentRepository_ConcurrentRecordRefund exercises the race under
+// -race: many goroutines concurrently load the same completed payment, each
+// RecordRefund(6000) + Save. Exactly one must win; every loser must observe a
+// version conflict. Without optimistic locking both would succeed
+// last-writer-wins and the books would show one 6000 refund while the gateway
+// moved 12000 (issue #190).
+func TestInMemoryPaymentRepository_ConcurrentRecordRefund(t *testing.T) {
+	repo := NewInMemoryPaymentRepository()
+	ctx := context.Background()
+
+	base, err := payment.NewPayment(
+		shared.NewPaymentID(),
+		shared.NewInvoiceID(),
+		shared.NewMoney(new(big.Rat).SetInt64(10000), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard,
+		"gw_txn",
+		time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	if err := base.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := repo.Save(ctx, base); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+
+	const goroutines = 8
+	// Pre-load one isolated copy per goroutine BEFORE any Save runs, so every
+	// copy observes the same stored version. Loading inside the goroutines would
+	// let a late loader read the winner's already-bumped version and win too,
+	// making the "exactly one winner" assertion flaky. The real-world race this
+	// models is exactly this: multiple operators who all loaded the payment
+	// before any of them committed a refund.
+	loaded := make([]*payment.Payment, goroutines)
+	for i := range loaded {
+		lp, findErr := repo.FindByID(ctx, base.ID())
+		if findErr != nil {
+			t.Fatalf("preload FindByID: %v", findErr)
+		}
+		if refundErr := lp.RecordRefund(
+			shared.NewMoney(new(big.Rat).SetInt64(6000), shared.CurrencyJPY)); refundErr != nil {
+			t.Fatalf("preload RecordRefund: %v", refundErr)
+		}
+		loaded[i] = lp
+	}
+
+	var wins, conflicts int64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(lp *payment.Payment) {
+			defer wg.Done()
+			<-start
+			saveErr := repo.Save(ctx, lp)
+			switch {
+			case saveErr == nil:
+				atomic.AddInt64(&wins, 1)
+			case tx.IsVersionConflict(saveErr):
+				atomic.AddInt64(&conflicts, 1)
+			default:
+				t.Errorf("unexpected Save error: %v", saveErr)
+			}
+		}(loaded[i])
+	}
+	close(start)
+	wg.Wait()
+
+	if wins != 1 {
+		t.Errorf("expected exactly 1 winning Save, got %d", wins)
+	}
+	if conflicts != goroutines-1 {
+		t.Errorf("expected %d version conflicts, got %d", goroutines-1, conflicts)
+	}
+
+	stored, err := repo.FindByID(ctx, base.ID())
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	// Only the winner's single 6000 refund is booked — never 12000.
+	if stored.RefundedAmount().Amount().Cmp(big.NewRat(6000, 1)) != 0 {
+		t.Errorf("expected refunded 6000 (single winner), got %s",
+			stored.RefundedAmount().Amount().RatString())
 	}
 }

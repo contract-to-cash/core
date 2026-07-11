@@ -103,11 +103,15 @@ func clonePayment(p *payment.Payment) (*payment.Payment, error) {
 }
 
 func (r *isolatingPaymentRepo) Save(ctx context.Context, p *payment.Payment) error {
-	clone, err := clonePayment(p)
-	if err != nil {
-		return err
-	}
-	return r.inner.Save(ctx, clone)
+	// Delegate directly WITHOUT pre-cloning: the inner in-memory repository
+	// already stores an isolated snapshot copy (issue #152), so a wrapper clone
+	// here is redundant. It would also be harmful now that Payment carries an
+	// optimistic-locking version (issue #190): cloning via FromSnapshot collapses
+	// loadedVersion into version, so the inner repo's LoadedVersion-vs-stored
+	// check could never pass — even for the race winner. Passing the caller's
+	// pointer through preserves the (version, loadedVersion) pair the inner check
+	// relies on.
+	return r.inner.Save(ctx, p)
 }
 
 func (r *isolatingPaymentRepo) FindByID(ctx context.Context, id shared.PaymentID) (*payment.Payment, error) {

@@ -138,6 +138,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (C5). Corrected the `application/` dependency wording in `CLAUDE.md` and
     `docs/architecture.md` (L6).
 
+### Fixed
+
+- **Payment optimistic locking (#190)** — `payment.Payment` now carries a
+  `version` / `loadedVersion` optimistic-locking pair, mirroring `invoice.Invoice`
+  and `invoice.CreditNote`. Every state transition that changes persisted state
+  (`Complete`, `Fail`, `MarkRefunded`, `MarkPartiallyRefunded`, `MarkChargedBack`,
+  `RecordRefund`) bumps the version. Previously `Payment` had none, so two
+  operators who each loaded a completed payment and called `RecordRefund` could
+  both save last-writer-wins — booking one refund while the gateway moved money
+  twice — and a concurrent `Pending→Completed` (3DS) vs `Pending→Failed` (webhook)
+  pair silently lost one transition.
+  - **BREAKING (adapter implementors)**: `payment.Repository.Save` now documents an
+    optimistic-locking concurrency contract. Implementations MUST reject a stale
+    same-ID write by returning an error that `tx.IsVersionConflict` recognizes
+    (the `tx.ErrVersionConflict` sentinel or a `*shared.DomainError` with code
+    `shared.ErrCodeVersionConflict`) and persist `Version()` on success — or
+    serialize the read (row lock / `SELECT ... FOR UPDATE` / `SERIALIZABLE`). An
+    unconditional last-writer-wins upsert reintroduces the double-refund window.
+    The first save of a given ID (fresh payment, `LoadedVersion` 0) is unaffected,
+    so this is source-compatible for existing callers.
+  - `PaymentSnapshot` gained a `Version` field; `ToSnapshot` / `FromSnapshot`
+    round-trip it (with `FromSnapshot` restoring both `version` and
+    `loadedVersion` from the single field).
+  - `PaymentService.Refund` now wraps its local bookkeeping transaction in
+    `tx.RetryOnConflict`, mirroring `CreditNoteService.RefundCreditNote`: a version
+    conflict retries against the winner's freshly-persisted state, where
+    `RecordRefund` re-validates and surfaces a clean over-refund domain error
+    instead of a spurious reconciliation alert. `ProcessPayment`'s existing
+    idempotency-key race machinery is unchanged.
+  - The reference `infrastructure/inmemory` payment repository now enforces the
+    version check.
+
 ### Removed
 
 - **Dead-code inventory (#159, applying the #116 delete-unused policy)**:

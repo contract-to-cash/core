@@ -51,6 +51,10 @@ type PaymentSnapshot struct {
 	FailureReason        *string
 	ProcessedAt          time.Time
 	Metadata             map[string]string
+	// Version is the optimistic-locking version (issue #190). The entity's
+	// loadedVersion is not stored separately: FromSnapshot sets both version and
+	// loadedVersion from this single field.
+	Version int
 }
 
 // ToSnapshot returns a flat, independent copy of the payment's internal state.
@@ -80,6 +84,7 @@ func (p *Payment) ToSnapshot() PaymentSnapshot {
 		FailureReason:        failureReason,
 		ProcessedAt:          p.processedAt,
 		Metadata:             metadata,
+		Version:              p.version,
 	}
 }
 
@@ -118,5 +123,9 @@ func FromSnapshot(s PaymentSnapshot) (*Payment, error) {
 		failureReason:        failureReason,
 		processedAt:          s.ProcessedAt,
 		metadata:             metadata,
+		// loadedVersion is set to Version so the next Save through a repository
+		// with optimistic locking compares against the correct baseline (#190).
+		version:       s.Version,
+		loadedVersion: s.Version,
 	}, nil
 }

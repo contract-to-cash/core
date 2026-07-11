@@ -19,6 +19,7 @@ import (
 	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
+	"github.com/contract-to-cash/core/infrastructure/inmemory"
 	"github.com/contract-to-cash/core/plugin"
 )
 
@@ -3260,5 +3261,107 @@ func TestProcessPayment_OnPaymentProcessedNotFiredOnGatewayFailure(t *testing.T)
 	}
 	if spy.called {
 		t.Error("OnPaymentProcessed must not fire when the charge fails")
+	}
+}
+
+// --- Refund optimistic-lock retry (issue #190) ---
+
+// conflictInjectingPaymentRepo wraps a real in-memory payment repository and
+// forces the first `failures` Save calls to return tx.ErrVersionConflict,
+// simulating an optimistic-locking backend that lost a race to a concurrent
+// writer. It lets the service-level Refund test exercise the RetryOnConflict
+// wrapper deterministically without spinning up real goroutines.
+type conflictInjectingPaymentRepo struct {
+	inner     *inmemory.InMemoryPaymentRepository
+	mu        sync.Mutex
+	failures  int
+	saveCalls int
+}
+
+func (r *conflictInjectingPaymentRepo) Save(ctx context.Context, p *payment.Payment) error {
+	r.mu.Lock()
+	r.saveCalls++
+	if r.failures > 0 {
+		r.failures--
+		r.mu.Unlock()
+		return tx.ErrVersionConflict
+	}
+	r.mu.Unlock()
+	return r.inner.Save(ctx, p)
+}
+func (r *conflictInjectingPaymentRepo) FindByID(ctx context.Context, id shared.PaymentID) (*payment.Payment, error) {
+	return r.inner.FindByID(ctx, id)
+}
+func (r *conflictInjectingPaymentRepo) FindByInvoiceID(ctx context.Context, id shared.InvoiceID) ([]*payment.Payment, error) {
+	return r.inner.FindByInvoiceID(ctx, id)
+}
+func (r *conflictInjectingPaymentRepo) FindByIdempotencyKey(ctx context.Context, key string) (*payment.Payment, error) {
+	return r.inner.FindByIdempotencyKey(ctx, key)
+}
+
+// TestRefund_RetriesOnVersionConflict verifies that PaymentService.Refund
+// retries its local bookkeeping transaction when the payment repository reports
+// an optimistic-lock conflict (issue #190). The gateway refund is deterministic
+// and already succeeded, so the retry must re-read the payment and record the
+// refund exactly once — surfacing no error to the caller.
+func TestRefund_RetriesOnVersionConflict(t *testing.T) {
+	clock := newPaymentTestClock()
+	ctx := context.Background()
+
+	inner := inmemory.NewInMemoryPaymentRepository()
+	seed, err := payment.NewPayment(
+		shared.NewPaymentID(),
+		shared.NewInvoiceID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard,
+		"gw_txn_190",
+		clock.Now(),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	if err := seed.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := inner.Save(ctx, seed); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+
+	// Fail the first Save with a version conflict; the retry must succeed.
+	repo := &conflictInjectingPaymentRepo{inner: inner, failures: 1}
+
+	svc := NewPaymentService(
+		&mockGateway{}, // Refund() returns success
+		repo,
+		&mockInvoiceRepoForPayment{},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	amount := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+	if err := svc.Refund(ctx, seed.ID(), RefundInput{
+		Amount: &amount,
+		Reason: port.RefundReasonRequestedByCustomer,
+	}); err != nil {
+		t.Fatalf("Refund should succeed after a retried version conflict, got: %v", err)
+	}
+
+	if repo.saveCalls < 2 {
+		t.Errorf("expected at least 2 Save attempts (conflict + retry), got %d", repo.saveCalls)
+	}
+
+	// Exactly one refund of 3000 must be booked.
+	stored, err := inner.FindByID(ctx, seed.ID())
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	if stored.RefundedAmount().Amount().Cmp(big.NewRat(3000, 1)) != 0 {
+		t.Errorf("expected refunded 3000 recorded once, got %s",
+			stored.RefundedAmount().Amount().RatString())
+	}
+	if stored.Status() != payment.PaymentStatusPartiallyRefunded {
+		t.Errorf("expected partially_refunded, got %s", stored.Status())
 	}
 }

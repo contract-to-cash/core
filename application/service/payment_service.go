@@ -27,6 +27,14 @@ import (
 // gateway and fails with an opaque validation error.
 const adyenMaxIdempotencyKeyLen = 64
 
+// paymentMaxRetries bounds the optimistic-lock retry loop around the payment
+// bookkeeping transaction (issue #190). It mirrors creditNoteMaxRetries: a
+// small number of attempts is enough because a version conflict means a
+// concurrent writer already committed, and the re-read either converges or is
+// rejected by a domain guard (e.g. RecordRefund's over-refund check) — neither
+// of which benefits from many retries.
+const paymentMaxRetries = 3
+
 // newRetryEffectiveKey derives a fresh effective idempotency key by appending
 // an opaque ULID suffix to the caller's original key. The suffix is not
 // exposed as a public helper anywhere in the tree because effective-key
@@ -1014,12 +1022,20 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 // that the check-then-act is not split across the transaction boundary. Re-load
 // happens through the transaction-scoped repository, so on a backend that
 // honours the payment [payment.Repository] concurrency contract (row lock /
-// SELECT ... FOR UPDATE / SERIALIZABLE), a concurrent second refund observes
+// SELECT ... FOR UPDATE / SERIALIZABLE / optimistic version), a concurrent second refund observes
 // the winner's already-recorded state and RecordRefund rejects it with a domain
 // error (invalid_state_transition or over-refund). The money never moved twice
 // because the gateway deduped the two calls under one key. On a last-writer-wins
 // backend the local guard is weaker, but the gateway key still prevents the
 // double refund — the worst case is a redundant local write, not lost money.
+//
+// The tx.Run is wrapped in tx.RetryOnConflict (issue #190): now that
+// RecordRefund bumps the payment's optimistic-locking version, an
+// optimistic-locking backend rejects the loser's Save with a version conflict
+// instead of silently overwriting. RetryOnConflict re-runs the closure, which
+// re-reads the payment (now carrying the winner's refund) and lets RecordRefund
+// re-validate — converging on a clean over-refund domain error rather than a
+// spurious reconciliation alert. This mirrors CreditNoteService.RefundCreditNote.
 //
 // tx.Run (not raw RunInTx) joins an outer transaction if the caller already
 // started one, and stamps the tx onto the context.
@@ -1084,23 +1100,37 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 	// error rather than double-recording.
 	var recorded *payment.Payment
 	var recordRejected bool
-	err = tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
-		loaded, findErr := repos.Payments.FindByID(txCtx, paymentID)
-		if findErr != nil {
-			return fmt.Errorf("failed to reload payment for refund: %w", findErr)
-		}
-		if refundErr := loaded.RecordRefund(refundAmount); refundErr != nil {
-			// Domain rejection (already refunded / over-refund) — typically a
-			// concurrent refund that recorded first. Flag it so the outer code
-			// distinguishes this benign case from a genuine persistence failure.
-			recordRejected = true
-			return refundErr
-		}
-		if saveErr := repos.Payments.Save(txCtx, loaded); saveErr != nil {
-			return saveErr
-		}
-		recorded = loaded
-		return nil
+	err = tx.RetryOnConflict(paymentMaxRetries, func() error {
+		// Reset per attempt: a prior attempt that hit a version conflict must not
+		// leak its (unset) recordRejected state into this one. RetryOnConflict only
+		// retries on version conflicts, which are NOT domain rejections, so
+		// recordRejected is always false when we retry — but reset defensively.
+		recordRejected = false
+		recorded = nil
+		return tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+			loaded, findErr := repos.Payments.FindByID(txCtx, paymentID)
+			if findErr != nil {
+				return fmt.Errorf("failed to reload payment for refund: %w", findErr)
+			}
+			if refundErr := loaded.RecordRefund(refundAmount); refundErr != nil {
+				// Domain rejection (already refunded / over-refund) — typically a
+				// concurrent refund that recorded first. Flag it so the outer code
+				// distinguishes this benign case from a genuine persistence failure.
+				// This is NOT a version conflict, so RetryOnConflict will not retry
+				// it — the error propagates straight out.
+				recordRejected = true
+				return refundErr
+			}
+			// A version conflict here (optimistic-locking backend, concurrent
+			// writer committed first) is returned unwrapped so tx.IsVersionConflict
+			// recognizes it and RetryOnConflict re-runs this closure against the
+			// winner's freshly-persisted state.
+			if saveErr := repos.Payments.Save(txCtx, loaded); saveErr != nil {
+				return saveErr
+			}
+			recorded = loaded
+			return nil
+		})
 	})
 	if err != nil {
 		if recordRejected {

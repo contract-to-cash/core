@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
 )
@@ -16,12 +17,14 @@ var _ payment.Repository = (*InMemoryPaymentRepository)(nil)
 type InMemoryPaymentRepository struct {
 	mu       sync.RWMutex
 	payments map[shared.PaymentID]*payment.Payment
+	versions map[shared.PaymentID]int // stored optimistic-locking version per payment
 }
 
 // NewInMemoryPaymentRepository creates a new InMemoryPaymentRepository.
 func NewInMemoryPaymentRepository() *InMemoryPaymentRepository {
 	return &InMemoryPaymentRepository{
 		payments: make(map[shared.PaymentID]*payment.Payment),
+		versions: make(map[shared.PaymentID]int),
 	}
 }
 
@@ -43,6 +46,14 @@ func NewInMemoryPaymentRepository() *InMemoryPaymentRepository {
 // PaymentService catches the sentinel and converges on the winner's
 // record via FindByIdempotencyKey rather than firing saga compensation
 // — see application/service/payment_service.go.
+//
+// Optimistic-locking guard (issue #190): for a same-ID re-save, Save compares
+// the payment's LoadedVersion against the stored version and rejects the write
+// with tx.ErrVersionConflict when they differ, so a concurrent
+// RecordRefund-vs-RecordRefund (or Complete-vs-Fail) on the same loaded payment
+// cannot both persist last-writer-wins. The first save of a given ID has no
+// stored version to compare against and always succeeds, so callers that
+// construct a fresh payment (LoadedVersion 0) are unaffected.
 func (r *InMemoryPaymentRepository) Save(_ context.Context, p *payment.Payment) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -62,19 +73,32 @@ func (r *InMemoryPaymentRepository) Save(_ context.Context, p *payment.Payment) 
 		}
 	}
 
+	if storedVersion, ok := r.versions[p.ID()]; ok {
+		if p.LoadedVersion() != storedVersion {
+			return tx.ErrVersionConflict
+		}
+	}
+
 	// Store an ISOLATED copy (snapshot round-trip), not the caller's pointer, so
 	// the caller's later mutations to p cannot leak into the repository or into
-	// concurrent readers (issue #152). Payment has no optimistic-locking version,
-	// so the round-trip is a straight deep copy.
+	// concurrent readers (issue #152). FromSnapshot restores version and
+	// loadedVersion together, matching the just-persisted baseline.
 	stored, err := clonePayment(p)
 	if err != nil {
 		return err
 	}
 	r.payments[p.ID()] = stored
+	r.versions[p.ID()] = p.Version()
+	// Sync loadedVersion so subsequent saves from the same pointer (the common
+	// non-isolated in-memory case) compare against the just-persisted version.
+	p.SetVersion(p.Version())
 	return nil
 }
 
 // clonePayment returns an isolated deep copy of p via the snapshot round-trip.
+// FromSnapshot restores version and loadedVersion from the single stored version
+// field, so the clone carries the same optimistic-locking baseline as the
+// original (issue #190).
 func clonePayment(p *payment.Payment) (*payment.Payment, error) {
 	return payment.FromSnapshot(p.ToSnapshot())
 }
