@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -2140,5 +2141,111 @@ func TestFinalizeInvoice_NotFound(t *testing.T) {
 	var domainErr *shared.DomainError
 	if !errors.As(err, &domainErr) || domainErr.Code != shared.ErrCodeNotFound {
 		t.Errorf("expected not_found domain error, got: %v", err)
+	}
+}
+
+// --- issue #188: negative-returning plugins ---
+
+type negativeDiscountPlugin struct {
+	amount shared.Money
+}
+
+func (p *negativeDiscountPlugin) Name() string                                        { return "negative_discount" }
+func (p *negativeDiscountPlugin) Version() string                                     { return "1.0.0" }
+func (p *negativeDiscountPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *negativeDiscountPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *negativeDiscountPlugin) Priority() int                                       { return 100 }
+func (p *negativeDiscountPlugin) CalculateDiscount(_ *plugin.CalculationContext) (shared.Money, error) {
+	return p.amount, nil
+}
+
+type negativeTaxPlugin struct {
+	amount shared.Money
+}
+
+func (p *negativeTaxPlugin) Name() string                                        { return "negative_tax" }
+func (p *negativeTaxPlugin) Version() string                                     { return "1.0.0" }
+func (p *negativeTaxPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *negativeTaxPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *negativeTaxPlugin) Priority() int                                       { return 100 }
+func (p *negativeTaxPlugin) CalculateTax(_ *plugin.CalculationContext) (shared.Money, error) {
+	return p.amount, nil
+}
+
+// TestGenerateInvoice_NegativeDiscountRejected verifies the pipeline boundary
+// guard (issue #188): a discount hook returning a negative amount aborts the
+// pipeline with a structured DomainError naming the offending plugin, rather
+// than silently over-billing (afterDiscount = subtotal + |discount|).
+func TestGenerateInvoice_NegativeDiscountRejected(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(5000))
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(&negativeDiscountPlugin{amount: jpy(-1000)})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		registry,
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err == nil {
+		t.Fatal("expected error for negative discount, got nil")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) {
+		t.Fatalf("expected *shared.DomainError, got %T: %v", err, err)
+	}
+	if domErr.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected business_rule error code, got %s", domErr.Code)
+	}
+	if !strings.Contains(domErr.Error(), "negative_discount") {
+		t.Errorf("expected error to name the plugin 'negative_discount', got %q", domErr.Error())
+	}
+}
+
+// TestGenerateInvoice_NegativeTaxRejected verifies the pipeline boundary guard
+// (issue #188): a tax hook returning a negative amount aborts the pipeline with
+// a structured DomainError naming the offending plugin, rather than producing a
+// negative invoice total.
+func TestGenerateInvoice_NegativeTaxRejected(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(5000))
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(&negativeTaxPlugin{amount: jpy(-6000)})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		registry,
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	_, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err == nil {
+		t.Fatal("expected error for negative tax, got nil")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) {
+		t.Fatalf("expected *shared.DomainError, got %T: %v", err, err)
+	}
+	if domErr.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected business_rule error code, got %s", domErr.Code)
+	}
+	if !strings.Contains(domErr.Error(), "negative_tax") {
+		t.Errorf("expected error to name the plugin 'negative_tax', got %q", domErr.Error())
 	}
 }

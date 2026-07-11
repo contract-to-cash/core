@@ -368,3 +368,181 @@ func TestInvoice_RecordPayment_Partial(t *testing.T) {
 		t.Errorf("expected balance 7000, got %s", inv.Balance().Amount().RatString())
 	}
 }
+
+// TestNewInvoice_SignAndMagnitudeInvariants exercises the issue #188 invariants:
+// subtotal / discount / tax must be non-negative and discount must not exceed
+// subtotal. A violation must surface a validation *shared.DomainError.
+func TestNewInvoice_SignAndMagnitudeInvariants(t *testing.T) {
+	tests := []struct {
+		name     string
+		subtotal shared.Money
+		discount shared.Money
+		tax      shared.Money
+		wantErr  bool
+		wantCode shared.ErrorCode
+	}{
+		{
+			name:     "valid non-negative amounts",
+			subtotal: jpy(10000),
+			discount: jpy(500),
+			tax:      jpy(950),
+			wantErr:  false,
+		},
+		{
+			name:     "valid discount equal to subtotal",
+			subtotal: jpy(10000),
+			discount: jpy(10000),
+			tax:      shared.Zero(shared.CurrencyJPY),
+			wantErr:  false,
+		},
+		{
+			name:     "negative subtotal rejected",
+			subtotal: jpy(-1),
+			discount: shared.Zero(shared.CurrencyJPY),
+			tax:      shared.Zero(shared.CurrencyJPY),
+			wantErr:  true,
+			wantCode: shared.ErrCodeValidation,
+		},
+		{
+			name:     "negative discount rejected",
+			subtotal: jpy(10000),
+			discount: jpy(-1000),
+			tax:      shared.Zero(shared.CurrencyJPY),
+			wantErr:  true,
+			wantCode: shared.ErrCodeValidation,
+		},
+		{
+			name:     "negative tax rejected",
+			subtotal: jpy(10000),
+			discount: shared.Zero(shared.CurrencyJPY),
+			tax:      jpy(-1),
+			wantErr:  true,
+			wantCode: shared.ErrCodeValidation,
+		},
+		{
+			name:     "discount exceeding subtotal rejected",
+			subtotal: jpy(100),
+			discount: jpy(200),
+			tax:      shared.Zero(shared.CurrencyJPY),
+			wantErr:  true,
+			wantCode: shared.ErrCodeValidation,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewInvoice(shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
+				tt.subtotal, tt.discount, tt.tax)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var domErr *shared.DomainError
+			if !errors.As(err, &domErr) {
+				t.Fatalf("expected *shared.DomainError, got %T", err)
+			}
+			if domErr.Code != tt.wantCode {
+				t.Errorf("expected error code %s, got %s", tt.wantCode, domErr.Code)
+			}
+		})
+	}
+}
+
+// TestWithAppliedBalance_Bounds checks that WithAppliedBalance rejects negative
+// and greater-than-total applied balances while accepting in-range values (#188).
+func TestWithAppliedBalance_Bounds(t *testing.T) {
+	// total = 10000 - 0 + 0 = 10000
+	subtotal := jpy(10000)
+	zero := shared.Zero(shared.CurrencyJPY)
+
+	tests := []struct {
+		name    string
+		applied shared.Money
+		wantErr bool
+		code    shared.ErrorCode
+	}{
+		{name: "in range", applied: jpy(3000), wantErr: false},
+		{name: "equal to total", applied: jpy(10000), wantErr: false},
+		{name: "negative rejected", applied: jpy(-1), wantErr: true, code: shared.ErrCodeValidation},
+		{name: "exceeds total rejected", applied: jpy(10001), wantErr: true, code: shared.ErrCodeValidation},
+		{name: "currency mismatch rejected", applied: shared.NewMoney(big.NewRat(100, 1), shared.CurrencyUSD), wantErr: true, code: shared.ErrCodeCurrencyMismatch},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inv, err := NewInvoice(shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
+				subtotal, zero, zero, WithAppliedBalance(tt.applied))
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				wantDue, _ := subtotal.Subtract(tt.applied)
+				if inv.AmountDue().Amount().Cmp(wantDue.Amount()) != 0 {
+					t.Errorf("expected amount due %s, got %s", wantDue.Amount().RatString(), inv.AmountDue().Amount().RatString())
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var domErr *shared.DomainError
+			if !errors.As(err, &domErr) {
+				t.Fatalf("expected *shared.DomainError, got %T", err)
+			}
+			if domErr.Code != tt.code {
+				t.Errorf("expected error code %s, got %s", tt.code, domErr.Code)
+			}
+		})
+	}
+}
+
+// TestWithAmountDue_Bounds checks that WithAmountDue rejects negative and
+// greater-than-total amounts (#188).
+func TestWithAmountDue_Bounds(t *testing.T) {
+	subtotal := jpy(10000)
+	zero := shared.Zero(shared.CurrencyJPY)
+
+	tests := []struct {
+		name    string
+		due     shared.Money
+		wantErr bool
+		code    shared.ErrorCode
+	}{
+		{name: "in range", due: jpy(5000), wantErr: false},
+		{name: "equal to total", due: jpy(10000), wantErr: false},
+		{name: "negative rejected", due: jpy(-1), wantErr: true, code: shared.ErrCodeValidation},
+		{name: "exceeds total rejected", due: jpy(10001), wantErr: true, code: shared.ErrCodeValidation},
+		{name: "currency mismatch rejected", due: shared.NewMoney(big.NewRat(100, 1), shared.CurrencyUSD), wantErr: true, code: shared.ErrCodeCurrencyMismatch},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inv, err := NewInvoice(shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
+				subtotal, zero, zero, WithAmountDue(tt.due))
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if inv.AmountDue().Amount().Cmp(tt.due.Amount()) != 0 {
+					t.Errorf("expected amount due %s, got %s", tt.due.Amount().RatString(), inv.AmountDue().Amount().RatString())
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			var domErr *shared.DomainError
+			if !errors.As(err, &domErr) {
+				t.Fatalf("expected *shared.DomainError, got %T", err)
+			}
+			if domErr.Code != tt.code {
+				t.Errorf("expected error code %s, got %s", tt.code, domErr.Code)
+			}
+		})
+	}
+}

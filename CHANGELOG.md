@@ -425,6 +425,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     from event data plus the still-present suspension config, so `ContractResumedEvent`
     needs no new field and no snapshot-schema bump (the existing
     `SuspensionConfiguration` already persists `SuspendedAt`/`ExtendContract`).
+- **Negative / inverted invoice amounts are now rejected at the boundary (#188)**.
+  The billing pipeline accepted negative discounts and taxes from plugins, and
+  `invoice.NewInvoice` accepted a negative subtotal/discount/tax or a discount
+  exceeding the subtotal — any of which produced a negative or over-billed total.
+  A subtotal ¥100 with a ¥200 discount yielded `Total() = -100`, after which
+  `ValidatePayment` rejected *every* payment ("would exceed amount due -100"),
+  leaving a permanently unsettleable invoice.
+  - `BillingService.executeBillingPipeline` now validates each `DiscountHook` /
+    `TaxHook` return value inside the hook loop: a negative amount aborts the
+    pipeline with a `shared.DomainError` (`business_rule_violation`) that names
+    the offending plugin and the amount; a foreign-currency return is attributed
+    to the plugin as a `currency_mismatch` error.
+  - `invoice.NewInvoice` now enforces its monetary invariants: `subtotal`,
+    `discountAmount`, `taxAmount` must be non-negative and `discountAmount ≤
+    subtotal` (`validation_error`), in addition to the existing currency-parity
+    checks. The constructor already returned `(*Invoice, error)`, so this is a
+    behavioral tightening, **not** a signature change. Validation lives on the
+    constructor only — `InvoiceFromSnapshot` is unchanged, so snapshots of
+    legacy invoices persisted under looser rules still load (replay-safe).
+  - `WithAppliedBalance` now rejects a negative applied balance or one greater
+    than the total; `WithAmountDue` now rejects a negative amount due, one
+    greater than the total, or a currency mismatch — all via the existing
+    deferred-`optErr` option-validation path surfaced by `NewInvoice`.
 - `pricing.TieredPrice` gains a validating constructor `NewTieredPrice(tiers, mode)`
   and no longer silently mis-bills a misconfigured tiered price (#156). Previously
   `TieredPrice` took its tiers through exported fields with no validation, so two

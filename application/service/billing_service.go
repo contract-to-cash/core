@@ -555,9 +555,20 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 		if err != nil {
 			return nil, fmt.Errorf("DiscountHook error: %w", err)
 		}
+		// Boundary validation (issue #188): a discount hook must return a
+		// non-negative amount. A negative discount would inflate the subtotal
+		// (afterDiscount = subtotal - discount > subtotal), silently over-billing.
+		if discount.IsNegative() {
+			return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+				fmt.Sprintf("discount hook %q returned a negative discount: %s",
+					hook.Name(), discount.Amount().RatString()))
+		}
 		totalDiscount, err = totalDiscount.Add(discount)
 		if err != nil {
-			return nil, fmt.Errorf("failed to sum discounts: %w", err)
+			// A currency mismatch surfaces here; attribute it to the offending
+			// plugin so the failure is diagnosable.
+			return nil, shared.NewDomainErrorWithCause(shared.ErrCodeCurrencyMismatch,
+				fmt.Sprintf("discount hook %q returned an incompatible currency", hook.Name()), err)
 		}
 	}
 
@@ -585,9 +596,18 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 		if err != nil {
 			return nil, fmt.Errorf("TaxHook error: %w", err)
 		}
+		// Boundary validation (issue #188): a tax hook must return a non-negative
+		// amount. A negative tax exceeding afterDiscount would drive the invoice
+		// total below zero, producing an unsettleable invoice.
+		if tax.IsNegative() {
+			return nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+				fmt.Sprintf("tax hook %q returned a negative tax: %s",
+					hook.Name(), tax.Amount().RatString()))
+		}
 		totalTax, err = totalTax.Add(tax)
 		if err != nil {
-			return nil, fmt.Errorf("failed to sum taxes: %w", err)
+			return nil, shared.NewDomainErrorWithCause(shared.ErrCodeCurrencyMismatch,
+				fmt.Sprintf("tax hook %q returned an incompatible currency", hook.Name()), err)
 		}
 	}
 

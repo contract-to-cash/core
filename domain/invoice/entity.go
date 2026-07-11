@@ -201,6 +201,17 @@ func WithDueDate(t time.Time) InvoiceOption {
 // invoice and surfaced by NewInvoice (issue #148).
 func WithAppliedBalance(c shared.Money) InvoiceOption {
 	return func(inv *Invoice) {
+		// Sign/magnitude invariants (issue #188): a negative applied balance would
+		// inflate amountDue above the total, and an applied balance greater than
+		// the total would drive amountDue negative — both leave an invoice that
+		// cannot be settled correctly.
+		if c.IsNegative() {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("applied balance must not be negative: %s", c.Amount().RatString()))
+			}
+			return
+		}
 		inv.appliedBalance = c
 		amountDue, err := inv.total.Subtract(c)
 		if err != nil {
@@ -210,14 +221,49 @@ func WithAppliedBalance(c shared.Money) InvoiceOption {
 			}
 			return
 		}
+		// A negative amountDue means the applied balance exceeded the total.
+		if amountDue.IsNegative() {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("applied balance %s must not exceed invoice total %s",
+						c.Amount().RatString(), inv.total.Amount().RatString()))
+			}
+			return
+		}
 		inv.amountDue = amountDue
 		inv.balance = amountDue
 	}
 }
 
 // WithAmountDue sets the amount due.
+//
+// The amount due must be non-negative and must not exceed the invoice total
+// (issue #188); a negative or inflated amountDue is unsettleable / over-billing.
 func WithAmountDue(a shared.Money) InvoiceOption {
 	return func(inv *Invoice) {
+		if a.IsNegative() {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("amount due must not be negative: %s", a.Amount().RatString()))
+			}
+			return
+		}
+		if a.Currency() != inv.total.Currency() {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+					fmt.Sprintf("currency mismatch between amount due (%s) and invoice total (%s)",
+						a.Currency(), inv.total.Currency()))
+			}
+			return
+		}
+		if a.GreaterThan(inv.total) {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("amount due %s must not exceed invoice total %s",
+						a.Amount().RatString(), inv.total.Amount().RatString()))
+			}
+			return
+		}
 		inv.amountDue = a
 	}
 }
@@ -260,11 +306,38 @@ func NewInvoice(
 	taxAmount shared.Money,
 	opts ...InvoiceOption,
 ) (*Invoice, error) {
+	// Sign/magnitude invariants (issue #188): an invoice's monetary components
+	// must be non-negative and the discount must not exceed the subtotal. Without
+	// these guards a buggy plugin (or caller) can produce a negative or inverted
+	// total — e.g. subtotal ¥100 + discount ¥200 yields Total() = -100, which then
+	// makes ValidatePayment reject EVERY payment ("would exceed amount due -100"),
+	// leaving a permanently unsettleable invoice.
+	if subtotal.IsNegative() {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("invoice subtotal must not be negative: %s", subtotal.Amount().RatString()))
+	}
+	if discountAmount.IsNegative() {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("invoice discount amount must not be negative: %s", discountAmount.Amount().RatString()))
+	}
+	if taxAmount.IsNegative() {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("invoice tax amount must not be negative: %s", taxAmount.Amount().RatString()))
+	}
+
 	// total = subtotal - discountAmount + taxAmount
 	afterDiscount, err := subtotal.Subtract(discountAmount)
 	if err != nil {
 		return nil, shared.NewDomainErrorWithCause(shared.ErrCodeCurrencyMismatch,
 			"currency mismatch between subtotal and discount amount", err)
+	}
+	// discount ≤ subtotal. Currency parity is already guaranteed by the Subtract
+	// above, so a negative afterDiscount can only mean the discount exceeds the
+	// subtotal.
+	if afterDiscount.IsNegative() {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("invoice discount amount %s must not exceed subtotal %s",
+				discountAmount.Amount().RatString(), subtotal.Amount().RatString()))
 	}
 	total, err := afterDiscount.Add(taxAmount)
 	if err != nil {
