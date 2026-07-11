@@ -100,14 +100,107 @@ func TestBillingInterval_AddTo(t *testing.T) {
 	}
 }
 
-func TestBillingInterval_AddTo_EndOfMonth(t *testing.T) {
-	// Jan 31 + 1 month = Feb 28 (Go's AddDate behavior)
-	base := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
-	interval, _ := NewBillingInterval(IntervalUnitMonth, 1)
-	result := interval.AddTo(base)
-	expected := time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC) // Go normalizes Feb 31 -> Mar 3
-	if !result.Equal(expected) {
-		t.Errorf("expected %v, got %v", expected, result)
+// TestBillingInterval_AddTo_Clamping verifies calendar-correct month/year
+// addition: the day-of-month is clamped to the last valid day of the target
+// month instead of overflowing into the next month (issue #186). Before the
+// fix, time.AddDate normalized Jan 31 + 1 month to Mar 3, drifting the anchor.
+func TestBillingInterval_AddTo_Clamping(t *testing.T) {
+	tests := []struct {
+		name     string
+		base     time.Time
+		unit     IntervalUnit
+		count    int
+		expected time.Time
+	}{
+		{"Jan31 +1mo -> Feb28 (non-leap)", time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{"Jan31 +1mo -> Feb29 (leap)", time.Date(2028, 1, 31, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC)},
+		{"Jan31 +2mo -> Mar31", time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 2, time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)},
+		{"Mar31 +1mo -> Apr30", time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)},
+		{"Jan30 +1mo -> Feb28", time.Date(2026, 1, 30, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{"Aug31 +3mo (quarterly) -> Nov30", time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 3, time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC)},
+		{"Dec31 +1mo -> Jan31 (year rollover)", time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, time.Date(2027, 1, 31, 0, 0, 0, 0, time.UTC)},
+		{"Feb29 +1yr -> Feb28 (leap to non-leap)", time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC), IntervalUnitYear, 1, time.Date(2029, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{"Feb29 +4yr -> Feb29 (leap to leap)", time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC), IntervalUnitYear, 4, time.Date(2032, 2, 29, 0, 0, 0, 0, time.UTC)},
+		{"time-of-day preserved", time.Date(2026, 1, 31, 10, 30, 15, 0, time.UTC), IntervalUnitMonth, 1, time.Date(2026, 2, 28, 10, 30, 15, 0, time.UTC)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			interval, err := NewBillingInterval(tt.unit, tt.count)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			result := interval.AddTo(tt.base)
+			if !result.Equal(tt.expected) {
+				t.Errorf("AddTo(%v): expected %v, got %v", tt.base, tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestBillingInterval_AddToWithAnchorDay verifies that passing the original
+// billing anchor day restores the intended day-of-month wherever the target
+// month allows, preventing anchor drift across successive renewals (issue #186).
+func TestBillingInterval_AddToWithAnchorDay(t *testing.T) {
+	tests := []struct {
+		name      string
+		base      time.Time
+		unit      IntervalUnit
+		count     int
+		anchorDay int
+		expected  time.Time
+	}{
+		{"Feb28 +1mo anchor31 -> Mar31 (recovers)", time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, 31, time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC)},
+		{"Mar31 +1mo anchor31 -> Apr30 (clamped)", time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, 31, time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)},
+		{"Apr30 +1mo anchor31 -> May31 (recovers)", time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, 31, time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC)},
+		{"Feb28 +1yr anchor29 -> Feb28 (non-leap)", time.Date(2025, 2, 28, 0, 0, 0, 0, time.UTC), IntervalUnitYear, 1, 29, time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{"Feb28 +1yr anchor29 -> Feb29 (leap recovers)", time.Date(2027, 2, 28, 0, 0, 0, 0, time.UTC), IntervalUnitYear, 1, 29, time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC)},
+		{"mid-month anchor15 unaffected", time.Date(2026, 2, 15, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, 15, time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)},
+		{"anchorDay 0 falls back to AddTo", time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC), IntervalUnitMonth, 1, 0, time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)},
+		{"day interval ignores anchor", time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC), IntervalUnitDay, 5, 31, time.Date(2026, 2, 5, 0, 0, 0, 0, time.UTC)},
+		{"week interval ignores anchor", time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC), IntervalUnitWeek, 1, 31, time.Date(2026, 2, 7, 0, 0, 0, 0, time.UTC)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			interval, err := NewBillingInterval(tt.unit, tt.count)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			result := interval.AddToWithAnchorDay(tt.base, tt.anchorDay)
+			if !result.Equal(tt.expected) {
+				t.Errorf("AddToWithAnchorDay(%v, %d): expected %v, got %v", tt.base, tt.anchorDay, tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestBillingInterval_RenewalSequence_NoAnchorDrift proves the canonical
+// month-end scenario from issue #186: a Jan 31 subscription must bill on
+// Feb 28 -> Mar 31 -> Apr 30 -> May 31, recovering the 31st anchor each time
+// the target month is long enough, rather than drifting downward.
+func TestBillingInterval_RenewalSequence_NoAnchorDrift(t *testing.T) {
+	monthly := Monthly()
+	anchor := time.Date(2026, 1, 31, 0, 0, 0, 0, time.UTC)
+	anchorDay := anchor.Day() // 31
+
+	// Initial period end (first AddTo from the anchor clamps to Feb 28).
+	cur := monthly.AddTo(anchor)
+	wantEnds := []time.Time{
+		time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC),
+	}
+	if want := time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC); !cur.Equal(want) {
+		t.Fatalf("initial period end: expected %v, got %v", want, cur)
+	}
+	for i, want := range wantEnds {
+		cur = monthly.AddToWithAnchorDay(cur, anchorDay)
+		if !cur.Equal(want) {
+			t.Fatalf("renewal %d: expected end %v, got %v", i+1, want, cur)
+		}
 	}
 }
 

@@ -81,8 +81,16 @@ type ContractAggregate struct {
 	autoRenew         bool
 	cancelAtPeriodEnd bool
 	pendingPriceID    *shared.PriceID
-	createdAt         time.Time
-	updatedAt         time.Time
+	// billingAnchorDay is the day-of-month (1..31) of the original activation,
+	// used to prevent month-end billing-anchor drift across successive renewals
+	// (issue #186). It is 0 until the initial billing period is established
+	// (Activate / trial conversion) and is derived on replay from the initial
+	// period's start day — it is never mutated by a renewal, so the anchor
+	// survives clamping (Jan 31 -> Feb 28 -> Mar 31, not -> Mar 28). See
+	// RenewWithInterval and BillingInterval.AddToWithAnchorDay.
+	billingAnchorDay int
+	createdAt        time.Time
+	updatedAt        time.Time
 }
 
 // NewContractAggregate creates a new ContractAggregate.
@@ -164,6 +172,12 @@ func (a *ContractAggregate) CreatedAt() time.Time { return a.createdAt }
 
 // UpdatedAt returns the last update timestamp.
 func (a *ContractAggregate) UpdatedAt() time.Time { return a.updatedAt }
+
+// BillingAnchorDay returns the day-of-month (1..31) that billing periods are
+// anchored to, or 0 if no billing period has been established yet. It is set
+// when the contract activates (or a trial converts) and is preserved across
+// renewals so a month-end anchor does not drift (issue #186).
+func (a *ContractAggregate) BillingAnchorDay() int { return a.billingAnchorDay }
 
 // Create creates a new contract from a command.
 func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstore.EventMetadata) error {
@@ -509,9 +523,13 @@ func (a *ContractAggregate) RenewWithInterval(newInterval BillingInterval, metad
 		return a.expire(metadata)
 	}
 
-	// Calculate the next period using the new interval's AddTo
+	// Calculate the next period, anchoring the end on the original billing day
+	// so a month-end anchor does not drift across renewals (issue #186). The
+	// start chains from the previous period end (a possibly-clamped date such
+	// as Feb 28), but AddToWithAnchorDay restores the anchor day (e.g. 31)
+	// wherever the target month allows: Feb 28 -> Mar 31, Mar 31 -> Apr 30, ...
 	newPeriodStart := a.currentPeriod.End()
-	newPeriodEnd := newInterval.AddTo(newPeriodStart)
+	newPeriodEnd := newInterval.AddToWithAnchorDay(newPeriodStart, a.billingAnchorDay)
 	newPeriod, err := shared.NewDateRange(newPeriodStart, newPeriodEnd)
 	if err != nil {
 		return err
@@ -634,6 +652,12 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *ContractActivatedEvent:
 		a.status = ContractStatusActive
 		a.currentPeriod = e.CurrentPeriod
+		// Capture the billing anchor from the initial period's start day. This
+		// is the original activation day-of-month and is never changed by later
+		// renewals, so it survives month-end clamping (issue #186). Derived here
+		// rather than stored on the event: the initial period already carries
+		// the start, so historical streams reconstruct the anchor identically.
+		a.billingAnchorDay = anchorDayFrom(e.CurrentPeriod)
 		a.updatedAt = e.ActivatedAt
 
 	case *ContractSuspendedEvent:
@@ -707,6 +731,9 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 				period = derived
 			}
 			a.currentPeriod = period
+			// Anchor the billing day on the converted period's start, mirroring
+			// ContractActivatedEvent (issue #186).
+			a.billingAnchorDay = anchorDayFrom(period)
 		} else {
 			a.status = ContractStatusCancelled
 		}
@@ -755,6 +782,16 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	return nil
 }
 
+// anchorDayFrom returns the billing anchor day-of-month derived from a period's
+// start. It returns 0 for a zero-value period (no billing established), which
+// AddToWithAnchorDay treats as "no anchor" and falls back to plain clamping.
+func anchorDayFrom(period shared.DateRange) int {
+	if period.IsZero() {
+		return 0
+	}
+	return period.Start().Day()
+}
+
 // MarshalSnapshot serializes the aggregate state for snapshot storage.
 //
 // This is the event-sourced snapshot pattern: it returns []byte for storage
@@ -783,6 +820,7 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		AutoRenew:         a.autoRenew,
 		CancelAtPeriodEnd: a.cancelAtPeriodEnd,
 		PendingPriceID:    a.pendingPriceID,
+		BillingAnchorDay:  a.billingAnchorDay,
 		CreatedAt:         a.createdAt,
 		UpdatedAt:         a.updatedAt,
 	}
@@ -815,9 +853,11 @@ func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error {
 // contractSnapshotSchemaVersion is the current schema version of
 // contractSnapshotState. Version 2 dropped the deprecated billing_cycle field;
 // the billing interval is now carried solely by the interval field. Snapshots
-// written before this version (schema_version 0/1) stored only billing_cycle,
-// and LoadFromSnapshot converts it to an interval on read.
-const contractSnapshotSchemaVersion = 2
+// written before that version (schema_version 0/1) stored only billing_cycle,
+// and LoadFromSnapshot converts it to an interval on read. Version 3 added
+// billing_anchor_day (issue #186); legacy snapshots (schema_version <= 2) omit
+// it and LoadFromSnapshot derives it from the current period's start day.
+const contractSnapshotSchemaVersion = 3
 
 // contractSnapshotState is the JSON representation of aggregate state for snapshots.
 type contractSnapshotState struct {
@@ -838,6 +878,7 @@ type contractSnapshotState struct {
 	AutoRenew         bool                     `json:"auto_renew"`
 	CancelAtPeriodEnd bool                     `json:"cancel_at_period_end"`
 	PendingPriceID    *shared.PriceID          `json:"pending_price_id,omitempty"`
+	BillingAnchorDay  int                      `json:"billing_anchor_day,omitempty"` // added in schema v3 (issue #186); 0 in legacy snapshots
 	CreatedAt         time.Time                `json:"created_at"`
 	UpdatedAt         time.Time                `json:"updated_at"`
 }
@@ -882,6 +923,15 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	a.autoRenew = state.AutoRenew
 	a.cancelAtPeriodEnd = state.CancelAtPeriodEnd
 	a.pendingPriceID = shared.PtrCopy(state.PendingPriceID)
+	// Legacy snapshots (schema_version <= 2, issue #186) have no
+	// billing_anchor_day. Fall back to the current period's start day so the
+	// anchor is still honored on the next renewal — a best-effort reconstruction
+	// that degrades to clamping-only for an already-drifted period. New
+	// snapshots carry the true anchor.
+	a.billingAnchorDay = state.BillingAnchorDay
+	if a.billingAnchorDay == 0 {
+		a.billingAnchorDay = anchorDayFrom(state.CurrentPeriod)
+	}
 	a.createdAt = state.CreatedAt
 	a.updatedAt = state.UpdatedAt
 	a.SetVersion(snapshot.Version)

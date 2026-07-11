@@ -528,6 +528,7 @@ type ContractAggregate struct {
     autoRenew         bool
     cancelAtPeriodEnd bool
     pendingPriceID    *shared.PriceID
+    billingAnchorDay  int              // 課金アンカー日（1..31）。月末ドリフト防止（issue #186）。3.9 参照
     createdAt         time.Time
     updatedAt         time.Time
 }
@@ -572,6 +573,7 @@ func (a *ContractAggregate) AutoRenew() bool
 func (a *ContractAggregate) CancelAtPeriodEnd() bool
 func (a *ContractAggregate) PendingPriceID() *shared.PriceID
 func (a *ContractAggregate) HasPendingChange() bool
+func (a *ContractAggregate) BillingAnchorDay() int // 課金アンカー日（未確立なら 0）。3.9 参照
 func (a *ContractAggregate) CreatedAt() time.Time
 func (a *ContractAggregate) UpdatedAt() time.Time
 ```
@@ -880,6 +882,44 @@ type Repository interface {
     FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)
 }
 ```
+
+### 3.9 課金アンカーと月末ドリフト（issue #186）
+
+**問題**: 課金期間の加算に `time.AddDate` を使うと、月末オーバーフローが翌月へ
+正規化される（Go の仕様）。`Monthly().AddTo(1/31)` は `2/31` を `3/3` に正規化し、
+以降 `4/3 → 5/3 …` と**課金基準日（アンカー）が恒久的にドリフト**する。
+29〜31 日に開始した契約、および閏日（2/29）開始の年次契約が影響を受ける。
+
+**修正は 2 層**:
+
+1. **カレンダー正確な加算（クランプ）** — `pricing.BillingInterval.AddTo` は月・年の
+   加算で、対象月に存在しない日を**その月の末日にクランプ**する（`1/31 + 1ヶ月 → 2/28`
+   （閏年は `2/29`）、`2/29 + 1年 → 2/28`）。日・週の加算は従来どおり厳密。実装は
+   `domain/pricing/interval.go` の `addMonthsClamped`。
+
+2. **アンカー保持（ドリフト防止）** — クランプだけでは、各更新が「前期間末＋1インターバル」で
+   次期間を求めるため依然ドリフトする（`1/31 → 2/28 → 3/28 …`）。正しくは
+   `1/31 → 2/28 → 3/31 → 4/30 → 5/31` と、対象月が許す限り**元のアンカー日（31）へ復帰**
+   させる必要がある。そのため `ContractAggregate` は **`billingAnchorDay`（元のアクティベーション
+   日の day-of-month）** を保持し、`RenewWithInterval` は
+   `newInterval.AddToWithAnchorDay(前期間末, billingAnchorDay)` で次期間末を求める
+   （月・年の場合、対象の年・月は前期間末から進め、日はアンカー日を対象月末でクランプして配置）。
+
+**アンカーの確立とリプレイ互換性**:
+
+- `billingAnchorDay` は**イベントに新フィールドを追加せず**、初期課金期間の開始日から導出する。
+  `Apply(ContractActivatedEvent)` と `Apply(TrialEndedEvent)`（converted=true）が
+  `currentPeriod.Start().Day()` を `billingAnchorDay` にセットする。アンカーは**更新では変化しない**
+  （`ContractRenewedEvent` の Apply は現状維持）ため、既存イベントストリームをリプレイすると
+  アクティベーションイベントが持つ**元の**期間開始日から常に同じアンカーが再構築される。
+  → 既存ストリームは**バイト互換のまま同一状態に再水和**する（新イベント型・新 Upcaster は不要）。
+- 過去に旧コードでドリフト済みの契約（例: 現在の期間末が `4/3`）をリプレイすると、履歴上の
+  期間は**そのまま忠実に適用**され（追記専用履歴は書き換えない）、アンカーはアクティベーション
+  日（31）から再構築される。次回のライブ更新でアンカー（31）へ復帰し、ドリフトが**自己修復**される。
+- **スナップショット**は `billing_anchor_day`（`schema_version` 3、issue #186）を新たに保持する。
+  旧スナップショット（`schema_version ≤ 2`）はこのフィールドを持たないため、`LoadFromSnapshot` は
+  `currentPeriod.Start().Day()` へフォールバックする（ドリフト済み期間ではクランプのみへ縮退する
+  ベストエフォート復元。新スナップショットは真のアンカーを保持する）。
 
 ## 4. Invoice（請求書）
 

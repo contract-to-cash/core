@@ -83,6 +83,18 @@ func (i BillingInterval) Equals(other BillingInterval) bool {
 }
 
 // AddTo adds this interval's duration to the given time and returns the result.
+//
+// Month and year addition are calendar-correct: the day-of-month is clamped to
+// the last valid day of the target month rather than overflowing. Jan 31 + 1
+// month yields Feb 28 (Feb 29 in a leap year), NOT Mar 3, and Feb 29 + 1 year
+// yields Feb 28. This is the standard billing-anchor behavior (Stripe/Chargebee)
+// and avoids the drift that time.AddDate's overflow normalization introduces
+// (issue #186). Day and week addition are exact and unaffected.
+//
+// Note: adding a single interval still clamps a month-end day DOWN for short
+// months. To keep a month-end anchor (e.g. the 31st) from permanently drifting
+// across SUCCESSIVE renewals, use AddToWithAnchorDay, which restores the
+// original day wherever the target month allows.
 func (i BillingInterval) AddTo(t time.Time) time.Time {
 	switch i.unit {
 	case IntervalUnitDay:
@@ -90,13 +102,82 @@ func (i BillingInterval) AddTo(t time.Time) time.Time {
 	case IntervalUnitWeek:
 		return t.AddDate(0, 0, 7*i.count)
 	case IntervalUnitMonth:
-		return t.AddDate(0, i.count, 0)
+		return addMonthsClamped(t, i.count)
 	case IntervalUnitYear:
-		return t.AddDate(i.count, 0, 0)
+		return addMonthsClamped(t, 12*i.count)
 	default:
 		// Fallback to monthly (should not happen with validation)
-		return t.AddDate(0, i.count, 0)
+		return addMonthsClamped(t, i.count)
 	}
+}
+
+// AddToWithAnchorDay advances t by one interval while honoring a billing anchor
+// day-of-month, preventing anchor drift across successive month/year renewals.
+//
+// Plain AddTo clamps a month-end day down for short months (Jan 31 -> Feb 28),
+// but adding another interval to that clamped value keeps drifting
+// (Feb 28 -> Mar 28 -> ...). Passing the ORIGINAL anchor day (e.g. 31) restores
+// the intended day-of-month wherever the target month is long enough, so a
+// month-end subscription bills on the true anchor every cycle:
+//
+//	Jan 31 -> Feb 28 -> Mar 31 -> Apr 30 -> May 31
+//
+// anchorDay is the day-of-month of the original activation (1..31); a
+// non-positive value falls back to AddTo(t). Day and week intervals have no
+// month-end concept and are delegated to AddTo unchanged. Time-of-day and
+// location are preserved.
+func (i BillingInterval) AddToWithAnchorDay(t time.Time, anchorDay int) time.Time {
+	if anchorDay <= 0 {
+		return i.AddTo(t)
+	}
+	var months int
+	switch i.unit {
+	case IntervalUnitMonth:
+		months = i.count
+	case IntervalUnitYear:
+		months = 12 * i.count
+	case IntervalUnitDay, IntervalUnitWeek:
+		return i.AddTo(t)
+	default:
+		return i.AddTo(t)
+	}
+	y, m := shiftMonths(t.Year(), t.Month(), months)
+	d := anchorDay
+	if last := daysInMonth(y, m); d > last {
+		d = last
+	}
+	return time.Date(y, m, d, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
+}
+
+// shiftMonths returns the target year and month after adding months (which may
+// be negative) to the given year/month, without touching the day.
+func shiftMonths(year int, month time.Month, months int) (int, time.Month) {
+	total := (int(month) - 1) + months
+	y := year + total/12
+	m := total % 12
+	if m < 0 {
+		m += 12
+		y--
+	}
+	return y, time.Month(m + 1)
+}
+
+// daysInMonth returns the number of days in the given year/month.
+func daysInMonth(year int, month time.Month) int {
+	// Day 0 of the following month is the last day of the target month.
+	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}
+
+// addMonthsClamped adds months to t, clamping the day-of-month to the last valid
+// day of the target month (Jan 31 + 1 month -> Feb 28/29, not Mar 3). Time-of-day
+// and location are preserved.
+func addMonthsClamped(t time.Time, months int) time.Time {
+	y, m, d := t.Date()
+	ty, tm := shiftMonths(y, m, months)
+	if last := daysInMonth(ty, tm); d > last {
+		d = last
+	}
+	return time.Date(ty, tm, d, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
 }
 
 // String returns a human-readable representation.
