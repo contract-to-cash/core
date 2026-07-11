@@ -325,10 +325,12 @@ func (s *CreditNoteService) IssueCreditNote(ctx context.Context, creditNoteID sh
 	// Post-commit hooks (non-fatal, outside transaction)
 	pluginCtx := plugin.NewContext(ctx)
 	for _, hook := range s.registry.GetOnCreditNoteIssuedHooks() {
-		if hookErr := hook.OnCreditNoteIssued(pluginCtx, cn); hookErr != nil {
-			s.logger.Warn("OnCreditNoteIssued hook failed",
+		if hookErr := plugin.SafeInvoke("OnCreditNoteIssuedHook.OnCreditNoteIssued", hook.Name(), func() error {
+			return hook.OnCreditNoteIssued(pluginCtx, cn)
+		}); hookErr != nil {
+			plugin.LogNonFatalHookError(s.logger, "OnCreditNoteIssued hook failed", hookErr,
+				"hook", hook.Name(),
 				"creditNoteID", cn.ID(),
-				"error", hookErr,
 			)
 		}
 	}
@@ -505,11 +507,13 @@ func (s *CreditNoteService) ReissueInvoice(ctx context.Context, originalInvoiceI
 	// Post-commit hooks (non-fatal, outside transaction)
 	pluginCtx := plugin.NewContext(ctx)
 	for _, hook := range s.registry.GetOnInvoiceRevisedHooks() {
-		if hookErr := hook.OnInvoiceRevised(pluginCtx, original, replacement); hookErr != nil {
-			s.logger.Warn("OnInvoiceRevised hook failed",
+		if hookErr := plugin.SafeInvoke("OnInvoiceRevisedHook.OnInvoiceRevised", hook.Name(), func() error {
+			return hook.OnInvoiceRevised(pluginCtx, original, replacement)
+		}); hookErr != nil {
+			plugin.LogNonFatalHookError(s.logger, "OnInvoiceRevised hook failed", hookErr,
+				"hook", hook.Name(),
 				"originalInvoiceID", originalInvoiceID,
 				"replacementInvoiceID", replacement.ID(),
-				"error", hookErr,
 			)
 		}
 	}

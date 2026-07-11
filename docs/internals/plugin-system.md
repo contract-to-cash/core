@@ -755,6 +755,50 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
   請求書のレンダリング・送付パイプラインはコアのスコープ外。
   利用者が実装する請求書生成アダプタが各フェーズで発火する。
 
+### 5.4 パニック隔離とフェイタリティ・ポリシー（issue #193）
+
+プラグインは第三者コードであり、`panic` する可能性がある。コアが発火する全フックは
+**`plugin.SafeInvoke`（および `(shared.Money, error)` を返す `SafeInvokeMoney`）** 経由で
+呼び出され、`recover()` でパニックを捕捉し、スタックトレース（`runtime/debug.Stack`）を
+添えた構造化エラー **`*plugin.PluginPanicError`**（`PluginName` / `HookType` / `Value` /
+`Stack` を保持）へ変換する。これにより、暴走したプラグイン 1 つが進行中の請求・支払い
+トランザクションを破壊すること（例: 課金成功後に `AfterCharge` がパニックし、
+`ProcessPayment` のローカル永続化を突き抜けて「課金済みだが未記録」状態を生む）を防ぐ。
+
+**捕捉したパニックは、フックがエラーを返したのと同じフェイタリティ・ポリシーで扱う。**
+フックが「拒否権を持つ（veto-capable）」か「非致命（non-fatal）」かは §5.3 の発火箇所と
+一致する:
+
+| 分類 | 対象フック | パニック時の挙動 |
+|------|-----------|-----------------|
+| **拒否権あり（veto）** | `InvoiceLifecycleHook.BeforeCalculation` / `DiscountHook` / `TaxHook` / `BeforeChargeHook` | パニック → パイプラインエラーとして**伝播**し、操作をクリーンに中断する（フックがエラーを返した場合と同一）。ゲートウェイ課金前・保存前なので副作用は残らない |
+| **tx 内・保存前** | `InvoiceLifecycleHook.AfterCalculation` | トランザクション内（Save より前）で発火。パニック → エラーへ変換して `tx.Run` のクロージャから返す。**パニックが `tx.Run` を突き抜けない**ため（バックエンド依存のロールバック挙動を避ける）、tx はクリーンに中断し何も永続化されない |
+| **非致命（non-fatal）** | `AfterChargeHook` / `OnPaymentProcessedHook` / `OnPaymentFailedHook` / `OnRefundHook` / `OnInvoiceIssuedHook` / `OnCreditNoteIssuedHook` / `OnInvoiceRevisedHook` / `OnContractRenewHook` / `OnContractTrialEndHook` / `OnContractChangeHook`（バッチ含む） | パニック → `plugin.LogNonFatalHookError` が**プラグイン名・フック種別・スタックを Error レベルでログ**し、処理を継続する。同種の後続フックも通常どおり実行される（1 つのパニックが他フックを止めない） |
+| **ライフサイクル** | `InitializeAll` / `ShutdownAll` の `Plugin.Initialize` / `Plugin.Shutdown` | パニック → エラーへ変換して返す。パニックする `Initialize` は起動を**回復不能にクラッシュさせず**、`*PluginPanicError` を含むエラーとして扱う |
+
+> **注**: 統合者が発火するフック（契約 Create/Activate/Suspend/Resume/Cancel の 5 種）と
+> アダプタが発火する `InvoiceGenerationHook` はコアの発火経路外のため、コアの
+> `SafeInvoke` ラップは適用されない。統合者・アダプタは自コードで同様のパニック隔離を
+> 行うことが推奨される（`plugin.SafeInvoke` / `plugin.LogNonFatalHookError` は公開 API なので
+> そのまま利用できる）。`examples/hosting-integration-demo/main.go` の発火ループはリファレンス。
+
+**API**:
+
+```go
+// plugin/safe.go
+func SafeInvoke(hookType, pluginName string, fn func() error) error
+func SafeInvokeMoney(hookType, pluginName string, fn func() (shared.Money, error)) (shared.Money, error)
+func AsPanic(err error) (*PluginPanicError, bool)   // err が *PluginPanicError を包むか判定
+func LogNonFatalHookError(logger *slog.Logger, msg string, err error, attrs ...any)
+
+type PluginPanicError struct {
+    PluginName string
+    HookType   string
+    Value      any    // recover() が返したパニック値
+    Stack      []byte // debug.Stack()
+}
+```
+
 ## 6. クーポンプラグイン実装例
 
 ### 6.1 プラグイン実装

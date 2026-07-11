@@ -158,7 +158,12 @@ func (r *Registry) InitializeAll(ctx context.Context, configs map[string]Config)
 		if cfg == nil {
 			cfg = Config{}
 		}
-		if err := p.Initialize(ctx, cfg); err != nil {
+		// A panicking Initialize is converted to an error (not an unrecoverable
+		// crash), so a single bad plugin fails startup cleanly instead of taking
+		// the process down (issue #193).
+		if err := SafeInvoke("Plugin.Initialize", p.Name(), func() error {
+			return p.Initialize(ctx, cfg)
+		}); err != nil {
 			return fmt.Errorf("failed to initialize plugin %q: %w", p.Name(), err)
 		}
 	}
@@ -176,10 +181,14 @@ func (r *Registry) ShutdownAll(ctx context.Context) error {
 
 	sortByPriority(plugins)
 
-	// Shutdown in reverse order
+	// Shutdown in reverse order. A panicking Shutdown is converted to an error
+	// rather than being allowed to unwind the caller (issue #193).
 	for i := len(plugins) - 1; i >= 0; i-- {
-		if err := plugins[i].Shutdown(ctx); err != nil {
-			return fmt.Errorf("failed to shutdown plugin %q: %w", plugins[i].Name(), err)
+		p := plugins[i]
+		if err := SafeInvoke("Plugin.Shutdown", p.Name(), func() error {
+			return p.Shutdown(ctx)
+		}); err != nil {
+			return fmt.Errorf("failed to shutdown plugin %q: %w", p.Name(), err)
 		}
 	}
 	return nil

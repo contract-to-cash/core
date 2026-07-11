@@ -102,6 +102,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     an error on int64 overflow instead of silently wrapping.
   - `BillingConfig.TaxRoundingMode` (option `WithTaxRoundingMode`) selects the
     pipeline's minor-unit rounding mode; default `shared.RoundDown`.
+- **Plugin hook panic isolation (#193)** — every plugin hook the core fires is
+  now invoked through the new `plugin.SafeInvoke` / `plugin.SafeInvokeMoney`
+  helpers, which `recover()` a panicking plugin, capture its stack
+  (`runtime/debug.Stack`), and convert it to a structured
+  `*plugin.PluginPanicError` (plugin name + hook type + recovered value +
+  stack). A recovered panic is now handled with the **same fatality policy as a
+  returned error**: veto-capable hooks (`BeforeCalculation`, `DiscountHook`,
+  `TaxHook`, `BeforeCharge`) abort the operation cleanly; `AfterCalculation`
+  (which runs inside the billing transaction) converts to an error so the tx
+  aborts cleanly instead of the panic unwinding through `tx.Run`; non-fatal
+  hooks (`AfterCharge`, `OnInvoiceIssued`, `OnPaymentProcessed`,
+  `OnPaymentFailed`, `OnRefund`, `OnCreditNoteIssued`, `OnInvoiceRevised`,
+  `OnContractRenew`, `OnContractTrialEnd`, `OnContractChange`) are logged at
+  Error level with the stack (via `plugin.LogNonFatalHookError`) and skipped so
+  the flow — and the remaining hooks — continue. `Registry.InitializeAll` /
+  `ShutdownAll` likewise turn a panicking `Initialize` / `Shutdown` into an
+  error rather than an unrecoverable crash. This closes the gap where a single
+  bad plugin could corrupt in-flight billing/payment state (e.g. a panic in
+  `AfterCharge` after a successful gateway charge leaving a charged-but-
+  unrecorded payment). See `docs/internals/plugin-system.md` §5.4. New public
+  API: `plugin.SafeInvoke`, `plugin.SafeInvokeMoney`, `plugin.AsPanic`,
+  `plugin.LogNonFatalHookError`, `plugin.PluginPanicError`.
 - `port.CustomerGateway.SetDefaultPaymentMethod(ctx, customerID, paymentMethodID)`:
   sets the customer's default payment method used for automatic charges when no
   invoice- or contract-level method is specified, complementing the existing
