@@ -627,6 +627,7 @@ type ContractSuspendedEvent struct {
     SuspendedAt     time.Time
     BillingBehavior SuspensionBillingBehavior
     ResumeDate      *time.Time
+    ExtendContract  bool                        // SchemaVersion 2 で追加（#194）
     Reason          string
 }
 
@@ -803,6 +804,32 @@ const (
     SuspensionBillingContinue SuspensionBillingBehavior = "continue"
 )
 ```
+
+#### イベント往復と `ExtendContract`（#194）
+
+`SuspensionConfiguration` の全フィールドは `ContractSuspendedEvent` に載せ、
+`Apply(ContractSuspendedEvent)` が完全に復元する。以前は `Apply` が
+`BillingBehavior` / `ResumeDate` / `Reason` の3フィールドからのみ設定を再構築して
+いたため、`Suspend(SuspensionConfiguration{ExtendContract: true, ...})` を実行しても
+リプレイ後（およびリプレイ状態から書かれたスナップショット）では `ExtendContract` が
+`false`、`SuspendedAt` がゼロ値に戻ってしまう不具合があった（#194）。現在は
+`ExtendContract` をイベントへ載せ、`SuspendedAt` も設定へ復元するため、ライブ変更と
+リプレイが一致する。
+
+- **イベントスキーマ**: `ContractSuspendedEvent` は SchemaVersion 2。
+  `ContractSuspendedEventUpcaster` が旧 v1 ペイロードを v2 へ引き上げる。旧イベントの
+  既定値は `extend_contract=false`（#194 以前の一時停止は期間延長しなかった）。
+  `suspended_at` は欠落・ゼロ値の場合にイベントの `OccurredAt` へフォールバックする
+  （実 v1 は常に `suspended_at` を持つが、ゼロ値だと後述の再開時延長計算が壊れるための防御）。
+
+- **再開時の期間延長**: `ExtendContract=true` の一時停止を `Resume` すると、コアは
+  `currentPeriod.End` を一時停止期間（再開時刻 − `SuspendedAt`）だけ後ろへずらす。この計算は
+  `Apply(ContractResumedEvent)` 内で行われる。リプレイ時点でも一時停止設定
+  （`SuspendedAt` / `ExtendContract`）は直前の `ContractSuspendedEvent`（またはスナップショット）
+  から復元済みで、`ContractResumedEvent.ResumedAt` はイベントに載っているため、延長は
+  イベントデータ＋リプレイ状態から決定論的に再構築できる。`ContractResumedEvent` に
+  追加フィールドは不要。スナップショットは既存の `SuspensionConfiguration`（`SuspendedAt` /
+  `ExtendContract` を含む）をそのまま保持するため、スナップショットスキーマの変更は不要。
 
 ### 3.7 日割り計算設定
 

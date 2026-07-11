@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/eventstore"
@@ -239,6 +240,78 @@ func (u *TrialEndedEventUpcaster) Upcast(event eventstore.Event) (eventstore.Eve
 	return event, nil
 }
 
+// suspendedAtSet reports whether a raw JSON suspended_at field is present and
+// carries a non-zero timestamp. A zero time.Time ("0001-01-01T00:00:00Z") means
+// the anchor was never really recorded, so the upcaster substitutes the event's
+// OccurredAt to keep the resume-time period extension well-defined.
+func suspendedAtSet(raw map[string]json.RawMessage, key string) bool {
+	v, ok := raw[key]
+	if !ok {
+		return false
+	}
+	var t time.Time
+	if err := json.Unmarshal(v, &t); err != nil {
+		return false
+	}
+	return !t.IsZero()
+}
+
+// ContractSuspendedEventUpcaster migrates historical ContractSuspendedEvent
+// payloads (schema version 1) to version 2. Version 2 promoted the
+// extend_contract flag onto the event and made suspended_at a reconstruction
+// input for the resume-time period extension (issue #194).
+//
+// Legacy defaults:
+//   - extend_contract: false. Pre-#194 suspensions never carried the flag and no
+//     core path extended the billing period, so the historically-correct default
+//     is "do not extend". A missing extend_contract already deserializes to
+//     false; the upcaster writes an explicit false when absent (and never
+//     overwrites an existing value), keeping the migrated payload self-describing.
+//   - suspended_at: fall back to the event's OccurredAt when absent or zero.
+//     Every real v1 payload already carried suspended_at, but defending the
+//     resume-extension math against a zero SuspendedAt (which would otherwise
+//     compute an enormous duration) is cheap. OccurredAt is the envelope
+//     timestamp of the suspension, so it is the correct anchor.
+type ContractSuspendedEventUpcaster struct{}
+
+// CanUpcast returns true ONLY for ContractSuspendedEvent at exactly schema
+// version 1. Matching the exact fromVersion (not <= 1) keeps the fixpoint chain
+// order-independent: a freshly written v2 event is skipped regardless of where
+// this upcaster sits in the chain.
+func (u *ContractSuspendedEventUpcaster) CanUpcast(eventType eventstore.EventType, fromVersion int) bool {
+	return eventType == EventTypeContractSuspended && fromVersion == 1
+}
+
+// Upcast bumps a ContractSuspendedEvent to schema version 2, ensuring
+// extend_contract is present (default false) and suspended_at is populated
+// (falling back to the event's OccurredAt when absent or zero-valued).
+func (u *ContractSuspendedEventUpcaster) Upcast(event eventstore.Event) (eventstore.Event, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(event.Data, &raw); err != nil {
+		return event, fmt.Errorf("upcaster: failed to unmarshal ContractSuspendedEvent: %w", err)
+	}
+
+	if _, ok := raw["extend_contract"]; !ok {
+		raw["extend_contract"] = []byte("false")
+	}
+
+	if !suspendedAtSet(raw, "suspended_at") {
+		fallback, err := json.Marshal(event.OccurredAt)
+		if err != nil {
+			return event, fmt.Errorf("upcaster: failed to marshal fallback suspended_at: %w", err)
+		}
+		raw["suspended_at"] = fallback
+	}
+
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return event, fmt.Errorf("upcaster: failed to marshal ContractSuspendedEvent: %w", err)
+	}
+	event.Data = data
+	event.SchemaVersion = 2
+	return event, nil
+}
+
 // NewContractUpcasterChain returns an UpcasterChain with all contract upcasters.
 func NewContractUpcasterChain() *eventstore.UpcasterChain {
 	return eventstore.NewUpcasterChain(
@@ -247,5 +320,6 @@ func NewContractUpcasterChain() *eventstore.UpcasterChain {
 		&ContractCreatedIdempotencyKeyUpcaster{},
 		&ContractRenewedEventUpcaster{},
 		&TrialEndedEventUpcaster{},
+		&ContractSuspendedEventUpcaster{},
 	)
 }
