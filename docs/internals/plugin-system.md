@@ -177,6 +177,12 @@ type DiscountHook interface {
 
     // CalculateDiscount 割引額を計算して返す
     // ctx.Subtotal() で基本料金を参照可能
+    //
+    // 戻り値の契約（issue #188）: 返す割引額は **非負** かつ ctx.Subtotal() と
+    // **同一通貨** でなければならない。負の割引を返すとコアの請求パイプラインは
+    // ErrCodeBusinessRule（プラグイン名と金額を含む）で請求を中断する。
+    // 通貨不一致は ErrCodeCurrencyMismatch（同じくプラグイン名を含む）。
+    // 「割引合計 > subtotal」の clamp はコアが行う（§5.1 手順3）。
     CalculateDiscount(ctx *CalculationContext) (shared.Money, error)
 }
 ```
@@ -193,6 +199,12 @@ type TaxHook interface {
     // ctx.SubtotalAfterDiscount() で割引後の小計を参照可能
     // コアが割引後の金額でこのフックを呼ぶため、
     // 会計基準の順序（割引→税）が構造的に保証される
+    //
+    // 戻り値の契約（issue #188）: 返す税額は **非負** かつ
+    // ctx.SubtotalAfterDiscount() と **同一通貨** でなければならない。
+    // 負の税を返すとコアは ErrCodeBusinessRule（プラグイン名と金額を含む）で
+    // 請求を中断する（負の税で total が負値になり決済不能な請求書が生成されるのを防ぐ）。
+    // 通貨不一致は ErrCodeCurrencyMismatch（プラグイン名を含む）。
     CalculateTax(ctx *CalculationContext) (shared.Money, error)
 }
 ```
@@ -644,9 +656,12 @@ Priority値に依存しないため、プラグイン登録順のミスで会計
 2. 基本料金をコンテキストへ設定（コア、契約タイプに応じて分岐）
    → 以降 ctx.Subtotal() は基本料金を返す
 3. DiscountHook.CalculateDiscount()          ← 割引計算（全DiscountHook、ctx.Subtotal()=基本料金）
+   → 各フックの戻り値を境界検証（負値は ErrCodeBusinessRule で中断、通貨不一致は
+     ErrCodeCurrencyMismatch。いずれもプラグイン名を含む。issue #188）
    → 割引上限ガード（割引合計 > subtotalの場合にcap）
 4. 小計算出（コア: subtotal - totalDiscount）→ ctx.SetSubtotalAfterDiscount()
 5. TaxHook.CalculateTax()                    ← 税計算（ctx.SubtotalAfterDiscount()に対して）
+   → 各フックの戻り値を境界検証（負値は ErrCodeBusinessRule で中断。issue #188）
 6. 合計算出（コア: afterDiscount + totalTax）
 7. クレジット台帳からの充当（コア、FIFO）    ← 残高があれば税込合計から差引（tx内）
 8. 請求書をdraft状態で生成（コア、tx内）→ GracePeriod後に FinalizeInvoice で確定

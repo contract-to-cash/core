@@ -1097,7 +1097,7 @@ type Invoice struct {
     refundReason      string
 }
 
-// コンストラクタ
+// コンストラクタ（金額不変条件を検証し error を返す。詳細は下記「金額不変条件」参照）
 func NewInvoice(
     id shared.InvoiceID,
     accountID shared.AccountID,
@@ -1106,7 +1106,7 @@ func NewInvoice(
     discountAmount shared.Money,
     taxAmount shared.Money,
     opts ...InvoiceOption,
-) *Invoice
+) (*Invoice, error)
 
 // Functional Options
 type InvoiceOption func(*Invoice)
@@ -1146,6 +1146,30 @@ func (inv *Invoice) PaymentMethodID() *string
 ```
 // NOTE: 請求書生成アダプタの InvoiceLineItem.Quantity は float64（小数量=0.5時間等の表現用）。
 // ドメインモデル → 請求書ドキュメントの変換時に int64→float64 キャストを行う。
+
+#### 金額不変条件（issue #188）
+
+`NewInvoice` は構築時に以下の金額不変条件を検証し、違反した場合は
+`shared.DomainError` を返す（`*Invoice` は返さない）。これはプラグイン
+（`DiscountHook` / `TaxHook`）や統合者が計算した値が請求書に流れ込む最後の防波堤であり、
+負値・符号反転した請求書（例: subtotal ¥100 + discount ¥200 → Total() = -100）が生成されて
+`ValidatePayment` が全ての支払いを拒否する「決済不能な請求書」を防ぐ。
+
+- `subtotal` / `discountAmount` / `taxAmount` は**いずれも非負**でなければならない
+  （負値は `ErrCodeValidation`）。
+- `discountAmount ≤ subtotal`（割引が小計を超えてはならない。超過は `ErrCodeValidation`）。
+- 通貨は `subtotal` / `discountAmount` / `taxAmount` で一致していなければならない
+  （不一致は `ErrCodeCurrencyMismatch`。`Subtract`/`Add` が検出）。
+
+Functional Option 側の金額ガード:
+
+- `WithAppliedBalance(c)`: `c` は**非負**かつ `c ≤ total`（超過すると amountDue が負になる）。
+  通貨不一致は `ErrCodeCurrencyMismatch`。違反は `optErr` に記録され `NewInvoice` が返す。
+- `WithAmountDue(a)`: `a` は**非負**かつ `a ≤ total`、通貨は total と一致。
+
+> **注**: この検証は**コンストラクタ限定**であり、`InvoiceFromSnapshot` は対象外。
+> 過去に緩い検証で永続化された歴史的請求書のスナップショットは引き続きロードできる
+> （検証はドメイン生成経路にのみ課す）。
 
 ### 4.2 CreditNote（クレジットノート）
 
