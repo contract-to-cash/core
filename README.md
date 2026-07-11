@@ -167,6 +167,21 @@ Full documentation is available at **[contract-to-cash.github.io/core](https://c
 | [Guides](https://contract-to-cash.github.io/core/docs/guides/integration) | Integration, custom plugins, temporal queries |
 | [API Reference](https://contract-to-cash.github.io/core/docs/api/domain-types) | Types, services, hooks, event store |
 
+## Stability
+
+This project is **pre-v1.0** and has not yet cut a tagged release — the first tagged
+release is pending. The API may change as we approach v1.0.
+
+- **Versioning** follows [Semantic Versioning](https://semver.org/). The plugin-API
+  compatibility policy is documented in
+  [Plugin System §10](docs/internals/plugin-system.md) (what counts as a breaking
+  change for hooks and contexts).
+- **Breaking changes** are recorded in [CHANGELOG.md](CHANGELOG.md); pre-v1.0
+  breaking changes are marked `BREAKING (pre-v1.0)`.
+- Track `main` for the latest, or pin to a specific commit for reproducible builds.
+
+For security reporting and integrator hardening, see [SECURITY.md](SECURITY.md).
+
 ## Contributing
 
 Contributions are welcome! Please open an issue to discuss your idea before submitting a pull request.

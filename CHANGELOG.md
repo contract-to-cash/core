@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Level 3 default-payment-method resolution in `PaymentService.ResolvePaymentMethod`.
   **BREAKING**: external `CustomerGateway` implementations must implement this
   method.
+- `SECURITY.md` (vulnerability reporting policy + integrator hardening checklist) and
+  `docs/guides/data-protection.md` (PII in an append-only event store, erasure
+  patterns, logging, retention responsibilities). README/README.ja gained a
+  **Stability** section (pre-v1.0, semver, first tagged release pending).
 
 ### Changed
 

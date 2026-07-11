@@ -167,6 +167,20 @@ batch/            # バッチプロセッサ（契約更新）
 | [ガイド](https://contract-to-cash.github.io/core/ja/docs/guides/integration) | 統合、カスタムプラグイン、時間旅行クエリ |
 | [APIリファレンス](https://contract-to-cash.github.io/core/ja/docs/api/domain-types) | 型、サービス、フック、Event Store |
 
+## 安定性（Stability）
+
+本プロジェクトは **v1.0 未満（pre-v1.0）** であり、まだタグ付きリリースを作成していません
+（最初のタグ付きリリースは準備中です）。v1.0 に向けて API が変更される可能性があります。
+
+- **バージョニング**は[セマンティックバージョニング](https://semver.org/lang/ja/)に従います。
+  プラグイン API の互換性ポリシー（フック・コンテキストにおける破壊的変更の定義）は
+  [Plugin System §10](docs/internals/plugin-system.md) に記載しています。
+- **破壊的変更**は [CHANGELOG.md](CHANGELOG.md) に記録します。pre-v1.0 の破壊的変更は
+  `BREAKING (pre-v1.0)` と明記します。
+- 最新の状態は `main` を追跡し、再現可能なビルドが必要な場合は特定のコミットに固定してください。
+
+セキュリティ報告と統合者向けのハードニングは [SECURITY.md](SECURITY.md) を参照してください。
+
 ## コントリビュート
 
 コントリビューション歓迎です。プルリクエストを送る前に、まずイシューでアイデアを議論してください。
