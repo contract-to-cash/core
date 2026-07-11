@@ -39,6 +39,28 @@ func (m Money) Round(decimalPlaces int, mode RoundingMode) Money {
 	return NewMoney(result, m.currency)
 }
 
+// RoundToMinorUnit returns a copy of m quantised to its currency's minor unit
+// (JPY -> 0 decimals, USD/EUR -> 2 decimals; see Currency.MinorUnitExponent)
+// using the supplied mode. This is the single conversion that reduces an exact
+// big.Rat business amount to a value a payment gateway can settle. After it, the
+// amount is an integral number of minor units (IsIntegralMinorUnit reports true).
+func (m Money) RoundToMinorUnit(mode RoundingMode) Money {
+	return m.Round(m.currency.MinorUnitExponent(), mode)
+}
+
+// IsIntegralMinorUnit reports whether the amount is already an exact integral
+// number of the currency's minor units (i.e. RoundToMinorUnit would not change
+// it). For JPY this means the amount has no fractional yen; for USD/EUR it means
+// no fraction of a cent. Used to assert the billing pipeline quantised every
+// amount before persistence, so invoices reconcile exactly against gateway
+// charges.
+func (m Money) IsIntegralMinorUnit() bool {
+	exp := m.currency.MinorUnitExponent()
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(exp)), nil)
+	scaled := new(big.Rat).Mul(m.safeAmount(), new(big.Rat).SetInt(scale))
+	return scaled.IsInt()
+}
+
 // roundRatToInt rounds a rational to the nearest integer according to mode.
 func roundRatToInt(r *big.Rat, mode RoundingMode) *big.Int {
 	q := new(big.Int)

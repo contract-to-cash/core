@@ -41,6 +41,23 @@ func (c BillingConfig) effectiveDaysUntilDue() int {
 	return c.DaysUntilDue
 }
 
+// defaultTaxRoundingMode is the minor-unit rounding mode applied by the billing
+// pipeline when BillingConfig.TaxRoundingMode is left at its zero value. RoundDown
+// (truncate toward zero) matches Japanese consumption-tax practice of truncating
+// the per-invoice tax and never rounds an amount up past its exact value.
+const defaultTaxRoundingMode = shared.RoundDown
+
+// effectiveTaxRoundingMode returns the configured TaxRoundingMode, falling back
+// to defaultTaxRoundingMode when the field is left at its zero value. Keeps a
+// zero-value BillingConfig{} valid (zero values are treated as defaults at usage
+// time).
+func (c BillingConfig) effectiveTaxRoundingMode() shared.RoundingMode {
+	if c.TaxRoundingMode == "" {
+		return defaultTaxRoundingMode
+	}
+	return c.TaxRoundingMode
+}
+
 // BillingConfigOption configures a BillingConfig via the functional options pattern.
 type BillingConfigOption func(*BillingConfig)
 
@@ -65,6 +82,13 @@ func WithAllowPartialPayment(allow bool) BillingConfigOption {
 	return func(c *BillingConfig) { c.AllowPartialPayment = allow }
 }
 
+// WithTaxRoundingMode sets the rounding mode the billing pipeline uses to
+// quantise amounts to the invoice currency's minor unit (issue #189). Default
+// shared.RoundDown (truncate toward zero, per Japanese consumption-tax practice).
+func WithTaxRoundingMode(mode shared.RoundingMode) BillingConfigOption {
+	return func(c *BillingConfig) { c.TaxRoundingMode = mode }
+}
+
 // NewBillingConfig creates a validated BillingConfig with documented defaults.
 // Options override the defaults. Returns an error if any value is invalid.
 //
@@ -72,11 +96,13 @@ func WithAllowPartialPayment(allow bool) BillingConfigOption {
 //   - GracePeriod: 1 hour
 //   - DaysUntilDue: 30
 //   - CollectionMethod: CollectionAutoCharge ("charge_automatically")
+//   - TaxRoundingMode: shared.RoundDown (truncate toward zero)
 func NewBillingConfig(opts ...BillingConfigOption) (BillingConfig, error) {
 	cfg := BillingConfig{
 		GracePeriod:      1 * time.Hour,
 		DaysUntilDue:     defaultDaysUntilDue,
 		CollectionMethod: CollectionAutoCharge,
+		TaxRoundingMode:  defaultTaxRoundingMode,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -102,5 +128,17 @@ func (c BillingConfig) validate() error {
 			fmt.Sprintf("CollectionMethod %q is invalid, must be %q or %q",
 				c.CollectionMethod, CollectionAutoCharge, CollectionSendInvoice))
 	}
+	if c.TaxRoundingMode != "" && !validRoundingModes[c.TaxRoundingMode] {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("TaxRoundingMode %q is invalid, must be %q, %q or %q",
+				c.TaxRoundingMode, shared.RoundDown, shared.RoundUp, shared.RoundHalfUp))
+	}
 	return nil
+}
+
+// validRoundingModes is the set of RoundingMode values accepted by BillingConfig.
+var validRoundingModes = map[shared.RoundingMode]bool{
+	shared.RoundDown:   true,
+	shared.RoundUp:     true,
+	shared.RoundHalfUp: true,
 }

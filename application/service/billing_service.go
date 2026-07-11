@@ -51,6 +51,21 @@ type BillingConfig struct {
 	// partial payments (Invoice.allowPartialPay). Default false: a payment must
 	// settle the full amount due in one go (design-decisions 3.1).
 	AllowPartialPayment bool
+
+	// TaxRoundingMode is the rounding mode the billing pipeline applies when it
+	// quantises amounts to the invoice currency's minor unit (issue #189). The
+	// pipeline rounds the subtotal, the total discount, and the total tax to the
+	// currency's minor unit (JPY -> integer yen, USD/EUR -> cents) so the
+	// persisted subtotal/discount/tax/total/amountDue are all integral in minor
+	// units and reconcile exactly against integer-only payment gateways.
+	//
+	// Default (zero value) is shared.RoundDown: it rounds toward zero, matching
+	// Japanese consumption-tax practice of truncating the per-invoice tax
+	// (端数切り捨て) and guaranteeing the pipeline never rounds an amount UP past
+	// what the exact calculation produced (a rounded discount never exceeds the
+	// exact discount, a rounded tax never overcharges). Set shared.RoundHalfUp
+	// or shared.RoundUp via WithTaxRoundingMode when a jurisdiction requires it.
+	TaxRoundingMode shared.RoundingMode
 }
 
 // BillingServiceOption configures optional dependencies of BillingService.
@@ -499,7 +514,15 @@ func (s *BillingService) GenerateProrationInvoice(ctx context.Context, contractI
 // BeforeCalculation → Discount → Tax → Credit application → Invoice creation → AfterCalculation → Save.
 func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipelineInput) (*invoice.Invoice, error) {
 	agg := input.agg
-	subtotal := input.subtotal
+	// Minor-unit rounding mode for this pipeline (issue #189). Every amount the
+	// pipeline persists is quantised to the currency's minor unit with this mode
+	// so the invoice reconciles exactly against integer-only payment gateways.
+	roundingMode := s.config.effectiveTaxRoundingMode()
+	// Quantise the subtotal up front: usage-based subtotals in particular can be
+	// exact rationals (e.g. tiered per-unit prices). Rounding here keeps the
+	// value the discount hooks see, and every downstream amount, integral in
+	// minor units.
+	subtotal := input.subtotal.RoundToMinorUnit(roundingMode)
 	currency := subtotal.Currency()
 	calcCtx := plugin.NewCalculationContext(ctx, agg, shared.Zero(currency))
 
@@ -538,6 +561,11 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 		}
 	}
 
+	// Quantise the aggregate discount to the currency's minor unit (issue #189)
+	// so subtotal - discount is integral. RoundDown (the default) never rounds
+	// the discount up past the exact figure the hooks returned.
+	totalDiscount = totalDiscount.RoundToMinorUnit(roundingMode)
+
 	// Cap discount to subtotal (discount must not exceed subtotal)
 	if totalDiscount.GreaterThan(subtotal) {
 		totalDiscount = subtotal
@@ -562,6 +590,14 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 			return nil, fmt.Errorf("failed to sum taxes: %w", err)
 		}
 	}
+
+	// Quantise the aggregate tax to the currency's minor unit (issue #189): tax
+	// hooks compute rate*afterDiscount exactly (e.g. ¥101 -> ¥101 tax at 10% is
+	// ¥10.1), which no integer-only gateway can settle. Rounding here — after
+	// summing all tax hooks, once per invoice — makes the tax and therefore the
+	// total and amountDue integral in minor units. Since afterDiscount is already
+	// integral, total = afterDiscount + roundedTax stays integral.
+	totalTax = totalTax.RoundToMinorUnit(roundingMode)
 
 	// total = afterDiscount + totalTax
 	total, err := afterDiscount.Add(totalTax)

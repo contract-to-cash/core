@@ -90,6 +90,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     production)" section enumerating the concrete corruption shapes (credits
     consumed with no invoice in the billing pipeline; void-without-replacement in
     `ReissueInvoice`).
+- **Currency minor-unit rounding across the billing pipeline (#189)**:
+  - `shared.Currency.MinorUnitExponent()` returns a currency's minor-unit decimal
+    count (JPY=0, USD/EUR=2). Backed by an extensible registry:
+    `shared.RegisterCurrencyMinorUnit(currency, exponent)` adds/overrides entries,
+    and unregistered currencies fall back to `shared.DefaultMinorUnitExponent` (2).
+  - `shared.Money.RoundToMinorUnit(mode)` quantises an amount to its currency's
+    minor unit; `shared.Money.IsIntegralMinorUnit()` reports whether it already is.
+    Both reuse the existing `shared.RoundingMode`.
+  - `shared.Money.Int64Checked() (int64, error)` truncates toward zero and reports
+    an error on int64 overflow instead of silently wrapping.
+  - `BillingConfig.TaxRoundingMode` (option `WithTaxRoundingMode`) selects the
+    pipeline's minor-unit rounding mode; default `shared.RoundDown`.
 - `port.CustomerGateway.SetDefaultPaymentMethod(ctx, customerID, paymentMethodID)`:
   sets the customer's default payment method used for automatic charges when no
   invoice- or contract-level method is specified, complementing the existing
@@ -171,6 +183,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `eventstore.Store.Subscribe` interface signature is **unchanged**
     (backward compatible); only its documented contract and the in-memory
     implementation's behaviour changed.
+- **BEHAVIORAL CHANGE — invoice amounts are now rounded to the currency's minor
+  unit (#189).** Previously the billing pipeline and tax plugin produced exact
+  rational amounts, so e.g. ¥101 at 10% tax persisted a `¥10.1` tax and a
+  `¥111.1` total that an integer-only gateway could never settle, causing a
+  perpetual 0.1 residue and reconciliation drift. `BillingService`'s pipeline now
+  quantises the subtotal, total discount, and total tax to the invoice currency's
+  minor unit (via `BillingConfig.TaxRoundingMode`, default `shared.RoundDown`), so
+  the persisted subtotal/discount/tax/total/amountDue are all integral in minor
+  units. Consumers who previously relied on fractional invoice amounts will see
+  rounded figures; set `WithTaxRoundingMode(shared.RoundHalfUp)` (or `RoundUp`) if
+  a jurisdiction requires it.
+
+### Fixed
+
+- **`shared.Money.Int64()` floored negative amounts (#189).** It documented
+  "truncating any fractional part" but used floor division (`big.Int.Div`), so
+  `Int64(-1.5)` returned `-2` instead of `-1`, overstating negative fractional
+  amounts by one minor unit. It now truncates toward zero as documented. Overflow
+  behavior is documented (low-order bits); use the new `Int64Checked()` when the
+  amount's range is not guaranteed.
+
 - **Low-priority batch cleanup (#162)** — a group of small, low-risk correctness
   and clarity fixes surfaced by the 2026-07-06 review:
   - **BREAKING (pre-v1.0)**: renamed `contract.Repository.FindTrialsEndingSoon`

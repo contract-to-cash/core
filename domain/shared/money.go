@@ -119,13 +119,41 @@ func (m Money) Min(other Money) (Money, error) {
 	return NewMoney(other.safeAmount(), m.currency), nil
 }
 
-// Int64 returns the amount as int64, truncating any fractional part.
-// Useful for zero-decimal currencies like JPY, KRW, etc.
+// Int64 returns the amount as int64, truncating the fractional part toward zero.
+// Truncation toward zero means Int64(1.9) == 1 and Int64(-1.9) == -1 (NOT -2):
+// this is the symmetric truncation the doc promises, matching Money.Round with
+// RoundDown. Useful for zero-decimal currencies like JPY, KRW, etc., or for
+// converting an already-quantised amount to gateway minor units.
+//
+// Overflow: if the truncated integer does not fit in an int64, the returned
+// value is the low-order 64 bits (big.Int.Int64 semantics) and is meaningless.
+// Callers that cannot guarantee the range must use Int64Checked, which reports
+// overflow as an error instead of silently wrapping.
 func (m Money) Int64() int64 {
 	if m.amount == nil {
 		return 0
 	}
-	return new(big.Int).Div(m.amount.Num(), m.amount.Denom()).Int64()
+	// Quo truncates toward zero (big.Rat denominators are always positive, so
+	// big.Int.Div — Euclidean/floor division — would round negative amounts the
+	// wrong way; e.g. Div(-3,2) == -2 whereas Quo(-3,2) == -1).
+	return new(big.Int).Quo(m.amount.Num(), m.amount.Denom()).Int64()
+}
+
+// Int64Checked returns the amount truncated toward zero as int64, or an error if
+// the truncated integer does not fit in an int64. Use this instead of Int64 when
+// the amount's magnitude is not known to be bounded (e.g. externally supplied
+// amounts) so overflow surfaces as a domain error rather than a silently wrapped
+// value.
+func (m Money) Int64Checked() (int64, error) {
+	if m.amount == nil {
+		return 0, nil
+	}
+	truncated := new(big.Int).Quo(m.amount.Num(), m.amount.Denom())
+	if !truncated.IsInt64() {
+		return 0, NewDomainError(ErrCodeValidation,
+			fmt.Sprintf("money amount %s overflows int64", m.safeAmount().RatString()))
+	}
+	return truncated.Int64(), nil
 }
 
 // Float64 returns the amount as float64.
