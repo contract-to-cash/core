@@ -161,10 +161,23 @@ func WithCustomerGateway(gw port.CustomerGateway) PaymentServiceOption {
 }
 
 // WithPaymentTxManager sets the transaction manager for the PaymentService.
-// If not provided, a NoopTxManager is used (no transaction wrapping).
+// If not provided, a NoopTxManager is used (no transaction wrapping) and a
+// Warn-level log is emitted at construction (see WithoutPaymentTransactions to
+// opt out).
 func WithPaymentTxManager(tm tx.TxManager) PaymentServiceOption {
 	return func(s *PaymentService) {
 		s.txManager = tm
+	}
+}
+
+// WithoutPaymentTransactions explicitly opts the PaymentService into running
+// without a transaction manager (payment + invoice writes will NOT be atomic).
+// Use it for in-memory demos and tests where that trade-off is intentional; it
+// suppresses the non-atomic warning that a silently-defaulted NoopTxManager
+// would otherwise emit. Do NOT use it in production with real repositories.
+func WithoutPaymentTransactions() PaymentServiceOption {
+	return func(s *PaymentService) {
+		s.suppressTxWarning = true
 	}
 }
 
@@ -199,6 +212,9 @@ type PaymentService struct {
 	logger           *slog.Logger
 	txManager        tx.TxManager
 	idempotencyStore port.IdempotencyStore
+	// suppressTxWarning records an explicit WithoutPaymentTransactions() opt-in so
+	// the default-NoopTxManager warning is not emitted for intentional non-atomic use.
+	suppressTxWarning bool
 }
 
 // NewPaymentService creates a new PaymentService.
@@ -230,11 +246,17 @@ func NewPaymentService(
 		s.logger = slog.Default()
 	}
 	if s.txManager == nil {
-		s.txManager = tx.NewNoopTxManager(tx.Repos{
+		repos := tx.Repos{
 			Payments: paymentRepo,
 			Invoices: invoiceRepo,
-		})
+		}
+		if s.suppressTxWarning {
+			s.txManager = tx.NewNoopTxManagerExplicit(repos)
+		} else {
+			s.txManager = tx.NewNoopTxManager(repos)
+		}
 	}
+	tx.WarnIfDefaultNoop(s.logger, s.txManager, "PaymentService", "wire WithPaymentTxManager(...) (or WithoutPaymentTransactions() to acknowledge non-atomic in-memory use)")
 	return s
 }
 

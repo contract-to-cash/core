@@ -1,9 +1,12 @@
 package tx_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/contract-to-cash/core/application/tx"
@@ -142,6 +145,142 @@ func TestRetryOnConflict_NonConflictErrorNotRetried(t *testing.T) {
 	if attempts != 1 {
 		t.Fatalf("expected 1 attempt (no retry), got %d", attempts)
 	}
+}
+
+// RetryOnConflict must clamp a non-positive maxAttempts to 1 and still run fn
+// exactly once. Returning nil without ever invoking fn (the previous behaviour)
+// silently reported success while doing no work (issue #187).
+func TestRetryOnConflict_ZeroAttemptsClampedToOne(t *testing.T) {
+	attempts := 0
+	err := tx.RetryOnConflict(0, func() error {
+		attempts++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected fn to run once when maxAttempts=0, got %d", attempts)
+	}
+}
+
+func TestRetryOnConflict_NegativeAttemptsClampedToOne(t *testing.T) {
+	attempts := 0
+	err := tx.RetryOnConflict(-5, func() error {
+		attempts++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected fn to run once when maxAttempts is negative, got %d", attempts)
+	}
+}
+
+// With the clamp, a non-positive maxAttempts still surfaces fn's error (rather
+// than a bogus nil), because fn runs at least once.
+func TestRetryOnConflict_ZeroAttemptsSurfacesError(t *testing.T) {
+	sentinel := errors.New("boom")
+	attempts := 0
+	err := tx.RetryOnConflict(0, func() error {
+		attempts++
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected fn's error to surface, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected 1 attempt, got %d", attempts)
+	}
+}
+
+func TestRetryOnConflict_OneAttemptRunsOnce(t *testing.T) {
+	attempts := 0
+	err := tx.RetryOnConflict(1, func() error {
+		attempts++
+		return tx.ErrVersionConflict
+	})
+	if !errors.Is(err, tx.ErrVersionConflict) {
+		t.Fatalf("expected ErrVersionConflict, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected exactly 1 attempt with maxAttempts=1 (no retry), got %d", attempts)
+	}
+}
+
+// --- NoopTxManager detection and the non-atomic warning (issue #187) ---
+
+func TestIsNoop(t *testing.T) {
+	if !tx.IsNoop(tx.NewNoopTxManager(tx.Repos{})) {
+		t.Fatal("expected default NoopTxManager to be detected as noop")
+	}
+	if !tx.IsNoop(tx.NewNoopTxManagerExplicit(tx.Repos{})) {
+		t.Fatal("expected explicit NoopTxManager to be detected as noop")
+	}
+	if tx.IsNoop(fakeTxManager{}) {
+		t.Fatal("a non-noop TxManager must not be detected as noop")
+	}
+}
+
+func TestIsExplicitNoop(t *testing.T) {
+	if tx.IsExplicitNoop(tx.NewNoopTxManager(tx.Repos{})) {
+		t.Fatal("default NoopTxManager must NOT be reported as explicit")
+	}
+	if !tx.IsExplicitNoop(tx.NewNoopTxManagerExplicit(tx.Repos{})) {
+		t.Fatal("expected explicit NoopTxManager to be reported as explicit")
+	}
+	if tx.IsExplicitNoop(fakeTxManager{}) {
+		t.Fatal("a non-noop TxManager must not be reported as explicit noop")
+	}
+}
+
+func TestWarnIfDefaultNoop_WarnsForDefaultNoop(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	tx.WarnIfDefaultNoop(logger, tx.NewNoopTxManager(tx.Repos{}), "TestComponent", "wire a TxManager")
+
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Fatalf("expected a WARN-level log, got: %q", out)
+	}
+	if !strings.Contains(out, "NOT atomic") {
+		t.Fatalf("expected the non-atomic warning text, got: %q", out)
+	}
+	if !strings.Contains(out, "TestComponent") {
+		t.Fatalf("expected the component name in the log, got: %q", out)
+	}
+}
+
+func TestWarnIfDefaultNoop_SilentForExplicitNoop(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	tx.WarnIfDefaultNoop(logger, tx.NewNoopTxManagerExplicit(tx.Repos{}), "TestComponent", "wire a TxManager")
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no log for an explicit NoopTxManager, got: %q", buf.String())
+	}
+}
+
+func TestWarnIfDefaultNoop_SilentForRealTxManager(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	tx.WarnIfDefaultNoop(logger, fakeTxManager{}, "TestComponent", "wire a TxManager")
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no log for a real TxManager, got: %q", buf.String())
+	}
+}
+
+// fakeTxManager is a non-noop TxManager used to prove IsNoop / WarnIfDefaultNoop
+// only fire for NoopTxManager.
+type fakeTxManager struct{}
+
+func (fakeTxManager) RunInTx(ctx context.Context, fn func(context.Context, tx.Repos) error) error {
+	return fn(ctx, tx.Repos{})
 }
 
 // --- Version-conflict encoding interoperability (issue #152) ---

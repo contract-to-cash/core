@@ -26,7 +26,10 @@ type ContractRenewalProcessor struct {
 }
 
 // NewContractRenewalProcessor creates a new ContractRenewalProcessor.
-// If txManager is nil, a NoopTxManager is used.
+// If txManager is nil, a default NoopTxManager is used and a Warn-level log is
+// emitted (renewal writes will NOT be atomic). Pass a real TxManager for
+// production, or tx.NewNoopTxManagerExplicit(...) to acknowledge intentional
+// non-atomic in-memory/test use and suppress the warning.
 func NewContractRenewalProcessor(
 	contractRepo contract.Repository,
 	priceRepo pricing.PriceRepository,
@@ -43,6 +46,7 @@ func NewContractRenewalProcessor(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	tx.WarnIfDefaultNoop(logger, txManager, "ContractRenewalProcessor", "pass a real TxManager to NewContractRenewalProcessor (or tx.NewNoopTxManagerExplicit(...) to acknowledge non-atomic in-memory use)")
 	return &ContractRenewalProcessor{
 		contractRepo: contractRepo,
 		priceRepo:    priceRepo,

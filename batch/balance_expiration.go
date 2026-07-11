@@ -36,7 +36,10 @@ type BalanceExpirationProcessor struct {
 var _ BatchProcessor = (*BalanceExpirationProcessor)(nil)
 
 // NewBalanceExpirationProcessor creates a new BalanceExpirationProcessor.
-// If txManager is nil, a NoopTxManager is used.
+// If txManager is nil, a default NoopTxManager is used and a Warn-level log is
+// emitted (balance-forfeiture writes will NOT be atomic). Pass a real TxManager
+// for production, or tx.NewNoopTxManagerExplicit(...) to acknowledge intentional
+// non-atomic in-memory/test use and suppress the warning.
 func NewBalanceExpirationProcessor(
 	balanceRepo balance.Repository,
 	clock shared.Clock,
@@ -51,6 +54,7 @@ func NewBalanceExpirationProcessor(
 	if logger == nil {
 		logger = slog.Default()
 	}
+	tx.WarnIfDefaultNoop(logger, txManager, "BalanceExpirationProcessor", "pass a real TxManager to NewBalanceExpirationProcessor (or tx.NewNoopTxManagerExplicit(...) to acknowledge non-atomic in-memory use)")
 	return &BalanceExpirationProcessor{
 		balanceRepo: balanceRepo,
 		clock:       clock,

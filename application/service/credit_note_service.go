@@ -22,10 +22,24 @@ func WithBillingService(bs *BillingService) CreditNoteServiceOption {
 }
 
 // WithCreditNoteTxManager sets the transaction manager for the CreditNoteService.
-// If not provided, a NoopTxManager is used (no transaction wrapping).
+// If not provided, a NoopTxManager is used (no transaction wrapping) and a
+// Warn-level log is emitted at construction (see WithoutCreditNoteTransactions
+// to opt out).
 func WithCreditNoteTxManager(tm tx.TxManager) CreditNoteServiceOption {
 	return func(s *CreditNoteService) {
 		s.txManager = tm
+	}
+}
+
+// WithoutCreditNoteTransactions explicitly opts the CreditNoteService into
+// running without a transaction manager (credit-note + invoice writes, including
+// the void-and-reissue flow, will NOT be atomic). Use it for in-memory demos and
+// tests where that trade-off is intentional; it suppresses the non-atomic
+// warning that a silently-defaulted NoopTxManager would otherwise emit. Do NOT
+// use it in production with real repositories.
+func WithoutCreditNoteTransactions() CreditNoteServiceOption {
+	return func(s *CreditNoteService) {
+		s.suppressTxWarning = true
 	}
 }
 
@@ -46,6 +60,9 @@ type CreditNoteService struct {
 	billingSvc     *BillingService
 	txManager      tx.TxManager
 	logger         *slog.Logger
+	// suppressTxWarning records an explicit WithoutCreditNoteTransactions() opt-in
+	// so the default-NoopTxManager warning is not emitted for intentional non-atomic use.
+	suppressTxWarning bool
 }
 
 // NewCreditNoteService creates a new CreditNoteService.
@@ -69,11 +86,17 @@ func NewCreditNoteService(
 		s.logger = slog.Default()
 	}
 	if s.txManager == nil {
-		s.txManager = tx.NewNoopTxManager(tx.Repos{
+		repos := tx.Repos{
 			Invoices:    invoiceRepo,
 			CreditNotes: creditNoteRepo,
-		})
+		}
+		if s.suppressTxWarning {
+			s.txManager = tx.NewNoopTxManagerExplicit(repos)
+		} else {
+			s.txManager = tx.NewNoopTxManager(repos)
+		}
 	}
+	tx.WarnIfDefaultNoop(s.logger, s.txManager, "CreditNoteService", "wire WithCreditNoteTxManager(...) (or WithoutCreditNoteTransactions() to acknowledge non-atomic in-memory use)")
 	return s
 }
 

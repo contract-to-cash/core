@@ -157,6 +157,88 @@ func NewBillingModule(db *sql.DB, gateway port.PaymentGateway) *BillingModule {
 }
 ```
 
+## Transaction Manager (REQUIRED for production)
+
+> ⚠️ **Wire a real `tx.TxManager` into every write-side service and batch
+> processor.** The wiring in Step 4 above omits it to keep the example short — do
+> **not** ship that. When no manager is supplied the library falls back to
+> `tx.NewNoopTxManager`, which runs each closure **inline with no transaction**:
+> a multi-write flow that fails partway leaves earlier writes committed and later
+> ones lost. The code compiles and passes happy-path tests; the corruption only
+> appears under partial failure in production.
+
+Because forgetting the option is silent, each write-side service and batch
+processor now emits a **`Warn`-level log at construction** when it falls back to
+the default noop manager, e.g.:
+
+```
+level=WARN msg="running without a transaction manager: multi-write operations
+  are NOT atomic and can corrupt data under partial failure"
+  component=BillingService remedy="wire WithBillingTxManager(...) ..."
+```
+
+Treat that log as a production blocker.
+
+### Concrete corruption shapes when the TxManager is missing
+
+- **Credits consumed with no invoice (billing pipeline).**
+  `BillingService.executeBillingPipeline` applies credit-ledger balances (FIFO
+  `entry.Consume` + `BalanceApplication`) **before** it saves the invoice. Without
+  a transaction, an invoice `Save` failure leaves the balance entries already
+  drawn down while no invoice exists to justify the deduction — the customer's
+  credit silently evaporates.
+- **Void without replacement (`CreditNoteService.ReissueInvoice`).**
+  The void-and-reissue flow voids the original invoice and generates its
+  replacement as one logical unit. Without a transaction, a failure between the
+  two steps leaves the original voided and **no replacement issued** — the
+  customer is left with no live invoice.
+- **Payment recorded but invoice not updated (`PaymentService`).**
+  Payment and invoice writes are meant to commit together; a non-atomic run can
+  record the payment while the invoice status update is lost (or vice versa),
+  desynchronising the ledger.
+- **Batch processors** (`ContractRenewalProcessor`, `TrialExpirationProcessor`,
+  `BalanceExpirationProcessor`) likewise apply an aggregate mutation plus its
+  persistence non-atomically when no manager is wired.
+
+### Wiring a real manager
+
+Implement `tx.TxManager` so `RunInTx` opens one database transaction and yields
+`tx.Repos` whose repositories all run on that transaction's connection, then pass
+it via the service option / constructor argument:
+
+```go
+txManager := NewPostgresTxManager(db) // your implementation of tx.TxManager
+
+billingService := service.NewBillingService(
+    contractRepo, invoiceRepo, usageRepo, balanceConfig,
+    priceRepo, productRepo, registry, service.BillingConfig{DaysUntilDue: 30}, clock,
+    service.WithBalanceRepo(balanceRepo),
+    service.WithBillingTxManager(txManager),   // <- REQUIRED for production
+)
+
+paymentService := service.NewPaymentService(
+    gateway, paymentRepo, invoiceRepo, contractRepo, eventStore, registry, clock,
+    service.WithPaymentTxManager(txManager),   // <- REQUIRED for production
+)
+
+creditNoteService := service.NewCreditNoteService(
+    invoiceRepo, creditNoteRepo, registry, clock,
+    service.WithCreditNoteTxManager(txManager), // <- REQUIRED for production
+)
+
+renewalProcessor := batch.NewContractRenewalProcessor(
+    contractRepo, priceRepo, registry, clock, txManager, logger,
+)
+```
+
+**In-memory / demo / test code** legitimately runs without transactions. To
+acknowledge that intentionally and silence the warning, opt in explicitly with
+`service.WithoutTransactions()` /
+`service.WithoutPaymentTransactions()` /
+`service.WithoutCreditNoteTransactions()` (services) or
+`tx.NewNoopTxManagerExplicit(...)` (batch processors) instead of leaving the
+manager unset.
+
 ## Step 5: Set Up Batch Jobs
 
 Schedule batch processors for recurring operations:
