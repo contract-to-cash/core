@@ -75,7 +75,7 @@ graph TB
 
 **Strict rules:**
 
-- `domain/` must have zero external dependencies (stdlib + `ulid` only)
+- `domain/` takes no third-party external dependencies: only the stdlib, `github.com/oklog/ulid/v2`, and the same-module infrastructure-free `eventstore/` interfaces (the event-sourced `domain/contract` aggregate embeds `eventstore.BaseAggregate` and implements `eventstore.DomainEvent`/`EventRegistry`; `eventstore/` itself depends only on `domain/shared`, so no cycle). No other `domain/*` package imports `eventstore/`.
 - `application/` depends on `domain/` plus the infrastructure-free base packages `eventstore/` and `plugin/` (see the dependency graph in 2.2), never on `infrastructure/`
 - Dependencies always point inward (Dependency Inversion)
 - Interfaces are defined in `domain/` or `application/port/`; implementations live in `infrastructure/`
@@ -94,6 +94,7 @@ graph BT
     pricing["domain/pricing"] --> shared
     contract --> pricing
     eventstore["eventstore/"] --> shared
+    contract --> eventstore
     plugin["plugin/"] --> contract
     plugin --> invoice
     plugin --> payment
@@ -281,20 +282,33 @@ flowchart LR
 
 **Calculation order detail** (plugin-observable; matches `executeBillingPipeline` in `application/service/billing_service.go`):
 
+> Every amount the pipeline persists is quantized to the currency's minor unit with
+> `BillingConfig.TaxRoundingMode` (default `RoundDown`) so the invoice reconciles exactly
+> against integer-only gateways (issue #189): the subtotal is rounded up front, the summed
+> discount is rounded before the cap guard, and the summed tax is rounded once per invoice.
+> All hooks are fired via `plugin.SafeInvoke`/`SafeInvokeMoney`, which converts a plugin
+> panic into a `*PluginPanicError` (fatality policy in `docs/internals/plugin-system.md` §5.4).
+
 1. `InvoiceLifecycleHook.BeforeCalculation()` -- Pre-calculation processing.
    **`ctx.Subtotal()` returns ZERO here** — the core creates the `CalculationContext`
    with a zero subtotal and only calls `SetSubtotal` *after* this hook. (`ctx.ProductID()`
-   is already available, resolved from the contract's Price.)
-2. Base price is computed (core, branched by contract type) and populated onto the context;
-   from here `ctx.Subtotal()` returns the base price.
+   and `ctx.BillingPeriod()` are already available; ProductID is resolved from the
+   contract's Price and the billing period is set before any calculation hook runs.)
+2. Base price is computed (core, branched by contract type), rounded to the minor unit,
+   and populated onto the context; from here `ctx.Subtotal()` returns the base price.
    - subscription: fixed price
    - usage_based: UsageRecord aggregation -> included allowance deduction -> PricingModel
    - one_time: fixed price (once)
    - hybrid: base price + usage charge
 3. `DiscountHook.CalculateDiscount()` -- Discount calculation (`ctx.Subtotal()` = base price)
+   - Boundary validation: a negative discount aborts with `ErrCodeBusinessRule`, a
+     currency mismatch with `ErrCodeCurrencyMismatch` (both name the plugin; issue #188)
+   - Summed discount rounded to the minor unit (issue #189)
    - Discount cap guard: total discount is capped at subtotal
 4. Subtotal after discount (core: subtotal - totalDiscount) -> `ctx.SetSubtotalAfterDiscount()`
 5. `TaxHook.CalculateTax()` -- Tax on `ctx.SubtotalAfterDiscount()`
+   - Boundary validation: a negative tax aborts with `ErrCodeBusinessRule` (issue #188)
+   - Summed tax rounded to the minor unit, once per invoice (issue #189)
 6. Total computation (core: afterDiscount + totalTax)
 7. Credit ledger application (core, inside the transaction) -- FIFO deduction from balance
 8. Create draft invoice (core, inside the transaction) -> finalize after GracePeriod via `FinalizeInvoice`

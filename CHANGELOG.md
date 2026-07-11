@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+
+- **Reconciled `docs/internals/plugin-system.md` and `docs/architecture.md` with the current code (#198)** —
+  the plugin-system spec and architecture overview had drifted from post-#185/#188/#189/#193/#210 code.
+  Corrected: §3.8 now lists `ContractChangeExpired`; §4.1 registry pseudo-code now shows
+  priority-ordered `sortedCopy` getters, priority-ordered `InitializeAll`/reverse-order `ShutdownAll`
+  with `SafeInvoke` and first-error-abort, and the real `sortByPriority`/`sortedCopy` helpers; §5.1
+  and §8.1 now document the minor-unit rounding steps (#189), `SetBillingPeriod`, and `SafeInvoke`
+  wrapping; §5.3 firing table now reflects `expired`; §6.1 coupon example matches the actual plugin
+  (implements `DiscountHook`+`InvoiceLifecycleHook`, defaults `MaxCouponsPerInvoice=1`, `CouponQuery`,
+  first-valid-wins, no persistence in `CalculateDiscount`); §6.2 adds the `CouponQuery` struct; §7
+  tax-priority comment no longer implies cross-type ordering comes from `Priority`. `architecture.md`
+  §2.2 adds the `domain/contract → eventstore` edge and both `architecture.md` and `CLAUDE.md` now
+  state precisely that `domain/` may depend on the same-module `eventstore/` interfaces (no cycle).
+
 ### Fixed
 
 - **Voiding an invoice now restores the credit balance it consumed (#184)** —
