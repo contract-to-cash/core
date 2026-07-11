@@ -169,8 +169,9 @@ Full documentation is available at **[contract-to-cash.github.io/core](https://c
 
 ## Stability
 
-This project is **pre-v1.0** and has not yet cut a tagged release — the first tagged
-release is pending. The API may change as we approach v1.0.
+This project is **pre-v1.0**. Tagged releases start at
+[v0.1.0](https://github.com/contract-to-cash/core/releases) — pin a release tag rather
+than a `main` pseudo-version. The API may change as we approach v1.0.
 
 - **Versioning** follows [Semantic Versioning](https://semver.org/). The plugin-API
   compatibility policy is documented in
@@ -178,7 +179,8 @@ release is pending. The API may change as we approach v1.0.
   change for hooks and contexts).
 - **Breaking changes** are recorded in [CHANGELOG.md](CHANGELOG.md); pre-v1.0
   breaking changes are marked `BREAKING (pre-v1.0)`.
-- Track `main` for the latest, or pin to a specific commit for reproducible builds.
+- Pin a [release tag](https://github.com/contract-to-cash/core/releases) for
+  reproducible builds; track `main` only if you accept absorbing unreleased changes.
 
 For security reporting and integrator hardening, see [SECURITY.md](SECURITY.md).
 
