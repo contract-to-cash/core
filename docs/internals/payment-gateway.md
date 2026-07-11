@@ -721,6 +721,16 @@ type WebhookProcessorConfig struct {
     // 粗い「一方向」の陳腐化ガードであり、リプレイ制御ではない（例: 30日）。
     // 極端に古い/ゴミなペイロードを弾く用途のみ。デフォルト 0（無効）なので、
     // 数時間〜数日遅れて届く正当な再送は常に通過する。
+    //
+    // 破棄時の挙動: 期限超過は一時的な状態ではないため、GW に再送させても
+    // 毎回同じ拒否になるだけ（ノイズ）。したがって:
+    //   - DLQ あり: 理由付き（LastError に MaxEventAge 超過、RetryCount=0 =
+    //     ハンドラ未実行）で DLQ に記録し、Warn ログを出して nil を返す（ACK。
+    //     GW の再送が止まり、運用者は DLQ から調査/再処理できる）。
+    //     DLQ 送信自体が失敗した場合は記録できていないので error を返す（GW 再送で
+    //     後続試行が DLQ 記録をやり直す）。
+    //   - DLQ なし: GW 再送が唯一の回復チャネルなので、型付き
+    //     *WebhookError{Code: WebhookErrorCodeEventTooOld} を返す。
     MaxEventAge time.Duration
 
     // DeduplicationTTL 重複検出レコードの保持期間
@@ -850,13 +860,30 @@ func (p *WebhookProcessor) ProcessWebhook(
     //    リプレイ防止は行わない: ゲートウェイは失敗 Webhook を元の CreatedAt の
     //    まま数時間〜数日再送するため、本文 CreatedAt の古さ/未来で拒否しない
     //    （issue #191）。MaxEventAge は極端に古いペイロードのみを弾く一方向ガード。
+    //    超過は一時的な状態ではなく再送させても毎回同じ拒否になるため、
+    //    DLQ があれば「記録して ACK」、なければ型付きエラーで GW 再送に委ねる。
     if p.config.MaxEventAge > 0 {
         now := p.clock.Now()
         if age := now.Sub(event.CreatedAt); age > p.config.MaxEventAge {
-            return &WebhookError{
-                Code:  WebhookErrorCodeInvalidPayload,
-                Cause: fmt.Errorf("event %s is %v old (max: %v)", event.ID, age, p.config.MaxEventAge),
+            ageErr := &WebhookError{
+                Code:    WebhookErrorCodeEventTooOld,
+                Message: fmt.Sprintf("event %s is %v old (max: %v)", event.ID, age, p.config.MaxEventAge),
             }
+            if p.dlq != nil {
+                // 運用者が調査/再処理できるよう理由付きで DLQ に記録し、
+                // nil（ACK）で GW の無意味な再送を止める。
+                // RetryCount=0: ハンドラは一度も実行されていない。
+                // DLQ 送信失敗時は記録できていないため error を返す（GW が再送）。
+                if dlqErr := p.dlq.Send(ctx, &WebhookDLQEntry{
+                    EventID: event.ID, EventType: event.Type, Payload: event.RawData,
+                    LastError: ageErr.Error(), RetryCount: 0, CreatedAt: now,
+                }); dlqErr != nil {
+                    return fmt.Errorf("DLQ send failed: %w (original: %v)", dlqErr, ageErr)
+                }
+                // Warn ログ（event_id / age / max_event_age）
+                return nil
+            }
+            return ageErr // DLQ なし: GW 再送が唯一の回復チャネル
         }
     }
 
@@ -944,6 +971,8 @@ const (
     WebhookErrorCodeUnsupportedEvent WebhookErrorCode = "unsupported_event"
     WebhookErrorCodeDuplicate        WebhookErrorCode = "duplicate_event"
     WebhookErrorCodeProcessingFailed WebhookErrorCode = "processing_failed"
+    // MaxEventAge 超過（DLQ 未設定時のみ返る。DLQ ありなら DLQ 記録 + ACK）
+    WebhookErrorCodeEventTooOld      WebhookErrorCode = "event_too_old"
 )
 
 // WebhookError Webhook処理エラー
@@ -973,12 +1002,15 @@ func (e *WebhookError) Unwrap() error { return e.Cause }
 // | 重複イベント（正常系）          | 200         | リトライしない | ProcessWebhookがnil返却  |
 // | 非リトライエラー（DLQ行き）     | 200         | リトライしない | DLQで追跡               |
 // | 署名/トランスポートTS検証失敗   | 401         | リトライする  | 不正リクエスト（ParseAndVerify） |
-// | MaxEventAge 超過（極端に古い）   | 400         | リトライする  | 陳腐化ガード（任意・既定無効）  |
+// | MaxEventAge 超過（DLQあり）     | 200         | リトライしない | DLQに記録済み + ACK（nil返却） |
+// | MaxEventAge 超過（DLQなし）     | 400         | リトライする  | event_too_old。再送が唯一の回復チャネル |
 // | 重複検出ストレージ障害          | 503         | リトライする  | Redis/DB一時障害         |
 // | リトライ可能な内部エラー         | 503         | リトライする  | ※ProcessWebhook内で処理済 |
 //
 // ※本文 CreatedAt の古さでは拒否しない（正当な再送を失うため。issue #191）。
 //   リプレイ防止は ParseAndVerify の署名済みトランスポート層タイムスタンプが担う。
+//   MaxEventAge 超過は一時的な状態ではないため、DLQ があれば ACK して再送ノイズを
+//   止める（PR #200 レビュー対応）。
 func MapWebhookErrorToHTTP(err error) int {
     var webhookErr *WebhookError
     if !errors.As(err, &webhookErr) {
@@ -989,6 +1021,8 @@ func MapWebhookErrorToHTTP(err error) int {
         return 401
     case WebhookErrorCodeInvalidPayload:
         return 400
+    case WebhookErrorCodeEventTooOld:
+        return 400 // DLQ 未設定時のみ到達（DLQ ありなら nil=200 で ACK 済み）
     case WebhookErrorCodeDuplicate:
         return 200 // 重複イベント → GW側のリトライは不要
     case WebhookErrorCodeProcessingFailed:

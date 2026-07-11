@@ -22,7 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disabled): an optional coarse, one-directional staleness bound that drops only
   events whose body `CreatedAt` is older than the bound (e.g. 30 days). It is a
   sanity guard for garbage/absurdly-old payloads, NOT a replay control, and is
-  off by default so legitimate old redeliveries always flow.
+  off by default so legitimate old redeliveries always flow. On trigger, the
+  drop leaves an operator trail instead of causing pointless gateway redelivery:
+  with a DLQ configured the event is sent to the DLQ with a distinct reason
+  (`LastError` explains the over-age drop, `RetryCount` 0 because the handler
+  never ran), a warning is logged, and the delivery is acknowledged (nil) so the
+  gateway stops redelivering; without a DLQ a typed `*port.WebhookError` with the
+  new code `port.WebhookErrorCodeEventTooOld` is returned (gateway redelivery is
+  then the only recovery channel). A DLQ send failure returns an error so the
+  gateway retries and a later attempt can record the drop.
 
 ### Fixed
 

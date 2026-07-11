@@ -164,6 +164,15 @@ type WebhookProcessorConfig struct {
 	// garbage payloads. It defaults to 0 (DISABLED) so that legitimate
 	// redeliveries, which may arrive hours-to-days after the original event,
 	// always flow through to deduplication and the handler.
+	//
+	// Drop behavior: an over-age event is never a transient condition, so
+	// letting the gateway redeliver it is pointless. If a dead letter queue is
+	// configured, ProcessWebhook sends the event to the DLQ (LastError explains
+	// the MaxEventAge drop, RetryCount is 0 because the handler never ran),
+	// logs a warning, and returns nil so the gateway stops redelivering. If no
+	// DLQ is configured, ProcessWebhook returns a typed *WebhookError with
+	// code WebhookErrorCodeEventTooOld — gateway redelivery is then the only
+	// remaining recovery channel.
 	MaxEventAge time.Duration
 
 	DeduplicationTTL time.Duration // default: 72 hours
@@ -308,10 +317,44 @@ func (p *WebhookProcessor) ProcessWebhook(
 	//
 	// MaxEventAge, when configured (> 0), is a one-directional sanity guard that
 	// drops only absurdly old payloads. It is disabled by default.
+	//
+	// When it triggers, an error response would only make the gateway redeliver
+	// the same over-age event again — each attempt re-rejected, pure noise — so:
+	//   - with a DLQ configured, the event is recorded there with a distinct
+	//     reason (operators can inspect/replay it) and the delivery is
+	//     ACKNOWLEDGED (nil) to stop redelivery;
+	//   - without a DLQ, gateway redelivery is the only recovery channel, so a
+	//     typed *WebhookError (WebhookErrorCodeEventTooOld) is returned.
 	if p.config.MaxEventAge > 0 {
 		now := p.clock.Now()
 		if age := now.Sub(event.CreatedAt); age > p.config.MaxEventAge {
-			return fmt.Errorf("webhook event %s exceeds MaxEventAge: %v old (max %v)", event.ID, age, p.config.MaxEventAge)
+			ageErr := &WebhookError{
+				Code:    WebhookErrorCodeEventTooOld,
+				Message: fmt.Sprintf("webhook event %s exceeds MaxEventAge: %v old (max %v)", event.ID, age, p.config.MaxEventAge),
+			}
+			if p.dlq != nil {
+				entry := &WebhookDLQEntry{
+					EventID:    event.ID,
+					EventType:  event.Type,
+					Payload:    event.RawData,
+					LastError:  ageErr.Error(),
+					RetryCount: 0, // the handler never ran
+					CreatedAt:  now,
+				}
+				if dlqErr := p.dlq.Send(ctx, entry); dlqErr != nil {
+					// The drop could not be recorded; return an error so the
+					// gateway redelivers and a later attempt can DLQ it.
+					return fmt.Errorf("DLQ send failed: %w (original: %v)", dlqErr, ageErr)
+				}
+				p.logger.Warn("webhook event exceeds MaxEventAge; sent to DLQ and acknowledged to stop gateway redelivery",
+					"event_id", event.ID,
+					"event_type", event.Type,
+					"age", age,
+					"max_event_age", p.config.MaxEventAge,
+				)
+				return nil
+			}
+			return ageErr
 		}
 	}
 

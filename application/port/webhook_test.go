@@ -3,6 +3,7 @@ package port
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -177,8 +178,56 @@ func TestWebhookProcessor_MaxEventAge(t *testing.T) {
 		}
 	})
 
-	t.Run("beyond bound is dropped", func(t *testing.T) {
-		event := &WebhookEvent{ID: "evt_beyond", Type: WebhookEventPaymentSucceeded, CreatedAt: now.Add(-31 * 24 * time.Hour)}
+	// PR #200 review: an over-age event is never transient, so with a DLQ the
+	// drop must leave an operator trail (DLQ entry) and be ACKED (nil) to stop
+	// pointless gateway redelivery.
+	t.Run("beyond bound with DLQ: sent to DLQ and acknowledged", func(t *testing.T) {
+		event := &WebhookEvent{ID: "evt_beyond", Type: WebhookEventPaymentSucceeded, CreatedAt: now.Add(-31 * 24 * time.Hour), RawData: []byte(`{"stale":true}`)}
+		cfg := defaultConfig()
+		cfg.MaxEventAge = 30 * 24 * time.Hour
+		dlq := &mockDLQ{}
+		dedup := &mockDeduplicator{}
+		called := false
+		handler := func(_ context.Context, _ *WebhookEvent) error {
+			called = true
+			return nil
+		}
+		p := newTestProcessor(
+			&mockWebhookHandler{event: event},
+			dedup,
+			dlq,
+			shared.FixedClock{FixedTime: now},
+			cfg,
+		)
+		if err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, handler); err != nil {
+			t.Fatalf("over-age event with DLQ must be acknowledged (nil) to stop redelivery, got: %v", err)
+		}
+		if called {
+			t.Fatal("handler must not run for an event beyond MaxEventAge")
+		}
+		if len(dlq.entries) != 1 {
+			t.Fatalf("expected 1 DLQ entry for the over-age drop, got %d", len(dlq.entries))
+		}
+		entry := dlq.entries[0]
+		if entry.EventID != "evt_beyond" {
+			t.Fatalf("expected DLQ EventID 'evt_beyond', got %q", entry.EventID)
+		}
+		if !strings.Contains(entry.LastError, "MaxEventAge") || !strings.Contains(entry.LastError, string(WebhookErrorCodeEventTooOld)) {
+			t.Fatalf("DLQ LastError must carry the distinct over-age reason, got %q", entry.LastError)
+		}
+		if entry.RetryCount != 0 {
+			t.Fatalf("expected RetryCount 0 (handler never ran), got %d", entry.RetryCount)
+		}
+		if !bytes.Equal(entry.Payload, event.RawData) {
+			t.Fatalf("expected DLQ Payload %q, got %q", event.RawData, entry.Payload)
+		}
+		if len(dedup.recorded) != 0 {
+			t.Fatalf("a dropped event must not be marked processed, got recorded=%v", dedup.recorded)
+		}
+	})
+
+	t.Run("beyond bound without DLQ: typed WebhookError", func(t *testing.T) {
+		event := &WebhookEvent{ID: "evt_beyond_nodlq", Type: WebhookEventPaymentSucceeded, CreatedAt: now.Add(-31 * 24 * time.Hour)}
 		cfg := defaultConfig()
 		cfg.MaxEventAge = 30 * 24 * time.Hour
 		called := false
@@ -189,19 +238,47 @@ func TestWebhookProcessor_MaxEventAge(t *testing.T) {
 		p := newTestProcessor(
 			&mockWebhookHandler{event: event},
 			&mockDeduplicator{},
-			&mockDLQ{},
+			nil, // no DLQ: redelivery is the only recovery channel, so return an error
 			shared.FixedClock{FixedTime: now},
 			cfg,
 		)
 		err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, handler)
 		if err == nil {
-			t.Fatal("event beyond MaxEventAge must be dropped, got nil")
+			t.Fatal("event beyond MaxEventAge without DLQ must return an error, got nil")
+		}
+		var whErr *WebhookError
+		if !errors.As(err, &whErr) {
+			t.Fatalf("expected a typed *WebhookError, got %T: %v", err, err)
+		}
+		if whErr.Code != WebhookErrorCodeEventTooOld {
+			t.Fatalf("expected code %q, got %q", WebhookErrorCodeEventTooOld, whErr.Code)
 		}
 		if got := err.Error(); !strings.Contains(got, "MaxEventAge") {
 			t.Fatalf("expected error mentioning MaxEventAge, got: %s", got)
 		}
 		if called {
 			t.Fatal("handler must not run for an event beyond MaxEventAge")
+		}
+	})
+
+	t.Run("beyond bound with failing DLQ: error returned so gateway retries", func(t *testing.T) {
+		event := &WebhookEvent{ID: "evt_beyond_dlqfail", Type: WebhookEventPaymentSucceeded, CreatedAt: now.Add(-31 * 24 * time.Hour)}
+		cfg := defaultConfig()
+		cfg.MaxEventAge = 30 * 24 * time.Hour
+		dlq := &mockDLQ{err: fmt.Errorf("DLQ unavailable")}
+		p := newTestProcessor(
+			&mockWebhookHandler{event: event},
+			&mockDeduplicator{},
+			dlq,
+			shared.FixedClock{FixedTime: now},
+			cfg,
+		)
+		err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler)
+		if err == nil {
+			t.Fatal("if the drop cannot be recorded in the DLQ, the delivery must NOT be acked")
+		}
+		if got := err.Error(); !strings.Contains(got, "DLQ send failed") {
+			t.Fatalf("expected error containing 'DLQ send failed', got: %s", got)
 		}
 	})
 }
