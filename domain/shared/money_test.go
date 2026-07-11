@@ -2,6 +2,7 @@ package shared
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"math/big"
 	"testing"
@@ -95,6 +96,45 @@ func TestMoney_GreaterThan(t *testing.T) {
 	}
 	if b.GreaterThan(a) {
 		t.Error("expected 100 < 200")
+	}
+}
+
+func TestMoney_GreaterThanStrict(t *testing.T) {
+	a := NewMoney(big.NewRat(200, 1), CurrencyJPY)
+	b := NewMoney(big.NewRat(100, 1), CurrencyJPY)
+
+	got, err := a.GreaterThanStrict(b)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got {
+		t.Error("expected 200 > 100")
+	}
+
+	got, err = b.GreaterThanStrict(a)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got {
+		t.Error("expected 100 not > 200")
+	}
+
+	// Currency mismatch surfaces as an error instead of a silent false.
+	usdVal := NewMoney(big.NewRat(1, 1), CurrencyUSD)
+	got, err = usdVal.GreaterThanStrict(a)
+	if err == nil {
+		t.Fatal("expected currency-mismatch error, got nil")
+	}
+	if got {
+		t.Error("expected false result on mismatch")
+	}
+	var de *DomainError
+	if !errors.As(err, &de) || de.Code != ErrCodeCurrencyMismatch {
+		t.Errorf("expected currency mismatch DomainError, got %v", err)
+	}
+	// Legacy GreaterThan still silently answers false on the same mismatch.
+	if usdVal.GreaterThan(a) {
+		t.Error("legacy GreaterThan should return false on currency mismatch")
 	}
 }
 

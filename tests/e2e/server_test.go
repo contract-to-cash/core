@@ -303,7 +303,7 @@ func handleCreateContract(env *testEnv) http.HandlerFunc {
 		}
 
 		// Create a Price entity so BillingService.calculateSubtotal can look it up.
-		price := pricing.NewPrice(
+		price, priceErr := pricing.NewPrice(
 			shared.ProductID(req.ProductID),
 			moneyJPY(req.Price),
 			shared.CurrencyJPY,
@@ -311,6 +311,10 @@ func handleCreateContract(env *testEnv) http.HandlerFunc {
 			nil, // no usage-based pricing model
 			env.clock.Now(),
 		)
+		if priceErr != nil {
+			writeError(w, http.StatusBadRequest, priceErr.Error())
+			return
+		}
 		if err := env.priceRepo.Save(r.Context(), price); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -954,15 +958,21 @@ func handleChangePrice(env *testEnv) http.HandlerFunc {
 			return
 		}
 
-		// Create a new Price entity for the new price
-		newPrice := pricing.NewPrice(
+		// Create a new Price entity for the new price. Use the interval directly
+		// (NewPriceWithInterval) rather than round-tripping through a BillingCycle,
+		// which would be empty — and now rejected — for non-cycle intervals.
+		newPrice, priceErr := pricing.NewPriceWithInterval(
 			currentPrice.ProductID(),
 			moneyJPY(req.NewPrice),
 			shared.CurrencyJPY,
-			agg.GetInterval().ToBillingCycle(),
+			agg.GetInterval(),
 			nil,
 			env.clock.Now(),
 		)
+		if priceErr != nil {
+			writeError(w, http.StatusBadRequest, priceErr.Error())
+			return
+		}
 		if err := env.priceRepo.Save(r.Context(), newPrice); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return

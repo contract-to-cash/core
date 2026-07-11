@@ -99,12 +99,34 @@ func (m Money) IsZero() bool {
 	return m.safeAmount().Sign() == 0
 }
 
-// GreaterThan returns true if m > other. Returns false if currencies differ.
+// GreaterThan reports whether m > other.
+//
+// Legacy comparator (issue #196): it returns false on a currency mismatch
+// instead of reporting one, so a wrong-currency operand silently reads as "not
+// greater". That is dangerous for financial guards — an over-limit foreign
+// amount slips past an `if x.GreaterThan(limit)` check. Every call site that
+// compares amounts of possibly-differing currency MUST either guard the
+// currency explicitly first or use GreaterThanStrict, which surfaces the
+// mismatch as an error. GreaterThan is retained for comparisons already known
+// to share a currency (e.g. two values derived from the same Money).
 func (m Money) GreaterThan(other Money) bool {
 	if m.currency != other.currency {
 		return false
 	}
 	return m.safeAmount().Cmp(other.safeAmount()) > 0
+}
+
+// GreaterThanStrict reports whether m > other, returning a currency-mismatch
+// DomainError instead of silently answering false when the currencies differ
+// (issue #196). Prefer this over GreaterThan for any comparison where the two
+// operands are not already guaranteed to share a currency, so a wrong-currency
+// operand cannot slip past a financial guard.
+func (m Money) GreaterThanStrict(other Money) (bool, error) {
+	if m.currency != other.currency {
+		return false, NewDomainError(ErrCodeCurrencyMismatch,
+			fmt.Sprintf("cannot compare %s with %s", m.currency, other.currency))
+	}
+	return m.safeAmount().Cmp(other.safeAmount()) > 0, nil
 }
 
 // Min returns the smaller of m and other. Returns error if currencies differ.

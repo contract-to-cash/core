@@ -182,6 +182,16 @@ func NewCreditNote(
 				fmt.Sprintf("credit note item tax currency %s does not match item currency %s",
 					itemTax.Currency(), currency))
 		}
+		// A negative item tax would understate the note's tax and total (a
+		// negative addend), letting a bogus CreditAmount slip past the
+		// "exceeds total" guard in Apply/Refund. Tax is a non-negative surcharge;
+		// reject it at the aggregate boundary (issue #196, mirrors the positive
+		// item-amount guard above).
+		if itemTax.IsNegative() {
+			return nil, shared.NewDomainError(shared.ErrCodeValidation,
+				fmt.Sprintf("credit note item tax amount must not be negative: got %s",
+					itemTax.Amount().RatString()))
+		}
 		ta, err := taxAmount.Add(itemTax)
 		if err != nil {
 			return nil, err
@@ -237,24 +247,25 @@ func (cn *CreditNote) Issue(issuedAt time.Time) error {
 }
 
 // validateAdjustmentAmount guards the currency and sign invariants shared by
-// Apply and Refund. Money.GreaterThan silently returns false on a currency
-// mismatch (see domain/shared/money.go), so an explicit currency check MUST
-// precede the "exceeds total" comparison; otherwise a foreign-currency amount
-// (e.g. USD 1,000,000 against a JPY note) would slip past it. A non-positive
-// amount is likewise rejected: applying or refunding a zero or negative credit
-// is meaningless and would persist a nonsensical CreditAmount/RefundAmount on
-// the issued note. Mirrors payment.ValidateRefund (issue #148).
+// Apply and Refund. A non-positive amount is rejected: applying or refunding a
+// zero or negative credit is meaningless and would persist a nonsensical
+// CreditAmount/RefundAmount on the issued note. The "exceeds total" comparison
+// uses Money.GreaterThanStrict so a foreign-currency amount (e.g. USD 1,000,000
+// against a JPY note) surfaces as a currency-mismatch error instead of silently
+// reading as "not greater" (the legacy Money.GreaterThan pitfall, issue #196).
+// Mirrors payment.ValidateRefund (issue #148).
 func (cn *CreditNote) validateAdjustmentAmount(amount shared.Money, label string) error {
-	if amount.Currency() != cn.total.Currency() {
-		return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
-			fmt.Sprintf("%s amount currency %s does not match credit note currency %s",
-				label, amount.Currency(), cn.total.Currency()))
-	}
 	if amount.IsNegative() || amount.IsZero() {
 		return shared.NewDomainError(shared.ErrCodeValidation,
 			fmt.Sprintf("%s amount must be positive", label))
 	}
-	if amount.GreaterThan(cn.total) {
+	exceeds, err := amount.GreaterThanStrict(cn.total)
+	if err != nil {
+		return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+			fmt.Sprintf("%s amount currency %s does not match credit note currency %s",
+				label, amount.Currency(), cn.total.Currency()))
+	}
+	if exceeds {
 		return shared.NewDomainError(shared.ErrCodeBusinessRule,
 			fmt.Sprintf("%s amount %s exceeds total %s",
 				label, amount.Amount().RatString(), cn.total.Amount().RatString()))

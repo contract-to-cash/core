@@ -235,10 +235,20 @@ func WithAppliedBalance(c shared.Money) InvoiceOption {
 	}
 }
 
-// WithAmountDue sets the amount due.
+// WithAmountDue sets the amount due (and keeps balance in sync).
 //
 // The amount due must be non-negative and must not exceed the invoice total
 // (issue #188); a negative or inflated amountDue is unsettleable / over-billing.
+// The "exceeds total" comparison uses Money.GreaterThanStrict so a foreign
+// currency surfaces as a mismatch error rather than silently reading as "not
+// greater" (issue #196).
+//
+// Like WithAppliedBalance, this also updates balance: balance tracks
+// amountDue − paidAmount, and paidAmount is zero at construction, so a fresh
+// invoice whose amountDue is overridden here must carry the matching balance.
+// Previously only amountDue was set, leaving balance stuck at the full total —
+// an invoice that reported settled would still show a non-zero balance
+// (issue #196).
 func WithAmountDue(a shared.Money) InvoiceOption {
 	return func(inv *Invoice) {
 		if a.IsNegative() {
@@ -248,7 +258,8 @@ func WithAmountDue(a shared.Money) InvoiceOption {
 			}
 			return
 		}
-		if a.Currency() != inv.total.Currency() {
+		exceeds, err := a.GreaterThanStrict(inv.total)
+		if err != nil {
 			if inv.optErr == nil {
 				inv.optErr = shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
 					fmt.Sprintf("currency mismatch between amount due (%s) and invoice total (%s)",
@@ -256,7 +267,7 @@ func WithAmountDue(a shared.Money) InvoiceOption {
 			}
 			return
 		}
-		if a.GreaterThan(inv.total) {
+		if exceeds {
 			if inv.optErr == nil {
 				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
 					fmt.Sprintf("amount due %s must not exceed invoice total %s",
@@ -265,6 +276,7 @@ func WithAmountDue(a shared.Money) InvoiceOption {
 			return
 		}
 		inv.amountDue = a
+		inv.balance = a
 	}
 }
 

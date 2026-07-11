@@ -1006,7 +1006,10 @@ func (s *BillingService) applyBalances(ctx context.Context, balanceRepo balance.
 			continue
 		}
 
-		consumed, err := entry.Consume(remaining)
+		// ConsumeAt re-checks expiry against the same `now`, holding the
+		// "expired credit is unspendable" invariant at the entity even though the
+		// FIFO loop already skips expired entries above (issue #196).
+		consumed, err := entry.ConsumeAt(remaining, now)
 		if err != nil {
 			return shared.Zero(currency), err
 		}

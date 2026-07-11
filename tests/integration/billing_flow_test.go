@@ -44,10 +44,13 @@ func createActiveContractWithPrice(
 	t.Helper()
 
 	// Create Price entity
-	priceEntity := pricing.NewPrice(
+	priceEntity, err := pricing.NewPrice(
 		shared.NewProductID(), price, price.Currency(),
 		pricing.BillingCycleMonthly, nil, clock.Now(),
 	)
+	if err != nil {
+		t.Fatalf("failed to create price: %v", err)
+	}
 	if err := priceRepo.Save(ctx, priceEntity); err != nil {
 		t.Fatalf("failed to save price: %v", err)
 	}
@@ -55,7 +58,7 @@ func createActiveContractWithPrice(
 	contractID := shared.NewContractID()
 	agg := contract.NewContractAggregate(contractID, clock)
 
-	err := agg.Create(contract.CreateContractCommand{
+	err = agg.Create(contract.CreateContractCommand{
 		IdempotencyKey: "idem-integration-billing_flow-1",
 		AccountID:      shared.AccountID("acc-001"),
 		PriceID:        priceEntity.ID(),

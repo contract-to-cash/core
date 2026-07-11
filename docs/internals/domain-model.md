@@ -246,7 +246,8 @@ func (m Money) Multiply(factor *big.Rat) Money
 func (m Money) Negate() Money
 func (m Money) IsNegative() bool
 func (m Money) IsZero() bool
-func (m Money) GreaterThan(other Money) bool
+func (m Money) GreaterThan(other Money) bool             // レガシー: 通貨不一致時は静かに false（下記注意）
+func (m Money) GreaterThanStrict(other Money) (bool, error) // 通貨不一致を error で報告（issue #196）
 func (m Money) Min(other Money) (Money, error)
 func (m Money) MarshalJSON() ([]byte, error)
 func (m *Money) UnmarshalJSON(data []byte) error
@@ -258,6 +259,16 @@ func (m Money) IsIntegralMinorUnit() bool
 func (m Money) Int64() int64            // ゼロ方向切り捨て（truncate toward zero）
 func (m Money) Int64Checked() (int64, error) // int64 に収まらなければ error
 ```
+
+#### `GreaterThan` と `GreaterThanStrict`（issue #196）
+
+`GreaterThan` は**通貨不一致のとき静かに `false` を返す**レガシー比較子である。金額ガード
+（例: `if x.GreaterThan(limit)`）に使うと、通貨違いの過大な外貨が「大きくない」と誤読され
+ガードをすり抜ける危険がある。**通貨が同一と保証されない比較には `GreaterThanStrict` を使う**
+こと（不一致を `ErrCodeCurrencyMismatch` の `DomainError` で報告する）。`GreaterThan` は
+同一通貨が保証済みの比較にのみ残す。`CreditNote.Apply/Refund`（`validateAdjustmentAmount`）、
+`Invoice.WithAmountDue`、`CreditNoteService` の累計クレジット超過判定は本 issue で
+`GreaterThanStrict` へ移行済み。
 
 #### 通貨の最小単位（minor unit）と丸めポリシー（issue #189）
 
@@ -581,14 +592,24 @@ type ContractAggregate struct {
 func NewContractAggregate(id shared.ContractID, clock shared.Clock) *ContractAggregate
 
 // コマンドメソッド（各メソッドはイベントを生成し Apply で状態を更新する）
+// Create の検証（issue #196）: 不変なイベントストリームに不正値を書かないよう、
+// nil Clock（NewContractAggregate に nil を渡した場合。panic ではなく validation error）、
+// 空 AccountID、PriceID も非ゼロ Price も無い（価格参照が皆無）、Price と BasePrice の
+// 通貨不一致（両者非ゼロのとき）を拒否する。
 func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) Activate(metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) Suspend(config SuspensionConfiguration, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) Resume(metadata eventstore.EventMetadata) error
+// Cancel の Apply は pendingPriceID / trialConfig をクリアする（issue #196）。終端契約が
+// HasPendingChange()==true を報告したり trialing からの解約後に trialConfig を残さないため。
+// Apply でのクリアは決定的・冪等なのでリプレイ安全。
 func (a *ContractAggregate) Cancel(reason string, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) ChangePrice(newPriceID shared.PriceID, policy ChangePolicy, proration *PlanChangeProration, metadata eventstore.EventMetadata) error
+// UnscheduleChange は終端契約（cancelled/expired）では invalid_state_transition を返す（issue #196）。
 func (a *ContractAggregate) UnscheduleChange(reason string, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) ChangePaymentMethod(paymentMethodID *string, metadata eventstore.EventMetadata) error
+// StartTrial は config を集約の Clock と照合して検証する（issue #196）: ゼロ/過去の
+// TrialEndDate、負の ConversionReminderDays を拒否する。
 func (a *ContractAggregate) StartTrial(config TrialConfiguration, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) RenewWithInterval(newInterval BillingInterval, metadata eventstore.EventMetadata) error
@@ -599,6 +620,9 @@ func (a *ContractAggregate) UnscheduleCancellation(metadata eventstore.EventMeta
 func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error
 func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error
 func (a *ContractAggregate) MarshalSnapshot() ([]byte, error)
+// LoadFromSnapshot のレガシー分岐（interval が無く billing_cycle のみ）は Strict 変換を使い、
+// 未知/欠落の billing_cycle を静かに Monthly へ丸めず validation error にする（issue #196 / #162 L-4）。
+// 正当なレガシースナップショット（daily/weekly/monthly/yearly）はそのままロードできる。
 func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 
 // Getters
@@ -1165,7 +1189,11 @@ Functional Option 側の金額ガード:
 
 - `WithAppliedBalance(c)`: `c` は**非負**かつ `c ≤ total`（超過すると amountDue が負になる）。
   通貨不一致は `ErrCodeCurrencyMismatch`。違反は `optErr` に記録され `NewInvoice` が返す。
-- `WithAmountDue(a)`: `a` は**非負**かつ `a ≤ total`、通貨は total と一致。
+- `WithAmountDue(a)`: `a` は**非負**かつ `a ≤ total`、通貨は total と一致
+  （`GreaterThanStrict` で判定）。`WithAppliedBalance` と同様に `balance` も同期する
+  （`balance` は amountDue − paidAmount を追跡し、生成時 paidAmount はゼロなので
+  amountDue を上書きしたら balance も一致させる）。以前は amountDue のみ設定され
+  balance が total のまま取り残されていた（issue #196）。
 
 > **注**: この検証は**コンストラクタ限定**であり、`InvoiceFromSnapshot` は対象外。
 > 過去に緩い検証で永続化された歴史的請求書のスナップショットは引き続きロードできる
@@ -1238,7 +1266,8 @@ type CreditNote struct {
 }
 
 // コンストラクタ
-// Returns an error if items is empty.
+// items が空、通貨不一致、item 金額が非正、または **item の taxAmount が負**（総額を
+// 過少計上する。issue #196）の場合に error を返す。
 func NewCreditNote(
     id shared.CreditNoteID,
     invoiceID shared.InvoiceID,
@@ -1589,6 +1618,10 @@ type Price struct {
 }
 
 // NewPrice は後方互換の BillingCycle 文字列を受け取り、内部で BillingInterval に変換する。
+// 検証（issue #196）: Price は不変なので構築時に不正値を弾く。負の amount、
+// amount の通貨が currency 引数と不一致（amount が非ゼロのとき）、未知の billingCycle
+// を拒否する。billingCycle は lenient な BillingCycleToInterval（未知は静かに Monthly）
+// ではなく **Strict 変換**を使い、未知を error として報告する（upcaster と同一ポリシー）。
 func NewPrice(
     productID shared.ProductID,
     amount shared.Money,
@@ -1596,9 +1629,10 @@ func NewPrice(
     billingCycle BillingCycle,
     pricingModel PricingModel,
     createdAt time.Time,
-) *Price
+) (*Price, error)
 
 // NewPriceWithInterval は BillingInterval を直接受け取る（新規コード推奨）。
+// 検証は NewPrice と同様。加えて zero 値（未初期化）の interval を拒否する（issue #196）。
 func NewPriceWithInterval(
     productID shared.ProductID,
     amount shared.Money,
@@ -1606,7 +1640,7 @@ func NewPriceWithInterval(
     interval BillingInterval,
     pricingModel PricingModel,
     createdAt time.Time,
-) *Price
+) (*Price, error)
 
 func (p *Price) ID() shared.PriceID
 func (p *Price) ProductID() shared.ProductID
@@ -1616,6 +1650,8 @@ func (p *Price) Interval() BillingInterval // 課金サイクル（新 API）
 // BillingCycle は interval から導出した文字列を返す。
 // 完全一致する BillingCycle がない interval（例: quarterly）では "" を返す。
 func (p *Price) BillingCycle() BillingCycle
+// PricingModel は防御的コピーを返す（issue #196）: 返り値（例 TieredPrice.Tiers の
+// 背後配列）を変更しても Price 内部のモデルや以降の CalculatePrice 結果は変わらない。
 func (p *Price) PricingModel() PricingModel
 func (p *Price) Status() PriceStatus
 func (p *Price) CreatedAt() time.Time
@@ -1943,9 +1979,17 @@ const (
 // createdAt は Clock.Now() 経由で呼び出し元が提供すること。
 func NewBalanceEntry(accountID shared.AccountID, amount shared.Money, reason BalanceReason, createdAt time.Time) *BalanceEntry
 
-// Consume は残高を消費し、実際に消費された金額を返す。
+// ConsumeAt は有効期限を強制して残高を消費する（issue #196）: now 時点で失効済みの
+// エントリからの消費を business_rule error で拒否し、それ以外は Consume に委譲する。
+// これが不変条件を保持する消費 API であり、請求パイプラインが使う。FindByID など
+// 失効を除外しないロードで得たエントリでも失効クレジットを消費できないことを保証する。
+// now は shared.Clock から取得する。
+func (e *BalanceEntry) ConsumeAt(amount shared.Money, now time.Time) (shared.Money, error)
+
+// Consume は残高を消費し、実際に消費された金額を返す（有効期限は見ない低レベルプリミティブ）。
 // 残高不足の場合は残高分のみ消費する（min(remainingAmount, amount)）。
-// 消費が発生した場合は version をインクリメントする。
+// 消費が発生した場合は version をインクリメントする。失効を除外していない呼び出し元は
+// 代わりに ConsumeAt を使うこと（issue #196）。
 func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error)
 
 // Restore は消費済みクレジットをエントリへ戻す（Consume の逆操作、issue #184）。

@@ -93,7 +93,7 @@ func TestBillingAnchor_TrialConversion_SetsAnchor(t *testing.T) {
 	if err := agg.Create(cmd, newTestMetadata()); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	if err := agg.StartTrial(TrialConfiguration{}, newTestMetadata()); err != nil {
+	if err := agg.StartTrial(TrialConfiguration{TrialEndDate: endedAt.AddDate(0, 0, 14)}, newTestMetadata()); err != nil {
 		t.Fatalf("StartTrial failed: %v", err)
 	}
 	if err := agg.EndTrial(true, newTestMetadata()); err != nil {

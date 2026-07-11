@@ -115,6 +115,39 @@ func NewTieredPrice(tiers []PriceTier, mode TieredPricingMode) (TieredPrice, err
 	return TieredPrice{Tiers: tiers, Mode: mode}, nil
 }
 
+// Clone returns a deep copy of the TieredPrice with an independent Tiers
+// backing array (issue #196). PriceTier holds only value-type fields (int64 and
+// Money, whose internal amount is never mutated in place), so copying the slice
+// is sufficient — mutating the returned copy's tiers cannot alter the original's
+// CalculatePrice results.
+func (p TieredPrice) Clone() TieredPrice {
+	tiers := make([]PriceTier, len(p.Tiers))
+	copy(tiers, p.Tiers)
+	return TieredPrice{Tiers: tiers, Mode: p.Mode}
+}
+
+// clonePricingModel returns a defensive copy of a PricingModel so a caller that
+// mutates the returned value cannot reach back into a Price's internal model
+// (issue #196). Only TieredPrice carries mutable backing state (its exported
+// Tiers slice); FlatPrice and UsagePrice are value types whose fields are
+// effectively immutable, so they are returned as-is. An unknown/custom model is
+// returned unchanged: the library cannot copy a type it does not know, and
+// third-party models are expected to be immutable.
+func clonePricingModel(m PricingModel) PricingModel {
+	switch tp := m.(type) {
+	case TieredPrice:
+		return tp.Clone()
+	case *TieredPrice:
+		if tp == nil {
+			return m
+		}
+		c := tp.Clone()
+		return &c
+	default:
+		return m
+	}
+}
+
 // mustAddTier sums two Money values, panicking on a currency mismatch. By
 // construction (NewTieredPrice validates that every tier shares one currency)
 // this Add can never fail; a non-nil error therefore signals a TieredPrice built
