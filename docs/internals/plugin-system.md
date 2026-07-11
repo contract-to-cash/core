@@ -953,7 +953,7 @@ type Coupon struct {
     validFrom               time.Time
     validUntil              time.Time
     usageLimit              *int                    // グローバル使用回数制限
-    usedCount               int
+    usedCount               int                     // マイグレーションベースライン専用（§6.3、プラグインは加算しない）
     perAccountUsageLimit    *int                    // アカウントごとの使用回数上限（nil=無制限）
     applicableTo            []shared.ProductID      // 適用可能な Product ID（空なら全 Product）
     applicableContractTypes []contract.ContractType // 適用可能な契約タイプ（空なら全タイプ）
@@ -1037,6 +1037,12 @@ type CouponRepository interface {
    `SaveRedemption` は同一キーの2回目以降を no-op にする。
 4. 使用回数は redemption 行から**再構成**する（別カウンタを持たない）。グローバル/アカウント別の
    上限判定は、**進行中の (contract, period)** を除外して redemption を数える（リトライ安全）。
+5. `Coupon.usedCount` は**マイグレーションベースライン専用**。redemption 行が存在する以前の
+   歴史的使用分（カウンタしか持たない旧システムからの移行等）だけを表し、
+   **プラグインは決してインクリメントしない**。グローバル上限判定は
+   `usedCount + count(redemption 行) >= usageLimit`。したがって1回の使用は
+   「usedCount に反映済み」**または**「redemption 行がある」の**どちらか一方**で
+   なければならない（両方だと二重カウント）。
 
 **保証される不変条件**:
 
@@ -1050,6 +1056,16 @@ type CouponRepository interface {
 > insert-or-ignore で冪等性と並行安全性を担保する。`AfterCalculation` からの引換確定エラーは
 > 致命（tx をロールバック）— 「請求書は保存されたのにクーポン使用が記録されない」状態を防ぐ。
 > 抽象的な発火順序・可観測性は §5.1 を参照。実装リファレンスは `plugins/coupon/plugin.go`。
+
+> **⚠️ アップグレード注意（#185 以前のデータ）**: 旧実装は1回の使用につき redemption 行の保存
+> （`SaveRedemption`）**と** `usedCount` の加算（`RecordUsage`）の**両方**を行っていた。
+> 既存データを持つデプロイメントがそのままアップグレードすると、歴史的使用が
+> ベースラインと行の両方で**二重カウント**され、グローバル上限に早く到達する
+> （例: 上限100・歴史的使用40のプロモは、新規20回で 40+40+20=100 に達してブロックされる）。
+> デプロイ前に一度だけ、**(a)** redemption 行が既にある使用分を `usedCount` から差し引く
+> （全使用が行を持つ場合は 0 にリセット）、**または (b)** `usedCount` に反映済みの歴史的
+> redemption 行を削除する（もしくは `FindRedemptions` の結果から除外する）こと。
+> 新規デプロイメント（既存 redemption データなし）は対応不要。
 
 ## 7. 税計算プラグイン実装例
 

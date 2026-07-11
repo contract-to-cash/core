@@ -89,6 +89,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `InvoiceID()`, and `IdempotencyKey()`.
   - `plugin.CalculationContext` gained `BillingPeriod()` / `SetBillingPeriod()`
     (additive); the billing pipeline sets it before any calculation hook runs.
+  - **Upgrade note — existing redemption data double-counts without a one-time
+    migration.** `Coupon.usedCount` is now strictly a **migration baseline**: it
+    covers only uses that predate redemption rows and is **never incremented by
+    the plugin**. The global-limit check is `usedCount + count(redemption rows)`.
+    The OLD code wrote BOTH a redemption row (`SaveRedemption`) AND incremented
+    the usage counter (`RecordUsage`) for every use, so on pre-existing data each
+    historical use is counted twice and coupons hit their global limit early —
+    e.g. a 100-use promo with 40 historical uses blocks after only 20 new uses
+    (40 baseline + 40 rows + 20 new = 100). Integrators upgrading with existing
+    redemption data must do ONE of the following before deploying:
+    - reset each coupon's `usedCount` baseline to exclude uses that already have
+      a redemption row (typically `usedCount -= count(redemption rows)`, i.e. 0
+      when every historical use produced a row), or
+    - delete — or exclude from `FindRedemptions` results — the historical
+      redemption rows that are already reflected in `usedCount`.
+    Fresh deployments (no pre-existing redemption data) need no action:
+    `usedCount` starts at 0 and stays there.
 
 ### Added
 

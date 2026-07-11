@@ -135,7 +135,7 @@ type Coupon struct {
 	validFrom               time.Time
 	validUntil              time.Time
 	usageLimit              *int
-	usedCount               int
+	usedCount               int                     // MIGRATION BASELINE only — see UsedCount()
 	perAccountUsageLimit    *int                    // max uses per account (nil = unlimited)
 	applicableTo            []shared.ProductID      // applicable product IDs (empty = all products)
 	applicableContractTypes []contract.ContractType // applicable contract types (empty = all types)
@@ -238,7 +238,21 @@ func (c *Coupon) MaxDiscount() *shared.Money { return c.maxDiscount }
 // UsageLimit returns the global usage limit, or nil if unlimited.
 func (c *Coupon) UsageLimit() *int { return c.usageLimit }
 
-// UsedCount returns the current usage count.
+// UsedCount returns the coupon's usage-count MIGRATION BASELINE.
+//
+// Since issue #185, usedCount is strictly a baseline for uses that PREDATE
+// redemption rows (e.g. usage migrated from a system that only kept a counter).
+// The plugin NEVER increments it: every new use is recorded as an idempotent
+// Redemption row, and the global-limit check is
+// `usedCount + count(redemption rows) >= usageLimit`.
+//
+// A use must therefore be reflected in usedCount OR have a redemption row —
+// never both. The pre-#185 code wrote BOTH for every use, so deployments
+// upgrading with existing data would double-count each historical use and hit
+// the global limit early. Such deployments must run a one-time migration:
+// either reset usedCount to exclude uses that already have a redemption row,
+// or delete/exclude those historical rows. See the CHANGELOG upgrade note for
+// issue #185. Fresh deployments start at 0 and stay there.
 func (c *Coupon) UsedCount() int { return c.usedCount }
 
 // PerAccountUsageLimit returns the per-account usage limit, or nil if unlimited.
