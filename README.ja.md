@@ -169,15 +169,18 @@ batch/            # バッチプロセッサ（契約更新）
 
 ## 安定性（Stability）
 
-本プロジェクトは **v1.0 未満（pre-v1.0）** であり、まだタグ付きリリースを作成していません
-（最初のタグ付きリリースは準備中です）。v1.0 に向けて API が変更される可能性があります。
+本プロジェクトは **v1.0 未満（pre-v1.0）** です。タグ付きリリースは
+[v0.1.0](https://github.com/contract-to-cash/core/releases) から提供しています —
+`main` の擬似バージョンではなくリリースタグを固定してください。
+v1.0 に向けて API が変更される可能性があります。
 
 - **バージョニング**は[セマンティックバージョニング](https://semver.org/lang/ja/)に従います。
   プラグイン API の互換性ポリシー（フック・コンテキストにおける破壊的変更の定義）は
   [Plugin System §10](docs/internals/plugin-system.md) に記載しています。
 - **破壊的変更**は [CHANGELOG.md](CHANGELOG.md) に記録します。pre-v1.0 の破壊的変更は
   `BREAKING (pre-v1.0)` と明記します。
-- 最新の状態は `main` を追跡し、再現可能なビルドが必要な場合は特定のコミットに固定してください。
+- 再現可能なビルドには[リリースタグ](https://github.com/contract-to-cash/core/releases)を
+  固定してください。`main` の追跡は未リリースの変更を取り込む前提がある場合のみ推奨します。
 
 セキュリティ報告と統合者向けのハードニングは [SECURITY.md](SECURITY.md) を参照してください。
 

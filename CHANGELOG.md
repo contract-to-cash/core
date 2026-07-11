@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-07-11
+
+First tagged release. Everything below was previously accumulated under
+[Unreleased]; consumers pinning pseudo-versions of `main` should move to this
+tag. Pre-v1.0: minor versions may contain breaking changes, each marked
+**BREAKING** in its entry.
+
 ### Docs
 
 - **Reconciled `docs/internals/plugin-system.md` and `docs/architecture.md` with the current code (#198)** —
