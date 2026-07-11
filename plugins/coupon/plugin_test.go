@@ -2,8 +2,10 @@ package coupon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 // these rows (issue #185). saveRedemptionCall counts only NON-duplicate (i.e.
 // effective) confirmations.
 type mockCouponRepository struct {
+	mu                 sync.Mutex
 	coupons            []*Coupon
 	redemptions        map[string]*Redemption // IdempotencyKey -> redemption
 	saveRedemptionCall int
@@ -59,20 +62,53 @@ func (m *mockCouponRepository) Save(_ context.Context, _ *Coupon) error {
 	return nil
 }
 
-func (m *mockCouponRepository) SaveRedemption(_ context.Context, r *Redemption) error {
+func (m *mockCouponRepository) SaveRedemption(_ context.Context, r *Redemption, limits RedemptionLimits) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.saveRedemptionErr != nil {
 		return m.saveRedemptionErr
 	}
 	key := r.IdempotencyKey()
 	if _, exists := m.redemptions[key]; exists {
-		return nil // idempotent no-op
+		return nil // (a) idempotent no-op
 	}
+	// (b) atomic limit check against existing distinct rows (#195).
+	if limits.GlobalLimit != nil {
+		if limits.GlobalBaseline+m.countLocked(r.CouponID(), nil) >= *limits.GlobalLimit {
+			return ErrUsageLimitReached
+		}
+	}
+	if limits.PerAccountLimit != nil {
+		acct := r.AccountID()
+		if m.countLocked(r.CouponID(), &acct) >= *limits.PerAccountLimit {
+			return ErrUsageLimitReached
+		}
+	}
+	// (c) insert
 	m.redemptions[key] = r
 	m.saveRedemptionCall++
 	return nil
 }
 
+// countLocked counts distinct redemptions of a coupon (optionally filtered to an
+// account). Callers must hold m.mu.
+func (m *mockCouponRepository) countLocked(couponID CouponID, accountID *shared.AccountID) int {
+	n := 0
+	for _, r := range m.redemptions {
+		if r.CouponID() != couponID {
+			continue
+		}
+		if accountID != nil && r.AccountID() != *accountID {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 func (m *mockCouponRepository) FindRedemptions(_ context.Context, couponID CouponID, accountID *shared.AccountID) ([]*Redemption, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.findRedemptionsErr != nil {
 		return nil, m.findRedemptionsErr
 	}
@@ -91,6 +127,8 @@ func (m *mockCouponRepository) FindRedemptions(_ context.Context, couponID Coupo
 
 // allRedemptions returns every stored redemption (order unspecified).
 func (m *mockCouponRepository) allRedemptions() []*Redemption {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	result := make([]*Redemption, 0, len(m.redemptions))
 	for _, r := range m.redemptions {
 		result = append(result, r)
@@ -100,6 +138,8 @@ func (m *mockCouponRepository) allRedemptions() []*Redemption {
 
 // seed pre-confirms a redemption, simulating prior committed usage.
 func (m *mockCouponRepository) seed(r *Redemption) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.redemptions[r.IdempotencyKey()] = r
 }
 
@@ -895,6 +935,175 @@ func TestCouponPlugin_SubtotalAfterDiscountUpdated(t *testing.T) {
 }
 
 // createTestAggregate creates a ContractAggregate via the Create command for testing.
+// limitedCoupon builds a coupon valid around testClock with the given global and
+// per-account usage limits (0 = leave unset / unlimited).
+func limitedCoupon(id CouponID, code string, globalLimit, perAccountLimit int) *Coupon {
+	var gl *int
+	if globalLimit > 0 {
+		gl = &globalLimit
+	}
+	c := NewCoupon(
+		id, code, CouponTypePercentage, big.NewRat(10, 100), shared.CurrencyJPY,
+		nil, nil,
+		testClock.Now().AddDate(-1, 0, 0), testClock.Now().AddDate(1, 0, 0),
+		gl, 0, nil,
+	)
+	if perAccountLimit > 0 {
+		c.WithPerAccountUsageLimit(perAccountLimit)
+	}
+	return c
+}
+
+// prepareConfirm computes the discount for a fresh calculation context bound to
+// the given aggregate and returns a closure that confirms the redemption (drives
+// AfterCalculation), mirroring what the billing pipeline does inside its
+// transaction. The returned closure is safe to run from a goroutine (it does not
+// touch *testing.T).
+func prepareConfirm(t *testing.T, p *CouponPlugin, agg *contract.ContractAggregate) func() error {
+	t.Helper()
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContextWithContract(subtotal, agg)
+	if _, err := p.CalculateDiscount(ctx); err != nil {
+		t.Fatalf("CalculateDiscount: %v", err)
+	}
+	inv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		subtotal, shared.Zero(shared.CurrencyJPY), shared.Zero(shared.CurrencyJPY),
+		invoice.WithBillingPeriod(ctx.BillingPeriod()),
+	)
+	if err != nil {
+		t.Fatalf("build invoice: %v", err)
+	}
+	return func() error { return p.AfterCalculation(ctx, inv) }
+}
+
+// runConcurrently fires every confirm closure from its own goroutine, released
+// together, and returns their errors.
+func runConcurrently(confirms []func() error) []error {
+	errs := make([]error, len(confirms))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range confirms {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = confirms[i]()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	return errs
+}
+
+// classifyConfirmErrors partitions confirmation errors into successes and
+// limit-reached rejections, failing on any other error.
+func classifyConfirmErrors(t *testing.T, errs []error) (ok, limitReached int) {
+	t.Helper()
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, ErrUsageLimitReached):
+			limitReached++
+		default:
+			t.Fatalf("unexpected confirmation error: %v", err)
+		}
+	}
+	return ok, limitReached
+}
+
+// TestCouponPlugin_ConcurrentConfirm_DistinctKeys_GlobalLimit is the core #195
+// race test: N concurrent confirmations of DISTINCT (contract, period) keys
+// against a global usageLimit L < N must let EXACTLY L through — the atomic
+// SaveRedemption gate rejects the rest with ErrUsageLimitReached even though all
+// N passed CalculateDiscount's advisory read (all saw zero prior redemptions).
+func TestCouponPlugin_ConcurrentConfirm_DistinctKeys_GlobalLimit(t *testing.T) {
+	const n, limit = 8, 3
+	repo := newMockRepo(limitedCoupon("c-global", "SAVE10", limit, 0))
+	p := NewCouponPlugin(repo, testClock)
+
+	confirms := make([]func() error, n)
+	for i := 0; i < n; i++ {
+		agg := createTestAggregate(t, shared.AccountID(fmt.Sprintf("acc-%d", i)))
+		confirms[i] = prepareConfirm(t, p, agg)
+	}
+
+	ok, limitReached := classifyConfirmErrors(t, runConcurrently(confirms))
+	if ok != limit {
+		t.Errorf("expected exactly %d successful confirmations, got %d", limit, ok)
+	}
+	if limitReached != n-limit {
+		t.Errorf("expected %d limit-reached rejections, got %d", n-limit, limitReached)
+	}
+	if got := repo.saveRedemptionCall; got != limit {
+		t.Errorf("expected exactly %d persisted redemptions, got %d", limit, got)
+	}
+}
+
+// TestCouponPlugin_ConcurrentConfirm_SameKey_CollapsesToOne verifies the #185
+// invariant still holds under the new atomic contract: N concurrent confirmations
+// of the SAME (contract, period) key all succeed (idempotent) and collapse to a
+// single redemption — never counted as more than one use.
+func TestCouponPlugin_ConcurrentConfirm_SameKey_CollapsesToOne(t *testing.T) {
+	const n = 8
+	repo := newMockRepo(limitedCoupon("c-same", "SAVE10", 100, 0))
+	p := NewCouponPlugin(repo, testClock)
+
+	agg := createTestAggregate(t, "acc-1")
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContextWithContract(subtotal, agg)
+	if _, err := p.CalculateDiscount(ctx); err != nil {
+		t.Fatalf("CalculateDiscount: %v", err)
+	}
+	inv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		subtotal, shared.Zero(shared.CurrencyJPY), shared.Zero(shared.CurrencyJPY),
+		invoice.WithBillingPeriod(ctx.BillingPeriod()),
+	)
+	if err != nil {
+		t.Fatalf("build invoice: %v", err)
+	}
+
+	confirms := make([]func() error, n)
+	for i := range confirms {
+		confirms[i] = func() error { return p.AfterCalculation(ctx, inv) }
+	}
+	ok, limitReached := classifyConfirmErrors(t, runConcurrently(confirms))
+	if ok != n {
+		t.Errorf("expected all %d same-key confirmations to succeed, got %d ok / %d limit-reached", n, ok, limitReached)
+	}
+	if got := repo.saveRedemptionCall; got != 1 {
+		t.Errorf("expected same-key confirmations to collapse to 1 redemption, got %d", got)
+	}
+}
+
+// TestCouponPlugin_ConcurrentConfirm_DistinctKeys_PerAccountLimit is the
+// per-account variant of the #195 race: one account, N distinct contracts
+// (distinct keys), perAccountUsageLimit L < N → exactly L succeed.
+func TestCouponPlugin_ConcurrentConfirm_DistinctKeys_PerAccountLimit(t *testing.T) {
+	const n, limit = 6, 2
+	repo := newMockRepo(limitedCoupon("c-acct", "SAVE10", 0, limit))
+	p := NewCouponPlugin(repo, testClock)
+
+	confirms := make([]func() error, n)
+	for i := 0; i < n; i++ {
+		agg := createTestAggregate(t, "acc-shared")
+		confirms[i] = prepareConfirm(t, p, agg)
+	}
+
+	ok, limitReached := classifyConfirmErrors(t, runConcurrently(confirms))
+	if ok != limit {
+		t.Errorf("expected exactly %d successful confirmations, got %d", limit, ok)
+	}
+	if limitReached != n-limit {
+		t.Errorf("expected %d limit-reached rejections, got %d", n-limit, limitReached)
+	}
+	if got := repo.saveRedemptionCall; got != limit {
+		t.Errorf("expected exactly %d persisted redemptions, got %d", limit, got)
+	}
+}
+
 func createTestAggregate(t *testing.T, accountID shared.AccountID) *contract.ContractAggregate {
 	t.Helper()
 	return createTestAggregateWithType(t, accountID, contract.ContractTypeSubscription)
