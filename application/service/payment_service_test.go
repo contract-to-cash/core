@@ -3162,6 +3162,229 @@ func TestRefund_InvalidAmount_DoesNotCallGateway(t *testing.T) {
 	}
 }
 
+// newZeroAmountFinalizedInvoice builds a finalized invoice with AmountDue()==0
+// (fully discounted / credited), the case a real gateway would reject on Charge.
+func newZeroAmountFinalizedInvoice() *invoice.Invoice {
+	inv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		invoice.WithAmountDue(shared.Zero(shared.CurrencyJPY)),
+	)
+	if err != nil {
+		panic("newZeroAmountFinalizedInvoice: " + err.Error())
+	}
+	_ = inv.Finalize()
+	return inv
+}
+
+// TestProcessPayment_ZeroAmount_SettlesWithoutGateway verifies that a zero-amount
+// invoice settles directly without calling the gateway (issue #197). The gateway
+// is configured to fail if Charge is called, proving it is skipped.
+func TestProcessPayment_ZeroAmount_SettlesWithoutGateway(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newZeroAmountFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+	// failCharge: if the gateway is called, Charge errors and settlement fails.
+	gw := &mockGateway{failCharge: true}
+
+	svc := NewPaymentService(gw, &mockPaymentRepo{}, invRepo, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		Amount:         shared.Zero(shared.CurrencyJPY),
+		Currency:       shared.CurrencyJPY,
+		IdempotencyKey: "idem-zero-1",
+	})
+	if err != nil {
+		t.Fatalf("zero-amount settlement should succeed without gateway, got: %v", err)
+	}
+	if p == nil || p.Status() != payment.PaymentStatusCompleted {
+		t.Fatalf("expected completed zero-amount payment, got %v", p)
+	}
+	if p.Amount().Amount().Sign() != 0 {
+		t.Errorf("expected zero payment amount, got %s", p.Amount().Amount().RatString())
+	}
+	if inv.Status() != invoice.InvoiceStatusPaid {
+		t.Errorf("expected invoice paid, got %s", inv.Status())
+	}
+}
+
+// TestProcessPayment_ZeroAmount_NoPaymentMethodRequired verifies a zero-amount
+// invoice settles even when no payment method can be resolved (issue #197).
+func TestProcessPayment_ZeroAmount_NoPaymentMethodRequired(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newZeroAmountFinalizedInvoice()
+	// No contract repo / customer gateway → ResolvePaymentMethod would fail, but
+	// it must not be consulted for a zero settlement.
+	svc := NewPaymentService(&mockGateway{failCharge: true}, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		Currency:       shared.CurrencyJPY,
+		IdempotencyKey: "idem-zero-2",
+	})
+	if err != nil {
+		t.Fatalf("zero settlement without a payment method should succeed, got: %v", err)
+	}
+	if p.Status() != payment.PaymentStatusCompleted {
+		t.Errorf("expected completed, got %s", p.Status())
+	}
+}
+
+// TestProcessPayment_ZeroAmount_Idempotent verifies that a zero-amount
+// settlement honours the idempotency key: a completed payment already recorded
+// under the key is returned without settling again or touching the gateway
+// (issue #197). Mirrors TestProcessPayment_Idempotency_DoesNotMutateInvoiceForDuplicateKey.
+func TestProcessPayment_ZeroAmount_Idempotent(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newZeroAmountFinalizedInvoice()
+
+	existing, _ := payment.NewPayment(
+		shared.NewPaymentID(), inv.ID(), shared.Zero(shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard, "", clock.Now(),
+	)
+	_ = existing.Complete()
+
+	svc := NewPaymentService(&mockGateway{failCharge: true}, &mockPaymentRepo{existing: existing}, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		Currency:       shared.CurrencyJPY,
+		IdempotencyKey: "idem-zero-3",
+	})
+	if err != nil {
+		t.Fatalf("idempotent zero replay failed: %v", err)
+	}
+	if p.ID() != existing.ID() {
+		t.Errorf("expected the existing payment returned, got a new one")
+	}
+	// The invoice must not have been settled again.
+	if !inv.PaidAmount().IsZero() {
+		t.Errorf("invoice must not be re-settled on idempotent replay")
+	}
+}
+
+// nilReturningInvoiceRepo mimics a BYO-DB adapter that violates the FindByID
+// convention by returning (nil, nil) for a missing invoice instead of an error.
+type nilReturningInvoiceRepo struct{ mockInvoiceRepoForPayment }
+
+func (r *nilReturningInvoiceRepo) FindByID(_ context.Context, _ shared.InvoiceID) (*invoice.Invoice, error) {
+	return nil, nil
+}
+
+// nilReturningPaymentRepo returns (nil, nil) for a missing payment.
+type nilReturningPaymentRepo struct{ mockPaymentRepo }
+
+func (r *nilReturningPaymentRepo) FindByID(_ context.Context, _ shared.PaymentID) (*payment.Payment, error) {
+	return nil, nil
+}
+
+// TestProcessPayment_NilInvoice_ReturnsNotFound verifies the defensive nil-guard
+// against a BYO-DB adapter returning (nil, nil) instead of a not-found error
+// (issue #197): ProcessPayment returns a clean not-found error, not a nil panic.
+func TestProcessPayment_NilInvoice_ReturnsNotFound(t *testing.T) {
+	clock := newPaymentTestClock()
+	svc := NewPaymentService(&mockGateway{}, &mockPaymentRepo{}, &nilReturningInvoiceRepo{}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	_, err := svc.ProcessPayment(context.Background(), shared.NewInvoiceID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "idem-nil-inv",
+	})
+	if err == nil {
+		t.Fatal("expected not-found error for nil invoice")
+	}
+	assertDomainError(t, err, shared.ErrCodeNotFound)
+}
+
+// TestRefund_NilPayment_ReturnsNotFound verifies the defensive nil-guard in
+// Refund against a (nil, nil) FindByID (issue #197).
+func TestRefund_NilPayment_ReturnsNotFound(t *testing.T) {
+	clock := newPaymentTestClock()
+	svc := NewPaymentService(&mockGateway{}, &nilReturningPaymentRepo{}, &mockInvoiceRepoForPayment{}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	err := svc.Refund(context.Background(), shared.NewPaymentID(), RefundInput{Reason: port.RefundReasonRequestedByCustomer})
+	if err == nil {
+		t.Fatal("expected not-found error for nil payment")
+	}
+	assertDomainError(t, err, shared.ErrCodeNotFound)
+}
+
+// TestRefund_FullRefund_ForwardsResolvedAmountToGateway verifies that a full
+// refund (RefundInput.Amount == nil) sends the locally-resolved amount to the
+// gateway rather than nil (issue #197), so the gateway and the ledger agree on
+// exactly one figure.
+func TestRefund_FullRefund_ForwardsResolvedAmountToGateway(t *testing.T) {
+	clock := newPaymentTestClock()
+	ctx := context.Background()
+
+	inner := inmemory.NewInMemoryPaymentRepository()
+	seed, err := payment.NewPayment(
+		shared.NewPaymentID(),
+		shared.NewInvoiceID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard,
+		"gw_txn_197",
+		clock.Now(),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	if err := seed.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// Record a prior partial refund so "remaining" (7000) differs from both the
+	// full charge (10000) and nil — proving the resolved remaining is forwarded.
+	if err := seed.RecordRefund(shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)); err != nil {
+		t.Fatalf("RecordRefund: %v", err)
+	}
+	if err := inner.Save(ctx, seed); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+
+	gw := &spyGateway{}
+	svc := NewPaymentService(
+		gw,
+		inner,
+		&mockInvoiceRepoForPayment{},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	// Full refund of the remainder: Amount left nil.
+	if err := svc.Refund(ctx, seed.ID(), RefundInput{
+		Reason: port.RefundReasonRequestedByCustomer,
+	}); err != nil {
+		t.Fatalf("Refund failed: %v", err)
+	}
+
+	if gw.refundReq == nil {
+		t.Fatal("gateway Refund was not called")
+	}
+	if gw.refundReq.Amount == nil {
+		t.Fatal("full refund must forward a non-nil amount to the gateway (issue #197)")
+	}
+	// remaining = 10000 - 3000 = 7000
+	if gw.refundReq.Amount.Amount().Cmp(big.NewRat(7000, 1)) != 0 {
+		t.Errorf("gateway refund amount = %s, want 7000 (resolved remaining)",
+			gw.refundReq.Amount.Amount().RatString())
+	}
+
+	// Ledger must record the same 7000, so gateway and ledger agree.
+	stored, err := inner.FindByID(ctx, seed.ID())
+	if err != nil {
+		t.Fatalf("final load: %v", err)
+	}
+	if stored.RefundedAmount().Amount().Cmp(big.NewRat(10000, 1)) != 0 {
+		t.Errorf("ledger total refunded = %s, want 10000 (3000 prior + 7000 now)",
+			stored.RefundedAmount().Amount().RatString())
+	}
+}
+
 // --- OnPaymentProcessed metrics hook ---
 
 type onPaymentProcessedSpyPlugin struct {

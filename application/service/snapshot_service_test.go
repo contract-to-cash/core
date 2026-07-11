@@ -41,6 +41,9 @@ func (a *nonMarshalerAggregate) LoadFromSnapshot(_ eventstore.Snapshot) error { 
 func TestCreateSnapshot_HappyPath_RoundTrips(t *testing.T) {
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)}
 	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(10000))
+	// Simulate a persisted aggregate: events have been appended and cleared.
+	// CreateSnapshot rejects aggregates with uncommitted events (issue #197).
+	agg.ClearUncommittedEvents()
 
 	store := &snapshotCapturingStore{}
 	svc := NewSnapshotService(store, clock, 100)
@@ -108,9 +111,39 @@ func TestCreateSnapshot_NonMarshaler_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestCreateSnapshot_UncommittedEvents_ReturnsError(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)}
+	// Freshly-mutated aggregate: Create + Activate left uncommitted events that
+	// have NOT been persisted. Snapshotting it now would pair post-mutation
+	// state with a version that disagrees with the event stream (issue #197).
+	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(10000))
+	if len(agg.UncommittedEvents()) == 0 {
+		t.Fatal("test precondition: aggregate should have uncommitted events")
+	}
+
+	store := &snapshotCapturingStore{}
+	svc := NewSnapshotService(store, clock, 100)
+
+	err := svc.CreateSnapshot(context.Background(), agg)
+	if err == nil {
+		t.Fatal("expected an error snapshotting an aggregate with uncommitted events, got nil")
+	}
+	var de *shared.DomainError
+	if !errors.As(err, &de) {
+		t.Fatalf("expected a shared.DomainError, got %T: %v", err, err)
+	}
+	if de.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("error code = %q, want %q", de.Code, shared.ErrCodeBusinessRule)
+	}
+	if store.saved != nil {
+		t.Error("no snapshot should have been saved for an aggregate with uncommitted events")
+	}
+}
+
 func TestCreateSnapshot_SaveError_Propagates(t *testing.T) {
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)}
 	agg := newTestContractAggregate(clock, contract.ContractTypeSubscription, jpy(500))
+	agg.ClearUncommittedEvents() // persisted aggregate — see CreateSnapshot guard (issue #197)
 
 	sentinel := errors.New("store unavailable")
 	store := &snapshotCapturingStore{saveErr: sentinel}

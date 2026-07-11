@@ -154,9 +154,17 @@ func (u *ContractCreatedEventUpcaster) Upcast(event eventstore.Event) (eventstor
 // (billing_cycle → interval), then this upcaster raises it to v3.
 type ContractCreatedIdempotencyKeyUpcaster struct{}
 
-// CanUpcast returns true for ContractCreatedEvent at schema version <= 2.
+// CanUpcast returns true ONLY for ContractCreatedEvent at exactly schema
+// version 2. Matching the exact fromVersion (not <= 2) keeps the fixpoint chain
+// order-independent (issue #197): were this upcaster to accept <= 2 and be
+// applied before ContractCreatedEventUpcaster, a v1 payload would jump straight
+// to v3 and SKIP the v1→v2 billing_cycle→interval migration entirely, leaving
+// a legacy billing_cycle payload with no interval. Restricting to == 2 forces
+// the chain to run 1→2 (ContractCreatedEventUpcaster) then 2→3 (here)
+// regardless of registration order — mirroring ContractSuspendedEventUpcaster's
+// exact-version guard.
 func (u *ContractCreatedIdempotencyKeyUpcaster) CanUpcast(eventType eventstore.EventType, fromVersion int) bool {
-	return eventType == EventTypeContractCreated && fromVersion <= 2
+	return eventType == EventTypeContractCreated && fromVersion == 2
 }
 
 // Upcast bumps a ContractCreatedEvent to schema version 3. It leaves the

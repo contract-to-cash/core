@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -152,43 +153,75 @@ func (r *InMemoryContractRepository) FindExpiring(ctx context.Context, before ti
 	return result, nil
 }
 
-// FindTrialsEndingBefore returns trialing contracts whose trial ends before the given time.
-func (r *InMemoryContractRepository) FindTrialsEndingBefore(ctx context.Context, before time.Time) ([]*contract.ContractAggregate, error) {
+// FindTrialsEndingBefore returns trialing contracts whose trial ends before the
+// given time. When limit > 0, at most limit contracts are returned, ordered by
+// TrialEndDate ascending (oldest-expired first) so repeated batch runs drain the
+// backlog deterministically (issue #197); limit <= 0 means unbounded.
+func (r *InMemoryContractRepository) FindTrialsEndingBefore(ctx context.Context, before time.Time, limit int) ([]*contract.ContractAggregate, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var result []*contract.ContractAggregate
+	type candidate struct {
+		id  shared.ContractID
+		key time.Time
+	}
+	var candidates []candidate
 	for id, agg := range r.contracts {
 		if agg.Status() == contract.ContractStatusTrialing && agg.TrialConfig() != nil {
 			if agg.TrialConfig().TrialEndDate.Before(before) {
-				clone, err := r.rehydrateLocked(ctx, id)
-				if err != nil {
-					return nil, err
-				}
-				result = append(result, clone)
+				candidates = append(candidates, candidate{id: id, key: agg.TrialConfig().TrialEndDate})
 			}
 		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].key.Before(candidates[j].key) })
+	if limit > 0 && len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+
+	result := make([]*contract.ContractAggregate, 0, len(candidates))
+	for _, c := range candidates {
+		clone, err := r.rehydrateLocked(ctx, c.id)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, clone)
 	}
 	return result, nil
 }
 
-// FindDueForRenewal returns active contracts whose current period ends on or before asOf.
-func (r *InMemoryContractRepository) FindDueForRenewal(ctx context.Context, asOf time.Time) ([]*contract.ContractAggregate, error) {
+// FindDueForRenewal returns active contracts whose current period ends on or
+// before asOf. When limit > 0, at most limit contracts are returned, ordered by
+// current-period end ascending (oldest-due first) for deterministic backlog
+// draining (issue #197); limit <= 0 means unbounded.
+func (r *InMemoryContractRepository) FindDueForRenewal(ctx context.Context, asOf time.Time, limit int) ([]*contract.ContractAggregate, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var result []*contract.ContractAggregate
+	type candidate struct {
+		id  shared.ContractID
+		key time.Time
+	}
+	var candidates []candidate
 	for id, agg := range r.contracts {
 		if agg.Status() == contract.ContractStatusActive {
 			period := agg.CurrentPeriod()
 			if !period.End().IsZero() && !period.End().After(asOf) {
-				clone, err := r.rehydrateLocked(ctx, id)
-				if err != nil {
-					return nil, err
-				}
-				result = append(result, clone)
+				candidates = append(candidates, candidate{id: id, key: period.End()})
 			}
 		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].key.Before(candidates[j].key) })
+	if limit > 0 && len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+
+	result := make([]*contract.ContractAggregate, 0, len(candidates))
+	for _, c := range candidates {
+		clone, err := r.rehydrateLocked(ctx, c.id)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, clone)
 	}
 	return result, nil
 }

@@ -332,6 +332,14 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	if err != nil {
 		return nil, fmt.Errorf("failed to load invoice: %w", err)
 	}
+	// Defensive nil-guard (issue #197): invoice.Repository.FindByID is documented
+	// to return an error (ErrCodeNotFound) for a missing invoice, but a BYO-DB
+	// adapter that instead returns (nil, nil) would otherwise nil-panic on
+	// inv.AmountDue() below. Convert it to a clean not-found domain error.
+	if inv == nil {
+		return nil, shared.NewDomainError(shared.ErrCodeNotFound,
+			fmt.Sprintf("invoice %s not found", invoiceID))
+	}
 
 	amount := input.Amount
 	if amount.IsZero() {
@@ -345,9 +353,13 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return nil, fmt.Errorf("payment validation failed: %w", err)
 	}
 
-	// Resolve payment method via fallback chain if not explicitly provided
+	// Resolve payment method via fallback chain if not explicitly provided.
+	// Skipped for a zero-amount settlement (issue #197): a fully-discounted /
+	// fully-credited invoice has nothing to charge, so requiring a payment method
+	// (ResolvePaymentMethod errors when none is on file) would wrongly block
+	// settlement of an invoice that needs no gateway at all.
 	pmID := input.PaymentMethodID
-	if pmID == "" {
+	if pmID == "" && !amount.IsZero() {
 		resolved, resolveErr := s.ResolvePaymentMethod(ctx, inv)
 		if resolveErr != nil {
 			return nil, fmt.Errorf("failed to resolve payment method: %w", resolveErr)
@@ -462,6 +474,17 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 				)
 			}
 		}
+	}
+
+	// Zero-amount settlement (issue #197): a fully-discounted or fully-credited
+	// invoice has AmountDue()==0. Real gateways reject a zero-value Charge, so the
+	// unconditional gateway call below would make such invoices unsettleable.
+	// Settle it directly instead — record a completed zero-value payment and mark
+	// the invoice paid — without touching the gateway or the saga. Idempotency is
+	// still honoured (the pre-charge lookup above already short-circuited a prior
+	// completed payment under the effective key; the in-tx check repeats it).
+	if amount.IsZero() {
+		return s.settleZeroAmountPayment(ctx, inv, invoiceID, amount, effectiveKey, input)
 	}
 
 	// Build PaymentContext with invoice (payment is nil at this stage for BeforeCharge)
@@ -744,6 +767,12 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		if invErr != nil {
 			return fmt.Errorf("failed to reload invoice in tx: %w", invErr)
 		}
+		// Defensive nil-guard (issue #197): a BYO-DB adapter returning (nil, nil)
+		// would nil-panic on inv.RecordPayment below.
+		if freshInv == nil {
+			return shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("invoice %s not found", invoiceID))
+		}
 		inv = freshInv
 
 		// Idempotency check first: avoid mutating in-memory state if a
@@ -1025,6 +1054,155 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	return p, nil
 }
 
+// settleZeroAmountPayment settles a zero-amount invoice without calling the
+// payment gateway (issue #197). Real gateways reject a zero-value Charge, so a
+// fully-discounted / fully-credited invoice (AmountDue()==0) cannot go through
+// the normal gateway path. This records a completed zero-value payment and marks
+// the invoice paid, inside a single transaction, with the same in-tx idempotency
+// handling as the gateway path (minus the saga — there is no charge to reverse).
+//
+// Hook semantics (documented decision):
+//   - BeforeCharge is NOT fired. BeforeCharge is a gateway pre-flight ("about to
+//     charge the gateway"); a zero settlement never touches the gateway, so
+//     firing it would leak a phantom charge attempt into plugins that reserve
+//     inventory / emit audit events — the same reasoning that skips BeforeCharge
+//     on the pre-charge idempotent-replay short-circuit.
+//   - AfterCharge and OnPaymentProcessed ARE fired (non-fatal), because the
+//     payment did complete and the invoice is now paid: provisioning / metrics
+//     plugins must observe a zero-value settlement exactly as they observe a
+//     paid gateway charge. They fire paired, as on every success path.
+func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoice.Invoice, invoiceID shared.InvoiceID, amount shared.Money, effectiveKey string, input ProcessPaymentInput) (*payment.Payment, error) {
+	// Build the completed zero-value payment. No gateway transaction ID — nothing
+	// was charged. Method type resolves from the input only (no ChargeResponse).
+	p, npErr := payment.NewPayment(
+		shared.NewPaymentID(),
+		invoiceID,
+		amount,
+		s.resolvePaymentMethodType("", input.PaymentMethod),
+		"",
+		s.clock.Now(),
+	)
+	if npErr != nil {
+		return nil, fmt.Errorf("failed to construct zero-amount payment record: %w", npErr)
+	}
+	if effectiveKey != "" {
+		p.SetIdempotencyKey(effectiveKey)
+	}
+
+	err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		invoiceRepo := repos.Invoices
+		if invoiceRepo == nil {
+			invoiceRepo = s.invoiceRepo
+		}
+		freshInv, invErr := invoiceRepo.FindByID(txCtx, invoiceID)
+		if invErr != nil {
+			return fmt.Errorf("failed to reload invoice in tx: %w", invErr)
+		}
+		if freshInv == nil {
+			return shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("invoice %s not found", invoiceID))
+		}
+		inv = freshInv
+
+		// In-tx idempotency: converge on an existing payment under the effective
+		// key rather than double-settling. Mirrors the gateway path's switch.
+		if effectiveKey != "" {
+			existing, findErr := repos.Payments.FindByIdempotencyKey(txCtx, effectiveKey)
+			if findErr != nil {
+				return fmt.Errorf("idempotency check failed: %w", findErr)
+			}
+			if existing != nil {
+				switch existing.Status() {
+				case payment.PaymentStatusPending:
+					if completeErr := existing.Complete(); completeErr != nil {
+						return fmt.Errorf("failed to upgrade pending payment to completed: %w", completeErr)
+					}
+					if recordErr := inv.RecordPayment(amount, s.clock.Now()); recordErr != nil {
+						return fmt.Errorf("failed to record payment on invoice: %w", recordErr)
+					}
+					if saveErr := repos.Payments.Save(txCtx, existing); saveErr != nil {
+						return fmt.Errorf("failed to save upgraded payment: %w", saveErr)
+					}
+					if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {
+						return fmt.Errorf("failed to save invoice after payment upgrade: %w", saveErr)
+					}
+					p = existing
+					return nil
+				case payment.PaymentStatusCompleted:
+					p = existing
+					return nil
+				case payment.PaymentStatusFailed,
+					payment.PaymentStatusRefunded,
+					payment.PaymentStatusPartiallyRefunded,
+					payment.PaymentStatusChargedBack:
+					return shared.NewDomainError(
+						shared.ErrCodeConflict,
+						fmt.Sprintf("cannot replay payment in terminal state %q (idempotency key %q)",
+							existing.Status(), effectiveKey),
+					)
+				}
+			}
+		}
+
+		if completeErr := p.Complete(); completeErr != nil {
+			return fmt.Errorf("failed to complete zero-amount payment: %w", completeErr)
+		}
+		if recordErr := inv.RecordPayment(amount, s.clock.Now()); recordErr != nil {
+			return fmt.Errorf("failed to record zero-amount payment on invoice: %w", recordErr)
+		}
+		if saveErr := repos.Payments.Save(txCtx, p); saveErr != nil {
+			// A duplicate-key collision means a concurrent settlement won. There is
+			// no gateway charge to reconcile for a zero payment, so converge on the
+			// winner by re-reading it on the outer ctx.
+			if errors.Is(saveErr, payment.ErrDuplicateIdempotencyKey) && effectiveKey != "" {
+				winner, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, effectiveKey)
+				if findErr == nil && winner != nil {
+					p = winner
+					return nil
+				}
+				return shared.NewDomainError(shared.ErrCodeConflict,
+					fmt.Sprintf("duplicate idempotency key %q detected for zero-amount settlement; retry", effectiveKey))
+			}
+			return fmt.Errorf("failed to save zero-amount payment: %w", saveErr)
+		}
+		if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {
+			return fmt.Errorf("failed to save invoice after zero-amount payment: %w", saveErr)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// AfterCharge + OnPaymentProcessed fire (non-fatal); BeforeCharge does not.
+	successCtx := plugin.NewPaymentContext(ctx, p, inv)
+	for _, hook := range s.registry.GetAfterChargeHooks() {
+		if hookErr := plugin.SafeInvoke("AfterChargeHook.AfterCharge", hook.Name(), func() error {
+			return hook.AfterCharge(successCtx)
+		}); hookErr != nil {
+			plugin.LogNonFatalHookError(s.logger, "AfterCharge hook failed", hookErr,
+				"hook", hook.Name(),
+				"paymentID", p.ID(),
+				"invoiceID", invoiceID,
+			)
+		}
+	}
+	metricsCtx := plugin.NewContext(ctx)
+	for _, hook := range s.registry.GetOnPaymentProcessedHooks() {
+		if hookErr := plugin.SafeInvoke("OnPaymentProcessedHook.OnPaymentProcessed", hook.Name(), func() error {
+			return hook.OnPaymentProcessed(metricsCtx, p)
+		}); hookErr != nil {
+			plugin.LogNonFatalHookError(s.logger, "OnPaymentProcessed hook failed", hookErr,
+				"hook", hook.Name(),
+				"paymentID", p.ID(),
+				"invoiceID", invoiceID,
+			)
+		}
+	}
+
+	return p, nil
+}
+
 // Refund processes a refund for a payment (issue #150).
 //
 // # Gateway idempotency key (money-safety)
@@ -1087,6 +1265,13 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 	if err != nil {
 		return fmt.Errorf("failed to load payment: %w", err)
 	}
+	// Defensive nil-guard (issue #197): payment.Repository.FindByID is documented
+	// to error on a missing payment; a BYO-DB adapter returning (nil, nil) would
+	// otherwise nil-panic on p.Amount() below.
+	if p == nil {
+		return shared.NewDomainError(shared.ErrCodeNotFound,
+			fmt.Sprintf("payment %s not found", paymentID))
+	}
 
 	// Determine refund amount: if not specified, refund the remaining unrefunded amount.
 	var refundAmount shared.Money
@@ -1118,9 +1303,18 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		refundKey = deriveRefundIdempotencyKey(paymentID, p.RefundedAmount())
 	}
 
+	// Send the RESOLVED refund amount to the gateway, not input.Amount (issue
+	// #197). On a full refund input.Amount is nil; forwarding nil would ask the
+	// gateway to refund "the full charge" by its own reckoning while the local
+	// ledger records the amount computed here (payment amount − already-refunded).
+	// If those two notions ever diverge — a prior partial refund the gateway
+	// knows about, a gateway that treats nil as "the original charge" rather than
+	// "the remaining balance" — the gateway moves a different amount than the
+	// ledger records, silently desynchronising them. Passing &refundAmount makes
+	// the gateway and the ledger agree on exactly one figure.
 	refundReq := &port.RefundRequest{
 		TransactionID:  p.GatewayTransactionID(),
-		Amount:         input.Amount,
+		Amount:         &refundAmount,
 		Reason:         input.Reason,
 		IdempotencyKey: refundKey,
 	}
@@ -1234,6 +1428,13 @@ func (s *PaymentService) ResolvePaymentMethod(ctx context.Context, inv *invoice.
 		agg, err := s.contractRepo.FindByID(ctx, inv.ContractID())
 		if err != nil {
 			return "", fmt.Errorf("failed to load contract for payment method resolution: %w", err)
+		}
+		// Defensive nil-guard (issue #197): contract.Repository.FindByID errors on
+		// a missing contract; a BYO-DB adapter returning (nil, nil) would nil-panic
+		// on agg.PaymentMethodID() below.
+		if agg == nil {
+			return "", shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("contract %s not found", inv.ContractID()))
 		}
 		if agg.PaymentMethodID() != nil && *agg.PaymentMethodID() != "" {
 			return *agg.PaymentMethodID(), nil

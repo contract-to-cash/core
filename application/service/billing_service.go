@@ -315,7 +315,11 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 // Contracts in non-billable statuses (cancelled, expired) are also blocked.
 //
 // The regenerated invoice is linked to the voided invoice via RevisionOf/OriginalInvoiceID
-// to maintain the audit trail.
+// to maintain the audit trail. When a period has been void-and-recreated more than
+// once, the revision chain links to the voided invoice with the greatest ID
+// (deterministic — see the selection comment below; ULID creation order stands in
+// for a void timestamp), so regeneration is reproducible regardless of the order
+// FindByContractAndPeriod returns rows in (issue #197).
 func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) (*invoice.Invoice, error) {
 	// Load contract aggregate (tx-scoped when inside a transaction, so reads see
 	// writes made earlier in the same transaction — symmetry with GenerateInvoice)
@@ -356,11 +360,23 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 
 	// Require a voided invoice for the same period — this distinguishes regeneration
 	// from net-new invoice creation and prevents misuse as a bypass.
-	// Use the last voided invoice found so that the revision chain links to the
-	// most recently voided entry (important when void-and-recreate runs more than once).
+	//
+	// Deterministic selection (issue #197): FindByContractAndPeriod returns
+	// invoices in an unspecified order (the in-memory repo iterates a map), so
+	// picking "the last one seen" linked the revision chain to a nondeterministic
+	// invoice when a period had been void-and-recreated more than once. We instead
+	// link to the voided invoice with the greatest ID. Invoice IDs are ULIDs whose
+	// leading bits are a creation timestamp, so lexicographic max == most recently
+	// created == most recently voided in a void-and-recreate sequence (each cycle
+	// voids the current invoice and creates a newer one). The Invoice entity has no
+	// dedicated voidedAt timestamp, so the ULID's creation ordering is the stable
+	// stand-in; the choice is documented on RegenerateInvoice.
 	var voidedInv *invoice.Invoice
 	for _, inv := range existing {
-		if inv.Status() == invoice.InvoiceStatusVoided {
+		if inv.Status() != invoice.InvoiceStatusVoided {
+			continue
+		}
+		if voidedInv == nil || inv.ID() > voidedInv.ID() {
 			voidedInv = inv
 		}
 	}
@@ -957,11 +973,21 @@ func (s *BillingService) calculateUsageCharge(
 		}
 
 		if billableUsage > 0 {
+			// Line-item consistency (issue #197): the line item's amount is the
+			// whole metric charge (metricPrice), which for tiered/volume pricing is
+			// NOT quantity × a single per-unit rate. Setting unitPrice = metricPrice
+			// while quantity = billableUsage made quantity × unitPrice ≠ amount
+			// (it equalled billableUsage × metricPrice). We instead record the
+			// EXACT average per-unit price = metricPrice / billableUsage, computed
+			// over big.Rat so quantity × unitPrice == amount exactly (no rounding
+			// error). This keeps the displayed usage quantity while making the line
+			// item internally consistent for tiered/volume/graduated models.
+			perUnit := metricPrice.Multiply(new(big.Rat).SetFrac64(1, billableUsage))
 			usageLI, liErr := invoice.NewLineItem(
 				shared.GenerateID(),
 				fmt.Sprintf("Usage: %s", metric.Name),
 				billableUsage,
-				metricPrice, metricPrice, nil,
+				perUnit, metricPrice, nil,
 				invoice.WithPriceID(price.ID()),
 			)
 			if liErr != nil {

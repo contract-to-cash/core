@@ -70,6 +70,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`contract.ContractAggregate.StartTrial`** now validates its config against
     the aggregate's clock: a zero/past `TrialEndDate` and negative
     `ConversionReminderDays` are rejected.
+- **Application / eventstore / batch consistency gaps (#197)** — a batch of
+  correctness fixes across the service, plugin, batch, and in-memory layers:
+  - **Upcaster order-dependence**: `ContractCreatedIdempotencyKeyUpcaster.CanUpcast`
+    now matches `fromVersion == 2` (was `<= 2`). Registered before
+    `ContractCreatedEventUpcaster`, the old guard let a v1 payload jump straight to
+    v3 and skip the v1→v2 `billing_cycle`→`interval` migration; the exact-version
+    guard makes the fixpoint chain run 1→2→3 regardless of registration order
+    (mirrors `ContractSuspendedEventUpcaster`). Added a chain-order-permutation test.
+  - **Snapshot of a dirty aggregate**: `SnapshotService.CreateSnapshot` now errors
+    (`business_rule`) when the aggregate has uncommitted events, instead of writing
+    a state/version-inconsistent snapshot. Persist (append + `ClearUncommittedEvents`)
+    before snapshotting.
+  - **Non-deterministic revision chain**: `BillingService.RegenerateInvoice` links
+    the revision chain to the voided invoice with the greatest ID (ULID creation
+    order) rather than a map-ordered "last seen" invoice, so regeneration is
+    reproducible when a period was void-and-recreated more than once.
+  - **Inconsistent usage line items**: usage line items now record the exact average
+    per-unit price (`metricPrice / billableUsage` over `big.Rat`) so
+    `quantity × unitPrice == amount`; previously `unitPrice` held the whole metric
+    charge, breaking the identity for any quantity ≠ 1.
+  - **Refund gateway/ledger disagreement**: `PaymentService.Refund` sends the
+    resolved refund amount (`&refundAmount`) to the gateway on the full-refund path
+    instead of `nil`, so the gateway and the local ledger always agree on one figure.
+  - **`FindByID` nil-guards**: `PaymentService` and `CreditNoteService` now defend
+    against a repository returning `(nil, nil)` for a missing entity (BYO-DB
+    defensiveness), returning a clean `not_found` error instead of nil-panicking.
+    The `FindByID` not-found convention (return `ErrCodeNotFound`, never `(nil, nil)`)
+    is now documented on the `contract` / `invoice` / `payment` / `CreditNote`
+    repository interfaces.
+  - **Credit note ledger posting**: `CreditNoteService.ApplyCreditNote` posts the
+    applied amount to the account's credit ledger as a spendable `BalanceEntry`
+    (inside the same transaction) when a balance repo is wired via the new
+    `WithCreditNoteBalanceRepo(...)` option, so "apply to account" is a real credit
+    rather than a status-only change. Backward-compatible: no balance repo → status
+    transition only. (No new plugin hook was added — the ledger entry is the record
+    of the application; the 20-hook surface is unchanged.)
+  - **Plugin lifecycle robustness**: `Registry.InitializeAll` now rolls back the
+    already-initialized plugins (Shutdown, reverse order) when a later Initialize
+    fails, instead of leaking half-initialized plugins; `Registry.ShutdownAll` now
+    attempts every plugin and returns all errors joined instead of aborting on the
+    first (matching `docs/internals/plugin-system.md` §4.1).
+  - **Zero-amount settlement**: `PaymentService.ProcessPayment` settles a
+    zero-amount invoice (fully discounted / credited) directly without calling the
+    gateway — real gateways reject a zero-value charge. It skips `BeforeCharge` (a
+    gateway pre-flight) but fires `AfterCharge` + `OnPaymentProcessed`, and requires
+    no payment method. Idempotency is honoured.
+  - **In-memory repository isolation**: `InMemoryProductRepository` now clones
+    products via a snapshot round-trip (Product is a mutable entity) instead of
+    sharing raw pointers; `InMemoryBalanceRepository.SaveApplication` /
+    `SaveRefund` now upsert by ID (idempotent under tx retry) and return isolated
+    copies.
+  - **BREAKING (repository implementors)**: the batch finder methods gained a
+    trailing `limit int` parameter —
+    `contract.Repository.FindDueForRenewal(ctx, asOf, limit)`,
+    `contract.Repository.FindTrialsEndingBefore(ctx, before, limit)`, and
+    `balance.Repository.FindExpired(ctx, asOf, limit)` — threaded from the new
+    `batch.BatchOptions.Limit` field so a run against a large due-set does not load
+    the entire backlog. `limit <= 0` means unbounded (preserves prior behaviour);
+    a positive limit returns the oldest-eligible rows first. BYO-DB adapters must
+    add the parameter and push it into the query.
 
 - **Voiding an invoice now restores the credit balance it consumed (#184)** —
   previously, when an invoice that had drawn down account credit (via FIFO

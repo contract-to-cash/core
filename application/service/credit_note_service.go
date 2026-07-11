@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/contract-to-cash/core/application/tx"
+	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/plugin"
@@ -51,6 +52,19 @@ func WithCreditNoteLogger(l *slog.Logger) CreditNoteServiceOption {
 	}
 }
 
+// WithCreditNoteBalanceRepo wires a credit-ledger repository into the
+// CreditNoteService (issue #197). When provided, ApplyCreditNote posts the
+// applied amount to the account's credit ledger as a spendable BalanceEntry
+// (inside the same transaction as the credit-note state transition), so
+// "apply to account" actually credits the customer's balance instead of being a
+// status-only change. When omitted, ApplyCreditNote only performs the status
+// transition (backward-compatible).
+func WithCreditNoteBalanceRepo(repo balance.Repository) CreditNoteServiceOption {
+	return func(s *CreditNoteService) {
+		s.balanceRepo = repo
+	}
+}
+
 // CreditNoteService orchestrates credit note creation, issuance, and invoice revision.
 type CreditNoteService struct {
 	invoiceRepo    invoice.Repository
@@ -58,6 +72,7 @@ type CreditNoteService struct {
 	registry       *plugin.Registry
 	clock          shared.Clock
 	billingSvc     *BillingService
+	balanceRepo    balance.Repository
 	txManager      tx.TxManager
 	logger         *slog.Logger
 	// suppressTxWarning records an explicit WithoutCreditNoteTransactions() opt-in
@@ -89,6 +104,7 @@ func NewCreditNoteService(
 		repos := tx.Repos{
 			Invoices:    invoiceRepo,
 			CreditNotes: creditNoteRepo,
+			Balances:    s.balanceRepo,
 		}
 		if s.suppressTxWarning {
 			s.txManager = tx.NewNoopTxManagerExplicit(repos)
@@ -153,6 +169,13 @@ func (s *CreditNoteService) CreateCreditNote(
 		inv, err := invoiceRepo.FindByID(txCtx, invoiceID)
 		if err != nil {
 			return fmt.Errorf("failed to find invoice: %w", err)
+		}
+		// Defensive nil-guard (issue #197): invoice.Repository.FindByID errors on a
+		// missing invoice; a BYO-DB adapter returning (nil, nil) would nil-panic on
+		// inv.Status() below.
+		if inv == nil {
+			return shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("invoice %s not found", invoiceID))
 		}
 
 		if !creditNoteEligibleStatuses[inv.Status()] {
@@ -314,6 +337,10 @@ func (s *CreditNoteService) IssueCreditNote(ctx context.Context, creditNoteID sh
 			if findErr != nil {
 				return fmt.Errorf("failed to find credit note: %w", findErr)
 			}
+			if loaded == nil {
+				return shared.NewDomainError(shared.ErrCodeNotFound,
+					fmt.Sprintf("credit note %s not found", creditNoteID))
+			}
 			if issueErr := loaded.Issue(s.clock.Now()); issueErr != nil {
 				return issueErr
 			}
@@ -356,6 +383,23 @@ func (s *CreditNoteService) IssueCreditNote(ctx context.Context, creditNoteID sh
 // Refund on the same issued note cannot both persist: the loser's Save is
 // rejected with tx.ErrVersionConflict, RetryOnConflict re-reads the now-applied
 // note, and Apply rejects the retry with invalid_state_transition.
+//
+// Ledger posting (issue #197): "apply to account" means the credit note becomes
+// spendable account credit, so when a balance repository is wired (see
+// WithCreditNoteBalanceRepo) this posts a BalanceEntry for creditAmount to the
+// note's account, INSIDE the same transaction as the state transition, so the
+// applied status and the ledger credit commit or roll back together. The entry
+// uses BalanceReasonRefundConversion (a credit note applied to the balance is a
+// refund-to-credit conversion) and carries an idempotency guard: applying the
+// same note ID twice is already blocked by the issued→applied transition, so a
+// retried Apply cannot double-post. When no balance repository is wired the
+// method is a status-only transition (backward-compatible).
+//
+// Observability: no Apply-specific plugin hook exists (the plugin surface is the
+// documented set of 20 hooks — adding a 21st for this narrow event is out of
+// scope for this fix), so the posting is recorded on the ledger and logged
+// rather than surfaced through a new hook IF. Downstream consumers observe the
+// application through the BalanceEntry / OnCreditNoteIssued-tracked note state.
 func (s *CreditNoteService) ApplyCreditNote(ctx context.Context, creditNoteID shared.CreditNoteID, creditAmount shared.Money) (*invoice.CreditNote, error) {
 	var cn *invoice.CreditNote
 	err := tx.RetryOnConflict(creditNoteMaxRetries, func() error {
@@ -366,12 +410,41 @@ func (s *CreditNoteService) ApplyCreditNote(ctx context.Context, creditNoteID sh
 			if findErr != nil {
 				return fmt.Errorf("failed to find credit note: %w", findErr)
 			}
+			if loaded == nil {
+				return shared.NewDomainError(shared.ErrCodeNotFound,
+					fmt.Sprintf("credit note %s not found", creditNoteID))
+			}
 			if applyErr := loaded.Apply(creditAmount); applyErr != nil {
 				return applyErr
 			}
 			if saveErr := repo.Save(txCtx, loaded); saveErr != nil {
 				return saveErr
 			}
+
+			// Post the applied amount to the account's credit ledger (issue #197).
+			// Runs in the same tx as the transition so a save failure below rolls
+			// the applied status back too. Skipped when no balance repo is wired.
+			if balanceRepo := s.txScopedBalanceRepo(repos); balanceRepo != nil {
+				entry, entryErr := balance.NewBalanceEntry(
+					loaded.AccountID(), creditAmount,
+					balance.BalanceReasonRefundConversion, s.clock.Now(),
+				)
+				if entryErr != nil {
+					return fmt.Errorf("failed to build balance entry for applied credit note: %w", entryErr)
+				}
+				entry.SetSourceType(balance.BalanceSourceTypeRefundConversion)
+				if saveErr := balanceRepo.Save(txCtx, entry); saveErr != nil {
+					return fmt.Errorf("failed to post applied credit note to ledger: %w", saveErr)
+				}
+				s.logger.Info("credit note applied to account balance",
+					"creditNoteID", creditNoteID,
+					"accountID", loaded.AccountID(),
+					"balanceEntryID", entry.ID(),
+					"amount", creditAmount.Amount().RatString(),
+					"currency", creditAmount.Currency(),
+				)
+			}
+
 			applied = loaded
 			return nil
 		})
@@ -385,6 +458,17 @@ func (s *CreditNoteService) ApplyCreditNote(ctx context.Context, creditNoteID sh
 		return nil, err
 	}
 	return cn, nil
+}
+
+// txScopedBalanceRepo returns the transaction-scoped balance repository, falling
+// back to the field repo when the caller wired an incomplete tx.Repos set. Nil
+// when no balance repository is configured at all (the ledger-posting step in
+// ApplyCreditNote is then skipped).
+func (s *CreditNoteService) txScopedBalanceRepo(repos tx.Repos) balance.Repository {
+	if repos.Balances != nil {
+		return repos.Balances
+	}
+	return s.balanceRepo
 }
 
 // RefundCreditNote transitions a credit note from issued to refunded (payment refund).
@@ -402,6 +486,10 @@ func (s *CreditNoteService) RefundCreditNote(ctx context.Context, creditNoteID s
 			loaded, findErr := repo.FindByID(txCtx, creditNoteID)
 			if findErr != nil {
 				return fmt.Errorf("failed to find credit note: %w", findErr)
+			}
+			if loaded == nil {
+				return shared.NewDomainError(shared.ErrCodeNotFound,
+					fmt.Sprintf("credit note %s not found", creditNoteID))
 			}
 			if refundErr := loaded.Refund(refundAmount); refundErr != nil {
 				return refundErr
@@ -462,6 +550,12 @@ func (s *CreditNoteService) ReissueInvoice(ctx context.Context, originalInvoiceI
 		loaded, findErr := invoiceRepo.FindByID(txCtx, originalInvoiceID)
 		if findErr != nil {
 			return fmt.Errorf("failed to find invoice: %w", findErr)
+		}
+		// Defensive nil-guard (issue #197): a BYO-DB adapter returning (nil, nil)
+		// would nil-panic on original.OriginalInvoiceID() below.
+		if loaded == nil {
+			return shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("invoice %s not found", originalInvoiceID))
 		}
 		original = loaded
 

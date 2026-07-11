@@ -594,57 +594,56 @@ func sortedCopy[T Plugin](hooks []T) []T {
     return cp
 }
 
-// InitializeAll 全プラグインを Priority 昇順（小さい値が先）で初期化する。
-// map の反復順は非決定的なので、一旦スライスへ集めて sortByPriority でソートしてから
-// 初期化する。各 Initialize は plugin.SafeInvoke でラップされ、パニックしても
-// プロセスをクラッシュさせず *PluginPanicError を含むエラーとして返る（§5.4、issue #193）。
-// config が nil のプラグインには空の Config{} を渡す。
+// InitializeAll 全プラグインを Priority 昇順で初期化する。
+//
+// 初期化は all-or-nothing（#197）: いずれかの Initialize が失敗したら、その呼び出しで
+// 既に初期化済みのプラグインを **逆順に Shutdown してロールバック** してからエラーを返す。
+// これをしないと、失敗した InitializeAll が「半初期化された」プラグイン（接続・goroutine・
+// ファイルハンドル等を掴んだまま）をリークさせる — 呼び出し側はエラーしか受け取らず、
+// どのプラグインが先に成功したかを知る手段がないため解放できない。ロールバック中の
+// Shutdown エラーは errors.Join で元の初期化エラーに連結され、可観測だが元原因を隠さない。
 func (r *Registry) InitializeAll(ctx context.Context, configs map[string]Config) error {
-    r.mu.RLock()
-    plugins := make([]Plugin, 0, len(r.plugins))
-    for _, p := range r.plugins {
-        plugins = append(plugins, p)
-    }
-    r.mu.RUnlock()
-
-    sortByPriority(plugins)
-
+    // ... Priority 昇順にソート ...
+    var initialized []Plugin
     for _, p := range plugins {
-        cfg := configs[p.Name()]
-        if cfg == nil {
-            cfg = Config{}
-        }
         if err := SafeInvoke("Plugin.Initialize", p.Name(), func() error {
-            return p.Initialize(ctx, cfg)
+            return p.Initialize(ctx, configs[p.Name()])
         }); err != nil {
-            return fmt.Errorf("failed to initialize plugin %q: %w", p.Name(), err)
+            initErr := fmt.Errorf("failed to initialize plugin %q: %w", p.Name(), err)
+            // 既に初期化したプレフィックスを逆順に Shutdown（#197）
+            if rbErr := shutdownInReverse(ctx, initialized); rbErr != nil {
+                return errors.Join(initErr, rbErr)
+            }
+            return initErr
         }
+        initialized = append(initialized, p)
     }
     return nil
 }
 
-// ShutdownAll 全プラグインを Priority の**逆順**でシャットダウンする。
-// Initialize と同様に SafeInvoke でラップし、**最初のエラーで打ち切って**そのエラーを
-// 返す（残りのプラグインの Shutdown をベストエフォートで続行する実装ではない点に注意）。
+// ShutdownAll 全プラグインを逆 Priority 順にシャットダウンする。
+//
+// InitializeAll と異なり、**最初のエラーで中断しない**（#197）: 1 つの失敗が後続の
+// プラグインを未 Shutdown のまま（リソースをリーク）残さないよう、全プラグインの Shutdown を
+// 試み、エラーを収集して errors.Join で連結して返す。
 func (r *Registry) ShutdownAll(ctx context.Context) error {
-    r.mu.RLock()
-    plugins := make([]Plugin, 0, len(r.plugins))
-    for _, p := range r.plugins {
-        plugins = append(plugins, p)
-    }
-    r.mu.RUnlock()
+    // ... Priority 昇順にソートし、shutdownInReverse で逆順に全件試行 ...
+    return shutdownInReverse(ctx, plugins)
+}
 
-    sortByPriority(plugins)
-
+// shutdownInReverse は与えられたスライスを逆順に、全件 Shutdown を試みてエラーを
+// errors.Join で連結して返す（1 件の失敗で中断しない）。
+func shutdownInReverse(ctx context.Context, plugins []Plugin) error {
+    var errs []error
     for i := len(plugins) - 1; i >= 0; i-- {
         p := plugins[i]
         if err := SafeInvoke("Plugin.Shutdown", p.Name(), func() error {
             return p.Shutdown(ctx)
         }); err != nil {
-            return fmt.Errorf("failed to shutdown plugin %q: %w", p.Name(), err)
+            errs = append(errs, fmt.Errorf("failed to shutdown plugin %q: %w", p.Name(), err))
         }
     }
-    return nil
+    return errors.Join(errs...)
 }
 
 // --- フックゲッター（Priority ソート済みの「コピー」を返す） ---

@@ -152,16 +152,45 @@ func (r *InMemoryBalanceRepository) GetBalance(_ context.Context, accountID shar
 	return total, nil
 }
 
-// SaveApplication persists a credit application.
+// cloneApplication / cloneRefund return isolated copies of the audit records so
+// the repository never hands out (or stores) a pointer a caller can mutate
+// (issue #152 discipline / #197). BalanceApplication/BalanceRefund are flat value
+// structs whose only reference-typed field is shared.Money (an immutable value
+// object), so a shallow struct copy is a full isolation.
+func cloneApplication(app *balance.BalanceApplication) *balance.BalanceApplication {
+	cp := *app
+	return &cp
+}
+
+func cloneRefund(ref *balance.BalanceRefund) *balance.BalanceRefund {
+	cp := *ref
+	return &cp
+}
+
+// SaveApplication persists a credit application idempotently (issue #197).
+//
+// A prior implementation blindly appended, so a transaction retry that re-ran
+// applyBalances (e.g. after an optimistic-lock conflict) could record the SAME
+// application ID twice, double-counting consumed credit in the audit trail. This
+// upserts by BalanceApplication.ID: a repeat save of the same ID overwrites the
+// existing record rather than appending a duplicate. An isolated copy is stored
+// so a later mutation of the caller's struct cannot leak in.
 func (r *InMemoryBalanceRepository) SaveApplication(_ context.Context, app *balance.BalanceApplication) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.applications = append(r.applications, app)
+	for i, existing := range r.applications {
+		if existing.ID == app.ID {
+			r.applications[i] = cloneApplication(app)
+			return nil
+		}
+	}
+	r.applications = append(r.applications, cloneApplication(app))
 	return nil
 }
 
 // FindApplicationsByInvoice returns all credit applications for an invoice.
+// Returns isolated copies so callers cannot mutate stored state (issue #197).
 func (r *InMemoryBalanceRepository) FindApplicationsByInvoice(_ context.Context, invoiceID shared.InvoiceID) ([]*balance.BalanceApplication, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -169,24 +198,33 @@ func (r *InMemoryBalanceRepository) FindApplicationsByInvoice(_ context.Context,
 	var result []*balance.BalanceApplication
 	for _, app := range r.applications {
 		if app.InvoiceID == invoiceID {
-			result = append(result, app)
+			result = append(result, cloneApplication(app))
 		}
 	}
 	return result, nil
 }
 
-// SaveRefund persists a credit refund.
+// SaveRefund persists a credit refund idempotently (issue #197): a repeat save of
+// the same BalanceRefund.ID overwrites rather than appends, mirroring
+// SaveApplication. An isolated copy is stored.
 func (r *InMemoryBalanceRepository) SaveRefund(_ context.Context, refund *balance.BalanceRefund) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.refunds = append(r.refunds, refund)
+	for i, existing := range r.refunds {
+		if existing.ID == refund.ID {
+			r.refunds[i] = cloneRefund(refund)
+			return nil
+		}
+	}
+	r.refunds = append(r.refunds, cloneRefund(refund))
 	return nil
 }
 
 // FindRefundsByInvoice returns all credit refunds recorded against an invoice
 // (issue #184). Used by the void-restoration flow to skip already-restored
-// applications, keeping a double void / retry idempotent.
+// applications, keeping a double void / retry idempotent. Returns isolated
+// copies (issue #197).
 func (r *InMemoryBalanceRepository) FindRefundsByInvoice(_ context.Context, invoiceID shared.InvoiceID) ([]*balance.BalanceRefund, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -194,7 +232,7 @@ func (r *InMemoryBalanceRepository) FindRefundsByInvoice(_ context.Context, invo
 	var result []*balance.BalanceRefund
 	for _, ref := range r.refunds {
 		if ref.InvoiceID == invoiceID {
-			result = append(result, ref)
+			result = append(result, cloneRefund(ref))
 		}
 	}
 	return result, nil
@@ -204,11 +242,17 @@ func (r *InMemoryBalanceRepository) FindRefundsByInvoice(_ context.Context, invo
 // remaining amount is still non-zero (i.e. expired credit not yet forfeited by
 // MarkExpired), ordered by creation time ascending. Feeds
 // batch.BalanceExpirationProcessor (issue #159).
-func (r *InMemoryBalanceRepository) FindExpired(_ context.Context, asOf time.Time) ([]*balance.BalanceEntry, error) {
+//
+// When limit > 0, at most limit entries are returned (the oldest by creation
+// time, since the sort precedes truncation), so repeated batch runs drain the
+// expired backlog deterministically (issue #197); limit <= 0 means unbounded.
+func (r *InMemoryBalanceRepository) FindExpired(_ context.Context, asOf time.Time, limit int) ([]*balance.BalanceEntry, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var result []*balance.BalanceEntry
+	// Collect matching entries first, sort by creation time, THEN clone/truncate
+	// so the limit selects the oldest expired entries deterministically.
+	var matched []*balance.BalanceEntry
 	for _, entry := range r.entries {
 		if !entry.IsExpired(asOf) {
 			continue
@@ -216,16 +260,24 @@ func (r *InMemoryBalanceRepository) FindExpired(_ context.Context, asOf time.Tim
 		if entry.IsFullyConsumed() {
 			continue
 		}
+		matched = append(matched, entry)
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].CreatedAt().Before(matched[j].CreatedAt())
+	})
+	if limit > 0 && len(matched) > limit {
+		matched = matched[:limit]
+	}
+
+	result := make([]*balance.BalanceEntry, 0, len(matched))
+	for _, entry := range matched {
 		clone, err := cloneBalanceEntry(entry)
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, clone)
 	}
-
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt().Before(result[j].CreatedAt())
-	})
 
 	return result, nil
 }

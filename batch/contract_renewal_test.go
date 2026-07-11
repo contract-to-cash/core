@@ -190,7 +190,7 @@ func (m *mockRenewalRepo) FindExpiring(_ context.Context, _ time.Time) ([]*contr
 	return nil, nil
 }
 
-func (m *mockRenewalRepo) FindTrialsEndingBefore(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+func (m *mockRenewalRepo) FindTrialsEndingBefore(_ context.Context, _ time.Time, _ int) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
 
@@ -198,7 +198,7 @@ func (m *mockRenewalRepo) FindByIDAsOf(_ context.Context, _ shared.ContractID, _
 	return nil, nil
 }
 
-func (m *mockRenewalRepo) FindDueForRenewal(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+func (m *mockRenewalRepo) FindDueForRenewal(_ context.Context, _ time.Time, _ int) ([]*contract.ContractAggregate, error) {
 	return m.contracts, nil
 }
 

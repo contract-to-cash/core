@@ -17,6 +17,15 @@ type BatchOptions struct {
 	ContinueOnError bool
 	// Concurrency is the number of items processed in parallel.
 	Concurrency int
+	// Limit caps how many due items a single Process run loads and processes
+	// (issue #197). A positive value is passed through to the repository finder
+	// (FindDueForRenewal / FindTrialsEndingBefore / FindExpired), which returns at
+	// most that many rows — oldest-eligible first — so a run against a large due
+	// set does not load the entire backlog into memory. Zero (the default) means
+	// "no limit" and preserves the original unbounded behaviour. Schedule Process
+	// on a cadence (or in a loop until BatchResult.Total < Limit) to drain a
+	// backlog larger than Limit across multiple runs.
+	Limit int
 }
 
 // BatchResult summarizes the outcome of a batch operation.
