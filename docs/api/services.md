@@ -50,6 +50,13 @@ type BillingConfig struct {
                                          //   ("send_invoice"). Default CollectionAutoCharge.
     AllowPartialPayment bool             // If true, generated invoices accept partial payment
                                          //   (invoice.allowPartialPay). Default false.
+    TaxRoundingMode     shared.RoundingMode // Minor-unit rounding mode the pipeline applies to
+                                         //   subtotal / total discount / total tax so the
+                                         //   persisted amounts are integral in the currency's
+                                         //   minor unit (issue #189). Default shared.RoundDown
+                                         //   (truncate toward zero, per JP consumption-tax
+                                         //   practice). shared.RoundHalfUp / shared.RoundUp also
+                                         //   accepted.
 }
 ```
 
@@ -72,7 +79,15 @@ const (
 ```
 
 Use `service.NewBillingConfig(opts...)` (with `WithGracePeriod` / `WithDaysUntilDue` /
-`WithCollectionMethod` / `WithAllowPartialPayment`) for validated construction with defaults.
+`WithCollectionMethod` / `WithAllowPartialPayment` / `WithTaxRoundingMode`) for validated
+construction with defaults.
+
+> **Minor-unit rounding (#189)**: unlike the integrator-interpreted knobs above, `TaxRoundingMode`
+> IS read by the core pipeline. It quantises the subtotal, total discount, and total tax to the
+> invoice currency's minor unit (`shared.Currency.MinorUnitExponent()`: JPY=0, USD/EUR=2), so the
+> persisted subtotal/discount/tax/total/amountDue are integral in minor units and reconcile exactly
+> against integer-only payment gateways. Register non-default currencies with
+> `shared.RegisterCurrencyMinorUnit`.
 
 ### GenerateInvoice
 

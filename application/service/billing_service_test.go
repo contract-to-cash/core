@@ -1665,6 +1665,101 @@ func TestRegenerateInvoice_PipelineHooksApplied(t *testing.T) {
 	}
 }
 
+// TestGenerateInvoice_MinorUnitRounding_JPY guards issue #189: ¥101 at 10% tax
+// yields an exact ¥10.1 tax before rounding, which no integer-only gateway can
+// settle. The pipeline must round tax to whole yen (default RoundDown) so the
+// persisted tax/total/amountDue are all integral in JPY minor units.
+func TestGenerateInvoice_MinorUnitRounding_JPY(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(101))
+	period := currentPeriodOf(agg)
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(&tenPercentTaxPlugin{})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		registry,
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Tax = round_down(101 * 10%) = round_down(10.1) = 10
+	expectedTax := new(big.Rat).SetInt64(10)
+	if inv.TaxAmount().Amount().Cmp(expectedTax) != 0 {
+		t.Errorf("expected tax 10 (¥10.1 rounded down), got %v", inv.TaxAmount().Amount())
+	}
+	// Total = 101 + 10 = 111 (exact, no 0.1 residue)
+	expectedTotal := new(big.Rat).SetInt64(111)
+	if inv.Total().Amount().Cmp(expectedTotal) != 0 {
+		t.Errorf("expected total 111, got %v", inv.Total().Amount())
+	}
+
+	// Every persisted amount must be integral in JPY minor units.
+	for _, m := range []struct {
+		name  string
+		money shared.Money
+	}{
+		{"subtotal", inv.Subtotal()},
+		{"discount", inv.DiscountAmount()},
+		{"tax", inv.TaxAmount()},
+		{"total", inv.Total()},
+		{"amountDue", inv.AmountDue()},
+	} {
+		if !m.money.IsIntegralMinorUnit() {
+			t.Errorf("%s = %s is not integral in JPY minor units", m.name, m.money.Amount().RatString())
+		}
+	}
+}
+
+// TestGenerateInvoice_MinorUnitRounding_HalfUp verifies the configurable rounding
+// mode: with RoundHalfUp, ¥10.1 tax stays 10 but a ¥10.5 case would round up. Here
+// ¥105 at 10% = ¥10.5 -> 11 under RoundHalfUp (vs 10 under the default RoundDown).
+func TestGenerateInvoice_MinorUnitRounding_HalfUp(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(105))
+	period := currentPeriodOf(agg)
+
+	registry := plugin.NewRegistry()
+	_ = registry.Register(&tenPercentTaxPlugin{})
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		&mockUsageRepo{},
+		balance.BalanceConfig{},
+		priceRepoFor(priceEntity),
+		&mockProductRepo{},
+		registry,
+		BillingConfig{DaysUntilDue: 30, TaxRoundingMode: shared.RoundHalfUp},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Tax = round_half_up(105 * 10%) = round_half_up(10.5) = 11
+	expectedTax := new(big.Rat).SetInt64(11)
+	if inv.TaxAmount().Amount().Cmp(expectedTax) != 0 {
+		t.Errorf("expected tax 11 (¥10.5 half-up), got %v", inv.TaxAmount().Amount())
+	}
+	if !inv.Total().IsIntegralMinorUnit() {
+		t.Errorf("total %s is not integral in JPY minor units", inv.Total().Amount().RatString())
+	}
+}
+
 // --- Test helpers ---
 
 func assertDomainError(t *testing.T, err error, expectedCode shared.ErrorCode) {

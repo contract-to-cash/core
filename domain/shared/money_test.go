@@ -2,6 +2,7 @@ package shared
 
 import (
 	"encoding/json"
+	"math"
 	"math/big"
 	"testing"
 )
@@ -137,6 +138,10 @@ func TestMoney_Int64(t *testing.T) {
 		{"zero", Zero(CurrencyJPY), 0},
 		{"negative", NewMoney(big.NewRat(-500, 1), CurrencyJPY), -500},
 		{"fractional truncates", NewMoney(big.NewRat(1999, 100), CurrencyUSD), 19}, // 19.99 -> 19
+		// Truncation is toward zero, NOT floor: -1.5 -> -1 (was -2 under the old
+		// big.Int.Div floor division), -1.99 -> -1 (issue #189).
+		{"negative fractional truncates toward zero", NewMoney(big.NewRat(-3, 2), CurrencyJPY), -1},
+		{"negative fractional near-two truncates toward zero", NewMoney(big.NewRat(-199, 100), CurrencyUSD), -1},
 		{"nil amount (zero value)", Money{}, 0},
 	}
 	for _, tt := range tests {
@@ -146,6 +151,137 @@ func TestMoney_Int64(t *testing.T) {
 				t.Errorf("Int64() = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMoney_Int64Checked(t *testing.T) {
+	// In range: truncates toward zero, no error.
+	inRange := []struct {
+		name  string
+		money Money
+		want  int64
+	}{
+		{"integer", NewMoney(big.NewRat(1000, 1), CurrencyJPY), 1000},
+		{"negative fractional toward zero", NewMoney(big.NewRat(-3, 2), CurrencyJPY), -1},
+		{"nil amount", Money{}, 0},
+		{"max int64", NewMoney(new(big.Rat).SetInt64(math.MaxInt64), CurrencyJPY), math.MaxInt64},
+		{"min int64", NewMoney(new(big.Rat).SetInt64(math.MinInt64), CurrencyJPY), math.MinInt64},
+	}
+	for _, tt := range inRange {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tt.money.Int64Checked()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("Int64Checked() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	// Overflow: MaxInt64 + 1 does not fit in int64.
+	over := new(big.Rat).SetInt64(math.MaxInt64)
+	over.Add(over, big.NewRat(1, 1))
+	if _, err := NewMoney(over, CurrencyJPY).Int64Checked(); err == nil {
+		t.Error("expected overflow error for MaxInt64+1, got nil")
+	}
+
+	// Overflow below MinInt64.
+	under := new(big.Rat).SetInt64(math.MinInt64)
+	under.Sub(under, big.NewRat(1, 1))
+	if _, err := NewMoney(under, CurrencyJPY).Int64Checked(); err == nil {
+		t.Error("expected overflow error for MinInt64-1, got nil")
+	}
+}
+
+func TestMoney_RoundToMinorUnit(t *testing.T) {
+	tests := []struct {
+		name     string
+		amount   *big.Rat
+		currency Currency
+		mode     RoundingMode
+		want     *big.Rat
+	}{
+		// JPY has 0 minor-unit digits: round to whole yen.
+		{"jpy 10.1 down", big.NewRat(101, 10), CurrencyJPY, RoundDown, big.NewRat(10, 1)},
+		{"jpy 10.1 half_up", big.NewRat(101, 10), CurrencyJPY, RoundHalfUp, big.NewRat(10, 1)},
+		{"jpy 10.5 half_up", big.NewRat(21, 2), CurrencyJPY, RoundHalfUp, big.NewRat(11, 1)},
+		{"jpy 10.9 up", big.NewRat(109, 10), CurrencyJPY, RoundUp, big.NewRat(11, 1)},
+		{"jpy negative 10.5 half_up ties away", big.NewRat(-21, 2), CurrencyJPY, RoundHalfUp, big.NewRat(-11, 1)},
+		{"jpy negative 10.9 down toward zero", big.NewRat(-109, 10), CurrencyJPY, RoundDown, big.NewRat(-10, 1)},
+		// USD/EUR have 2 minor-unit digits: round to cents.
+		{"usd 1.005 half_up", big.NewRat(1005, 1000), CurrencyUSD, RoundHalfUp, big.NewRat(101, 100)},
+		{"usd 1.009 down", big.NewRat(1009, 1000), CurrencyUSD, RoundDown, big.NewRat(100, 100)},
+		{"usd 1.001 up", big.NewRat(1001, 1000), CurrencyUSD, RoundUp, big.NewRat(101, 100)},
+		{"eur negative 1.005 down toward zero", big.NewRat(-1005, 1000), CurrencyEUR, RoundDown, big.NewRat(-100, 100)},
+		// Already integral in minor units: unchanged.
+		{"jpy integral", big.NewRat(100, 1), CurrencyJPY, RoundHalfUp, big.NewRat(100, 1)},
+		{"usd integral cents", big.NewRat(150, 100), CurrencyUSD, RoundDown, big.NewRat(150, 100)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NewMoney(tt.amount, tt.currency).RoundToMinorUnit(tt.mode)
+			if got.Amount().Cmp(tt.want) != 0 {
+				t.Errorf("RoundToMinorUnit(%s) = %s, want %s", tt.mode, got.Amount().RatString(), tt.want.RatString())
+			}
+			if got.Currency() != tt.currency {
+				t.Errorf("currency changed: got %s, want %s", got.Currency(), tt.currency)
+			}
+			if !got.IsIntegralMinorUnit() {
+				t.Errorf("result %s is not integral in minor units for %s", got.Amount().RatString(), tt.currency)
+			}
+		})
+	}
+}
+
+func TestMoney_IsIntegralMinorUnit(t *testing.T) {
+	tests := []struct {
+		name     string
+		amount   *big.Rat
+		currency Currency
+		want     bool
+	}{
+		{"jpy whole yen", big.NewRat(100, 1), CurrencyJPY, true},
+		{"jpy fractional yen", big.NewRat(101, 10), CurrencyJPY, false},
+		{"usd whole cents", big.NewRat(150, 100), CurrencyUSD, true},
+		{"usd sub-cent", big.NewRat(1005, 1000), CurrencyUSD, false},
+		{"usd whole dollars", big.NewRat(5, 1), CurrencyUSD, true},
+		{"zero", new(big.Rat), CurrencyJPY, true},
+		{"unregistered currency defaults to 2 digits, whole cents", big.NewRat(150, 100), Currency("GBP"), true},
+		{"unregistered currency defaults to 2 digits, sub-cent", big.NewRat(1005, 1000), Currency("GBP"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NewMoney(tt.amount, tt.currency).IsIntegralMinorUnit(); got != tt.want {
+				t.Errorf("IsIntegralMinorUnit() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCurrency_MinorUnitExponent(t *testing.T) {
+	if got := CurrencyJPY.MinorUnitExponent(); got != 0 {
+		t.Errorf("JPY exponent = %d, want 0", got)
+	}
+	if got := CurrencyUSD.MinorUnitExponent(); got != 2 {
+		t.Errorf("USD exponent = %d, want 2", got)
+	}
+	if got := CurrencyEUR.MinorUnitExponent(); got != 2 {
+		t.Errorf("EUR exponent = %d, want 2", got)
+	}
+	// Unregistered currency falls back to the default.
+	if got := Currency("XYZ").MinorUnitExponent(); got != DefaultMinorUnitExponent {
+		t.Errorf("unregistered exponent = %d, want %d", got, DefaultMinorUnitExponent)
+	}
+	// Registration overrides / adds (e.g. a 3-digit currency like KWD).
+	RegisterCurrencyMinorUnit(Currency("KWD"), 3)
+	if got := Currency("KWD").MinorUnitExponent(); got != 3 {
+		t.Errorf("KWD exponent = %d, want 3", got)
+	}
+	// Negative exponents are clamped to 0.
+	RegisterCurrencyMinorUnit(Currency("CLAMP"), -5)
+	if got := Currency("CLAMP").MinorUnitExponent(); got != 0 {
+		t.Errorf("clamped exponent = %d, want 0", got)
 	}
 }
 

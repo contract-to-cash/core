@@ -3,6 +3,8 @@ package service
 import (
 	"testing"
 	"time"
+
+	"github.com/contract-to-cash/core/domain/shared"
 )
 
 func TestCollectionMethodConstants(t *testing.T) {
@@ -29,6 +31,37 @@ func TestNewBillingConfig_Defaults(t *testing.T) {
 	}
 	if cfg.CollectionMethod != CollectionAutoCharge {
 		t.Errorf("CollectionMethod = %q, want %q", cfg.CollectionMethod, CollectionAutoCharge)
+	}
+	if cfg.TaxRoundingMode != shared.RoundDown {
+		t.Errorf("TaxRoundingMode = %q, want %q", cfg.TaxRoundingMode, shared.RoundDown)
+	}
+}
+
+func TestNewBillingConfig_TaxRoundingMode(t *testing.T) {
+	cfg, err := NewBillingConfig(WithTaxRoundingMode(shared.RoundHalfUp))
+	if err != nil {
+		t.Fatalf("NewBillingConfig() returned error: %v", err)
+	}
+	if cfg.TaxRoundingMode != shared.RoundHalfUp {
+		t.Errorf("TaxRoundingMode = %q, want %q", cfg.TaxRoundingMode, shared.RoundHalfUp)
+	}
+
+	// Invalid mode is rejected.
+	if _, err := NewBillingConfig(WithTaxRoundingMode("sideways")); err == nil {
+		t.Fatal("expected error for invalid TaxRoundingMode, got nil")
+	} else if !containsStr(err.Error(), "TaxRoundingMode") {
+		t.Errorf("error message %q does not name TaxRoundingMode", err.Error())
+	}
+}
+
+func TestBillingConfig_effectiveTaxRoundingMode(t *testing.T) {
+	// Zero value falls back to the documented RoundDown default.
+	if got := (BillingConfig{}).effectiveTaxRoundingMode(); got != shared.RoundDown {
+		t.Errorf("zero-value effectiveTaxRoundingMode() = %q, want %q", got, shared.RoundDown)
+	}
+	// Explicit value is respected verbatim.
+	if got := (BillingConfig{TaxRoundingMode: shared.RoundUp}).effectiveTaxRoundingMode(); got != shared.RoundUp {
+		t.Errorf("explicit effectiveTaxRoundingMode() = %q, want %q", got, shared.RoundUp)
 	}
 }
 

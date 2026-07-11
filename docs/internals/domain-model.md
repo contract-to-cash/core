@@ -250,7 +250,52 @@ func (m Money) GreaterThan(other Money) bool
 func (m Money) Min(other Money) (Money, error)
 func (m Money) MarshalJSON() ([]byte, error)
 func (m *Money) UnmarshalJSON(data []byte) error
+
+// 丸め・最小単位（issue #189）
+func (m Money) Round(decimalPlaces int, mode RoundingMode) Money
+func (m Money) RoundToMinorUnit(mode RoundingMode) Money
+func (m Money) IsIntegralMinorUnit() bool
+func (m Money) Int64() int64            // ゼロ方向切り捨て（truncate toward zero）
+func (m Money) Int64Checked() (int64, error) // int64 に収まらなければ error
 ```
+
+#### 通貨の最小単位（minor unit）と丸めポリシー（issue #189）
+
+`Money` は `big.Rat` により業務計算を常に正確（有理数）に保つが、決済ゲートウェイは
+整数の最小単位（minor unit）しか受け付けない。したがって**永続化・回収の直前に、金額を
+通貨の最小単位へ量子化（丸め）する必要がある**。
+
+- **最小単位指数（`Currency.MinorUnitExponent()`）**: 通貨ごとの小数桁数。JPY=0（円が最小）、
+  USD/EUR=2（セント）。`Currency` は開いた string 型なので、レジストリは**拡張可能**である:
+  未登録通貨は `DefaultMinorUnitExponent`（=2、ISO 4217 の多数派）へフォールバックし、
+  `RegisterCurrencyMinorUnit(currency, exponent)` で追加・上書きできる（例: KWD/BHD=3）。
+  登録はアプリ起動時（請求実行前）に行う。負の指数は 0 にクランプされる。
+- **`RoundToMinorUnit(mode)`**: 金額を通貨の最小単位へ丸める唯一の変換。適用後は
+  `IsIntegralMinorUnit()` が true になる。`mode` は `rounding.go` の `RoundingMode`
+  （`RoundDown` / `RoundUp` / `RoundHalfUp`）を再利用する。
+- **`IsIntegralMinorUnit()`**: 金額が既に最小単位の整数倍か（= `RoundToMinorUnit` で変化しないか）
+  を判定する。請求パイプラインが全金額を量子化済みであることの表明に使う。
+
+**丸め点（請求パイプライン）**: `BillingService.executeBillingPipeline` は
+`BillingConfig.TaxRoundingMode`（後述）で **(1) 小計、(2) 割引合計、(3) 税合計** を最小単位へ
+丸める。`小計`・`割引`・`税`・`合計`・`amountDue` はいずれも最小単位で整数となり、
+整数のみを受け付けるゲートウェイと**正確に照合（reconcile）**できる。クレジット台帳からの
+FIFO 充当（`applyBalances`）も丸め後の整数 `total` を消費するため、`amountDue = total - 充当額`
+は整数を保ち、支払いバリデーション（`Invoice.ValidatePayment`）と厳密に一致する。
+
+**デフォルトの丸めモード**は `RoundDown`（ゼロ方向切り捨て）。日本の消費税実務における
+1請求単位の端数切り捨て（端数処理）に一致し、かつ**正確値を上回る丸め（過大請求）を決して
+行わない**（丸めた割引が正確な割引を超えず、丸めた税が過大にならない）。管轄が要求する場合は
+`WithTaxRoundingMode(shared.RoundHalfUp)` 等で上書きする。
+
+> **⚠️ 挙動変更（issue #189）**:
+> - **請求金額が最小単位へ丸められるようになった**。従来は税が正確な有理数（例: ¥101 の 10% =
+>   ¥10.1）のまま請求書へ永続化され、ゲートウェイで決済不能・照合ずれの原因になっていた。
+>   今後は既定で ¥10 に切り捨てられ、合計・amountDue も整数になる。
+> - **`Money.Int64()` の負数バグ修正**: 従来は `big.Int.Div`（床関数）で `Int64(-1.5) == -2` と
+>   なっていたが、ドキュメント通り**ゼロ方向切り捨て**に修正し `Int64(-1.5) == -1` を返す。
+>   int64 に収まらない値はドキュメント化された wrap 挙動になるため、範囲保証できない呼び出しは
+>   `Int64Checked()`（オーバーフローで error）を使う。
 
 ### 1.2 DateRange（期間）
 
