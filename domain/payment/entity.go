@@ -46,6 +46,22 @@ type Payment struct {
 	failureReason        *string
 	processedAt          time.Time
 	metadata             map[string]string
+
+	// Optimistic-locking support (mirrors invoice.Invoice / invoice.CreditNote,
+	// issue #190). version is bumped by EVERY state transition that changes
+	// persisted state (Complete, Fail, MarkRefunded, MarkPartiallyRefunded,
+	// MarkChargedBack, RecordRefund). Without it, a completed payment loaded by
+	// two operators could each RecordRefund a partial amount and both Save
+	// last-writer-wins — booking one refund while the gateway moved money twice.
+	// A concurrent Pending→Completed (3DS) vs Pending→Failed (webhook) pair would
+	// likewise silently lose one transition. loadedVersion records the version
+	// observed at load time; a repository honoring the concurrency contract (see
+	// Repository.Save) compares it against the stored version on Save and rejects
+	// a mismatch with tx.ErrVersionConflict. A brand-new payment starts at
+	// version 0 / loadedVersion 0, so adapters that never populate these fields
+	// keep working unchanged.
+	version       int
+	loadedVersion int
 }
 
 // NewPayment creates a new Payment.
@@ -116,6 +132,7 @@ func (p *Payment) Complete() error {
 			fmt.Sprintf("cannot complete payment: current status is %s", p.status))
 	}
 	p.status = PaymentStatusCompleted
+	p.version++
 	return nil
 }
 
@@ -127,6 +144,7 @@ func (p *Payment) Fail(reason string) error {
 	}
 	p.status = PaymentStatusFailed
 	p.failureReason = &reason
+	p.version++
 	return nil
 }
 
@@ -137,6 +155,7 @@ func (p *Payment) MarkRefunded() error {
 			fmt.Sprintf("cannot refund payment: current status is %s", p.status))
 	}
 	p.status = PaymentStatusRefunded
+	p.version++
 	return nil
 }
 
@@ -147,6 +166,7 @@ func (p *Payment) MarkPartiallyRefunded() error {
 			fmt.Sprintf("cannot partially refund payment: current status is %s", p.status))
 	}
 	p.status = PaymentStatusPartiallyRefunded
+	p.version++
 	return nil
 }
 
@@ -165,6 +185,7 @@ func (p *Payment) MarkChargedBack() error {
 			fmt.Sprintf("cannot charge back payment: current status is %s", p.status))
 	}
 	p.status = PaymentStatusChargedBack
+	p.version++
 	return nil
 }
 
@@ -217,6 +238,12 @@ func (p *Payment) RecordRefund(amount shared.Money) error {
 	} else {
 		p.status = PaymentStatusPartiallyRefunded
 	}
+	// Bump the optimistic-locking version (issue #190): two operators that both
+	// load a completed payment and each RecordRefund a partial amount must not
+	// both persist last-writer-wins. A compliant repository rejects the loser's
+	// Save with tx.ErrVersionConflict; on retry RecordRefund re-validates against
+	// the winner's already-recorded total and rejects the over-refund.
+	p.version++
 	return nil
 }
 
@@ -226,4 +253,27 @@ func (p *Payment) Metadata() map[string]string {
 		cp[k] = v
 	}
 	return cp
+}
+
+// Version returns the current optimistic-locking version. It is incremented by
+// every state transition that changes persisted state — Complete, Fail,
+// MarkRefunded, MarkPartiallyRefunded, MarkChargedBack, and RecordRefund. See
+// issue #190.
+func (p *Payment) Version() int { return p.version }
+
+// LoadedVersion returns the version observed when this payment was loaded from
+// persistence. Repository implementations compare it against the stored version
+// on Save to detect a concurrent modification (issue #190).
+func (p *Payment) LoadedVersion() int { return p.loadedVersion }
+
+// SetVersion sets the version and records it as the loaded version.
+// Repository implementations call this after a successful Save so that
+// subsequent saves from the same pointer compare against the just-persisted
+// version instead of a stale baseline.
+//
+// For initial reconstitution from persistence, prefer FromSnapshot, which
+// restores version and loadedVersion atomically alongside all other fields.
+func (p *Payment) SetVersion(v int) {
+	p.version = v
+	p.loadedVersion = v
 }

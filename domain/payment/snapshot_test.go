@@ -119,6 +119,56 @@ func TestPayment_FromSnapshot_AllowsRefundedStateDirectly(t *testing.T) {
 	}
 }
 
+// TestPayment_Snapshot_PreservesVersion verifies that the optimistic-locking
+// version survives a ToSnapshot / FromSnapshot round trip and that loadedVersion
+// is restored from the same field (issue #190).
+func TestPayment_Snapshot_PreservesVersion(t *testing.T) {
+	t.Parallel()
+
+	p, err := NewPayment(
+		shared.PaymentID("pay-ver"),
+		shared.InvoiceID("inv-1"),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		PaymentMethodCreditCard,
+		"tx-1",
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	// A fresh payment starts at version 0.
+	if p.Version() != 0 {
+		t.Fatalf("precondition: fresh payment version = %d, want 0", p.Version())
+	}
+	// Complete + partial refund bump the version twice.
+	if err := p.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := p.RecordRefund(shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)); err != nil {
+		t.Fatalf("RecordRefund: %v", err)
+	}
+	want := p.Version()
+	if want != 2 {
+		t.Fatalf("precondition: expected version 2 after Complete+RecordRefund, got %d", want)
+	}
+
+	snap := p.ToSnapshot()
+	if snap.Version != want {
+		t.Errorf("snapshot Version = %d, want %d", snap.Version, want)
+	}
+
+	restored, err := FromSnapshot(snap)
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+	if got := restored.Version(); got != want {
+		t.Errorf("restored Version = %d, want %d", got, want)
+	}
+	if got := restored.LoadedVersion(); got != want {
+		t.Errorf("restored LoadedVersion = %d, want %d (must be restored from Version)", got, want)
+	}
+}
+
 func TestPayment_FromSnapshot_ValidatesID(t *testing.T) {
 	t.Parallel()
 
