@@ -176,6 +176,12 @@ type pipelineInput struct {
 	// original so the credit consumed by the voided invoice is not double-charged:
 	// it is restored and then re-applied (FIFO) to the regenerated invoice within
 	// the same transaction. The restoration is idempotent (see restoreBalances).
+	//
+	// CONTRACT: the setter must have verified the invoice is actually voided —
+	// the pipeline calls restoreBalances directly WITHOUT re-checking status
+	// (RegenerateInvoice only reaches here after finding the invoice voided).
+	// Restoring a non-voided invoice's applications would fabricate balance;
+	// external callers go through RestoreBalancesForVoidedInvoice, which guards.
 	restoreVoidedInvoiceID shared.InvoiceID
 }
 
@@ -949,22 +955,48 @@ func (s *BillingService) applyBalances(ctx context.Context, balanceRepo balance.
 // RestoreBalancesForVoidedInvoice returns the credit a voided invoice consumed
 // back to the balance ledger and records BalanceRefund audit rows (issue #184).
 //
+// The invoice is loaded through the transaction-scoped invoice repository and
+// MUST be in voided status: restoring the applications of a live (draft/
+// finalized/paid) invoice would fabricate spendable balance — the invoice still
+// legitimately holds that credit — so any non-voided status is rejected with a
+// business_rule DomainError, and a missing invoice is an error (not a silent
+// no-op). The in-tx load means a void written earlier in the same transaction
+// (e.g. by CreditNoteService.ReissueInvoice) is visible to the guard.
+//
 // Call it inside the SAME transaction that voids the invoice so the void and the
 // credit restoration commit or roll back together. It joins an active
 // transaction stamped on ctx (via tx.Run) and uses the transaction-scoped
-// balance repository; when no balance repository is wired it is a no-op. The
-// operation is idempotent — a double void / retry restores each application at
-// most once (see restoreBalances).
+// repositories; when no balance repository is wired the restoration is a no-op
+// (the voided-status guard still runs). The operation is idempotent — a double
+// void / retry restores each application at most once (see restoreBalances).
 //
 // This is the reversal used by void paths that do NOT go through
 // RegenerateInvoice's pipeline — notably CreditNoteService.ReissueInvoice, which
 // voids the original and then generates a replacement via GenerateInvoice.
+// (RegenerateInvoice's pipeline verifies voided status itself and calls the
+// internal restoreBalances directly, skipping this redundant load.)
 func (s *BillingService) RestoreBalancesForVoidedInvoice(ctx context.Context, invoiceID shared.InvoiceID) error {
 	return tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		invoiceRepo := repos.Invoices
+		if invoiceRepo == nil {
+			invoiceRepo = s.invoiceRepo
+		}
+		inv, err := invoiceRepo.FindByID(txCtx, invoiceID)
+		if err != nil {
+			return fmt.Errorf("failed to load invoice for balance restoration: %w", err)
+		}
+		if inv == nil {
+			return shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("invoice %s not found", invoiceID))
+		}
+		if inv.Status() != invoice.InvoiceStatusVoided {
+			return shared.NewDomainError(shared.ErrCodeBusinessRule,
+				fmt.Sprintf("cannot restore balances: invoice %s is %s, not voided", invoiceID, inv.Status()))
+		}
 		if repos.Balances == nil {
 			return nil
 		}
-		_, err := s.restoreBalances(txCtx, repos.Balances, invoiceID)
+		_, err = s.restoreBalances(txCtx, repos.Balances, invoiceID)
 		return err
 	})
 }

@@ -2,11 +2,13 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 
 	"github.com/contract-to-cash/core/application/service"
 	"github.com/contract-to-cash/core/domain/balance"
+	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/infrastructure/inmemory"
 	"github.com/contract-to-cash/core/plugin"
 )
@@ -165,8 +167,12 @@ func TestRegenerateInvoice_RestoresConsumedCredit(t *testing.T) {
 	}
 }
 
-// TestRestoreBalancesForVoidedInvoice_Idempotent verifies a double restore /
-// retry restores the consumed credit at most once (issue #184).
+// TestRestoreBalancesForVoidedInvoice_Idempotent verifies the guards and the
+// idempotency of the public restore API (issue #184, PR #201 review):
+//   - restoring a non-voided invoice is rejected with business_rule (the live
+//     invoice still holds the credit — restoring would fabricate balance);
+//   - restoring a missing invoice errors rather than silently no-oping;
+//   - after a legitimate void, a double restore / retry restores at most once.
 func TestRestoreBalancesForVoidedInvoice_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	clock := fixedClock()
@@ -201,6 +207,38 @@ func TestRestoreBalancesForVoidedInvoice_Idempotent(t *testing.T) {
 	}
 	if bal, _ := balanceRepo.GetBalance(ctx, agg.AccountID(), price.Currency()); !bal.IsZero() {
 		t.Fatalf("precondition: expected 0 balance after generate, got %s", bal.Amount().RatString())
+	}
+
+	// Restoring a NON-voided invoice must be rejected (PR #201 review): the
+	// draft invoice still legitimately holds the credit — restoring now would
+	// fabricate spendable balance.
+	err = billingSvc.RestoreBalancesForVoidedInvoice(ctx, original.ID())
+	if err == nil {
+		t.Fatal("expected error restoring balances of a non-voided invoice, got nil")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) || domErr.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected business_rule error for non-voided invoice, got %v", err)
+	}
+	if bal, _ := balanceRepo.GetBalance(ctx, agg.AccountID(), price.Currency()); !bal.IsZero() {
+		t.Fatalf("expected balance untouched after rejected restore, got %s", bal.Amount().RatString())
+	}
+
+	// Restoring a missing invoice must error, not silently no-op.
+	if err := billingSvc.RestoreBalancesForVoidedInvoice(ctx, shared.NewInvoiceID()); err == nil {
+		t.Fatal("expected error restoring balances of a missing invoice, got nil")
+	}
+
+	// Void the invoice — restoration is now legitimate.
+	loaded, err := invoiceRepo.FindByID(ctx, original.ID())
+	if err != nil {
+		t.Fatalf("failed to load original: %v", err)
+	}
+	if err := loaded.VoidWithReason("billing error"); err != nil {
+		t.Fatalf("failed to void original: %v", err)
+	}
+	if err := invoiceRepo.Save(ctx, loaded); err != nil {
+		t.Fatalf("failed to save voided original: %v", err)
 	}
 
 	// First restore returns the 2000 to the ledger.

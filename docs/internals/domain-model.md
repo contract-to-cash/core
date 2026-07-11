@@ -1980,7 +1980,12 @@ void 復元（BillingService.restoreBalances）:
     クレジット再適用の**前**に voided 請求書の消費分を復元する。
   - `BillingService.RestoreBalancesForVoidedInvoice`（公開 API）—
     `CreditNoteService.ReissueInvoice` が original を void した後、置換請求書を
-    生成する**前**に同一トランザクション内で呼ぶ。
+    生成する**前**に同一トランザクション内で呼ぶ。tx スコープの invoice repo で
+    請求書をロードし、**voided ステータスでなければ business_rule エラー**で拒否する
+    （生きている請求書の消費記録を復元すると使用可能残高を捏造してしまうため。
+    存在しない請求書も silent no-op ではなくエラー）。RegenerateInvoice の
+    パイプライン内部経路は呼び出し前に voided 検証済みのため、再ロードせず
+    restoreBalances を直接呼ぶ。
   - `plugins/invoicecleanup` は例外: 残高復元手段もトランザクションも持たないため、
     `AppliedBalance() > 0` の請求書は **void せずスキップ**する（クレジット破壊を回避）。
 

@@ -25,7 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     internal reversal it wraps: reads `FindApplicationsByInvoice`, restores each
     consumed entry, and records a `BalanceRefund` audit row. Idempotent — a
     double void / retry restores each application at most once, guarded by the
-    new refund records.
+    new refund records. The public method loads the invoice through the
+    transaction-scoped repository and rejects restoration with a `business_rule`
+    `DomainError` unless the invoice is actually voided (restoring a live
+    invoice's applications would fabricate spendable balance); a missing invoice
+    errors instead of silently no-oping.
   - Wired into the void paths in the same transaction:
     `CreditNoteService.ReissueInvoice` restores before generating the
     replacement, and `BillingService.RegenerateInvoice` restores the voided
