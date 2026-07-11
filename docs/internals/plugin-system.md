@@ -394,6 +394,10 @@ const (
     ContractChangeCancelled  ContractChangeType = "cancelled"
     ContractChangeRenewed   ContractChangeType = "renewed"
     ContractChangeTrialEnd  ContractChangeType = "trial_end"
+    // ContractChangeExpired は契約が満了（autoRenew=false / cancelAtPeriodEnd）で
+    // Expired へ遷移したことを表す。中途解約（ContractChangeCancelled）とは区別され、
+    // 解約チャーンと自然満了をメトリクスで混同しないためにある（issue #162 B3）。
+    ContractChangeExpired    ContractChangeType = "expired"
 )
 
 type ContractChangeEvent struct {
@@ -568,60 +572,104 @@ func (r *Registry) Register(plugin Plugin) error {
     return nil
 }
 
-func (r *Registry) sortByPriority(hooks interface{}) {
-    // Priority順にソート（小さいほど先）
-    // ...
+// sortByPriority は []Plugin を Priority 昇順に**その場で**安定ソートする
+// （InitializeAll / ShutdownAll 用）。sortedCopy はフックスライスをコピーしてから
+// 安定ソートして返す（ゲッター用、内部スライスは変更しない）。どちらも
+// sort.SliceStable を使い、同一 Priority のフックは入力順を保つ。
+func sortByPriority(plugins []Plugin) {
+    sort.SliceStable(plugins, func(i, j int) bool {
+        return plugins[i].Priority() < plugins[j].Priority()
+    })
 }
 
-// InitializeAll 全プラグインを初期化
+func sortedCopy[T Plugin](hooks []T) []T {
+    if len(hooks) == 0 {
+        return nil
+    }
+    cp := make([]T, len(hooks))
+    copy(cp, hooks)
+    sort.SliceStable(cp, func(i, j int) bool {
+        return cp[i].Priority() < cp[j].Priority()
+    })
+    return cp
+}
+
+// InitializeAll 全プラグインを Priority 昇順（小さい値が先）で初期化する。
+// map の反復順は非決定的なので、一旦スライスへ集めて sortByPriority でソートしてから
+// 初期化する。各 Initialize は plugin.SafeInvoke でラップされ、パニックしても
+// プロセスをクラッシュさせず *PluginPanicError を含むエラーとして返る（§5.4、issue #193）。
+// config が nil のプラグインには空の Config{} を渡す。
 func (r *Registry) InitializeAll(ctx context.Context, configs map[string]Config) error {
     r.mu.RLock()
-    defer r.mu.RUnlock()
-    
-    for name, plugin := range r.plugins {
-        config := configs[name]
-        if err := plugin.Initialize(ctx, config); err != nil {
-            return fmt.Errorf("failed to initialize plugin %s: %w", name, err)
+    plugins := make([]Plugin, 0, len(r.plugins))
+    for _, p := range r.plugins {
+        plugins = append(plugins, p)
+    }
+    r.mu.RUnlock()
+
+    sortByPriority(plugins)
+
+    for _, p := range plugins {
+        cfg := configs[p.Name()]
+        if cfg == nil {
+            cfg = Config{}
+        }
+        if err := SafeInvoke("Plugin.Initialize", p.Name(), func() error {
+            return p.Initialize(ctx, cfg)
+        }); err != nil {
+            return fmt.Errorf("failed to initialize plugin %q: %w", p.Name(), err)
         }
     }
-    
     return nil
 }
 
-// ShutdownAll 全プラグインをシャットダウン
+// ShutdownAll 全プラグインを Priority の**逆順**でシャットダウンする。
+// Initialize と同様に SafeInvoke でラップし、**最初のエラーで打ち切って**そのエラーを
+// 返す（残りのプラグインの Shutdown をベストエフォートで続行する実装ではない点に注意）。
 func (r *Registry) ShutdownAll(ctx context.Context) error {
     r.mu.RLock()
-    defer r.mu.RUnlock()
-    
-    var errs []error
-    for _, plugin := range r.plugins {
-        if err := plugin.Shutdown(ctx); err != nil {
-            errs = append(errs, err)
-        }
+    plugins := make([]Plugin, 0, len(r.plugins))
+    for _, p := range r.plugins {
+        plugins = append(plugins, p)
     }
-    
-    if len(errs) > 0 {
-        return fmt.Errorf("shutdown errors: %v", errs)
+    r.mu.RUnlock()
+
+    sortByPriority(plugins)
+
+    for i := len(plugins) - 1; i >= 0; i-- {
+        p := plugins[i]
+        if err := SafeInvoke("Plugin.Shutdown", p.Name(), func() error {
+            return p.Shutdown(ctx)
+        }); err != nil {
+            return fmt.Errorf("failed to shutdown plugin %q: %w", p.Name(), err)
+        }
     }
     return nil
 }
 
+// --- フックゲッター（Priority ソート済みの「コピー」を返す） ---
+//
+// ⚠️ ゲッターは内部スライスをそのまま返すのではなく、必ず sortedCopy で
+// **Priority 昇順にソートしたコピー**を返す。登録順の内部スライスを生で返す実装は
+// (1) 呼び出し側が Priority 順を期待できず、(2) 返したスライスを呼び出し側が変更すると
+// レジストリ内部状態を破壊するため誤り。sortedCopy は STABLE ソートで、内部スライスは
+// 登録順を保つため、同一 Priority のフックは登録順で実行される（issue #162 P1）。
 func (r *Registry) GetDiscountHooks() []DiscountHook {
     r.mu.RLock()
     defer r.mu.RUnlock()
-    return r.discountHooks
+    return sortedCopy(r.discountHooks)
 }
 
 func (r *Registry) GetTaxHooks() []TaxHook {
     r.mu.RLock()
     defer r.mu.RUnlock()
-    return r.taxHooks
+    return sortedCopy(r.taxHooks)
 }
 
 func (r *Registry) GetInvoiceLifecycleHooks() []InvoiceLifecycleHook {
     r.mu.RLock()
     defer r.mu.RUnlock()
-    return r.invoiceLifecycleHooks
+    return sortedCopy(r.invoiceLifecycleHooks)
 }
 
 // 契約ライフサイクル（各イベント個別）
@@ -657,24 +705,37 @@ func (r *Registry) GetOnInvoiceRevisedHooks() []OnInvoiceRevisedHook { ... }
 Priority値に依存しないため、プラグイン登録順のミスで会計基準違反が発生しない。
 
 ```
+0. 基本料金を最小単位に丸める（コア: subtotal = RoundToMinorUnit(mode), issue #189）
+   → 従量課金の厳密有理数（段階単価等）を通貨の最小単位へ量子化。丸めモードは
+     BillingConfig.TaxRoundingMode（既定は RoundDown = ゼロ方向）。以降パイプラインが
+     永続化する全金額がこのモードで整数化され、整数専用ゲートウェイと厳密に照合できる
+   → ctx.SetBillingPeriod(period)（全計算フックの前に設定。DiscountHook が請求期間を
+     参照でき、クーポンが (coupon, contract, period) で冪等に引換できる。issue #185）
+   → ctx.SetProductID(...)（Price から解決）
 1. InvoiceLifecycleHook.BeforeCalculation()  ← 計算前処理
                                                 ⚠️ この時点で ctx.Subtotal() は ZERO
-                                                   （ctx.ProductID() は参照可能）
-2. 基本料金をコンテキストへ設定（コア、契約タイプに応じて分岐）
+                                                   （ctx.ProductID() / ctx.BillingPeriod() は参照可能）
+2. 基本料金（丸め済み）をコンテキストへ設定（コア、契約タイプに応じて分岐）
    → 以降 ctx.Subtotal() は基本料金を返す
 3. DiscountHook.CalculateDiscount()          ← 割引計算（全DiscountHook、ctx.Subtotal()=基本料金）
    → 各フックの戻り値を境界検証（負値は ErrCodeBusinessRule で中断、通貨不一致は
      ErrCodeCurrencyMismatch。いずれもプラグイン名を含む。issue #188）
+   → 割引合計を最小単位に丸める（コア: totalDiscount = RoundToMinorUnit(mode), issue #189）
    → 割引上限ガード（割引合計 > subtotalの場合にcap）
 4. 小計算出（コア: subtotal - totalDiscount）→ ctx.SetSubtotalAfterDiscount()
 5. TaxHook.CalculateTax()                    ← 税計算（ctx.SubtotalAfterDiscount()に対して）
    → 各フックの戻り値を境界検証（負値は ErrCodeBusinessRule で中断。issue #188）
-6. 合計算出（コア: afterDiscount + totalTax）
+   → 税合計を最小単位に丸める（コア: totalTax = RoundToMinorUnit(mode), 全 TaxHook 合算後に
+     1 請求書あたり 1 回。例: ¥101 × 10% = ¥10.1 → 整数化。issue #189）
+6. 合計算出（コア: afterDiscount + totalTax。両者とも整数化済みなので total も整数）
 7. クレジット台帳からの充当（コア、FIFO）    ← 残高があれば税込合計から差引（tx内）
 8. 請求書をdraft状態で生成（コア、tx内）→ GracePeriod後に FinalizeInvoice で確定
 9. InvoiceLifecycleHook.AfterCalculation()   ← 計算後処理（**保存(Save)より前**に発火、tx内）
 10. 保存（コア、tx内）
 ```
+
+> **全フックは `plugin.SafeInvoke` / `SafeInvokeMoney` 経由で発火**され、パニックは
+> `*PluginPanicError` へ変換される（フェイタリティ・ポリシーは §5.4、issue #193）。
 
 > **注**: このフロー順序は `architecture.md` セクション6.3 と同一。実コードは
 > `application/service/billing_service.go` の
@@ -734,7 +795,7 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 | `OnInvoiceRevisedHook` | `CreditNoteService.ReissueInvoice`（非致命） |
 | `OnContractRenewHook` | `batch.ContractRenewalProcessor`（保存後、非致命） |
 | `OnContractTrialEndHook` | `batch.TrialExpirationProcessor`（保存後、非致命） |
-| `OnContractChangeHook` | `batch.ContractRenewalProcessor`（renewed/cancelled）、`batch.TrialExpirationProcessor`（trial_end） |
+| `OnContractChangeHook` | `batch.ContractRenewalProcessor`（renewed / 満了時は expired、autoRenew=false での解約は cancelled）、`batch.TrialExpirationProcessor`（trial_end） |
 
 > **発火タイミングの注意**: コアが「保存後」に発火するフック（`OnInvoiceIssuedHook` /
 > `AfterChargeHook` / `OnPaymentProcessedHook` 等）は、呼び出し側が自前のトランザクション内から
@@ -810,20 +871,28 @@ type PluginPanicError struct {
 
 ### 6.1 プラグイン実装
 
+> **⚠️ この例は要点の抜粋**: 完全な実装（フィルタリング・使用上限のアドバイザリ判定・
+> 引換確定）は `plugins/coupon/plugin.go` を参照。クーポンは「計算（`CalculateDiscount`）」と
+> 「引換確定（`AfterCalculation`）」を分離しており、その設計根拠とトランザクション整合性は
+> §6.3 にある。
+
 ```go
 // plugins/coupon/plugin.go
 package coupon
 
 import (
     "context"
-    "time"
+    "errors"
+    "fmt"
 
+    "github.com/contract-to-cash/core/domain/invoice"
     "github.com/contract-to-cash/core/domain/shared"
     "github.com/contract-to-cash/core/plugin"
 )
 
-// CouponPlugin クーポンプラグイン
-// DiscountHook のみを実装する（TaxHookやInvoiceLifecycleHookの空実装は不要）
+// CouponPlugin クーポンプラグイン。
+// DiscountHook（割引を計算）AND InvoiceLifecycleHook（AfterCalculation で引換を確定）を
+// 実装する。「計算」と「確定」の分離が issue #185 を解決する（§6.3）。
 type CouponPlugin struct {
     repo     CouponRepository
     config   CouponConfig
@@ -831,82 +900,137 @@ type CouponPlugin struct {
     clock    shared.Clock
 }
 
-// インターフェース準拠の確認（コンパイル時チェック）
-var _ plugin.DiscountHook = (*CouponPlugin)(nil)
+// インターフェース準拠の確認（コンパイル時チェック）。両方のフックを実装する。
+var (
+    _ plugin.DiscountHook         = (*CouponPlugin)(nil)
+    _ plugin.InvoiceLifecycleHook = (*CouponPlugin)(nil)
+)
 
 type CouponConfig struct {
     MaxCouponsPerInvoice int
     AllowStacking        bool // 複数クーポン併用可否
 }
 
+// NewCouponPlugin は既定値 MaxCouponsPerInvoice=1 / AllowStacking=false で構築する
+// （スタッキング無効時は「最初に検証を通った1枚」だけを適用する）。
 func NewCouponPlugin(repo CouponRepository, clock shared.Clock) *CouponPlugin {
     return &CouponPlugin{
         repo:     repo,
         priority: plugin.PriorityNormal,
         clock:    clock,
+        config: CouponConfig{
+            MaxCouponsPerInvoice: 1,
+            AllowStacking:        false,
+        },
     }
 }
 
 func (p *CouponPlugin) Name() string    { return "coupon" }
-func (p *CouponPlugin) Version() string { return "1.0.0" }
+func (p *CouponPlugin) Version() string { return "1.2.0" }
 func (p *CouponPlugin) Priority() int   { return p.priority }
 
-func (p *CouponPlugin) Initialize(ctx context.Context, config plugin.Config) error {
+// Initialize は maxCouponsPerInvoice / allowStacking / priority を読む（型アサーション付き）。
+func (p *CouponPlugin) Initialize(_ context.Context, config plugin.Config) error {
     if v, ok := config["maxCouponsPerInvoice"].(int); ok {
         p.config.MaxCouponsPerInvoice = v
     }
     if v, ok := config["allowStacking"].(bool); ok {
         p.config.AllowStacking = v
     }
+    if v, ok := config["priority"].(int); ok {
+        p.priority = v
+    }
     return nil
 }
 
-func (p *CouponPlugin) Shutdown(ctx context.Context) error {
-    return nil
-}
+func (p *CouponPlugin) Shutdown(_ context.Context) error { return nil }
 
-// CalculateDiscount DiscountHookの実装
-// CalculateTax, BeforeCalculation, AfterCalculation の空実装は不要
+// CalculateDiscount DiscountHook の実装。
+// **永続化の副作用を持たない**（issue #185）: 適用可能クーポンと既存引換を「読む」だけで、
+// 割引を計算して ctx.RecordDiscount(...) するのみ。引換は AfterCalculation で確定するため、
+// このフックの後にパイプラインがロールバックしてもクーポンは消費されない。
+//
+// クーポン選択は「first valid wins」: スライスを事前に truncate せず、すべての検証
+// （有効期間・minAmount・通貨・使用上限）を通ったクーポンだけを applied として数える。
+// 先頭に無効クーポン（期限切れ等）があっても後続の有効クーポンを潰さない（issue #158）。
 func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) {
-    contract := ctx.Contract()
-    subtotal := ctx.Subtotal()
+    currency := ctx.Subtotal().Currency()
+    zero := shared.Zero(currency)
 
-    coupons, err := p.repo.FindApplicable(ctx.Context(), contract.ContractID(), p.clock.Now())
+    // フルクエリで適用可能クーポンを取得（ContractID / AccountID / ProductID / At）。
+    coupons, err := p.repo.FindApplicable(ctx.Context(), CouponQuery{
+        ContractID: ctx.ContractID(),
+        AccountID:  /* contract.AccountID() */ "",
+        ProductID:  ctx.ProductID(),
+        At:         p.clock.Now(),
+    })
     if err != nil {
-        return shared.Money{}, err
+        return zero, fmt.Errorf("coupon: find applicable: %w", err)
     }
 
-    if len(coupons) == 0 {
-        return shared.NewMoney(big.NewRat(0, 1), subtotal.Currency()), nil
+    // 適用上限（0=無制限）。AllowStacking=false は MaxCouponsPerInvoice より優先し 1 枚。
+    effectiveLimit := 0
+    if !p.config.AllowStacking {
+        effectiveLimit = 1
+    } else if p.config.MaxCouponsPerInvoice > 0 {
+        effectiveLimit = p.config.MaxCouponsPerInvoice
     }
 
-    totalDiscount := shared.Zero(subtotal.Currency())
-    for i, coupon := range coupons {
-        if !p.config.AllowStacking && i > 0 {
+    subtotal := ctx.Subtotal()
+    total := zero
+    applied := 0
+    for _, c := range coupons {
+        if effectiveLimit > 0 && applied >= effectiveLimit {
             break
         }
-        if p.config.MaxCouponsPerInvoice > 0 && i >= p.config.MaxCouponsPerInvoice {
-            break
+        // 有効期間・minAmount(通貨一致)・使用上限（引換行から再構成、進行中の
+        // (contract, period) を除外）をアドバイザリに再チェック。権威ある上限強制は
+        // AfterCalculation → SaveRedemption が原子的に行う（§6.3）。
+        if !c.IsValid(p.clock.Now()) {
+            continue
         }
+        // … minAmount / usageLimit / perAccountUsageLimit チェック（省略、§6.3）…
 
-        discount, err := coupon.CalculateDiscount(subtotal)
+        discount, err := c.CalculateDiscount(subtotal)
         if err != nil {
-            return shared.Money{}, fmt.Errorf("coupon discount calculation failed: %w", err)
+            return zero, fmt.Errorf("coupon: calculate discount: %w", err)
         }
-        totalDiscount, err = totalDiscount.Add(discount)
-        if err != nil {
-            return shared.Money{}, fmt.Errorf("coupon discount accumulation failed: %w", err)
+        if discount.Currency() != currency {
+            continue // 別通貨の固定額クーポンはスキップ（issue #148）
         }
+        applied++
 
-        // 型安全な割引記録（metadata[string]interface{} ではない）
+        // 型安全な割引記録（引換はここでは書かない）。
         ctx.RecordDiscount(plugin.AppliedDiscount{
             PluginName: p.Name(),
-            Code:       coupon.Code(),
+            Code:       c.Code(),
             Amount:     discount,
         })
+        if total, err = total.Add(discount); err != nil {
+            return zero, fmt.Errorf("coupon: sum discounts: %w", err)
+        }
     }
+    return total, nil
+}
 
-    return totalDiscount, nil
+// BeforeCalculation は no-op（InvoiceLifecycleHook を満たすため）。
+func (p *CouponPlugin) BeforeCalculation(_ *plugin.CalculationContext) error { return nil }
+
+// AfterCalculation は適用した各クーポンの引換を冪等に確定する（tx 内・請求書生成後・
+// 保存前）。SaveRedemption に RedemptionLimits を渡し、使用上限を原子的に強制する。
+// ErrUsageLimitReached はラップして返し tx をロールバックさせる（§6.3、issue #185/#195）。
+func (p *CouponPlugin) AfterCalculation(ctx *plugin.CalculationContext, inv *invoice.Invoice) error {
+    if inv == nil {
+        return nil
+    }
+    for _, d := range ctx.AppliedDiscounts() {
+        if d.PluginName != p.Name() {
+            continue
+        }
+        // … FindByCode → NewRedemption → SaveRedemption(redemption, limits) …
+        _ = errors.Is // ErrUsageLimitReached の判定に使用（§6.3）
+    }
+    return nil
 }
 ```
 
@@ -1011,6 +1135,14 @@ type RedemptionLimits struct {
     GlobalLimit     *int // Coupon.UsageLimit()。nil=無制限
     GlobalBaseline  int  // Coupon.UsedCount()（引換台帳以前の移行ベースライン）
     PerAccountLimit *int // Coupon.PerAccountUsageLimit()。nil=無制限
+}
+
+// CouponQuery は FindApplicable の検索パラメータ（プラグインが CalculationContext から詰める）。
+type CouponQuery struct {
+    ContractID shared.ContractID
+    AccountID  shared.AccountID
+    ProductID  shared.ProductID
+    At         time.Time
 }
 
 // CouponRepository クーポンリポジトリ（実際のシグネチャは型付き ID を使う）
@@ -1140,7 +1272,11 @@ type TaxPlugin struct {
 func NewTaxPlugin(calculator TaxCalculator) *TaxPlugin {
     return &TaxPlugin{
         calculator: calculator,
-        priority:   plugin.PriorityLow, // 割引より後に実行
+        // Priority は **同一 TaxHook 種別内**の順序にしか影響しない（§5.2）。
+        // 「割引→税」というフック種別間の順序はコアが構造的に保証するため、
+        // この値をどう設定しても DiscountHook より先に実行されることはない。
+        // PriorityLow は複数 TaxHook を登録したときの相対順序の既定値にすぎない。
+        priority: plugin.PriorityLow,
     }
 }
 
@@ -1259,8 +1395,14 @@ func (s *BillingService) GenerateInvoice(ctx context.Context, contractID shared.
 
 ```go
 func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipelineInput) (*invoice.Invoice, error) {
+    // 基本料金を最小単位へ丸める（issue #189）。丸めモードは config.TaxRoundingMode（既定 RoundDown）。
+    roundingMode := s.config.effectiveTaxRoundingMode()
+    subtotal := input.subtotal.RoundToMinorUnit(roundingMode)
+    currency := subtotal.Currency()
+
     // コンテキストは subtotal=Zero で生成される（BeforeCalculation では Subtotal()=0）
     calcCtx := plugin.NewCalculationContext(ctx, input.agg, shared.Zero(currency))
+    calcCtx.SetBillingPeriod(input.period) // 全計算フックの前に請求期間を公開（issue #185）
 
     // ProductID を Price から解決してコンテキストへ（BeforeCalculation でも参照可能）
     if priceID := input.agg.PriceID(); priceID != "" {
@@ -1268,13 +1410,17 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
         calcCtx.SetProductID(price.ProductID())
     }
 
-    // BeforeCalculation（この時点で Subtotal() はゼロ）
-    for _, h := range s.registry.GetInvoiceLifecycleHooks() { h.BeforeCalculation(calcCtx) }
+    // BeforeCalculation（この時点で Subtotal() はゼロ）。全フックは SafeInvoke でラップ（§5.4）。
+    for _, h := range s.registry.GetInvoiceLifecycleHooks() {
+        plugin.SafeInvoke("InvoiceLifecycleHook.BeforeCalculation", h.Name(), func() error { return h.BeforeCalculation(calcCtx) })
+    }
 
     calcCtx.SetSubtotal(subtotal) // ← ここで初めて基本料金がコンテキストへ
 
-    // DiscountHook → 割引上限ガード → SetSubtotalAfterDiscount
-    // TaxHook（SubtotalAfterDiscount に対して）→ total = afterDiscount + tax
+    // DiscountHook（SafeInvokeMoney）→ 境界検証（負値/通貨、#188）→ totalDiscount を丸め（#189）
+    //   → 割引上限ガード → SetSubtotalAfterDiscount
+    // TaxHook（SubtotalAfterDiscount に対して）→ 境界検証 → totalTax を丸め（#189）
+    //   → total = afterDiscount + tax
 
     invoiceID := shared.NewInvoiceID()
     err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
@@ -1282,15 +1428,17 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
         if input.duplicateCheck != nil { /* ... */ }
 
         // クレジット台帳から FIFO 充当（entry.Consume + BalanceApplication を作成、tx スコープ repo で保存）
-        appliedBalance := s.applyBalances(txCtx, repos.Balances, agg.AccountID(), invoiceID, total, currency)
-        amountDue := total.Subtract(appliedBalance)
+        appliedBalance, _ := s.applyBalances(txCtx, repos.Balances, agg.AccountID(), invoiceID, total, currency)
+        amountDue, _ := total.Subtract(appliedBalance)
 
-        // draft 請求書を生成（WithAllowPartialPayment(s.config.AllowPartialPayment) 等を伝播）
-        inv = invoice.NewInvoice(invoiceID, agg.AccountID(), input.contractID, subtotal, totalDiscount, totalTax, invOpts...)
+        // draft 請求書を生成（NewInvoice は error も返す。WithAllowPartialPayment 等を伝播）
+        inv, _ = invoice.NewInvoice(invoiceID, agg.AccountID(), input.contractID, subtotal, totalDiscount, totalTax, invOpts...)
         calcCtx.SetInvoice(inv)
 
-        // AfterCalculation は **保存(Save)より前**に発火
-        for _, h := range s.registry.GetInvoiceLifecycleHooks() { h.AfterCalculation(calcCtx, inv) }
+        // AfterCalculation は **保存(Save)より前**に発火（SafeInvoke でラップ、パニックは tx を突き抜けない）
+        for _, h := range s.registry.GetInvoiceLifecycleHooks() {
+            plugin.SafeInvoke("InvoiceLifecycleHook.AfterCalculation", h.Name(), func() error { return h.AfterCalculation(calcCtx, inv) })
+        }
 
         return repos.Invoices.Save(txCtx, inv) // 保存
     })

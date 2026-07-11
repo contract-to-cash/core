@@ -20,7 +20,7 @@ make lint               # vet + gofmt チェック + golangci-lint
 ### レイヤー構造（Clean Architecture + DDD）
 
 ```
-domain/          純粋なドメインロジック。外部依存は stdlib + ulid のみ
+domain/          純粋なドメインロジック。外部依存は stdlib + ulid + 同一モジュールの eventstore IF のみ
 application/     ユースケース層。domain にのみ依存
   service/         BillingService, PaymentService, CreditNoteService, SnapshotService
   port/            外部連携IF（PaymentGateway, WebhookHandler, IdempotencyStore, ...）
@@ -36,7 +36,7 @@ infrastructure/  ドメイン IF の実装（現在は inmemory/ のみ。DB 実
 
 **絶対に守るルール:**
 
-- `domain/` から外部パッケージへの依存は禁止（stdlib + `github.com/oklog/ulid/v2` のみ）
+- `domain/` からサードパーティ外部パッケージへの依存は禁止（stdlib + `github.com/oklog/ulid/v2` のみ）。ただし同一モジュール内の infrastructure-free な `eventstore/` インターフェースへの依存は例外として許容する（event-sourced な `domain/contract` 集約は `eventstore.BaseAggregate` を埋め込み `eventstore.DomainEvent`/`EventRegistry` を実装する。`eventstore/` は `domain/shared` にのみ依存するため循環しない）。`domain/contract` 以外の `domain/*` は `eventstore/` を import しない
 - `application/` は `domain/` を中心に、コアの基盤パッケージ（`eventstore/` / `plugin/`）にも依存してよい（依存グラフは architecture.md 2.2 参照）。ただし `infrastructure/` には依存しない
 - 依存の方向は常に外→内（Dependency Inversion）
 - インターフェースは `domain/` または `application/port/` に定義し、実装は `infrastructure/` に置く
