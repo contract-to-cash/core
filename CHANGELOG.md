@@ -41,6 +41,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `FindRefundsByInvoice(ctx, invoiceID)`, and `balance.BalanceRefund` gains
     `InvoiceID` / `ApplicationID` fields. Custom `balance.Repository`
     implementations must implement the new method.
+- **Month-end billing-anchor drift (#186)** — `pricing.BillingInterval.AddTo` used
+  `time.AddDate`, whose month-end overflow normalization drifted the billing anchor
+  permanently for contracts starting on the 29th–31st (`Monthly().AddTo(Jan 31)` →
+  `Mar 3`, next → `Apr 3`, …) and for yearly contracts starting on Feb 29
+  (→ Mar 1). Two-layer fix:
+  - `AddTo` now performs calendar-correct month/year addition, clamping the
+    day-of-month to the last valid day of the target month (`Jan 31 + 1mo` →
+    `Feb 28`/`Feb 29`; `Feb 29 + 1yr` → `Feb 28`). Day/week addition is unchanged.
+  - New `AddToWithAnchorDay` plus a derived `ContractAggregate.billingAnchorDay`
+    (exposed via `BillingAnchorDay()`) preserve the original anchor across
+    successive renewals so a month-end subscription bills `Jan 31 → Feb 28 →
+    Mar 31 → Apr 30 → May 31` instead of drifting downward. `RenewWithInterval`
+    now uses this anchor.
+  - Replay-safe: the anchor is reconstructed from the initial period's start day
+    on `ContractActivatedEvent` / `TrialEndedEvent`, so no event-schema change or
+    upcaster is needed and existing streams rehydrate identically. The contract
+    snapshot gains `billing_anchor_day` (`schema_version` 3); legacy snapshots
+    fall back to the current period's start day. Already-drifted historical
+    contracts self-heal back to their anchor on the next renewal.
 
 ### Added
 
