@@ -25,6 +25,7 @@ const sidebars: SidebarsConfig = {
         'guides/payment-integration',
         'guides/postgres-payment-repository',
         'guides/performance',
+        'guides/data-protection',
       ],
     },
     {
