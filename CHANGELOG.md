@@ -23,6 +23,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Domain-layer validation & immutability gaps (#196)** — a batch of
+  commercial-readiness hardening across the domain layer. Several sub-items are
+  **BREAKING** (pre-v1.0) as marked.
+  - **BREAKING — `pricing.NewPrice` / `pricing.NewPriceWithInterval` now return
+    `(*Price, error)`.** A `Price` is immutable, so the constructors now reject a
+    negative base amount, a base amount whose currency disagrees with the
+    `currency` argument (when non-zero), a zero-value `BillingInterval`
+    (`NewPriceWithInterval`), and an **unknown `billingCycle`** — the latter uses
+    the Strict converter and fails loudly instead of silently coercing to Monthly,
+    mirroring the event-upcaster policy. All callers must handle the error.
+  - **`pricing.Price.PricingModel()` now returns a defensive copy.** Mutating the
+    returned model (e.g. the exported `TieredPrice.Tiers` backing array) no longer
+    reaches into the Price's internal model or changes subsequent `CalculatePrice`
+    results. New `TieredPrice.Clone()`.
+  - **New `balance.BalanceEntry.ConsumeAt(amount, now)`** enforces expiry:
+    consuming from an entry that has expired as of `now` is rejected with a
+    `business_rule` error. `Consume(amount)` remains as the expiry-agnostic
+    primitive (documented; used only where expiry was already filtered). The
+    billing pipeline's `applyBalances` now consumes via `ConsumeAt`.
+  - **New `shared.Money.GreaterThanStrict(other) (bool, error)`** reports a
+    currency mismatch as an error instead of the legacy `GreaterThan`'s silent
+    `false`. The three warned financial guards
+    (`CreditNote.validateAdjustmentAmount`, `Invoice.WithAmountDue`,
+    `CreditNoteService` cumulative-credit check) now use it; `GreaterThan` is
+    retained and documented for same-currency comparisons.
+  - **`contract.ContractAggregate.UnscheduleChange`** now rejects terminal
+    (cancelled/expired) contracts, and the `ContractCancelledEvent` `Apply` now
+    clears `pendingPriceID` / `trialConfig` so a cancelled contract no longer
+    reports `HasPendingChange()==true` or retains a live trial config. Clearing in
+    `Apply` is replay-safe (deterministic, idempotent).
+  - **`invoice.NewCreditNote`** now rejects a **negative item `taxAmount`** (it
+    would understate the note's tax and total).
+  - **`contract.ContractAggregate.Create`** now validates its command against the
+    immutable event stream: a nil `Clock` (from `NewContractAggregate(id, nil)`)
+    returns a validation error instead of panicking; empty `AccountID`, a command
+    with neither `PriceID` nor a non-zero `Price`, and a `Price`/`BasePrice`
+    currency mismatch (both non-zero) are rejected.
+  - **`contract.ContractAggregate.LoadFromSnapshot`** legacy branch now uses the
+    Strict `billing_cycle` converter and fails loudly on an unknown/absent cycle
+    instead of silently coercing to Monthly (mirrors the upcaster; genuinely-valid
+    legacy snapshots still load).
+  - **`invoice.WithAmountDue`** now also syncs `balance` (previously only
+    `amountDue` was set, leaving `balance` stuck at the full total), and its
+    over-total check uses `GreaterThanStrict`.
+  - **`contract.ContractAggregate.StartTrial`** now validates its config against
+    the aggregate's clock: a zero/past `TrialEndDate` and negative
+    `ConversionReminderDays` are rejected.
+
 - **Voiding an invoice now restores the credit balance it consumed (#184)** —
   previously, when an invoice that had drawn down account credit (via FIFO
   `applyBalances`) was voided, the consumed `BalanceEntry` amounts were never

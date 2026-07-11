@@ -73,7 +73,8 @@ func main() {
 	metadata := eventstore.EventMetadata{UserID: "demo-user"}
 
 	// Create a Price entity for this subscription
-	priceEntity := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
+	priceEntity, priceErr := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
+	must("create price", priceErr)
 	must("save price", priceRepo.Save(ctx, priceEntity))
 
 	agg := contract.NewContractAggregate(contractID, clock)

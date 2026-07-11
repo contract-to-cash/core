@@ -14,12 +14,22 @@ func jpy(amount int64) shared.Money {
 	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyJPY)
 }
 
+// mustPrice unwraps a NewPrice result, panicking on a construction error. It
+// takes (p, err) directly so a two-value constructor call can be passed as its
+// sole argument.
+func mustPrice(p *pricing.Price, err error) *pricing.Price {
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
 func TestInMemoryPriceRepository_SaveAndFindByID(t *testing.T) {
 	repo := NewInMemoryPriceRepository()
 	ctx := context.Background()
 
 	productID := shared.NewProductID()
-	p := pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
+	p := mustPrice(pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now()))
 	if err := repo.Save(ctx, p); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -48,10 +58,10 @@ func TestInMemoryPriceRepository_FindByProductID(t *testing.T) {
 	ctx := context.Background()
 
 	productID := shared.NewProductID()
-	p1 := pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
-	p2 := pricing.NewPrice(productID, jpy(10000), shared.CurrencyJPY, pricing.BillingCycleYearly, nil, time.Now())
+	p1 := mustPrice(pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now()))
+	p2 := mustPrice(pricing.NewPrice(productID, jpy(10000), shared.CurrencyJPY, pricing.BillingCycleYearly, nil, time.Now()))
 	otherProduct := shared.NewProductID()
-	p3 := pricing.NewPrice(otherProduct, jpy(500), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
+	p3 := mustPrice(pricing.NewPrice(otherProduct, jpy(500), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now()))
 
 	_ = repo.Save(ctx, p1)
 	_ = repo.Save(ctx, p2)
@@ -71,8 +81,8 @@ func TestInMemoryPriceRepository_FindActiveByProductID(t *testing.T) {
 	ctx := context.Background()
 
 	productID := shared.NewProductID()
-	active := pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
-	archived := pricing.NewPrice(productID, jpy(2000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now())
+	active := mustPrice(pricing.NewPrice(productID, jpy(1000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now()))
+	archived := mustPrice(pricing.NewPrice(productID, jpy(2000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, time.Now()))
 	_ = archived.Archive()
 
 	_ = repo.Save(ctx, active)

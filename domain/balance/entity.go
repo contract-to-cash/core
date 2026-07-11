@@ -258,8 +258,37 @@ func (e *BalanceEntry) Restore(amount shared.Money) error {
 	return nil
 }
 
+// ConsumeAt spends credit from the entry with expiry enforcement: it rejects
+// consumption from an entry that has expired as of now, then delegates to
+// Consume (issue #196).
+//
+// This is the invariant-holding consumption API and the one the billing
+// pipeline uses. Without it, an expired entry loaded directly (e.g. via
+// Repository.FindByID, which does NOT filter expiry the way FindAvailable does)
+// could still be spent, letting a customer draw down credit the ledger already
+// considers dead. `now` comes from shared.Clock — never time.Now() directly.
+//
+// An already-forfeited (zero remaining) expired entry, and the boundary case
+// now == expiresAt, follow IsExpired's semantics (expiry is str* after
+// expiresAt). Restore deliberately does NOT go through this guard — returning
+// consumed credit to an expired entry is intentional (see Restore).
+func (e *BalanceEntry) ConsumeAt(amount shared.Money, now time.Time) (shared.Money, error) {
+	if e.IsExpired(now) {
+		return shared.Money{}, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"cannot consume expired balance entry")
+	}
+	return e.Consume(amount)
+}
+
 // Consume reduces the remaining amount by the given amount and increments the version.
 // Returns the actually consumed amount (may be less than requested if insufficient balance).
+//
+// Consume is expiry-agnostic: it does NOT check whether the entry has expired,
+// so callers that load entries without an expiry filter must use ConsumeAt
+// instead to hold the "expired credit is unspendable" invariant (issue #196).
+// It remains the low-level primitive for callers that have already excluded
+// expired entries (e.g. via Repository.FindAvailable) and for reconstruction in
+// tests.
 func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error) {
 	// Guard the financial invariant: a negative amount would subtract a
 	// negative below and inflate the remaining balance (create credit).

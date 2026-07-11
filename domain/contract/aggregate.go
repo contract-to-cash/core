@@ -186,14 +186,44 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 			fmt.Sprintf("cannot create contract: already in status %s", a.status))
 	}
 
+	// A nil clock would panic on Clock().Now() below. NewContractAggregate takes
+	// the clock as a plain argument (no error return), so guard it here at the
+	// first command instead — the aggregate is unusable without a clock, and this
+	// turns a nil-pointer panic into a domain error (issue #196).
+	if a.Clock() == nil {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"clock must be set (NewContractAggregate was given a nil Clock)")
+	}
 	now := a.Clock().Now()
 	if cmd.IdempotencyKey == "" {
 		return shared.NewDomainError(shared.ErrCodeValidation,
 			"IdempotencyKey must be set")
 	}
+	// Create writes an immutable ContractCreatedEvent, so a nonsensical command
+	// persisted here is uncorrectable. Reject the invariant violations up front
+	// (issue #196).
+	if cmd.AccountID == "" {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"AccountID must be set")
+	}
 	if cmd.Interval.IsZero() {
 		return shared.NewDomainError(shared.ErrCodeValidation,
 			"Interval must be set")
+	}
+	// A contract must reference a price somehow: either a PriceID (the Price
+	// entity path) or a non-zero legacy Price amount. A contract with neither has
+	// no basis for billing.
+	if cmd.PriceID == "" && cmd.Price.IsZero() {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"either PriceID or a non-zero Price must be set")
+	}
+	// Price and BasePrice must agree on currency so the event stream never carries
+	// a self-contradictory monetary pair. A zero amount carries no currency
+	// signal, so only cross-check when both are non-zero.
+	if !cmd.Price.IsZero() && !cmd.BasePrice.IsZero() && cmd.Price.Currency() != cmd.BasePrice.Currency() {
+		return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+			fmt.Sprintf("Price currency %s does not match BasePrice currency %s",
+				cmd.Price.Currency(), cmd.BasePrice.Currency()))
 	}
 	event := &ContractCreatedEvent{
 		ContractID:     a.contractID,
@@ -411,6 +441,14 @@ func (a *ContractAggregate) changePriceEndOfTerm(newPriceID shared.PriceID, meta
 
 // UnscheduleChange cancels a pending price change.
 func (a *ContractAggregate) UnscheduleChange(reason string, metadata eventstore.EventMetadata) error {
+	// Terminal contracts must not raise further events. Without this guard a
+	// cancelled/expired contract that still carried a pending price change (see
+	// the Apply fix in issue #196 that now clears it) could record a
+	// PriceChangeUnscheduledEvent after reaching a terminal state.
+	if a.status == ContractStatusCancelled || a.status == ContractStatusExpired {
+		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot unschedule change: contract is %s", a.status))
+	}
 	if a.pendingPriceID == nil {
 		return shared.NewDomainError(shared.ErrCodeBusinessRule,
 			"no pending change to cancel")
@@ -456,6 +494,27 @@ func (a *ContractAggregate) StartTrial(config TrialConfiguration, metadata event
 	if a.status != ContractStatusDraft {
 		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 			fmt.Sprintf("cannot start trial: current status is %s", a.status))
+	}
+
+	// Validate the trial configuration against the aggregate's clock before it is
+	// written to the immutable event stream (issue #196). A zero or already-past
+	// TrialEndDate would put the contract straight into an expired trial, and a
+	// negative reminder-day offset is meaningless.
+	now := a.Clock().Now()
+	if config.TrialEndDate.IsZero() {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"TrialEndDate must be set")
+	}
+	if !config.TrialEndDate.After(now) {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("TrialEndDate %s must be in the future (now %s)",
+				config.TrialEndDate.Format(time.RFC3339), now.Format(time.RFC3339)))
+	}
+	for _, d := range config.ConversionReminderDays {
+		if d < 0 {
+			return shared.NewDomainError(shared.ErrCodeValidation,
+				fmt.Sprintf("ConversionReminderDays must not be negative: got %d", d))
+		}
 	}
 
 	// Intake defense: deep-copy the caller-owned ConversionReminderDays slice
@@ -708,6 +767,14 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	case *ContractCancelledEvent:
 		a.status = ContractStatusCancelled
 		a.cancelAtPeriodEnd = false
+		// Clear pending/trial state on cancellation so a terminal contract does
+		// not report HasPendingChange()==true or retain a live trial config
+		// (issue #196). Cancelling directly from Trialing previously left
+		// trialConfig set (only EndTrial cleared it), and a scheduled price change
+		// left pendingPriceID set. Clearing here is replay-safe: it is
+		// deterministic from the event and idempotent across re-applies.
+		a.pendingPriceID = nil
+		a.trialConfig = nil
 		a.updatedAt = e.CancelledAt
 
 	case *PriceChangedEvent:
@@ -928,14 +995,23 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 		a.interval = state.Interval
 	} else {
 		// Legacy snapshot (schema_version 0/1): the interval was stored only in
-		// the now-removed billing_cycle field. Recover it from the raw payload.
+		// the now-removed billing_cycle field. Recover it from the raw payload
+		// using the Strict converter so an unknown or absent cycle fails loudly
+		// rather than silently coercing to Monthly — mirroring the event upcaster
+		// policy (issue #162 L-4 / #196). A genuinely-valid legacy snapshot (one
+		// of daily/weekly/monthly/yearly) still loads unchanged.
 		var legacy struct {
 			BillingCycle pricing.BillingCycle `json:"billing_cycle"`
 		}
 		if err := json.Unmarshal(snapshot.State, &legacy); err != nil {
 			return fmt.Errorf("failed to unmarshal legacy snapshot billing_cycle: %w", err)
 		}
-		a.interval = pricing.BillingCycleToInterval(legacy.BillingCycle)
+		interval, ok := pricing.BillingCycleToIntervalStrict(legacy.BillingCycle)
+		if !ok {
+			return shared.NewDomainError(shared.ErrCodeValidation,
+				fmt.Sprintf("legacy snapshot has unknown or absent billing_cycle %q (expected daily, weekly, monthly, or yearly)", legacy.BillingCycle))
+		}
+		a.interval = interval
 	}
 	a.currentPeriod = state.CurrentPeriod
 	// Deep-copy pointer fields so the aggregate does not alias the local

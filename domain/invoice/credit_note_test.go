@@ -214,6 +214,32 @@ func TestNewCreditNote_MixedItemCurrencies_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestNewCreditNote_NegativeItemTax_ReturnsError ensures a negative item tax is
+// rejected rather than understating the note's tax and total (issue #196).
+func TestNewCreditNote_NegativeItemTax_ReturnsError(t *testing.T) {
+	_, err := NewCreditNote(
+		shared.NewCreditNoteID(),
+		shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		CreditNoteReasonOrderChange,
+		[]CreditNoteItem{
+			NewCreditNoteItem("li-1", "Negative tax", jpy(5000), big.NewRat(10, 100), jpy(-500)),
+		},
+		time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC),
+	)
+	if err == nil {
+		t.Fatal("expected error for negative item tax, got nil")
+	}
+	var domainErr *shared.DomainError
+	if !errors.As(err, &domainErr) {
+		t.Fatalf("expected DomainError, got %T", err)
+	}
+	if domainErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected error code %s, got %s", shared.ErrCodeValidation, domainErr.Code)
+	}
+}
+
 // TestNewCreditNote_MismatchedTaxCurrency_ReturnsError ensures a tax amount in a
 // different currency from the item amount is rejected.
 func TestNewCreditNote_MismatchedTaxCurrency_ReturnsError(t *testing.T) {

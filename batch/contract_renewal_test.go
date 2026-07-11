@@ -536,7 +536,7 @@ func TestContractRenewalProcessor_BillingCycleChange(t *testing.T) {
 	}
 
 	// Create a yearly Price entity in mock repo
-	yearlyPrice := pricing.NewPrice(
+	yearlyPrice, yearlyPriceErr := pricing.NewPrice(
 		shared.NewProductID(),
 		shared.NewMoney(big.NewRat(30000, 1), shared.CurrencyJPY),
 		shared.CurrencyJPY,
@@ -544,6 +544,9 @@ func TestContractRenewalProcessor_BillingCycleChange(t *testing.T) {
 		nil,
 		clock.Now(),
 	)
+	if yearlyPriceErr != nil {
+		t.Fatalf("failed to create yearly price: %v", yearlyPriceErr)
+	}
 
 	priceRepo := &mockPriceRepo{
 		prices: map[shared.PriceID]*pricing.Price{

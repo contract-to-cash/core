@@ -1,6 +1,7 @@
 package pricing
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -12,9 +13,23 @@ func jpy(amount int64) shared.Money {
 	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyJPY)
 }
 
+func usd(amount int64) shared.Money {
+	return shared.NewMoney(new(big.Rat).SetInt64(amount), shared.CurrencyUSD)
+}
+
+// mustP unwraps a NewPrice / NewPriceWithInterval result, panicking on a
+// construction error. It takes (p, err) directly so a two-value constructor
+// call can be passed as its sole argument.
+func mustP(p *Price, err error) *Price {
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
 func TestNewPrice_CreatedAtIsSetFromParameter(t *testing.T) {
 	fixedTime := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
-	p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, fixedTime)
+	p := mustP(NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, fixedTime))
 
 	if !p.CreatedAt().Equal(fixedTime) {
 		t.Errorf("expected createdAt %v, got %v", fixedTime, p.CreatedAt())
@@ -24,7 +39,7 @@ func TestNewPrice_CreatedAtIsSetFromParameter(t *testing.T) {
 func TestNewPrice(t *testing.T) {
 	productID := shared.NewProductID()
 	createdAt := time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC)
-	p := NewPrice(productID, jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, createdAt)
+	p := mustP(NewPrice(productID, jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, createdAt))
 
 	if p.ID() == "" {
 		t.Error("expected non-empty price ID")
@@ -52,7 +67,7 @@ func TestNewPrice(t *testing.T) {
 func TestPrice_WithPricingModel(t *testing.T) {
 	productID := shared.NewProductID()
 	model := FlatPrice{Price: jpy(500)}
-	p := NewPrice(productID, jpy(0), shared.CurrencyJPY, BillingCycleMonthly, model, time.Now())
+	p := mustP(NewPrice(productID, jpy(0), shared.CurrencyJPY, BillingCycleMonthly, model, time.Now()))
 
 	if p.PricingModel() == nil {
 		t.Error("expected non-nil pricing model")
@@ -64,7 +79,7 @@ func TestPrice_WithPricingModel(t *testing.T) {
 }
 
 func TestPrice_Archive(t *testing.T) {
-	p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, time.Now())
+	p := mustP(NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, time.Now()))
 
 	if err := p.Archive(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -75,7 +90,7 @@ func TestPrice_Archive(t *testing.T) {
 }
 
 func TestPrice_Archive_AlreadyArchived(t *testing.T) {
-	p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, time.Now())
+	p := mustP(NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, time.Now()))
 	_ = p.Archive()
 
 	err := p.Archive()
@@ -87,7 +102,7 @@ func TestPrice_Archive_AlreadyArchived(t *testing.T) {
 func TestPrice_Immutability(t *testing.T) {
 	productID := shared.NewProductID()
 	amount := jpy(1000)
-	p := NewPrice(productID, amount, shared.CurrencyJPY, BillingCycleMonthly, nil, time.Now())
+	p := mustP(NewPrice(productID, amount, shared.CurrencyJPY, BillingCycleMonthly, nil, time.Now()))
 
 	originalID := p.ID()
 	originalProductID := p.ProductID()
@@ -118,7 +133,7 @@ func TestPrice_Immutability(t *testing.T) {
 func TestPrice_DifferentBillingCycles(t *testing.T) {
 	cycles := []BillingCycle{BillingCycleDaily, BillingCycleWeekly, BillingCycleMonthly, BillingCycleYearly}
 	for _, cycle := range cycles {
-		p := NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, cycle, nil, time.Now())
+		p := mustP(NewPrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, cycle, nil, time.Now()))
 		if p.BillingCycle() != cycle {
 			t.Errorf("expected billing cycle %s, got %s", cycle, p.BillingCycle())
 		}
@@ -130,7 +145,7 @@ func TestNewPriceWithInterval(t *testing.T) {
 	createdAt := time.Date(2026, 3, 30, 0, 0, 0, 0, time.UTC)
 
 	t.Run("quarterly", func(t *testing.T) {
-		p := NewPriceWithInterval(productID, jpy(3000), shared.CurrencyJPY, Quarterly(), nil, createdAt)
+		p := mustP(NewPriceWithInterval(productID, jpy(3000), shared.CurrencyJPY, Quarterly(), nil, createdAt))
 		if p.Interval().Unit() != IntervalUnitMonth {
 			t.Errorf("expected unit month, got %s", p.Interval().Unit())
 		}
@@ -144,16 +159,149 @@ func TestNewPriceWithInterval(t *testing.T) {
 	})
 
 	t.Run("monthly via interval", func(t *testing.T) {
-		p := NewPriceWithInterval(productID, jpy(1000), shared.CurrencyJPY, Monthly(), nil, createdAt)
+		p := mustP(NewPriceWithInterval(productID, jpy(1000), shared.CurrencyJPY, Monthly(), nil, createdAt))
 		if p.BillingCycle() != BillingCycleMonthly {
 			t.Errorf("expected monthly billing cycle, got %s", p.BillingCycle())
 		}
 	})
 
 	t.Run("backward compat: NewPrice stores interval", func(t *testing.T) {
-		p := NewPrice(productID, jpy(1000), shared.CurrencyJPY, BillingCycleYearly, nil, createdAt)
+		p := mustP(NewPrice(productID, jpy(1000), shared.CurrencyJPY, BillingCycleYearly, nil, createdAt))
 		if !p.Interval().Equals(Yearly()) {
 			t.Errorf("expected yearly interval, got %v", p.Interval())
 		}
 	})
+}
+
+// TestNewPrice_Validation exercises the construction-time invariants added in
+// issue #196.
+func TestNewPrice_Validation(t *testing.T) {
+	pid := shared.NewProductID()
+	now := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		run     func() (*Price, error)
+		wantErr bool
+		code    shared.ErrorCode
+	}{
+		{
+			name: "valid",
+			run: func() (*Price, error) {
+				return NewPrice(pid, jpy(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, now)
+			},
+			wantErr: false,
+		},
+		{
+			name: "unknown billing cycle is rejected (strict, not silently Monthly)",
+			run: func() (*Price, error) {
+				return NewPrice(pid, jpy(1000), shared.CurrencyJPY, BillingCycle("fortnightly"), nil, now)
+			},
+			wantErr: true,
+			code:    shared.ErrCodeValidation,
+		},
+		{
+			name: "empty billing cycle is rejected",
+			run: func() (*Price, error) {
+				return NewPrice(pid, jpy(1000), shared.CurrencyJPY, BillingCycle(""), nil, now)
+			},
+			wantErr: true,
+			code:    shared.ErrCodeValidation,
+		},
+		{
+			name: "negative amount is rejected",
+			run: func() (*Price, error) {
+				return NewPrice(pid, jpy(-1), shared.CurrencyJPY, BillingCycleMonthly, nil, now)
+			},
+			wantErr: true,
+			code:    shared.ErrCodeValidation,
+		},
+		{
+			name: "amount currency mismatch is rejected",
+			run: func() (*Price, error) {
+				return NewPrice(pid, usd(1000), shared.CurrencyJPY, BillingCycleMonthly, nil, now)
+			},
+			wantErr: true,
+			code:    shared.ErrCodeCurrencyMismatch,
+		},
+		{
+			name: "zero amount does not trigger currency mismatch",
+			run: func() (*Price, error) {
+				return NewPrice(pid, shared.Zero(shared.CurrencyUSD), shared.CurrencyJPY, BillingCycleMonthly, nil, now)
+			},
+			wantErr: false,
+		},
+		{
+			name: "zero interval is rejected",
+			run: func() (*Price, error) {
+				return NewPriceWithInterval(pid, jpy(1000), shared.CurrencyJPY, BillingInterval{}, nil, now)
+			},
+			wantErr: true,
+			code:    shared.ErrCodeValidation,
+		},
+		{
+			name: "quarterly interval is accepted",
+			run: func() (*Price, error) {
+				return NewPriceWithInterval(pid, jpy(3000), shared.CurrencyJPY, Quarterly(), nil, now)
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := tt.run()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (price=%v)", p)
+				}
+				if p != nil {
+					t.Errorf("expected nil price on error, got %v", p)
+				}
+				var de *shared.DomainError
+				if !errors.As(err, &de) {
+					t.Fatalf("expected DomainError, got %T", err)
+				}
+				if de.Code != tt.code {
+					t.Errorf("expected code %s, got %s", tt.code, de.Code)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if p == nil {
+				t.Fatal("expected non-nil price")
+			}
+		})
+	}
+}
+
+// TestPrice_PricingModel_ReturnsDefensiveCopy verifies that mutating the tiers of
+// a returned TieredPrice model does not alter the Price's internal model or
+// subsequent CalculatePrice results (issue #196).
+func TestPrice_PricingModel_ReturnsDefensiveCopy(t *testing.T) {
+	tiered, err := NewTieredPrice([]PriceTier{
+		{UpTo: 10, UnitPrice: jpy(100), FlatFee: jpy(0)},
+		{UpTo: 0, UnitPrice: jpy(50), FlatFee: jpy(0)},
+	}, TieredPricingGraduated)
+	if err != nil {
+		t.Fatalf("NewTieredPrice failed: %v", err)
+	}
+	p := mustP(NewPrice(shared.NewProductID(), jpy(0), shared.CurrencyJPY, BillingCycleMonthly, tiered, time.Now()))
+
+	before := p.PricingModel().CalculatePrice(20)
+
+	// Mutate the backing array of a returned copy.
+	leaked, ok := p.PricingModel().(TieredPrice)
+	if !ok {
+		t.Fatalf("expected TieredPrice, got %T", p.PricingModel())
+	}
+	leaked.Tiers[0].UnitPrice = jpy(999999)
+
+	after := p.PricingModel().CalculatePrice(20)
+	if before.Amount().Cmp(after.Amount()) != 0 {
+		t.Errorf("mutating returned tiers changed CalculatePrice: before=%s after=%s",
+			before.Amount().RatString(), after.Amount().RatString())
+	}
 }

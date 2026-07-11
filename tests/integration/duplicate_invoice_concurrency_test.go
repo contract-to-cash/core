@@ -195,10 +195,13 @@ func TestGenerateInvoice_SequentialDistinctPeriods_Unaffected_Integration(t *tes
 	// Build an auto-renewing active contract so RenewWithInterval advances the
 	// billing period (a non-auto-renewing contract would expire instead).
 	price := moneyJPY(5000)
-	priceEntity := pricing.NewPrice(
+	priceEntity, priceErr := pricing.NewPrice(
 		shared.NewProductID(), price, price.Currency(),
 		pricing.BillingCycleMonthly, nil, clock.Now(),
 	)
+	if priceErr != nil {
+		t.Fatalf("failed to create price: %v", priceErr)
+	}
 	if err := priceRepo.Save(ctx, priceEntity); err != nil {
 		t.Fatalf("failed to save price: %v", err)
 	}

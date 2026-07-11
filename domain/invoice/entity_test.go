@@ -531,6 +531,12 @@ func TestWithAmountDue_Bounds(t *testing.T) {
 				if inv.AmountDue().Amount().Cmp(tt.due.Amount()) != 0 {
 					t.Errorf("expected amount due %s, got %s", tt.due.Amount().RatString(), inv.AmountDue().Amount().RatString())
 				}
+				// balance must track amountDue (paidAmount is zero at
+				// construction), not stay stuck at the full total (issue #196).
+				if inv.Balance().Amount().Cmp(tt.due.Amount()) != 0 {
+					t.Errorf("expected balance synced to amount due %s, got %s",
+						tt.due.Amount().RatString(), inv.Balance().Amount().RatString())
+				}
 				return
 			}
 			if err == nil {

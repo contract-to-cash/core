@@ -2,6 +2,7 @@ package pricing
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/contract-to-cash/core/domain/shared"
@@ -42,6 +43,16 @@ type Price struct {
 
 // NewPrice creates a new active Price.
 // billingCycle is kept for backward compatibility; it is converted to a BillingInterval internally.
+//
+// Validation (issue #196): a Price is immutable, so a nonsensical one persisted
+// here is uncorrectable. NewPrice rejects
+//   - a negative base amount;
+//   - a base amount whose currency does not match the currency parameter (which
+//     would make Amount().Currency() disagree with Currency());
+//   - an unrecognized billingCycle. Unlike the lenient BillingCycleToInterval
+//     (which silently falls back to Monthly), construction uses the Strict
+//     converter and fails loudly, mirroring the event upcaster policy so an
+//     unknown cycle never masquerades as monthly (issue #162 L-4).
 func NewPrice(
 	productID shared.ProductID,
 	amount shared.Money,
@@ -49,21 +60,21 @@ func NewPrice(
 	billingCycle BillingCycle,
 	pricingModel PricingModel,
 	createdAt time.Time,
-) *Price {
-	return &Price{
-		id:           shared.NewPriceID(),
-		productID:    productID,
-		amount:       amount,
-		currency:     currency,
-		interval:     BillingCycleToInterval(billingCycle),
-		pricingModel: pricingModel,
-		status:       PriceStatusActive,
-		createdAt:    createdAt,
+) (*Price, error) {
+	interval, ok := BillingCycleToIntervalStrict(billingCycle)
+	if !ok {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("unknown billing cycle %q (expected daily, weekly, monthly, or yearly)", billingCycle))
 	}
+	return newPrice(productID, amount, currency, interval, pricingModel, createdAt)
 }
 
 // NewPriceWithInterval creates a new active Price with a BillingInterval.
 // This supports flexible billing intervals like quarterly (3 months) or semi-annual (6 months).
+//
+// Validation mirrors NewPrice (issue #196): it rejects a negative base amount, a
+// base amount whose currency disagrees with the currency parameter, and a
+// zero-value (uninitialized) interval.
 func NewPriceWithInterval(
 	productID shared.ProductID,
 	amount shared.Money,
@@ -71,7 +82,38 @@ func NewPriceWithInterval(
 	interval BillingInterval,
 	pricingModel PricingModel,
 	createdAt time.Time,
-) *Price {
+) (*Price, error) {
+	if interval.IsZero() {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			"billing interval must be set")
+	}
+	return newPrice(productID, amount, currency, interval, pricingModel, createdAt)
+}
+
+// newPrice is the shared constructor body for NewPrice / NewPriceWithInterval.
+// It enforces the amount invariants both public constructors share (issue #196).
+func newPrice(
+	productID shared.ProductID,
+	amount shared.Money,
+	currency shared.Currency,
+	interval BillingInterval,
+	pricingModel PricingModel,
+	createdAt time.Time,
+) (*Price, error) {
+	if amount.IsNegative() {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("price amount must not be negative: %s", amount.Amount().RatString()))
+	}
+	// A zero amount carries no currency signal, so only cross-check a non-zero
+	// amount's currency against the declared currency. This lets callers pass a
+	// zero base amount (e.g. pure usage-based prices) as shared.Zero(anyCurrency)
+	// without a spurious mismatch, while still catching a genuinely wrong-currency
+	// base amount like NewMoney(1000, USD) declared as JPY.
+	if !amount.IsZero() && amount.Currency() != currency {
+		return nil, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+			fmt.Sprintf("price amount currency %s does not match declared currency %s",
+				amount.Currency(), currency))
+	}
 	return &Price{
 		id:           shared.NewPriceID(),
 		productID:    productID,
@@ -81,7 +123,7 @@ func NewPriceWithInterval(
 		pricingModel: pricingModel,
 		status:       PriceStatusActive,
 		createdAt:    createdAt,
-	}
+	}, nil
 }
 
 // ID returns the price ID.
@@ -105,7 +147,12 @@ func (p *Price) BillingCycle() BillingCycle { return p.interval.ToBillingCycle()
 func (p *Price) Interval() BillingInterval { return p.interval }
 
 // PricingModel returns the pricing model (for usage-based pricing).
-func (p *Price) PricingModel() PricingModel { return p.pricingModel }
+//
+// It returns a defensive copy so a caller mutating the result (e.g. the exported
+// TieredPrice.Tiers backing array) cannot alter this Price's internal model and
+// change subsequent CalculatePrice results — preserving the documented
+// immutability of Price (issue #196). See clonePricingModel.
+func (p *Price) PricingModel() PricingModel { return clonePricingModel(p.pricingModel) }
 
 // Status returns the price status.
 func (p *Price) Status() PriceStatus { return p.status }

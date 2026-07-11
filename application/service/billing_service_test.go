@@ -162,7 +162,11 @@ func newTestClock() shared.FixedClock {
 }
 
 func newTestPrice(productID shared.ProductID, amount shared.Money, pricingModel pricing.PricingModel) *pricing.Price {
-	return pricing.NewPrice(productID, amount, amount.Currency(), pricing.BillingCycleMonthly, pricingModel, time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC))
+	p, err := pricing.NewPrice(productID, amount, amount.Currency(), pricing.BillingCycleMonthly, pricingModel, time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		panic(err)
+	}
+	return p
 }
 
 func newTestContractAggregate(clock shared.Clock, contractType contract.ContractType, price shared.Money) *contract.ContractAggregate {

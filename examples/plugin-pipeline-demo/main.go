@@ -87,7 +87,8 @@ func main() {
 	fmt.Println()
 
 	// ── 3. Create a ¥10,000/month contract ──
-	priceEntity := pricing.NewPrice(shared.NewProductID(), moneyJPY(10000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
+	priceEntity, priceErr := pricing.NewPrice(shared.NewProductID(), moneyJPY(10000), shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
+	must("create price", priceErr)
 	must("save price", priceRepo.Save(ctx, priceEntity))
 
 	contractID := shared.NewContractID()

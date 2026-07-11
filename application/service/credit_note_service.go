@@ -161,10 +161,11 @@ func (s *CreditNoteService) CreateCreditNote(
 		}
 
 		// Validate that credit note total does not exceed original invoice total.
-		// The credit note must be denominated in the invoice's currency: otherwise
-		// the over-credit comparison below (Money.GreaterThan) silently returns false
-		// on a currency mismatch and an arbitrarily large foreign total slips through
-		// (review #2). Anchor the currency on the invoice, not on items[0].
+		// The credit note must be denominated in the invoice's currency; the
+		// over-credit comparison below uses Money.GreaterThanStrict so a currency
+		// mismatch surfaces as an error rather than an arbitrarily large foreign
+		// total slipping through (review #2 / issue #196). Anchor the currency on
+		// the invoice, not on items[0].
 		currency := inv.Total().Currency()
 		itemSubtotal := shared.Zero(currency)
 		itemTax := shared.Zero(currency)
@@ -227,7 +228,17 @@ func (s *CreditNoteService) CreateCreditNote(
 		if err != nil {
 			return fmt.Errorf("failed to compute cumulative credit total: %w", err)
 		}
-		if cumulative.GreaterThan(inv.Total()) {
+		// GreaterThanStrict surfaces a currency mismatch as an error rather than
+		// silently reading as "not greater" (issue #196). currency is anchored on
+		// the invoice and every summed amount was validated against it above, so
+		// the mismatch branch is defensive.
+		exceeds, err := cumulative.GreaterThanStrict(inv.Total())
+		if err != nil {
+			return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+				fmt.Sprintf("cumulative credit note currency %s does not match invoice currency %s",
+					cumulative.Currency(), inv.Total().Currency()))
+		}
+		if exceeds {
 			return shared.NewDomainError(shared.ErrCodeBusinessRule,
 				fmt.Sprintf("cumulative credit note total %s exceeds invoice total %s",
 					cumulative.Amount().RatString(), inv.Total().Amount().RatString()))
