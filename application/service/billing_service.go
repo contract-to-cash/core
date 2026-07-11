@@ -170,6 +170,19 @@ type pipelineInput struct {
 	// closes the concurrent-insert window. Proration invoices pass nil because
 	// they intentionally coexist with the period's regular invoice.
 	duplicateCheck func(ctx context.Context) error
+	// restoreVoidedInvoiceID, when non-empty, names a voided invoice whose consumed
+	// credit must be returned to the ledger BEFORE this pipeline applies credit to
+	// the new invoice (issue #184). RegenerateInvoice sets it to the voided
+	// original so the credit consumed by the voided invoice is not double-charged:
+	// it is restored and then re-applied (FIFO) to the regenerated invoice within
+	// the same transaction. The restoration is idempotent (see restoreBalances).
+	//
+	// CONTRACT: the setter must have verified the invoice is actually voided —
+	// the pipeline calls restoreBalances directly WITHOUT re-checking status
+	// (RegenerateInvoice only reaches here after finding the invoice voided).
+	// Restoring a non-voided invoice's applications would fabricate balance;
+	// external callers go through RestoreBalancesForVoidedInvoice, which guards.
+	restoreVoidedInvoiceID shared.InvoiceID
 }
 
 // invoiceRepoFor returns the transaction-scoped invoice repository when ctx
@@ -356,6 +369,9 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 		lineItems:  lineItems,
 		period:     billingPeriod,
 		extraOpts:  extraOpts,
+		// Return credit consumed by the voided invoice to the ledger before the
+		// pipeline re-applies credit to the regenerated invoice (issue #184).
+		restoreVoidedInvoiceID: voidedInv.ID(),
 		// In-tx re-check (issue #149): reject if a non-voided invoice appeared
 		// for this period between the pre-tx check and the save. The voided
 		// original is excluded, so void-and-recreate still succeeds.
@@ -550,6 +566,18 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 		if input.duplicateCheck != nil {
 			if dupErr := input.duplicateCheck(txCtx); dupErr != nil {
 				return dupErr
+			}
+		}
+
+		// Restore credit consumed by a voided invoice (issue #184) BEFORE applying
+		// credit to the new invoice, so the restored balance is available for
+		// FIFO re-application below. This is what makes void-and-recreate
+		// (RegenerateInvoice) preserve the customer's credit instead of consuming
+		// it against the voided invoice forever. Idempotent — a retry that already
+		// restored will find the refund records and skip.
+		if input.restoreVoidedInvoiceID != "" && repos.Balances != nil {
+			if _, restoreErr := s.restoreBalances(txCtx, repos.Balances, input.restoreVoidedInvoiceID); restoreErr != nil {
+				return fmt.Errorf("failed to restore credits from voided invoice: %w", restoreErr)
 			}
 		}
 
@@ -922,6 +950,132 @@ func (s *BillingService) applyBalances(ctx context.Context, balanceRepo balance.
 	}
 
 	return totalApplied, nil
+}
+
+// RestoreBalancesForVoidedInvoice returns the credit a voided invoice consumed
+// back to the balance ledger and records BalanceRefund audit rows (issue #184).
+//
+// The invoice is loaded through the transaction-scoped invoice repository and
+// MUST be in voided status: restoring the applications of a live (draft/
+// finalized/paid) invoice would fabricate spendable balance — the invoice still
+// legitimately holds that credit — so any non-voided status is rejected with a
+// business_rule DomainError, and a missing invoice is an error (not a silent
+// no-op). The in-tx load means a void written earlier in the same transaction
+// (e.g. by CreditNoteService.ReissueInvoice) is visible to the guard.
+//
+// Call it inside the SAME transaction that voids the invoice so the void and the
+// credit restoration commit or roll back together. It joins an active
+// transaction stamped on ctx (via tx.Run) and uses the transaction-scoped
+// repositories; when no balance repository is wired the restoration is a no-op
+// (the voided-status guard still runs). The operation is idempotent — a double
+// void / retry restores each application at most once (see restoreBalances).
+//
+// This is the reversal used by void paths that do NOT go through
+// RegenerateInvoice's pipeline — notably CreditNoteService.ReissueInvoice, which
+// voids the original and then generates a replacement via GenerateInvoice.
+// (RegenerateInvoice's pipeline verifies voided status itself and calls the
+// internal restoreBalances directly, skipping this redundant load.)
+func (s *BillingService) RestoreBalancesForVoidedInvoice(ctx context.Context, invoiceID shared.InvoiceID) error {
+	return tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
+		invoiceRepo := repos.Invoices
+		if invoiceRepo == nil {
+			invoiceRepo = s.invoiceRepo
+		}
+		inv, err := invoiceRepo.FindByID(txCtx, invoiceID)
+		if err != nil {
+			return fmt.Errorf("failed to load invoice for balance restoration: %w", err)
+		}
+		if inv == nil {
+			return shared.NewDomainError(shared.ErrCodeNotFound,
+				fmt.Sprintf("invoice %s not found", invoiceID))
+		}
+		if inv.Status() != invoice.InvoiceStatusVoided {
+			return shared.NewDomainError(shared.ErrCodeBusinessRule,
+				fmt.Sprintf("cannot restore balances: invoice %s is %s, not voided", invoiceID, inv.Status()))
+		}
+		if repos.Balances == nil {
+			return nil
+		}
+		_, err = s.restoreBalances(txCtx, repos.Balances, invoiceID)
+		return err
+	})
+}
+
+// restoreBalances returns credit consumed by a (now voided) invoice to the
+// balance ledger and records BalanceRefund audit rows. It is the inverse of
+// applyBalances: for each BalanceApplication recorded against invoiceID it
+// reloads the source entry, calls BalanceEntry.Restore, saves it, and writes a
+// BalanceRefund linking the reversal to the application.
+//
+// Idempotency: applications already reversed by a prior BalanceRefund for the
+// invoice (matched by ApplicationID) are skipped, so a double void / transaction
+// retry restores each application at most once. Because the whole reversal runs
+// inside the caller's transaction, a mid-loop failure rolls the entire reversal
+// back and leaves no partial refunds.
+//
+// Expired entries: a source entry whose expiry has passed is still restored (see
+// BalanceEntry.Restore) and left for batch.BalanceExpirationProcessor to forfeit
+// through the normal expiration path.
+//
+// balanceRepo is the transaction-scoped repository from the caller's tx.Run.
+// Returns the total amount restored (zero when nothing was applicable).
+func (s *BillingService) restoreBalances(ctx context.Context, balanceRepo balance.Repository, invoiceID shared.InvoiceID) (shared.Money, error) {
+	apps, err := balanceRepo.FindApplicationsByInvoice(ctx, invoiceID)
+	if err != nil {
+		return shared.Money{}, fmt.Errorf("failed to load balance applications: %w", err)
+	}
+	if len(apps) == 0 {
+		return shared.Money{}, nil
+	}
+
+	// Idempotency guard: skip applications already reversed by an existing refund.
+	existingRefunds, err := balanceRepo.FindRefundsByInvoice(ctx, invoiceID)
+	if err != nil {
+		return shared.Money{}, fmt.Errorf("failed to load balance refunds: %w", err)
+	}
+	alreadyRefunded := make(map[string]bool, len(existingRefunds))
+	for _, ref := range existingRefunds {
+		alreadyRefunded[ref.ApplicationID] = true
+	}
+
+	now := s.clock.Now()
+	totalRestored := shared.Zero(apps[0].Amount.Currency())
+	for _, app := range apps {
+		if alreadyRefunded[app.ID] {
+			continue
+		}
+
+		entry, findErr := balanceRepo.FindByID(ctx, app.BalanceEntryID)
+		if findErr != nil {
+			return shared.Money{}, fmt.Errorf("failed to load balance entry %s: %w", app.BalanceEntryID, findErr)
+		}
+		if restoreErr := entry.Restore(app.Amount); restoreErr != nil {
+			return shared.Money{}, fmt.Errorf("failed to restore balance entry %s: %w", app.BalanceEntryID, restoreErr)
+		}
+		if saveErr := balanceRepo.Save(ctx, entry); saveErr != nil {
+			return shared.Money{}, fmt.Errorf("failed to save restored balance entry: %w", saveErr)
+		}
+
+		refund := &balance.BalanceRefund{
+			ID:             shared.GenerateID(),
+			BalanceEntryID: app.BalanceEntryID,
+			AccountID:      entry.AccountID(),
+			Amount:         app.Amount,
+			RefundedAt:     now,
+			InvoiceID:      invoiceID,
+			ApplicationID:  app.ID,
+		}
+		if saveErr := balanceRepo.SaveRefund(ctx, refund); saveErr != nil {
+			return shared.Money{}, fmt.Errorf("failed to save balance refund: %w", saveErr)
+		}
+
+		totalRestored, err = totalRestored.Add(app.Amount)
+		if err != nil {
+			return shared.Money{}, fmt.Errorf("failed to sum restored credits: %w", err)
+		}
+	}
+
+	return totalRestored, nil
 }
 
 // rejectIfActivePeriodInvoice returns a conflict DomainError when a non-voided

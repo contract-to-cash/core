@@ -122,3 +122,66 @@ func TestOnContractCancel_NoInvoices(t *testing.T) {
 		t.Fatalf("unexpected error on empty invoices: %v", err)
 	}
 }
+
+// TestOnContractCancel_SkipsInvoicesWithAppliedBalance verifies that a Draft or
+// Finalized invoice which already consumed account credit (AppliedBalance > 0) is
+// NOT voided on contract cancellation (issue #184). Voiding it here would destroy
+// the consumed credit, because this plugin cannot atomically restore it.
+func TestOnContractCancel_SkipsInvoicesWithAppliedBalance(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)}
+	invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
+	ctx := context.Background()
+
+	contractID := shared.NewContractID()
+	accountID := shared.NewAccountID()
+
+	// Draft invoice that consumed 2000 of credit (appliedBalance > 0): must be skipped.
+	creditedInv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(), accountID, contractID,
+		jpy(10000), jpy(0), jpy(0),
+		invoice.WithAppliedBalance(jpy(2000)),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating credited invoice: %v", err)
+	}
+	_ = invoiceRepo.Save(ctx, creditedInv)
+
+	// A plain draft invoice with no applied balance: should still be voided.
+	plainInv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(), accountID, contractID,
+		jpy(5000), jpy(0), jpy(0),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating plain invoice: %v", err)
+	}
+	_ = invoiceRepo.Save(ctx, plainInv)
+
+	agg := contract.NewContractAggregate(contractID, clock)
+	_ = agg.Create(contract.CreateContractCommand{
+		IdempotencyKey: "idem-invoicecleanup-appliedbalance-1",
+		AccountID:      accountID,
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          jpy(10000),
+		BasePrice:      jpy(10000),
+	}, eventstore.EventMetadata{UserID: "test"})
+	_ = agg.Activate(eventstore.EventMetadata{UserID: "test"})
+	_ = agg.Cancel("customer request", eventstore.EventMetadata{UserID: "test"})
+
+	p := NewInvoiceCleanupPlugin(invoiceRepo)
+	if err := p.OnContractCancel(plugin.NewContext(ctx), agg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The credited invoice must be left untouched (still draft), preserving credit.
+	got, _ := invoiceRepo.FindByID(ctx, creditedInv.ID())
+	if got.Status() != invoice.InvoiceStatusDraft {
+		t.Errorf("expected credited invoice to be SKIPPED (still draft), got %s", got.Status())
+	}
+
+	// The plain invoice must still be voided.
+	gotPlain, _ := invoiceRepo.FindByID(ctx, plainInv.ID())
+	if gotPlain.Status() != invoice.InvoiceStatusVoided {
+		t.Errorf("expected plain draft invoice to be voided, got %s", gotPlain.Status())
+	}
+}

@@ -209,6 +209,55 @@ func (e *BalanceEntry) MarkExpired(now time.Time) (shared.Money, error) {
 	return forfeited, nil
 }
 
+// Restore returns previously consumed credit back to the entry, increasing the
+// remaining amount by the given amount and incrementing the optimistic-locking
+// version. It is the inverse of Consume, used when the invoice that consumed the
+// credit is voided (issue #184): the consumed balance must be returned to the
+// customer's ledger instead of being silently destroyed.
+//
+// Guards:
+//   - amount must not be negative (a negative restore would consume, not return).
+//   - amount currency must match the entry currency (enforced by Money.Add).
+//   - the restore must not return more than was consumed: remainingAmount + amount
+//     must not exceed originalAmount. Restoring beyond the original credit would
+//     fabricate balance, so it is rejected with a business_rule error. Callers
+//     that reverse a single BalanceApplication never hit this, since the applied
+//     amount was consumed from this very entry.
+//
+// A zero-amount restore is an idempotent no-op: nothing changes and the version
+// is not bumped (mirroring Consume's zero-consumption behavior).
+//
+// Expiration semantics: Restore deliberately does NOT consult the entry's expiry.
+// Credit is returned even to an entry whose expiresAt has already passed —
+// otherwise a voided-invoice restoration would silently vanish. A
+// restored-but-expired entry is not offered by FindAvailable / GetBalance (both
+// skip expired entries) and is forfeited by batch.BalanceExpirationProcessor via
+// MarkExpired, so it flows through the normal expiration path rather than
+// lingering as a live balance.
+func (e *BalanceEntry) Restore(amount shared.Money) error {
+	// Guard the financial invariant: a negative amount would reduce the remaining
+	// balance below, i.e. consume rather than restore.
+	if amount.IsNegative() {
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			"restore amount must not be negative")
+	}
+	if amount.IsZero() {
+		// Nothing to restore, no version bump — idempotent no-op.
+		return nil
+	}
+	newRemaining, err := e.remainingAmount.Add(amount)
+	if err != nil {
+		return err
+	}
+	if newRemaining.GreaterThan(e.originalAmount) {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"cannot restore more than was consumed: remaining amount would exceed original amount")
+	}
+	e.remainingAmount = newRemaining
+	e.version++
+	return nil
+}
+
 // Consume reduces the remaining amount by the given amount and increments the version.
 // Returns the actually consumed amount (may be less than requested if insufficient balance).
 func (e *BalanceEntry) Consume(amount shared.Money) (shared.Money, error) {

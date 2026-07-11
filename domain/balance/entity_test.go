@@ -449,3 +449,121 @@ func TestBalanceEntry_LoadedVersion_Tracking(t *testing.T) {
 		t.Errorf("expected loadedVersion to remain 3 after second Consume, got %d", entry.LoadedVersion())
 	}
 }
+
+// --- Restore (issue #184) ---
+
+func TestBalanceEntry_Restore_ReturnsConsumedCredit(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry, _ := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+
+	consumed, err := entry.Consume(shared.NewMoney(new(big.Rat).SetInt64(600), shared.CurrencyJPY))
+	if err != nil {
+		t.Fatalf("unexpected consume error: %v", err)
+	}
+	if consumed.Amount().Cmp(big.NewRat(600, 1)) != 0 {
+		t.Fatalf("expected 600 consumed, got %s", consumed.Amount().RatString())
+	}
+	if entry.RemainingAmount().Amount().Cmp(big.NewRat(400, 1)) != 0 {
+		t.Fatalf("expected remaining 400 after consume, got %s", entry.RemainingAmount().Amount().RatString())
+	}
+	versionAfterConsume := entry.Version()
+
+	if err := entry.Restore(consumed); err != nil {
+		t.Fatalf("unexpected restore error: %v", err)
+	}
+	if entry.RemainingAmount().Amount().Cmp(big.NewRat(1000, 1)) != 0 {
+		t.Errorf("expected remaining restored to 1000, got %s", entry.RemainingAmount().Amount().RatString())
+	}
+	if entry.Version() != versionAfterConsume+1 {
+		t.Errorf("expected version bumped to %d after restore, got %d", versionAfterConsume+1, entry.Version())
+	}
+}
+
+func TestBalanceEntry_Restore_NegativeAmount_Rejected(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry, _ := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+	_, _ = entry.Consume(shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY))
+
+	neg := shared.NewMoney(new(big.Rat).SetInt64(-100), shared.CurrencyJPY)
+	err := entry.Restore(neg)
+	if err == nil {
+		t.Fatal("expected error restoring a negative amount, got nil")
+	}
+	var domErr *shared.DomainError
+	if !errorsAsBalance(err, &domErr) || domErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected validation error, got %v", err)
+	}
+}
+
+func TestBalanceEntry_Restore_ZeroAmount_NoVersionBump(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry, _ := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+	_, _ = entry.Consume(shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY))
+	versionBefore := entry.Version()
+
+	if err := entry.Restore(shared.Zero(shared.CurrencyJPY)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry.Version() != versionBefore {
+		t.Errorf("expected version unchanged on zero restore, got %d (was %d)", entry.Version(), versionBefore)
+	}
+	if entry.RemainingAmount().Amount().Cmp(big.NewRat(500, 1)) != 0 {
+		t.Errorf("expected remaining unchanged at 500, got %s", entry.RemainingAmount().Amount().RatString())
+	}
+}
+
+// TestBalanceEntry_Restore_ CannotExceedOriginal guards against fabricating
+// credit: restoring more than was consumed would push remaining above original.
+func TestBalanceEntry_Restore_CannotExceedOriginal(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry, _ := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+	_, _ = entry.Consume(shared.NewMoney(new(big.Rat).SetInt64(300), shared.CurrencyJPY))
+
+	// Only 300 was consumed; restoring 400 would exceed the original 1000.
+	err := entry.Restore(shared.NewMoney(new(big.Rat).SetInt64(400), shared.CurrencyJPY))
+	if err == nil {
+		t.Fatal("expected error restoring more than consumed, got nil")
+	}
+	var domErr *shared.DomainError
+	if !errorsAsBalance(err, &domErr) || domErr.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected business_rule error, got %v", err)
+	}
+	// Remaining must be untouched on rejection.
+	if entry.RemainingAmount().Amount().Cmp(big.NewRat(700, 1)) != 0 {
+		t.Errorf("expected remaining unchanged at 700 after rejected restore, got %s", entry.RemainingAmount().Amount().RatString())
+	}
+}
+
+func TestBalanceEntry_Restore_CurrencyMismatch_Rejected(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry, _ := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+	_, _ = entry.Consume(shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY))
+
+	err := entry.Restore(shared.NewMoney(new(big.Rat).SetInt64(100), shared.CurrencyUSD))
+	if err == nil {
+		t.Fatal("expected currency mismatch error, got nil")
+	}
+}
+
+// TestBalanceEntry_Restore_ExpiredEntryStillRestored documents the expiration
+// semantics: restoration ignores expiry (the expiration batch sweeps it later).
+func TestBalanceEntry_Restore_ExpiredEntryStillRestored(t *testing.T) {
+	accountID := shared.NewAccountID()
+	amount := shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)
+	entry, _ := NewBalanceEntry(accountID, amount, BalanceReasonProration, time.Now())
+	_, _ = entry.Consume(shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY))
+	past := time.Now().Add(-24 * time.Hour)
+	entry.expiresAt = &past
+
+	if err := entry.Restore(shared.NewMoney(new(big.Rat).SetInt64(1000), shared.CurrencyJPY)); err != nil {
+		t.Fatalf("expected expired entry to still accept restore, got %v", err)
+	}
+	if entry.RemainingAmount().Amount().Cmp(big.NewRat(1000, 1)) != 0 {
+		t.Errorf("expected remaining restored to 1000 on expired entry, got %s", entry.RemainingAmount().Amount().RatString())
+	}
+}
