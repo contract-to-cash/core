@@ -235,21 +235,23 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 				Timestamp:  p.clock.Now(),
 			}
 			for _, hook := range p.registry.GetOnContractChangeHooks() {
-				if hookErr := hook.OnContractChange(pluginCtx, changeEvent); hookErr != nil {
-					p.logger.Warn("post-commit change hook failed",
+				if hookErr := plugin.SafeInvoke("OnContractChangeHook.OnContractChange", hook.Name(), func() error {
+					return hook.OnContractChange(pluginCtx, changeEvent)
+				}); hookErr != nil {
+					plugin.LogNonFatalHookError(p.logger, "post-commit change hook failed", hookErr,
 						"hook", hook.Name(),
 						"contractID", agg.ContractID(),
-						"error", hookErr,
 					)
 				}
 			}
 		} else {
 			for _, hook := range p.registry.GetOnContractRenewHooks() {
-				if hookErr := hook.OnContractRenew(pluginCtx, agg); hookErr != nil {
-					p.logger.Warn("post-commit renew hook failed",
+				if hookErr := plugin.SafeInvoke("OnContractRenewHook.OnContractRenew", hook.Name(), func() error {
+					return hook.OnContractRenew(pluginCtx, agg)
+				}); hookErr != nil {
+					plugin.LogNonFatalHookError(p.logger, "post-commit renew hook failed", hookErr,
 						"hook", hook.Name(),
 						"contractID", agg.ContractID(),
-						"error", hookErr,
 					)
 				}
 			}
@@ -262,11 +264,12 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 				Timestamp:  p.clock.Now(),
 			}
 			for _, hook := range p.registry.GetOnContractChangeHooks() {
-				if hookErr := hook.OnContractChange(pluginCtx, changeEvent); hookErr != nil {
-					p.logger.Warn("post-commit change hook failed",
+				if hookErr := plugin.SafeInvoke("OnContractChangeHook.OnContractChange", hook.Name(), func() error {
+					return hook.OnContractChange(pluginCtx, changeEvent)
+				}); hookErr != nil {
+					plugin.LogNonFatalHookError(p.logger, "post-commit change hook failed", hookErr,
 						"hook", hook.Name(),
 						"contractID", agg.ContractID(),
-						"error", hookErr,
 					)
 				}
 			}

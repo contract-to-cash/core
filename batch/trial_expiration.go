@@ -243,11 +243,12 @@ func (p *TrialExpirationProcessor) processOne(ctx context.Context, agg *contract
 		pluginCtx := plugin.NewContext(ctx)
 
 		for _, hook := range p.registry.GetOnContractTrialEndHooks() {
-			if hookErr := hook.OnContractTrialEnd(pluginCtx, agg, converted); hookErr != nil {
-				p.logger.Warn("post-commit trial end hook failed",
+			if hookErr := plugin.SafeInvoke("OnContractTrialEndHook.OnContractTrialEnd", hook.Name(), func() error {
+				return hook.OnContractTrialEnd(pluginCtx, agg, converted)
+			}); hookErr != nil {
+				plugin.LogNonFatalHookError(p.logger, "post-commit trial end hook failed", hookErr,
 					"hook", hook.Name(),
 					"contractID", agg.ContractID(),
-					"error", hookErr,
 				)
 			}
 		}
@@ -260,11 +261,12 @@ func (p *TrialExpirationProcessor) processOne(ctx context.Context, agg *contract
 			Timestamp:  p.clock.Now(),
 		}
 		for _, hook := range p.registry.GetOnContractChangeHooks() {
-			if hookErr := hook.OnContractChange(pluginCtx, changeEvent); hookErr != nil {
-				p.logger.Warn("post-commit change hook failed",
+			if hookErr := plugin.SafeInvoke("OnContractChangeHook.OnContractChange", hook.Name(), func() error {
+				return hook.OnContractChange(pluginCtx, changeEvent)
+			}); hookErr != nil {
+				plugin.LogNonFatalHookError(p.logger, "post-commit change hook failed", hookErr,
 					"hook", hook.Name(),
 					"contractID", agg.ContractID(),
-					"error", hookErr,
 				)
 			}
 		}

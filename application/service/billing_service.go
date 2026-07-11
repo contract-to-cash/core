@@ -539,9 +539,13 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 		calcCtx.SetProductID(priceEntity.ProductID())
 	}
 
-	// BeforeCalculation (InvoiceLifecycleHooks)
+	// BeforeCalculation (InvoiceLifecycleHooks). Veto-capable: a returned error
+	// or a recovered panic aborts invoice generation (see plugin panic policy,
+	// docs/internals/plugin-system.md §5.4).
 	for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
-		if err := hook.BeforeCalculation(calcCtx); err != nil {
+		if err := plugin.SafeInvoke("InvoiceLifecycleHook.BeforeCalculation", hook.Name(), func() error {
+			return hook.BeforeCalculation(calcCtx)
+		}); err != nil {
 			return nil, fmt.Errorf("BeforeCalculation hook error: %w", err)
 		}
 	}
@@ -551,7 +555,9 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 	// Execute all DiscountHooks
 	totalDiscount := shared.Zero(currency)
 	for _, hook := range s.registry.GetDiscountHooks() {
-		discount, err := hook.CalculateDiscount(calcCtx)
+		discount, err := plugin.SafeInvokeMoney("DiscountHook.CalculateDiscount", hook.Name(), func() (shared.Money, error) {
+			return hook.CalculateDiscount(calcCtx)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("DiscountHook error: %w", err)
 		}
@@ -592,7 +598,9 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 	// Execute all TaxHooks
 	totalTax := shared.Zero(currency)
 	for _, hook := range s.registry.GetTaxHooks() {
-		tax, err := hook.CalculateTax(calcCtx)
+		tax, err := plugin.SafeInvokeMoney("TaxHook.CalculateTax", hook.Name(), func() (shared.Money, error) {
+			return hook.CalculateTax(calcCtx)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("TaxHook error: %w", err)
 		}
@@ -712,9 +720,16 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 		}
 		calcCtx.SetInvoice(inv)
 
-		// AfterCalculation (InvoiceLifecycleHooks)
+		// AfterCalculation (InvoiceLifecycleHooks). Fires INSIDE the transaction,
+		// before Save. It aborts the tx on a returned error, so a recovered panic
+		// is converted to an error and returned here too: the panic must not
+		// unwind through tx.Run (which would leave the backend's rollback
+		// behaviour undefined) — instead the tx aborts cleanly and nothing is
+		// persisted (plugin panic policy, docs/internals/plugin-system.md §5.4).
 		for _, hook := range s.registry.GetInvoiceLifecycleHooks() {
-			if hookErr := hook.AfterCalculation(calcCtx, inv); hookErr != nil {
+			if hookErr := plugin.SafeInvoke("InvoiceLifecycleHook.AfterCalculation", hook.Name(), func() error {
+				return hook.AfterCalculation(calcCtx, inv)
+			}); hookErr != nil {
 				return fmt.Errorf("AfterCalculation hook error: %w", hookErr)
 			}
 		}
@@ -810,11 +825,12 @@ func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.I
 	// Post-commit metrics hooks — non-fatal.
 	pluginCtx := plugin.NewContext(ctx)
 	for _, hook := range s.registry.GetOnInvoiceIssuedHooks() {
-		if hookErr := hook.OnInvoiceIssued(pluginCtx, inv); hookErr != nil {
-			s.logger.Warn("OnInvoiceIssued hook failed",
+		if hookErr := plugin.SafeInvoke("OnInvoiceIssuedHook.OnInvoiceIssued", hook.Name(), func() error {
+			return hook.OnInvoiceIssued(pluginCtx, inv)
+		}); hookErr != nil {
+			plugin.LogNonFatalHookError(s.logger, "OnInvoiceIssued hook failed", hookErr,
 				"hook", hook.Name(),
 				"invoiceID", invoiceID,
-				"error", hookErr,
 			)
 		}
 	}

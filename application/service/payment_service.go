@@ -471,7 +471,12 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// pre-charge idempotency short-circuit so plugins never see
 	// phantom charge attempts for retries that will not touch the gateway.
 	for _, hook := range s.registry.GetBeforeChargeHooks() {
-		err = hook.BeforeCharge(payCtx, amount)
+		// Veto-capable: a returned error OR a recovered panic aborts the charge
+		// before the gateway is touched (plugin panic policy,
+		// docs/internals/plugin-system.md §5.4).
+		err = plugin.SafeInvoke("BeforeChargeHook.BeforeCharge", hook.Name(), func() error {
+			return hook.BeforeCharge(payCtx, amount)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("BeforeCharge hook error: %w", err)
 		}
@@ -525,12 +530,15 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		}
 		// Execute OnPaymentFailed hooks with PaymentContext
 		failCtx := plugin.NewPaymentContext(ctx, failedPayment, inv)
+		gatewayErr := err
 		for _, hook := range s.registry.GetOnPaymentFailedHooks() {
-			if hookErr := hook.OnPaymentFailed(failCtx, err); hookErr != nil {
-				s.logger.Warn("OnPaymentFailed hook failed",
+			if hookErr := plugin.SafeInvoke("OnPaymentFailedHook.OnPaymentFailed", hook.Name(), func() error {
+				return hook.OnPaymentFailed(failCtx, gatewayErr)
+			}); hookErr != nil {
+				plugin.LogNonFatalHookError(s.logger, "OnPaymentFailed hook failed", hookErr,
+					"hook", hook.Name(),
 					"paymentID", failedPayment.ID(),
 					"invoiceID", invoiceID,
-					"error", hookErr,
 				)
 			}
 		}
@@ -977,11 +985,17 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// still fire. Hook implementations should be idempotent.
 	successCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetAfterChargeHooks() {
-		if hookErr := hook.AfterCharge(successCtx); hookErr != nil {
-			s.logger.Warn("AfterCharge hook failed",
+		// Non-fatal: the gateway charge already succeeded, so a recovered panic
+		// must NOT unwind through the local persistence path (that is exactly the
+		// charged-but-unrecorded-payment failure from issue #193). Log with the
+		// stack and continue (plugin panic policy §5.4).
+		if hookErr := plugin.SafeInvoke("AfterChargeHook.AfterCharge", hook.Name(), func() error {
+			return hook.AfterCharge(successCtx)
+		}); hookErr != nil {
+			plugin.LogNonFatalHookError(s.logger, "AfterCharge hook failed", hookErr,
+				"hook", hook.Name(),
 				"paymentID", p.ID(),
 				"invoiceID", invoiceID,
-				"error", hookErr,
 			)
 		}
 	}
@@ -997,11 +1011,13 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// deduplicate by payment ID.
 	metricsCtx := plugin.NewContext(ctx)
 	for _, hook := range s.registry.GetOnPaymentProcessedHooks() {
-		if hookErr := hook.OnPaymentProcessed(metricsCtx, p); hookErr != nil {
-			s.logger.Warn("OnPaymentProcessed hook failed",
+		if hookErr := plugin.SafeInvoke("OnPaymentProcessedHook.OnPaymentProcessed", hook.Name(), func() error {
+			return hook.OnPaymentProcessed(metricsCtx, p)
+		}); hookErr != nil {
+			plugin.LogNonFatalHookError(s.logger, "OnPaymentProcessed hook failed", hookErr,
+				"hook", hook.Name(),
 				"paymentID", p.ID(),
 				"invoiceID", invoiceID,
-				"error", hookErr,
 			)
 		}
 	}
@@ -1192,10 +1208,12 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 
 	refundCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetOnRefundHooks() {
-		if hookErr := hook.OnRefund(refundCtx, refundAmount); hookErr != nil {
-			s.logger.Warn("OnRefund hook failed",
+		if hookErr := plugin.SafeInvoke("OnRefundHook.OnRefund", hook.Name(), func() error {
+			return hook.OnRefund(refundCtx, refundAmount)
+		}); hookErr != nil {
+			plugin.LogNonFatalHookError(s.logger, "OnRefund hook failed", hookErr,
+				"hook", hook.Name(),
 				"paymentID", paymentID,
-				"error", hookErr,
 			)
 		}
 	}
