@@ -258,18 +258,50 @@ func (r *inMemoryCouponRepo) FindApplicable(_ context.Context, _ coupon.CouponQu
 
 func (r *inMemoryCouponRepo) Save(_ context.Context, _ *coupon.Coupon) error { return nil }
 
-// SaveRedemption idempotently confirms a redemption keyed by
+// SaveRedemption atomically confirms a redemption keyed by
 // (coupon, contract, billing period). A second confirmation of the same key is a
 // no-op, so billing retries / regenerations consume exactly one use (issue #185).
-func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, redemption *coupon.Redemption) error {
+// Usage limits are enforced as part of the same operation (issue #195): if
+// inserting would exceed the coupon's global or per-account limit,
+// coupon.ErrUsageLimitReached is returned and nothing is inserted. A real DB does
+// this with a UNIQUE index on the idempotency key plus a serialized conditional
+// insert; this single-threaded demo just checks the map.
+func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, redemption *coupon.Redemption, limits coupon.RedemptionLimits) error {
 	key := redemption.IdempotencyKey()
 	if _, exists := r.redemptions[key]; exists {
 		fmt.Println("  >> [Coupon] Redemption already confirmed for this period (idempotent no-op)")
 		return nil
 	}
+	if limits.GlobalLimit != nil {
+		if limits.GlobalBaseline+r.countRedemptions(redemption.CouponID(), nil) >= *limits.GlobalLimit {
+			return coupon.ErrUsageLimitReached
+		}
+	}
+	if limits.PerAccountLimit != nil {
+		acct := redemption.AccountID()
+		if r.countRedemptions(redemption.CouponID(), &acct) >= *limits.PerAccountLimit {
+			return coupon.ErrUsageLimitReached
+		}
+	}
 	r.redemptions[key] = redemption
 	fmt.Println("  >> [Coupon] Redemption confirmed for coupon SAVE10")
 	return nil
+}
+
+// countRedemptions counts distinct redemptions of a coupon (optionally filtered
+// to an account).
+func (r *inMemoryCouponRepo) countRedemptions(couponID coupon.CouponID, accountID *shared.AccountID) int {
+	n := 0
+	for _, rd := range r.redemptions {
+		if rd.CouponID() != couponID {
+			continue
+		}
+		if accountID != nil && rd.AccountID() != *accountID {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 func (r *inMemoryCouponRepo) FindRedemptions(_ context.Context, couponID coupon.CouponID, accountID *shared.AccountID) ([]*coupon.Redemption, error) {

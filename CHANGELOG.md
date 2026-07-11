@@ -60,6 +60,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     snapshot gains `billing_anchor_day` (`schema_version` 3); legacy snapshots
     fall back to the current period's start day. Already-drifted historical
     contracts self-heal back to their anchor on the next renewal.
+- **Coupon usage limits are now enforced atomically at redemption confirmation
+  (#195)** — after #185 moved redemption confirmation into `AfterCalculation`,
+  the usage-limit check was still check-then-act: two concurrent `GenerateInvoice`
+  runs for DIFFERENT contracts could both read "under limit" in
+  `CalculateDiscount`, both apply the discount, and both insert distinct
+  redemption keys — over-redeeming a `usageLimit`-capped promo (101 redemptions of
+  a 100-use coupon), with the same TOCTOU for `perAccountUsageLimit` across two
+  contracts/periods of one account.
+  - `CalculateDiscount`'s usage-limit checks are now explicitly **advisory** (a
+    best-effort read). The authoritative gate is `SaveRedemption`, which enforces
+    the limits **atomically together with the insert**: (a) an existing
+    same-idempotency-key row is an idempotent success; (b) otherwise, if inserting
+    would exceed a limit, it rejects with the new sentinel
+    `coupon.ErrUsageLimitReached` and inserts nothing; (c) otherwise it inserts.
+  - `CouponPlugin.AfterCalculation` passes the coupon's limits to
+    `SaveRedemption` and, on `ErrUsageLimitReached`, returns a descriptive error
+    (wrapping the sentinel) so the billing transaction rolls back — the invoice is
+    never persisted with a discount whose use could not be recorded. A retry
+    recalculates: `CalculateDiscount` now counts the winner's committed redemption
+    and skips the exhausted coupon, converging on a discount-free invoice.
+  - Race-tested (`-race`): N concurrent confirmations of DISTINCT keys against a
+    limit L < N let exactly L through; same-key concurrency still collapses to
+    one; a per-account-limit variant; plus an end-to-end concurrent
+    `GenerateInvoice` test (limit 1, two contracts → one discounted invoice, the
+    other fails-and-retries to a clean discount-free invoice).
+  - **BREAKING (pre-v1.0)**: `coupon.CouponRepository.SaveRedemption` gained a
+    `limits coupon.RedemptionLimits` parameter and MUST now enforce it atomically
+    with the insert (see the interface doc and `docs/internals/plugin-system.md`
+    §6.3). New exported symbols: `coupon.RedemptionLimits` and
+    `coupon.ErrUsageLimitReached`. Real databases implement the gate with a UNIQUE
+    index on the idempotency key plus a serialized conditional insert (advisory
+    lock / serializable tx / `ON CONFLICT DO NOTHING` + counted re-check).
+
 - **Coupon redemption is no longer persisted outside the billing transaction
   (#185)** — `coupon.CouponPlugin.CalculateDiscount` previously wrote a
   `Redemption` and incremented a usage counter as side effects of the discount

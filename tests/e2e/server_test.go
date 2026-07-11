@@ -1180,17 +1180,47 @@ func (r *inMemoryCouponRepo) Save(_ context.Context, c *couponplugin.Coupon) err
 	return nil
 }
 
-// SaveRedemption idempotently confirms a redemption keyed by
-// (coupon, contract, billing period) — a duplicate key is a no-op (issue #185).
-func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, redemption *couponplugin.Redemption) error {
+// SaveRedemption atomically confirms a redemption keyed by
+// (coupon, contract, billing period) — a duplicate key is a no-op (issue #185) —
+// and enforces usage limits under the same lock (issue #195).
+func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, redemption *couponplugin.Redemption, limits couponplugin.RedemptionLimits) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	key := redemption.IdempotencyKey()
 	if _, exists := r.redemptions[key]; exists {
-		return nil
+		return nil // (a) idempotent no-op
 	}
+	// (b) atomic limit check against existing distinct rows.
+	if limits.GlobalLimit != nil {
+		if limits.GlobalBaseline+r.countRedemptionsLocked(redemption.CouponID(), nil) >= *limits.GlobalLimit {
+			return couponplugin.ErrUsageLimitReached
+		}
+	}
+	if limits.PerAccountLimit != nil {
+		acct := redemption.AccountID()
+		if r.countRedemptionsLocked(redemption.CouponID(), &acct) >= *limits.PerAccountLimit {
+			return couponplugin.ErrUsageLimitReached
+		}
+	}
+	// (c) insert
 	r.redemptions[key] = redemption
 	return nil
+}
+
+// countRedemptionsLocked counts distinct redemptions of a coupon (optionally
+// filtered to an account). Callers must hold r.mu.
+func (r *inMemoryCouponRepo) countRedemptionsLocked(couponID couponplugin.CouponID, accountID *shared.AccountID) int {
+	n := 0
+	for _, rd := range r.redemptions {
+		if rd.CouponID() != couponID {
+			continue
+		}
+		if accountID != nil && rd.AccountID() != *accountID {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 func (r *inMemoryCouponRepo) FindRedemptions(_ context.Context, couponID couponplugin.CouponID, accountID *shared.AccountID) ([]*couponplugin.Redemption, error) {

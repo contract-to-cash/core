@@ -999,16 +999,39 @@ func (c *Coupon) CalculateDiscount(subtotal shared.Money) (shared.Money, error) 
     return discount, nil
 }
 
+// ErrUsageLimitReached は SaveRedemption が使用上限超過で引換を拒否したときに返す
+// センチネルエラー（#195）。プラグインの AfterCalculation はこれをラップした説明的
+// エラーを返してパイプラインをロールバックさせる（リトライは枯渇クーポンを外して再計算）。
+// 実装は errors.Is(err, ErrUsageLimitReached) が成立する形で返すこと。
+var ErrUsageLimitReached = errors.New("coupon: usage limit reached")
+
+// RedemptionLimits は SaveRedemption が挿入と同一原子操作で強制すべき使用上限。
+// プラグインが確定対象クーポンから設定する（nil = その次元は無制限）。
+type RedemptionLimits struct {
+    GlobalLimit     *int // Coupon.UsageLimit()。nil=無制限
+    GlobalBaseline  int  // Coupon.UsedCount()（引換台帳以前の移行ベースライン）
+    PerAccountLimit *int // Coupon.PerAccountUsageLimit()。nil=無制限
+}
+
 // CouponRepository クーポンリポジトリ（実際のシグネチャは型付き ID を使う）
 type CouponRepository interface {
     FindByCode(ctx context.Context, code string) (*Coupon, error)
     FindApplicable(ctx context.Context, query CouponQuery) ([]*Coupon, error)
     Save(ctx context.Context, coupon *Coupon) error
-    // SaveRedemption は (couponID, contractID, billingPeriod) で冪等（#185, §6.3）。
-    // 同一キーの2回目以降は no-op（重複行を作らず、使用回数も増やさない）。
-    SaveRedemption(ctx context.Context, redemption *Redemption) error
+    // SaveRedemption は「冪等 + 使用上限の原子的強制」を1操作で行う（#185, #195, §6.3）。
+    // 実装は同一クーポンへの並行 SaveRedemption に対して以下を1つの直列化された原子
+    // ステップとして行うこと:
+    //   (a) 冪等: 同一 IdempotencyKey (couponID, contractID, billingPeriod) の行が
+    //       既にあれば、挿入せず・新規使用として数えず nil を返す。
+    //   (b) 上限判定: それ以外で挿入が limits を超過するなら ErrUsageLimitReached を返し
+    //       挿入しない（GlobalBaseline + 既存行数 >= GlobalLimit、または
+    //       アカウント別既存行数 >= PerAccountLimit）。
+    //   (c) 挿入: それ以外は永続化する。
+    // (b) をここで原子的に行うことが #195（DISTINCT キー同士の TOCTOU）を塞ぐ。
+    SaveRedemption(ctx context.Context, redemption *Redemption, limits RedemptionLimits) error
     // FindRedemptions は使用回数の唯一の情報源。プラグインが redemption 行を数えて
-    // グローバル/アカウント別の使用上限を（進行中の (contract, period) を除外して）判定する。
+    // グローバル/アカウント別の使用上限を（進行中の (contract, period) を除外して）
+    // CalculateDiscount 内で**アドバイザリに**判定する（権威ある判定は SaveRedemption(b)）。
     FindRedemptions(ctx context.Context, couponID CouponID, accountID *shared.AccountID) ([]*Redemption, error)
 }
 ```
@@ -1016,7 +1039,7 @@ type CouponRepository interface {
 > **注**: `CalculateDiscount` は「小計を超えない」clamp を行わない — 割引合計が subtotal を
 > 超えないガードは **コアの請求パイプライン**が担う（§5.1 手順3の割引上限ガード）。
 
-### 6.3 クーポン引換のトランザクション整合性（#185）
+### 6.3 クーポン引換のトランザクション整合性（#185 / #195）
 
 **問題**: 引換（`Redemption`）の永続化と使用回数の加算を `CalculateDiscount`（＝**計算フック**、
 `tx.Run` の**前**に発火）の副作用として行うと、以下が壊れる。
@@ -1035,27 +1058,48 @@ type CouponRepository interface {
    保存前**に発火、§5.1 手順9）で引換を確定する。ここでは `invoice` から請求期間と請求書 ID を取得できる。
 3. 引換は **冪等**。キーは `(couponID, contractID, billingPeriod)`（`Redemption.IdempotencyKey()`）。
    `SaveRedemption` は同一キーの2回目以降を no-op にする。
-4. 使用回数は redemption 行から**再構成**する（別カウンタを持たない）。グローバル/アカウント別の
-   上限判定は、**進行中の (contract, period)** を除外して redemption を数える（リトライ安全）。
+4. 使用回数は redemption 行から**再構成**する（別カウンタを持たない）。`CalculateDiscount` 内の
+   グローバル/アカウント別の上限判定は、**進行中の (contract, period)** を除外して redemption を
+   数える（リトライ安全）が、これは**アドバイザリ（best-effort な読み取り）**である。
 5. `Coupon.usedCount` は**マイグレーションベースライン専用**。redemption 行が存在する以前の
    歴史的使用分（カウンタしか持たない旧システムからの移行等）だけを表し、
    **プラグインは決してインクリメントしない**。グローバル上限判定は
    `usedCount + count(redemption 行) >= usageLimit`。したがって1回の使用は
    「usedCount に反映済み」**または**「redemption 行がある」の**どちらか一方**で
-   なければならない（両方だと二重カウント）。
+   なければならない（両方だと二重カウント）。`RedemptionLimits.GlobalBaseline` に渡すのも
+   この `usedCount` である。
+6. **使用上限の権威ある強制は `SaveRedemption` が原子的に行う（#195）**。プラグインは確定対象
+   クーポンの上限を `RedemptionLimits`（`GlobalLimit` / `GlobalBaseline` / `PerAccountLimit`）に
+   詰めて `SaveRedemption` へ渡し、リポジトリが「冪等チェック → 上限カウント → 挿入」を1つの
+   直列化された原子操作として実行する。超過時は `ErrUsageLimitReached` を返す。
+
+**#195 が塞ぐ欠陥（#185 後の残存 TOCTOU）**: `CalculateDiscount` の上限判定は check-then-act の
+「読み取り」に過ぎない。異なる契約に対する2つの並行 `GenerateInvoice` が両方とも
+「99 < 100」を読んで両方 discount を適用し、両方の `AfterCalculation` が異なるキーを挿入すると、
+100 回上限のプロモが 101 回引換されうる（`perAccountUsageLimit` も、同一アカウントの別
+契約/期間で同型）。原子的な `SaveRedemption`(手順6) が敗者の確定を `ErrUsageLimitReached` で
+拒否することでこれを塞ぐ。
 
 **保証される不変条件**:
 
 - **(i)** パイプライン失敗は使用回数を恒久消費しない（ロールバック後の引換はリトライが同一キーで再利用）。
 - **(ii)** 同一期間のリトライ / `RegenerateInvoice` はちょうど1回だけ消費する。
-- **(iii)** 同一キーの並行確定は1件の引換に収束する（リポジトリの冪等契約。DISTINCT キー同士の
-  グローバル上限 TOCTOU の完全なハードニングは #195 で別途対応）。
+- **(iii)** 同一キーの並行確定は1件の引換に収束する（リポジトリの冪等契約）。
+- **(iv)** DISTINCT キー同士でも、グローバル/アカウント別の使用上限を**厳密に**超えない（#195）。
+  上限 L に対する N 並行確定はちょうど L 件だけ成功し、残りは `ErrUsageLimitReached` で拒否される。
+  敗者の `AfterCalculation` は説明的エラー（センチネルをラップ）を返し tx をロールバックさせる。
+  リトライ時の `CalculateDiscount` は勝者の確定済み行を数えるため枯渇クーポンをスキップし、
+  割引無しの請求書へ収束する（プラグインのリポジトリは請求 tx の一部ではないので勝者の行は残る）。
 
 > **リポジトリ実装の指針**: `SaveRedemption` は
-> `(coupon_id, contract_id, period_start, period_end)` の UNIQUE 制約 + upsert /
-> insert-or-ignore で冪等性と並行安全性を担保する。`AfterCalculation` からの引換確定エラーは
-> 致命（tx をロールバック）— 「請求書は保存されたのにクーポン使用が記録されない」状態を防ぐ。
-> 抽象的な発火順序・可観測性は §5.1 を参照。実装リファレンスは `plugins/coupon/plugin.go`。
+> `(coupon_id, contract_id, period_start, period_end)` の UNIQUE 制約で冪等性を、
+> **クーポン ID をキーにした直列化（advisory lock / SERIALIZABLE tx /
+> `INSERT ... ON CONFLICT DO NOTHING` + 同一ロック下でのカウント再チェック）** で上限強制の
+> 原子性を担保する。インメモリ実装は (a)〜(c) 全体を1つの mutex で囲む。`AfterCalculation` からの
+> 引換確定エラーは致命（tx をロールバック）— 「請求書は保存されたのにクーポン使用が記録されない」
+> 状態、および上限超過での過剰引換を防ぐ。抽象的な発火順序・可観測性は §5.1 を参照。
+> 実装リファレンスは `plugins/coupon/plugin.go`（`AfterCalculation` が `RedemptionLimits` を
+> 渡し、`ErrUsageLimitReached` をラップして返す）。
 
 > **⚠️ アップグレード注意（#185 以前のデータ）**: 旧実装は1回の使用につき redemption 行の保存
 > （`SaveRedemption`）**と** `usedCount` の加算（`RecordUsage`）の**両方**を行っていた。

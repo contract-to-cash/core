@@ -2,6 +2,7 @@ package coupon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/contract-to-cash/core/domain/invoice"
@@ -315,7 +316,7 @@ func (p *CouponPlugin) countRedemptions(
 func (p *CouponPlugin) BeforeCalculation(_ *plugin.CalculationContext) error { return nil }
 
 // AfterCalculation idempotently confirms a redemption for every coupon this
-// plugin applied during CalculateDiscount.
+// plugin applied during CalculateDiscount, enforcing usage limits atomically.
 //
 // This runs inside the billing transaction, AFTER the invoice has been created
 // (so the billing period and invoice ID the redemption is keyed by are known)
@@ -329,8 +330,21 @@ func (p *CouponPlugin) BeforeCalculation(_ *plugin.CalculationContext) error { r
 //   - Concurrent confirmations of the same key collapse to one redemption
 //     (repository idempotency contract).
 //
-// A confirmation error is returned (fatal) so the invoice rolls back rather than
-// being persisted without its coupon use recorded.
+// Usage-limit atomicity (issue #195): the limits are passed to SaveRedemption,
+// which enforces them as part of the same atomic insert. CalculateDiscount's
+// usage-limit checks are only an advisory read that two concurrent billing runs
+// for DIFFERENT contracts can both pass; SaveRedemption is the authoritative gate
+// that rejects the losing confirmation with ErrUsageLimitReached. When that
+// happens this method returns a descriptive error wrapping the sentinel, which
+// rolls back the billing transaction so the invoice is NOT persisted with a
+// discount whose use could not be recorded. A retry then recalculates: because
+// CalculateDiscount recounts redemptions and now sees the winner's committed row
+// (the plugin's repository is not part of the billing transaction, so the
+// winner's redemption survives), it skips the exhausted coupon and the retry
+// converges on an invoice without the discount.
+//
+// Any confirmation error is fatal (returned) so the invoice rolls back rather
+// than being persisted without its coupon use recorded.
 func (p *CouponPlugin) AfterCalculation(ctx *plugin.CalculationContext, inv *invoice.Invoice) error {
 	if inv == nil {
 		return nil
@@ -360,7 +374,19 @@ func (p *CouponPlugin) AfterCalculation(ctx *plugin.CalculationContext, inv *inv
 			inv.ID(),
 			p.clock.Now(),
 		)
-		if err := p.repo.SaveRedemption(ctx.Context(), redemption); err != nil {
+		limits := RedemptionLimits{
+			GlobalLimit:     c.UsageLimit(),
+			GlobalBaseline:  c.UsedCount(),
+			PerAccountLimit: c.PerAccountUsageLimit(),
+		}
+		if err := p.repo.SaveRedemption(ctx.Context(), redemption, limits); err != nil {
+			if errors.Is(err, ErrUsageLimitReached) {
+				// Lost the atomic race for the last use(s) of this coupon (or the
+				// limit was reached between calculation and confirmation). Abort
+				// the pipeline so the invoice is not persisted with an unrecordable
+				// discount; a retry recalculates without this coupon (#195).
+				return fmt.Errorf("coupon: usage limit reached confirming %q; invoice not persisted with unrecordable discount: %w", d.Code, err)
+			}
 			return fmt.Errorf("coupon: confirm redemption for %q: %w", d.Code, err)
 		}
 	}
