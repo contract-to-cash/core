@@ -131,8 +131,12 @@ func TestLoadFromHistory_V2CreatedWithoutKey(t *testing.T) {
 
 func TestContractCreatedIdempotencyKeyUpcaster_ChainToV3(t *testing.T) {
 	u := &ContractCreatedIdempotencyKeyUpcaster{}
-	if !u.CanUpcast(EventTypeContractCreated, 1) {
-		t.Error("expected CanUpcast=true for ContractCreated v1")
+	// Exact-version guard (issue #197): this upcaster only handles 2→3. The
+	// v1→v2 billing_cycle→interval migration is ContractCreatedEventUpcaster's
+	// job; a v1 payload reaches v3 through the fixpoint chain, not by this
+	// upcaster jumping v1→v3 (which would skip the interval migration).
+	if u.CanUpcast(EventTypeContractCreated, 1) {
+		t.Error("expected CanUpcast=false for ContractCreated v1 (exact-version guard)")
 	}
 	if !u.CanUpcast(EventTypeContractCreated, 2) {
 		t.Error("expected CanUpcast=true for ContractCreated v2")

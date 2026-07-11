@@ -484,6 +484,84 @@ func TestApplyCreditNote_Success(t *testing.T) {
 	}
 }
 
+// TestApplyCreditNote_PostsToLedgerWhenBalanceRepoWired verifies that
+// ApplyCreditNote posts the applied amount to the account's credit ledger when a
+// balance repository is wired (issue #197), so "apply to account" is a real
+// credit rather than a status-only change.
+func TestApplyCreditNote_PostsToLedgerWhenBalanceRepoWired(t *testing.T) {
+	clock := newTestClock()
+	accountID := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	paidInv := newPaidInvoice(accountID, contractID)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{paidInv.ID(): paidInv}}
+	cnRepo := &mockCreditNoteRepo{}
+	balRepo := inmemory.NewInMemoryBalanceRepository(clock)
+
+	svc := NewCreditNoteService(invRepo, cnRepo, plugin.NewRegistry(), clock,
+		WithCreditNoteBalanceRepo(balRepo))
+
+	items := []invoice.CreditNoteItem{
+		invoice.NewCreditNoteItem("li-1", "Credit", jpy(3000), big.NewRat(10, 100), jpy(300)),
+	}
+	cn, err := svc.CreateCreditNote(context.Background(), paidInv.ID(), invoice.CreditNoteReasonOrderChange, items, "")
+	if err != nil {
+		t.Fatalf("CreateCreditNote: %v", err)
+	}
+	if _, err := svc.IssueCreditNote(context.Background(), cn.ID()); err != nil {
+		t.Fatalf("IssueCreditNote: %v", err)
+	}
+
+	// Balance is zero before applying.
+	before, err := balRepo.GetBalance(context.Background(), accountID, shared.CurrencyJPY)
+	if err != nil {
+		t.Fatalf("GetBalance before: %v", err)
+	}
+	if !before.IsZero() {
+		t.Fatalf("expected zero balance before apply, got %s", before.Amount().RatString())
+	}
+
+	if _, err := svc.ApplyCreditNote(context.Background(), cn.ID(), jpy(3300)); err != nil {
+		t.Fatalf("ApplyCreditNote: %v", err)
+	}
+
+	// The applied amount must now be spendable account credit.
+	after, err := balRepo.GetBalance(context.Background(), accountID, shared.CurrencyJPY)
+	if err != nil {
+		t.Fatalf("GetBalance after: %v", err)
+	}
+	if after.Amount().Cmp(big.NewRat(3300, 1)) != 0 {
+		t.Errorf("expected 3300 credited to ledger, got %s", after.Amount().RatString())
+	}
+}
+
+// TestApplyCreditNote_NoLedgerPostWithoutBalanceRepo verifies the backward-
+// compatible path: with no balance repo wired, ApplyCreditNote is a status-only
+// transition and does not require or touch a ledger (issue #197).
+func TestApplyCreditNote_NoLedgerPostWithoutBalanceRepo(t *testing.T) {
+	accountID := shared.NewAccountID()
+	contractID := shared.NewContractID()
+	paidInv := newPaidInvoice(accountID, contractID)
+
+	invRepo := &mockInvoiceRepoWithFind{invoices: map[shared.InvoiceID]*invoice.Invoice{paidInv.ID(): paidInv}}
+	cnRepo := &mockCreditNoteRepo{}
+	svc := newCreditNoteService(invRepo, cnRepo, nil, nil) // no balance repo
+
+	items := []invoice.CreditNoteItem{
+		invoice.NewCreditNoteItem("li-1", "Credit", jpy(3000), big.NewRat(10, 100), jpy(300)),
+	}
+	cn, _ := svc.CreateCreditNote(context.Background(), paidInv.ID(), invoice.CreditNoteReasonOrderChange, items, "")
+	_, _ = svc.IssueCreditNote(context.Background(), cn.ID())
+
+	applied, err := svc.ApplyCreditNote(context.Background(), cn.ID(), jpy(3300))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if applied.Status() != invoice.CreditNoteStatusApplied {
+		t.Errorf("expected applied, got %s", applied.Status())
+	}
+}
+
 // --- RefundCreditNote tests ---
 
 func TestRefundCreditNote_Success(t *testing.T) {

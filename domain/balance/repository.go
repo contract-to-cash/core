@@ -46,5 +46,12 @@ type Repository interface {
 	// This is the scan feeding batch.BalanceExpirationProcessor (issue #159),
 	// the counterpart of contract.Repository.FindDueForRenewal for the credit
 	// ledger.
-	FindExpired(ctx context.Context, asOf time.Time) ([]*BalanceEntry, error)
+	//
+	// limit bounds the number of entries returned (issue #197): a positive limit
+	// returns at most that many (oldest-created first, so repeated batch runs
+	// drain the expired backlog deterministically); 0 (or negative) means "no
+	// limit" and preserves the original unbounded behaviour. The expiration batch
+	// threads BatchOptions.Limit here so a run does not load every expired row at
+	// once.
+	FindExpired(ctx context.Context, asOf time.Time, limit int) ([]*BalanceEntry, error)
 }

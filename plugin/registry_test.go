@@ -224,6 +224,109 @@ func TestShutdownAll(t *testing.T) {
 	}
 }
 
+// failingPlugin lets a test force Initialize/Shutdown to fail and records how
+// many times each was invoked (for rollback assertions, issue #197).
+type failingPlugin struct {
+	basePlugin
+	failInitialize bool
+	failShutdown   bool
+	initCount      int
+	shutdownCount  int
+}
+
+func (f *failingPlugin) Initialize(ctx context.Context, config Config) error {
+	f.initCount++
+	if f.failInitialize {
+		return errBoom
+	}
+	f.initialized = true
+	return nil
+}
+
+func (f *failingPlugin) Shutdown(ctx context.Context) error {
+	f.shutdownCount++
+	if f.failShutdown {
+		return errBoom
+	}
+	f.shutDown = true
+	return nil
+}
+
+var errBoom = errorString("boom")
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }
+
+// TestInitializeAll_PartialFailure_RollsBackInitializedPrefix verifies that when
+// a later plugin's Initialize fails, the earlier-initialized plugins are shut
+// down (rollback) so no half-initialized plugins leak (issue #197).
+func TestInitializeAll_PartialFailure_RollsBackInitializedPrefix(t *testing.T) {
+	r := NewRegistry()
+	// good has the lower priority so it initializes first; bad fails second.
+	good := &failingPlugin{basePlugin: basePlugin{name: "good", version: "1.0.0", priority: PriorityHigh}}
+	bad := &failingPlugin{basePlugin: basePlugin{name: "bad", version: "1.0.0", priority: PriorityLow}, failInitialize: true}
+
+	if err := r.Register(good); err != nil {
+		t.Fatalf("register good: %v", err)
+	}
+	if err := r.Register(bad); err != nil {
+		t.Fatalf("register bad: %v", err)
+	}
+
+	err := r.InitializeAll(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected InitializeAll to fail")
+	}
+
+	if good.initCount != 1 {
+		t.Errorf("good.initCount = %d, want 1", good.initCount)
+	}
+	// The already-initialized "good" plugin must have been rolled back.
+	if good.shutdownCount != 1 {
+		t.Errorf("good.shutdownCount = %d, want 1 (rollback)", good.shutdownCount)
+	}
+	if !good.shutDown {
+		t.Error("expected good plugin to be shut down during rollback")
+	}
+	// The failed plugin's Initialize failed, so it must NOT be shut down (it was
+	// never added to the initialized set).
+	if bad.shutdownCount != 0 {
+		t.Errorf("bad.shutdownCount = %d, want 0 (never initialized)", bad.shutdownCount)
+	}
+}
+
+// TestShutdownAll_ContinuesOnError verifies that ShutdownAll attempts every
+// plugin even when one fails, and returns the collected error (issue #197).
+func TestShutdownAll_ContinuesOnError(t *testing.T) {
+	r := NewRegistry()
+	first := &failingPlugin{basePlugin: basePlugin{name: "first", version: "1.0.0", priority: PriorityHigh}}
+	failer := &failingPlugin{basePlugin: basePlugin{name: "failer", version: "1.0.0", priority: PriorityNormal}, failShutdown: true}
+	last := &failingPlugin{basePlugin: basePlugin{name: "last", version: "1.0.0", priority: PriorityLow}}
+
+	for _, p := range []Plugin{first, failer, last} {
+		if err := r.Register(p); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+
+	err := r.ShutdownAll(context.Background())
+	if err == nil {
+		t.Fatal("expected ShutdownAll to return the failing plugin's error")
+	}
+
+	// Every plugin must have been attempted despite the middle one failing.
+	if !first.shutDown {
+		t.Error("expected first plugin to be shut down")
+	}
+	if !last.shutDown {
+		t.Error("expected last plugin to be shut down despite an earlier failure")
+	}
+	if failer.shutdownCount != 1 {
+		t.Errorf("failer.shutdownCount = %d, want 1", failer.shutdownCount)
+	}
+}
+
 // Ensure unused imports are referenced in tests.
 var _ = (*contract.ContractAggregate)(nil)
 var _ = (*invoice.Invoice)(nil)

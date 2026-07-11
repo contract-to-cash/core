@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -143,6 +144,16 @@ func (r *Registry) Register(p Plugin) error {
 
 // InitializeAll initializes all registered plugins with their respective configs.
 // Plugins are initialized in priority order (lowest value first).
+//
+// Partial-failure cleanup (issue #197): initialization is all-or-nothing. If any
+// plugin's Initialize fails, the plugins already initialized in this call are
+// rolled back by calling Shutdown on them in REVERSE order before the error is
+// returned. Without this, a failed InitializeAll would leak half-initialized
+// plugins holding open resources (connections, goroutines, file handles) that
+// the caller has no handle to release — the caller only saw an error, not the
+// set of plugins that succeeded first. Shutdown errors during rollback are
+// joined onto the returned error so they are observable but do not mask the
+// original initialization failure.
 func (r *Registry) InitializeAll(ctx context.Context, configs map[string]Config) error {
 	r.mu.RLock()
 	plugins := make([]Plugin, 0, len(r.plugins))
@@ -153,6 +164,7 @@ func (r *Registry) InitializeAll(ctx context.Context, configs map[string]Config)
 
 	sortByPriority(plugins)
 
+	initialized := make([]Plugin, 0, len(plugins))
 	for _, p := range plugins {
 		cfg := configs[p.Name()]
 		if cfg == nil {
@@ -164,13 +176,26 @@ func (r *Registry) InitializeAll(ctx context.Context, configs map[string]Config)
 		if err := SafeInvoke("Plugin.Initialize", p.Name(), func() error {
 			return p.Initialize(ctx, cfg)
 		}); err != nil {
-			return fmt.Errorf("failed to initialize plugin %q: %w", p.Name(), err)
+			initErr := fmt.Errorf("failed to initialize plugin %q: %w", p.Name(), err)
+			// Roll back the already-initialized prefix in reverse order so a
+			// failed startup does not leak initialized plugins (issue #197).
+			if rbErr := shutdownInReverse(ctx, initialized); rbErr != nil {
+				return errors.Join(initErr, fmt.Errorf("rollback shutdown after init failure: %w", rbErr))
+			}
+			return initErr
 		}
+		initialized = append(initialized, p)
 	}
 	return nil
 }
 
 // ShutdownAll shuts down all registered plugins in reverse priority order.
+//
+// Unlike InitializeAll, ShutdownAll does NOT abort on the first error (issue
+// #197): every plugin's Shutdown is attempted so one failing plugin cannot
+// leave later ones un-shut-down (leaking their resources). All errors are
+// collected and returned joined via errors.Join, matching the canonical
+// contract in docs/internals/plugin-system.md §4.1.
 func (r *Registry) ShutdownAll(ctx context.Context) error {
 	r.mu.RLock()
 	plugins := make([]Plugin, 0, len(r.plugins))
@@ -181,17 +206,25 @@ func (r *Registry) ShutdownAll(ctx context.Context) error {
 
 	sortByPriority(plugins)
 
-	// Shutdown in reverse order. A panicking Shutdown is converted to an error
-	// rather than being allowed to unwind the caller (issue #193).
+	return shutdownInReverse(ctx, plugins)
+}
+
+// shutdownInReverse shuts down the given plugins in reverse of their slice
+// order (so a priority-ascending slice is shut down highest-priority-value
+// first). It attempts EVERY plugin, collecting errors instead of aborting on
+// the first, and returns them joined. A panicking Shutdown is converted to an
+// error rather than being allowed to unwind the caller (issue #193).
+func shutdownInReverse(ctx context.Context, plugins []Plugin) error {
+	var errs []error
 	for i := len(plugins) - 1; i >= 0; i-- {
 		p := plugins[i]
 		if err := SafeInvoke("Plugin.Shutdown", p.Name(), func() error {
 			return p.Shutdown(ctx)
 		}); err != nil {
-			return fmt.Errorf("failed to shutdown plugin %q: %w", p.Name(), err)
+			errs = append(errs, fmt.Errorf("failed to shutdown plugin %q: %w", p.Name(), err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // --- Hook getters (return priority-sorted copies) ---

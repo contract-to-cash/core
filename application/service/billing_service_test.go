@@ -38,13 +38,13 @@ func (m *mockContractRepo) FindByAccountID(_ context.Context, _ shared.AccountID
 func (m *mockContractRepo) FindExpiring(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
-func (m *mockContractRepo) FindTrialsEndingBefore(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+func (m *mockContractRepo) FindTrialsEndingBefore(_ context.Context, _ time.Time, _ int) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
 func (m *mockContractRepo) FindByIDAsOf(_ context.Context, _ shared.ContractID, _ time.Time) (*contract.ContractAggregate, error) {
 	return nil, nil
 }
-func (m *mockContractRepo) FindDueForRenewal(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+func (m *mockContractRepo) FindDueForRenewal(_ context.Context, _ time.Time, _ int) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
 
@@ -122,7 +122,7 @@ func (m *mockBalanceRepo) SaveRefund(_ context.Context, _ *balance.BalanceRefund
 func (m *mockBalanceRepo) FindRefundsByInvoice(_ context.Context, _ shared.InvoiceID) ([]*balance.BalanceRefund, error) {
 	return nil, nil
 }
-func (m *mockBalanceRepo) FindExpired(_ context.Context, _ time.Time) ([]*balance.BalanceEntry, error) {
+func (m *mockBalanceRepo) FindExpired(_ context.Context, _ time.Time, _ int) ([]*balance.BalanceEntry, error) {
 	return nil, nil
 }
 func (m *mockBalanceRepo) FindByAccountID(_ context.Context, _ shared.AccountID, _ shared.Currency) ([]*balance.BalanceEntry, error) {
@@ -848,6 +848,71 @@ func TestCalculateSubtotal_UsageBased_ViaProductAndPrice(t *testing.T) {
 	}
 }
 
+// TestCalculateUsageCharge_LineItemInternallyConsistent verifies that a usage
+// line item satisfies quantity × unitPrice == amount (issue #197). Previously
+// unitPrice was set to the whole metric charge, so the identity was violated
+// for any quantity != 1.
+func TestCalculateUsageCharge_LineItemInternallyConsistent(t *testing.T) {
+	clock := newTestClock()
+
+	prod := product.NewProduct("API Access", "API usage product", clock.Now())
+	prod.AddUsageMetric(product.UsageMetric{Name: "api_calls", IncludedQuantity: 50})
+
+	// 10 JPY per unit; 150 total usage, 50 included → 100 billable → 1000 charge.
+	usagePricing := pricing.UsagePrice{UnitPrice: jpy(10)}
+	priceEntity := newTestPrice(prod.ID(), jpy(1000), usagePricing)
+	agg := newTestContractAggregateWithPriceID(clock, contract.ContractTypeUsageBased, jpy(1000), priceEntity.ID())
+
+	usageRepo := &mockUsageRepoWithMetrics{
+		summaries: map[shared.MetricName]*usage.UsageSummary{
+			"api_calls": {TotalUsage: 150},
+		},
+	}
+
+	svc := NewBillingService(
+		&mockContractRepo{agg: agg},
+		&mockInvoiceRepo{},
+		usageRepo,
+		balance.BalanceConfig{},
+		&mockPriceRepo{price: priceEntity},
+		&mockProductRepo{product: prod},
+		plugin.NewRegistry(),
+		BillingConfig{DaysUntilDue: 30},
+		clock,
+	)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), currentPeriodOf(agg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var usageLI *invoice.LineItem
+	for i := range inv.LineItems() {
+		li := inv.LineItems()[i]
+		// The usage line item is the one with quantity > 1.
+		if li.Quantity() == 100 {
+			usageLI = &li
+		}
+		// Every line item must satisfy quantity × unitPrice == amount.
+		q := new(big.Rat).SetInt64(li.Quantity())
+		got := li.UnitPrice().Amount().Cmp(new(big.Rat).Quo(li.Amount().Amount(), q))
+		if li.Quantity() > 0 && got != 0 {
+			t.Errorf("line item %q: quantity(%d) × unitPrice(%s) != amount(%s)",
+				li.Description(), li.Quantity(), li.UnitPrice().Amount().RatString(), li.Amount().Amount().RatString())
+		}
+	}
+	if usageLI == nil {
+		t.Fatal("expected a usage line item with quantity 100")
+	}
+	// unitPrice = 1000 / 100 = 10; amount = 1000.
+	if usageLI.UnitPrice().Amount().Cmp(new(big.Rat).SetInt64(10)) != 0 {
+		t.Errorf("expected usage unitPrice 10, got %s", usageLI.UnitPrice().Amount().RatString())
+	}
+	if usageLI.Amount().Amount().Cmp(new(big.Rat).SetInt64(1000)) != 0 {
+		t.Errorf("expected usage amount 1000, got %s", usageLI.Amount().Amount().RatString())
+	}
+}
+
 func TestCalculateSubtotal_UsageBased_IncludedQuantityCoversAll(t *testing.T) {
 	clock := newTestClock()
 
@@ -1476,6 +1541,61 @@ func TestRegenerateInvoice_Active_VoidedExists_Success(t *testing.T) {
 	}
 	if inv.Status() != invoice.InvoiceStatusDraft {
 		t.Errorf("expected draft status, got %s", inv.Status())
+	}
+}
+
+// TestRegenerateInvoice_LinksToGreatestVoidedID_Deterministic verifies that when
+// a period holds more than one voided invoice, the revision chain deterministically
+// links to the voided invoice with the greatest ID regardless of the order
+// FindByContractAndPeriod returns them (issue #197). The old "last one seen" logic
+// linked to a map-ordered, nondeterministic invoice.
+func TestRegenerateInvoice_LinksToGreatestVoidedID_Deterministic(t *testing.T) {
+	clock := newTestClock()
+
+	newVoided := func(id shared.InvoiceID, period shared.DateRange, agg *contract.ContractAggregate) *invoice.Invoice {
+		inv, err := invoice.NewInvoice(
+			id, agg.AccountID(), agg.ContractID(),
+			jpy(1000), jpy(0), jpy(0),
+			invoice.WithStatus(invoice.InvoiceStatusVoided),
+			invoice.WithBillingPeriod(period),
+		)
+		if err != nil {
+			t.Fatalf("unexpected error creating invoice: %v", err)
+		}
+		return inv
+	}
+
+	// Two voided invoices with controlled, comparable IDs. "inv-bbb" > "inv-aaa".
+	const smallerID = shared.InvoiceID("inv-aaa")
+	const greaterID = shared.InvoiceID("inv-bbb")
+
+	// Try both slice orderings; both must link to the greater ID.
+	for _, order := range []string{"greater-first", "greater-last"} {
+		t.Run(order, func(t *testing.T) {
+			agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+			period := currentPeriodOf(agg)
+
+			small := newVoided(smallerID, period, agg)
+			large := newVoided(greaterID, period, agg)
+
+			existing := []*invoice.Invoice{small, large}
+			if order == "greater-first" {
+				existing = []*invoice.Invoice{large, small}
+			}
+			invRepo := &mockInvoiceRepo{existingByPeriod: existing}
+			svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+			inv, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+			if err != nil {
+				t.Fatalf("regenerate failed: %v", err)
+			}
+			if inv.RevisionOf() == nil {
+				t.Fatal("expected RevisionOf to be set")
+			}
+			if *inv.RevisionOf() != greaterID {
+				t.Errorf("RevisionOf = %q, want %q (greatest voided ID, deterministic)", *inv.RevisionOf(), greaterID)
+			}
+		})
 	}
 }
 

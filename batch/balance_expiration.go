@@ -67,7 +67,7 @@ func NewBalanceExpirationProcessor(
 // remaining amount.
 func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOptions) (*BatchResult, error) {
 	now := p.clock.Now()
-	entries, err := p.balanceRepo.FindExpired(ctx, now)
+	entries, err := p.balanceRepo.FindExpired(ctx, now, opts.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find expired balance entries: %w", err)
 	}

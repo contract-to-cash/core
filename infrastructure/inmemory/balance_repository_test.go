@@ -169,3 +169,43 @@ func TestFindByAccountID_ReturnsEmptyForNoMatch(t *testing.T) {
 		t.Errorf("expected 0 entries, got %d", len(entries))
 	}
 }
+
+// TestSaveApplication_IdempotentByID verifies that SaveApplication upserts by ID
+// rather than blindly appending, so a transaction retry re-saving the same
+// application does not double-count it (issue #197).
+func TestSaveApplication_IdempotentByID(t *testing.T) {
+	repo := NewInMemoryBalanceRepository(shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	ctx := context.Background()
+	invoiceID := shared.NewInvoiceID()
+
+	app := &balance.BalanceApplication{
+		ID:             "app-1",
+		BalanceEntryID: shared.NewBalanceEntryID(),
+		InvoiceID:      invoiceID,
+		Amount:         shared.NewMoney(new(big.Rat).SetInt64(500), shared.CurrencyJPY),
+		AppliedAt:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	if err := repo.SaveApplication(ctx, app); err != nil {
+		t.Fatalf("SaveApplication 1: %v", err)
+	}
+	// Re-save the same ID (simulating a tx retry).
+	if err := repo.SaveApplication(ctx, app); err != nil {
+		t.Fatalf("SaveApplication 2: %v", err)
+	}
+
+	got, err := repo.FindApplicationsByInvoice(ctx, invoiceID)
+	if err != nil {
+		t.Fatalf("FindApplicationsByInvoice: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 application (idempotent), got %d", len(got))
+	}
+
+	// The returned record must be an isolated copy: mutating it must not affect
+	// the stored state.
+	got[0].Amount = shared.NewMoney(new(big.Rat).SetInt64(999999), shared.CurrencyJPY)
+	again, _ := repo.FindApplicationsByInvoice(ctx, invoiceID)
+	if again[0].Amount.Amount().Cmp(new(big.Rat).SetInt64(500)) != 0 {
+		t.Errorf("returned application was not an isolated copy; store mutated to %s", again[0].Amount.Amount().RatString())
+	}
+}

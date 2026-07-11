@@ -60,7 +60,7 @@ func NewContractRenewalProcessor(
 // Process finds active contracts due for renewal and renews them.
 func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOptions) (*BatchResult, error) {
 	now := p.clock.Now()
-	contracts, err := p.contractRepo.FindDueForRenewal(ctx, now)
+	contracts, err := p.contractRepo.FindDueForRenewal(ctx, now, opts.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find contracts due for renewal: %w", err)
 	}

@@ -74,6 +74,15 @@ type Repository interface {
 	// version to compare, so fresh payments (LoadedVersion 0) are unaffected. See
 	// infrastructure/inmemory for a reference optimistic-locking implementation.
 	Save(ctx context.Context, payment *Payment) error
+
+	// FindByID loads a payment by its ID.
+	//
+	// Not-found convention (issue #197): implementations MUST return an error for
+	// a missing payment — a shared.DomainError with code shared.ErrCodeNotFound —
+	// and MUST NOT return (nil, nil). Callers (e.g. PaymentService.Refund) treat a
+	// nil result defensively as not-found regardless, but returning a typed error
+	// is the contract so business errors and technical errors stay distinguishable.
+	// The infrastructure/inmemory implementation is the reference.
 	FindByID(ctx context.Context, id shared.PaymentID) (*Payment, error)
 	FindByInvoiceID(ctx context.Context, invoiceID shared.InvoiceID) ([]*Payment, error)
 	// FindByIdempotencyKey returns a payment with the given idempotency key,

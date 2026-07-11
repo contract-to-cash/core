@@ -67,6 +67,15 @@ type Repository interface {
 	// driver error. See infrastructure/inmemory for a reference implementation
 	// that mirrors the partial unique index above.
 	Save(ctx context.Context, invoice *Invoice) error
+
+	// FindByID loads an invoice by its ID.
+	//
+	// Not-found convention (issue #197): implementations MUST return an error for
+	// a missing invoice — a shared.DomainError with code shared.ErrCodeNotFound —
+	// and MUST NOT return (nil, nil). Callers (PaymentService.ProcessPayment,
+	// CreditNoteService) defend against a nil result regardless, but the typed
+	// error is the contract. The infrastructure/inmemory implementation is the
+	// reference.
 	FindByID(ctx context.Context, id shared.InvoiceID) (*Invoice, error)
 	FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*Invoice, error)
 	FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*Invoice, error)

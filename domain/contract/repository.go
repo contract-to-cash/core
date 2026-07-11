@@ -33,6 +33,12 @@ type Repository interface {
 	Save(ctx context.Context, aggregate *ContractAggregate) error
 
 	// FindByID loads a contract aggregate by its ID.
+	//
+	// Not-found convention (issue #197): implementations MUST return an error for
+	// a missing contract — a shared.DomainError with code shared.ErrCodeNotFound —
+	// and MUST NOT return (nil, nil). Callers defend against a nil result
+	// regardless (BYO-DB defensiveness), but the typed error is the contract. The
+	// infrastructure/inmemory implementation is the reference.
 	FindByID(ctx context.Context, id shared.ContractID) (*ContractAggregate, error)
 
 	// FindByAccountID returns all contracts for an account.
@@ -46,11 +52,25 @@ type Repository interface {
 	// `now`, it yields trials that have ALREADY ended (renamed from the
 	// misleading FindTrialsEndingSoon, which read as "ending in the near future"
 	// — issue #162 B4).
-	FindTrialsEndingBefore(ctx context.Context, before time.Time) ([]*ContractAggregate, error)
+	//
+	// limit bounds the number of aggregates returned (issue #197): a positive
+	// limit returns at most that many (the OLDEST-eligible first, so repeated
+	// batch runs drain the backlog deterministically without starvation); a limit
+	// of 0 (or negative) means "no limit" and preserves the original unbounded
+	// behaviour. The batch layer threads BatchOptions.Limit here so a run against
+	// a large due-set does not load every row into memory at once.
+	FindTrialsEndingBefore(ctx context.Context, before time.Time, limit int) ([]*ContractAggregate, error)
 
 	// FindByIDAsOf loads a contract aggregate as of a specific point in time.
 	FindByIDAsOf(ctx context.Context, id shared.ContractID, asOf time.Time) (*ContractAggregate, error)
 
-	// FindDueForRenewal returns active contracts whose current period ends on or before asOf.
-	FindDueForRenewal(ctx context.Context, asOf time.Time) ([]*ContractAggregate, error)
+	// FindDueForRenewal returns active contracts whose current period ends on or
+	// before asOf.
+	//
+	// limit bounds the number of aggregates returned (issue #197): a positive
+	// limit returns at most that many (oldest-due first for deterministic
+	// backlog draining); 0 (or negative) means "no limit" and preserves the
+	// original unbounded behaviour. The renewal batch threads BatchOptions.Limit
+	// here.
+	FindDueForRenewal(ctx context.Context, asOf time.Time, limit int) ([]*ContractAggregate, error)
 }

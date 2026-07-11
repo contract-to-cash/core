@@ -55,6 +55,26 @@ func (s *SnapshotService) CreateSnapshot(ctx context.Context, agg eventstore.Agg
 				"(a generic json.Marshal would serialize an empty {} and corrupt restores)", agg),
 		)
 	}
+
+	// Guard against snapshotting an aggregate with uncommitted events (issue
+	// #197). A snapshot records the aggregate's state paired with its Version().
+	// If the aggregate still holds uncommitted events, its in-memory state has
+	// already advanced past the persisted version: MarshalSnapshot captures the
+	// post-mutation state while Version() may not correspond to what has been
+	// appended to the event stream. Persisting that pairing yields a snapshot
+	// whose state and version disagree, so a later LoadFromSnapshot (optionally
+	// followed by replay of events after Version()) reconstructs a corrupt
+	// aggregate — double-applying or skipping the uncommitted events. Callers
+	// must persist (append + ClearUncommittedEvents) BEFORE snapshotting.
+	if len(agg.UncommittedEvents()) > 0 {
+		return shared.NewDomainError(
+			shared.ErrCodeBusinessRule,
+			fmt.Sprintf("cannot snapshot aggregate %s: it has %d uncommitted event(s); "+
+				"persist the aggregate (append events + ClearUncommittedEvents) before creating a snapshot",
+				agg.ID(), len(agg.UncommittedEvents())),
+		)
+	}
+
 	stateData, err := marshaler.MarshalSnapshot()
 	if err != nil {
 		return fmt.Errorf("failed to marshal aggregate state: %w", err)

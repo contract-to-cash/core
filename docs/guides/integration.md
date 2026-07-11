@@ -249,11 +249,28 @@ renewalProcessor := batch.NewContractRenewalProcessor(contractRepo, registry, cl
 renewalProcessor.Process(ctx, batch.BatchOptions{
     ContinueOnError: true,
     Concurrency:     4,
+    // Limit caps how many due contracts a single run loads/processes (issue #197).
+    // 0 (default) = no limit. Set a positive value to bound memory against a large
+    // due-set; the finder returns the oldest-eligible rows first, so schedule the
+    // job on a cadence (or loop until BatchResult.Total < Limit) to drain a
+    // backlog larger than Limit across runs.
+    Limit: 500,
 })
 
-// Snapshot creation (run periodically for performance)
+// Snapshot creation (run periodically for performance).
+// NOTE: CreateSnapshot rejects an aggregate that still holds uncommitted events
+// (issue #197) — persist the aggregate (append + ClearUncommittedEvents) first.
 snapshotService := service.NewSnapshotService(eventStore, clock, 50) // every 50 events
 ```
+
+> **Repository finders take a `limit` (BREAKING, issue #197)**: `Process` threads
+> `BatchOptions.Limit` into the repository finders
+> (`contract.Repository.FindDueForRenewal` / `FindTrialsEndingBefore`,
+> `balance.Repository.FindExpired`), whose signatures now take a trailing
+> `limit int`. A positive value bounds the rows returned (oldest-eligible first);
+> `0` means unbounded and preserves prior behaviour. BYO-DB adapters must add the
+> parameter — push the limit down to the query (`LIMIT`) rather than truncating in
+> memory.
 
 ## Directory Structure
 

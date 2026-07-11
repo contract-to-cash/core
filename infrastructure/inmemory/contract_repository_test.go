@@ -174,7 +174,7 @@ func TestInMemoryContractRepository_FindTrialsEndingBefore(t *testing.T) {
 
 	// Trial ends on Jan 15. Query before Jan 20 should find it.
 	before := time.Date(2026, 1, 20, 0, 0, 0, 0, time.UTC)
-	results, err := repo.FindTrialsEndingBefore(ctx, before)
+	results, err := repo.FindTrialsEndingBefore(ctx, before, 0)
 	if err != nil {
 		t.Fatalf("FindTrialsEndingBefore failed: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestInMemoryContractRepository_FindTrialsEndingBefore(t *testing.T) {
 
 	// Query before Jan 10 should find none (trial ends after Jan 10).
 	beforeEarly := time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)
-	none, err := repo.FindTrialsEndingBefore(ctx, beforeEarly)
+	none, err := repo.FindTrialsEndingBefore(ctx, beforeEarly, 0)
 	if err != nil {
 		t.Fatalf("FindTrialsEndingBefore failed: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestInMemoryContractRepository_FindDueForRenewal(t *testing.T) {
 	// Monthly contract activated on Jan 1 has period ending around Feb 1.
 	// Querying asOf Feb 1 should find it (period.End <= asOf).
 	asOf := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
-	results, err := repo.FindDueForRenewal(ctx, asOf)
+	results, err := repo.FindDueForRenewal(ctx, asOf, 0)
 	if err != nil {
 		t.Fatalf("FindDueForRenewal failed: %v", err)
 	}
@@ -223,12 +223,77 @@ func TestInMemoryContractRepository_FindDueForRenewal(t *testing.T) {
 
 	// Querying before period end should find none.
 	tooEarly := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
-	none, err := repo.FindDueForRenewal(ctx, tooEarly)
+	none, err := repo.FindDueForRenewal(ctx, tooEarly, 0)
 	if err != nil {
 		t.Fatalf("FindDueForRenewal failed: %v", err)
 	}
 	if len(none) != 0 {
 		t.Errorf("expected 0 contracts due for renewal before period end, got %d", len(none))
+	}
+}
+
+// TestInMemoryContractRepository_FindTrialsEndingBefore_Limit verifies the
+// limit parameter (issue #197): a positive limit caps the result to the N
+// oldest-expiring trials, and 0 means unbounded.
+func TestInMemoryContractRepository_FindTrialsEndingBefore_Limit(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	store := NewInMemoryEventStore(clock)
+	repo := NewInMemoryContractRepository(store, clock)
+	ctx := context.Background()
+	metadata := eventstore.EventMetadata{UserID: "test-user"}
+
+	// Three trials ending on Jan 5, Jan 10, Jan 15 (created in scrambled order).
+	endDates := []time.Time{
+		time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC),
+	}
+	for i, end := range endDates {
+		agg := contract.NewContractAggregate(shared.NewContractID(), clock)
+		cmd := contract.CreateContractCommand{
+			IdempotencyKey: shared.GenerateID(),
+			AccountID:      shared.NewAccountID(),
+			PriceID:        shared.NewPriceID(),
+			ContractType:   contract.ContractTypeSubscription,
+			Interval:       pricing.Monthly(),
+			Price:          shared.NewMoney(new(big.Rat).SetInt64(int64(100+i)), shared.CurrencyJPY),
+			BasePrice:      shared.NewMoney(new(big.Rat).SetInt64(int64(100+i)), shared.CurrencyJPY),
+		}
+		if err := agg.Create(cmd, metadata); err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+		if err := agg.StartTrial(contract.TrialConfiguration{TrialEndDate: end, AutoConvert: true}, metadata); err != nil {
+			t.Fatalf("StartTrial failed: %v", err)
+		}
+		if err := repo.Save(ctx, agg); err != nil {
+			t.Fatalf("Save failed: %v", err)
+		}
+	}
+
+	before := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+
+	// limit 0 → all three, oldest-first.
+	all, err := repo.FindTrialsEndingBefore(ctx, before, 0)
+	if err != nil {
+		t.Fatalf("FindTrialsEndingBefore(0) failed: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("limit 0: expected 3, got %d", len(all))
+	}
+
+	// limit 2 → the two oldest-expiring (Jan 5, Jan 10).
+	two, err := repo.FindTrialsEndingBefore(ctx, before, 2)
+	if err != nil {
+		t.Fatalf("FindTrialsEndingBefore(2) failed: %v", err)
+	}
+	if len(two) != 2 {
+		t.Fatalf("limit 2: expected 2, got %d", len(two))
+	}
+	if !two[0].TrialConfig().TrialEndDate.Equal(time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("expected oldest (Jan 5) first, got %s", two[0].TrialConfig().TrialEndDate)
+	}
+	if !two[1].TrialConfig().TrialEndDate.Equal(time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("expected Jan 10 second, got %s", two[1].TrialConfig().TrialEndDate)
 	}
 }
 
@@ -270,7 +335,7 @@ func TestInMemoryContractRepository_ConvertedTrialDueForRenewal(t *testing.T) {
 
 	// The monthly period runs Jan 1 -> Feb 1, so a Feb 1 query must find it.
 	asOf := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
-	results, err := repo.FindDueForRenewal(ctx, asOf)
+	results, err := repo.FindDueForRenewal(ctx, asOf, 0)
 	if err != nil {
 		t.Fatalf("FindDueForRenewal failed: %v", err)
 	}

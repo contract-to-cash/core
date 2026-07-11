@@ -38,6 +38,14 @@ type CreditNoteRepository interface {
 	// always succeeds, so callers constructing a fresh credit note
 	// (LoadedVersion 0) are unaffected.
 	Save(ctx context.Context, cn *CreditNote) error
+
+	// FindByID loads a credit note by its ID.
+	//
+	// Not-found convention (issue #197): implementations MUST return an error for
+	// a missing credit note — a shared.DomainError with code
+	// shared.ErrCodeNotFound — and MUST NOT return (nil, nil). CreditNoteService
+	// defends against a nil result regardless, but the typed error is the
+	// contract. The infrastructure/inmemory implementation is the reference.
 	FindByID(ctx context.Context, id shared.CreditNoteID) (*CreditNote, error)
 	FindByInvoiceID(ctx context.Context, invoiceID shared.InvoiceID) ([]*CreditNote, error)
 	FindByAccountID(ctx context.Context, accountID shared.AccountID) ([]*CreditNote, error)

@@ -74,7 +74,7 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 	now := p.clock.Now()
 	// FindTrialsEndingBefore(ctx, now) returns trialing contracts whose
 	// TrialEndDate is before `now` — i.e. trials that have already expired.
-	contracts, err := p.contractRepo.FindTrialsEndingBefore(ctx, now)
+	contracts, err := p.contractRepo.FindTrialsEndingBefore(ctx, now, opts.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find expired trials: %w", err)
 	}

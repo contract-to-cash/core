@@ -661,3 +661,83 @@ func TestUpcasterChain_SkipsNonPriceEvents(t *testing.T) {
 		t.Errorf("expected SchemaVersion=1 (unchanged), got %d", result.SchemaVersion)
 	}
 }
+
+// TestContractCreatedUpcasters_ChainOrderIndependent verifies that a v1
+// ContractCreated payload (carrying only a legacy billing_cycle, no interval)
+// reaches v3 with the interval correctly recovered REGARDLESS of the order in
+// which ContractCreatedEventUpcaster (1→2) and
+// ContractCreatedIdempotencyKeyUpcaster (2→3) sit in the chain (issue #197).
+//
+// Before the fix, ContractCreatedIdempotencyKeyUpcaster accepted fromVersion<=2
+// and, if applied first, jumped v1→v3 and skipped the billing_cycle→interval
+// migration, leaving the interval unset.
+func TestContractCreatedUpcasters_ChainOrderIndependent(t *testing.T) {
+	legacy := map[string]interface{}{
+		"contract_id":   "c1",
+		"account_id":    "acc-1",
+		"price_id":      "price-1",
+		"billing_cycle": "yearly",
+		"contract_type": "subscription",
+		"created_at":    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	orderings := map[string][]eventstore.Upcaster{
+		"created_then_idempotency": {
+			&ContractCreatedEventUpcaster{},
+			&ContractCreatedIdempotencyKeyUpcaster{},
+		},
+		"idempotency_then_created": {
+			&ContractCreatedIdempotencyKeyUpcaster{},
+			&ContractCreatedEventUpcaster{},
+		},
+	}
+
+	for name, upcasters := range orderings {
+		t.Run(name, func(t *testing.T) {
+			data, _ := json.Marshal(legacy)
+			chain := eventstore.NewUpcasterChain(upcasters...)
+
+			result, err := chain.Upcast(eventstore.Event{
+				Type:          EventTypeContractCreated,
+				SchemaVersion: 1,
+				Data:          data,
+			})
+			if err != nil {
+				t.Fatalf("Upcast failed: %v", err)
+			}
+			if result.SchemaVersion != 3 {
+				t.Fatalf("expected SchemaVersion=3, got %d", result.SchemaVersion)
+			}
+
+			domainEvent, err := contractEventRegistry.Deserialize(result.Type, result.Data)
+			if err != nil {
+				t.Fatalf("deserialize failed: %v", err)
+			}
+			created, ok := domainEvent.(*ContractCreatedEvent)
+			if !ok {
+				t.Fatalf("expected *ContractCreatedEvent, got %T", domainEvent)
+			}
+			// The interval must have been recovered from billing_cycle in BOTH
+			// orderings — this is the order-independence guarantee.
+			if !created.Interval.Equals(pricing.Yearly()) {
+				t.Errorf("expected interval yearly recovered from billing_cycle, got %s (billing_cycle migration was skipped)", created.Interval)
+			}
+		})
+	}
+}
+
+// TestContractCreatedIdempotencyKeyUpcaster_CanUpcastExactVersion pins the
+// exact-version guard so a regression back to fromVersion<=2 is caught (issue
+// #197).
+func TestContractCreatedIdempotencyKeyUpcaster_CanUpcastExactVersion(t *testing.T) {
+	u := &ContractCreatedIdempotencyKeyUpcaster{}
+	if u.CanUpcast(EventTypeContractCreated, 1) {
+		t.Error("expected CanUpcast=false at v1 (v1→v2 is ContractCreatedEventUpcaster's job)")
+	}
+	if !u.CanUpcast(EventTypeContractCreated, 2) {
+		t.Error("expected CanUpcast=true at exactly v2")
+	}
+	if u.CanUpcast(EventTypeContractCreated, 3) {
+		t.Error("expected CanUpcast=false at v3 (already migrated)")
+	}
+}

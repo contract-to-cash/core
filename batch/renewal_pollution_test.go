@@ -64,7 +64,7 @@ func (r *isolatingRenewalRepo) FindExpiring(_ context.Context, _ time.Time) ([]*
 	return nil, nil
 }
 
-func (r *isolatingRenewalRepo) FindTrialsEndingBefore(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+func (r *isolatingRenewalRepo) FindTrialsEndingBefore(_ context.Context, _ time.Time, _ int) ([]*contract.ContractAggregate, error) {
 	return nil, nil
 }
 
@@ -72,7 +72,7 @@ func (r *isolatingRenewalRepo) FindByIDAsOf(_ context.Context, _ shared.Contract
 	return nil, nil
 }
 
-func (r *isolatingRenewalRepo) FindDueForRenewal(_ context.Context, _ time.Time) ([]*contract.ContractAggregate, error) {
+func (r *isolatingRenewalRepo) FindDueForRenewal(_ context.Context, _ time.Time, _ int) ([]*contract.ContractAggregate, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]*contract.ContractAggregate, 0, len(r.stored))
