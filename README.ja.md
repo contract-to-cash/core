@@ -70,7 +70,10 @@ func main() {
 
     // PriceとContractの作成
     price := shared.NewMoney(new(big.Rat).SetInt64(3000), shared.CurrencyJPY)
-    pe := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
+    pe, err := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
+    if err != nil {
+        panic(err)
+    }
     priceRepo.Save(ctx, pe)
 
     cID := shared.NewContractID()
@@ -170,7 +173,7 @@ batch/            # バッチプロセッサ（契約更新）
 ## 安定性（Stability）
 
 本プロジェクトは **v1.0 未満（pre-v1.0）** です。タグ付きリリースは
-[v0.1.0](https://github.com/contract-to-cash/core/releases) から提供しています —
+[v0.2.0](https://github.com/contract-to-cash/core/releases)（最初のキュレーション済みリリース）から提供しています —
 `main` の擬似バージョンではなくリリースタグを固定してください。
 v1.0 に向けて API が変更される可能性があります。
 
