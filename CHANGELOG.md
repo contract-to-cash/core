@@ -18,6 +18,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/guides/data-protection.md` (PII in an append-only event store, erasure
   patterns, logging, retention responsibilities). README/README.ja gained a
   **Stability** section (pre-v1.0, semver, first tagged release pending).
+- `port.WebhookProcessorConfig.MaxEventAge` (`time.Duration`, default `0` =
+  disabled): an optional coarse, one-directional staleness bound that drops only
+  events whose body `CreatedAt` is older than the bound (e.g. 30 days). It is a
+  sanity guard for garbage/absurdly-old payloads, NOT a replay control, and is
+  off by default so legitimate old redeliveries always flow. On trigger, the
+  drop leaves an operator trail instead of causing pointless gateway redelivery:
+  with a DLQ configured the event is sent to the DLQ with a distinct reason
+  (`LastError` explains the over-age drop, `RetryCount` 0 because the handler
+  never ran), a warning is logged, and the delivery is acknowledged (nil) so the
+  gateway stops redelivering; without a DLQ a typed `*port.WebhookError` with the
+  new code `port.WebhookErrorCodeEventTooOld` is returned (gateway redelivery is
+  then the only recovery channel). A DLQ send failure returns an error so the
+  gateway retries and a later attempt can record the drop.
+
+### Fixed
+
+- **Webhook redeliveries with an old event timestamp are no longer rejected and
+  lost (#191)** — `WebhookProcessor.ProcessWebhook` previously rejected any event
+  whose body `CreatedAt` fell outside a bidirectional `TimestampTolerance` window
+  (default 5 min). Real gateways (Stripe, Adyen) redeliver failed webhooks with
+  backoff over hours-to-days carrying the ORIGINAL `CreatedAt`, so a transient
+  handler failure followed by a later redelivery was rejected as "webhook
+  timestamp too old" and — because the processor's recovery design relies on
+  gateway redelivery — the event was permanently lost. The processor no longer
+  gates on the event-body `CreatedAt` for replay. Transport-level replay
+  protection is now explicitly the responsibility of `WebhookHandler.ParseAndVerify`
+  (the HMAC-signed transport timestamp, which an attacker cannot forge);
+  duplicates continue to be suppressed by the `WebhookDeduplicator`. The
+  `WebhookHandler` interface contract documents this responsibility.
+
+### Deprecated
+
+- **BREAKING (behavioral, pre-v1.0)**: `port.WebhookProcessorConfig.TimestampTolerance`
+  is deprecated and NO LONGER APPLIED. It formerly gated the event-body
+  `CreatedAt` bidirectionally, which dropped legitimate gateway redeliveries
+  (#191). The field is retained (and still validated as non-negative) for
+  source/config backward compatibility but has no effect; it will be removed in a
+  future major version. Move replay protection into `ParseAndVerify` (signed
+  transport timestamp) and, if a coarse staleness bound is desired, use the new
+  `MaxEventAge`.
 
 ### Changed
 

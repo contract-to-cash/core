@@ -633,13 +633,23 @@ import (
 )
 
 // WebhookHandler Webhookハンドラインターフェース
-// ゲートウェイごとに実装する。署名検証・タイムスタンプ検証・パースを担当。
+// ゲートウェイごとに実装する。署名検証・トランスポート層タイムスタンプ検証・パースを担当。
 // 旧 domain/payment/webhook.go から application/port/ に移動
+//
+// ⚠️ リプレイ攻撃防止はこのアダプタの責務（issue #191）:
+//   ParseAndVerify は「HMAC署名で保護されたトランスポート層タイムスタンプ」
+//   （例: Stripe の Stripe-Signature の t=、Adyen の HMAC 対象タイムスタンプ）を
+//   短い許容範囲（Standard Webhooks 推奨 5分）で検証し、古い/未来のリクエストを
+//   拒否する。攻撃者はこの署名済みタイムスタンプを改竄できないため、これが
+//   リプレイ防止の正しい場所である。
+//   一方、イベント本文の発生時刻 WebhookEvent.CreatedAt はリプレイ制御に使ってはならない。
+//   ゲートウェイは失敗した Webhook を数時間〜数日にわたり「元の CreatedAt のまま」
+//   再送するため、CreatedAt の古さで拒否すると正当な再送を恒久的に失う（issue #191）。
 type WebhookHandler interface {
     // ParseAndVerify Webhookリクエストの検証とパースを一括で行う
     // 以下を順に実行する:
     //   1. 署名検証（HMAC-SHA256等、ゲートウェイ固有）
-    //   2. タイムスタンプ検証（許容範囲外のイベントを拒否）
+    //   2. トランスポート層タイムスタンプ検証（署名済みタイムスタンプでリプレイ拒否）
     //   3. ペイロードのパース
     ParseAndVerify(ctx context.Context, req *WebhookRequest) (*WebhookEvent, error)
 }
@@ -654,7 +664,7 @@ type WebhookRequest struct {
 type WebhookEvent struct {
     ID        string           // イベント一意ID（重複検出に使用）
     Type      WebhookEventType
-    CreatedAt time.Time        // イベント発生時刻（UTC必須、タイムスタンプ検証対象）
+    CreatedAt time.Time        // イベント発生時刻（UTC必須）。リプレイ制御には使わない（issue #191）
     Data      json.RawMessage
     RawData   []byte
 }
@@ -663,21 +673,26 @@ type WebhookEvent struct {
 // Webhook処理サービス（アプリケーション層）
 // ============================================================
 //
-// WebhookHandlerはゲートウェイ固有のパース・検証を担当する。
+// WebhookHandlerはゲートウェイ固有のパース・検証（署名 + トランスポート層
+// タイムスタンプによるリプレイ防止）を担当する。
 // 以下の横断的関心事はアプリケーション層の WebhookProcessor が担当する:
-//   - タイムスタンプ双方向検証（リプレイ攻撃防止）
-//   - イベント重複検出（冪等性保証）
+//   - イベント重複検出（冪等性保証。重複はここで吸収する）
 //   - リトライ可能/不可能エラーの分類
 //   - Dead Letter Queue（リトライ超過時の追跡）
+//   - （任意）MaxEventAge による粗い陳腐化ガード（デフォルト無効）
+//
+// リプレイ攻撃防止は WebhookProcessor の責務ではない（issue #191）:
+//   イベント本文 CreatedAt での双方向タイムスタンプ検証は廃止した。
+//   ゲートウェイは失敗 Webhook を元の CreatedAt のまま数時間〜数日再送するため、
+//   本文タイムスタンプで拒否すると正当な再送を恒久的に失う。リプレイ防止は
+//   ParseAndVerify（署名済みトランスポート層タイムスタンプ）が担う。
 //
 // 設計根拠:
-//   - Standard Webhooks仕様に準拠した双方向タイムスタンプ検証
 //   - Stripeは最長3日間リトライするため、重複検出TTLは72時間が必要
 //   - 決済GWは「2xxか否か」でリトライ判定するため、HTTPステータスの使い分けが重要
 
 // デフォルト値
 const (
-    DefaultTimestampTolerance = 5 * time.Minute   // Standard Webhooks仕様準拠
     DefaultDeduplicationTTL   = 72 * time.Hour     // Stripeの最大リトライ期間(3日)に合わせる
     DefaultMaxRetries         = 3
     DefaultRetryBackoff       = 1 * time.Second
@@ -694,10 +709,29 @@ type WebhookProcessor struct {
 
 // WebhookProcessorConfig Webhook処理設定
 type WebhookProcessorConfig struct {
-    // TimestampTolerance タイムスタンプの許容範囲（双方向）
-    // 過去・未来ともにこの範囲外のイベントを拒否する
-    // デフォルト: 5分（Standard Webhooks仕様準拠）
+    // Deprecated: TimestampTolerance は本文 CreatedAt には適用されなくなり、
+    // ProcessWebhook に一切影響しない（issue #191）。以前は本文 CreatedAt の
+    // 双方向検証に使われていたが、それが正当な再送（元の古い CreatedAt を持つ）を
+    // 恒久的に失わせていた。リプレイ防止は ParseAndVerify（署名済みトランスポート
+    // 層タイムスタンプ）へ移した。粗い陳腐化ガードが必要なら MaxEventAge を使う。
+    // 後方互換のためフィールドは残す（非負のみ検証）。将来のメジャーで削除予定。
     TimestampTolerance time.Duration
+
+    // MaxEventAge >0 のとき、本文 CreatedAt がこの値より古いイベントを破棄する。
+    // 粗い「一方向」の陳腐化ガードであり、リプレイ制御ではない（例: 30日）。
+    // 極端に古い/ゴミなペイロードを弾く用途のみ。デフォルト 0（無効）なので、
+    // 数時間〜数日遅れて届く正当な再送は常に通過する。
+    //
+    // 破棄時の挙動: 期限超過は一時的な状態ではないため、GW に再送させても
+    // 毎回同じ拒否になるだけ（ノイズ）。したがって:
+    //   - DLQ あり: 理由付き（LastError に MaxEventAge 超過、RetryCount=0 =
+    //     ハンドラ未実行）で DLQ に記録し、Warn ログを出して nil を返す（ACK。
+    //     GW の再送が止まり、運用者は DLQ から調査/再処理できる）。
+    //     DLQ 送信自体が失敗した場合は記録できていないので error を返す（GW 再送で
+    //     後続試行が DLQ 記録をやり直す）。
+    //   - DLQ なし: GW 再送が唯一の回復チャネルなので、型付き
+    //     *WebhookError{Code: WebhookErrorCodeEventTooOld} を返す。
+    MaxEventAge time.Duration
 
     // DeduplicationTTL 重複検出レコードの保持期間
     // Stripeは最長3日間リトライするため、72時間以上を推奨
@@ -804,8 +838,9 @@ func isRetryable(err error) bool {
 // ProcessWebhook Webhookイベントを安全に処理する
 //
 // 処理フロー:
-//   1. ParseAndVerify（署名検証 + パース）
-//   2. タイムスタンプ双方向検証（過去・未来の両方をチェック）
+//   1. ParseAndVerify（署名検証 + トランスポート層タイムスタンプ検証 + パース）
+//   2. （任意）MaxEventAge による粗い陳腐化ガード（デフォルト無効）。
+//      本文 CreatedAt によるリプレイ検証は行わない（issue #191）
 //   3. 重複検出（冪等性保証、TTL付き）
 //   4. イベントハンドラ呼び出し（リトライ可能エラーのみリトライ）
 //   5. リトライ超過時はDLQに送信
@@ -814,31 +849,41 @@ func (p *WebhookProcessor) ProcessWebhook(
     req *WebhookRequest,
     handler func(ctx context.Context, event *WebhookEvent) error,
 ) error {
-    // 1. パースと署名検証（ゲートウェイ固有）
+    // 1. パースと署名検証（ゲートウェイ固有）。リプレイ防止は ParseAndVerify が
+    //    署名済みトランスポート層タイムスタンプで担う。
     event, err := p.handler.ParseAndVerify(ctx, req)
     if err != nil {
         return &WebhookError{Code: WebhookErrorCodeInvalidSignature, Cause: err}
     }
 
-    // 2. タイムスタンプ双方向検証（Standard Webhooks仕様準拠）
-    //    過去方向: リプレイ攻撃防止
-    //    未来方向: クロックスキュー攻撃防止
-    tolerance := p.config.TimestampTolerance
-    if tolerance == 0 {
-        tolerance = DefaultTimestampTolerance
-    }
-    now := p.clock.Now()
-    diff := now.Sub(event.CreatedAt)
-    if diff > tolerance {
-        return &WebhookError{
-            Code: WebhookErrorCodeInvalidPayload,
-            Cause:  fmt.Errorf("event %s is %v old (tolerance: %v)", event.ID, diff, tolerance),
-        }
-    }
-    if diff < -tolerance {
-        return &WebhookError{
-            Code: WebhookErrorCodeInvalidPayload,
-            Cause:  fmt.Errorf("event %s is %v in the future (tolerance: %v)", event.ID, -diff, tolerance),
+    // 2. 任意の粗い陳腐化ガード（MaxEventAge）。
+    //    リプレイ防止は行わない: ゲートウェイは失敗 Webhook を元の CreatedAt の
+    //    まま数時間〜数日再送するため、本文 CreatedAt の古さ/未来で拒否しない
+    //    （issue #191）。MaxEventAge は極端に古いペイロードのみを弾く一方向ガード。
+    //    超過は一時的な状態ではなく再送させても毎回同じ拒否になるため、
+    //    DLQ があれば「記録して ACK」、なければ型付きエラーで GW 再送に委ねる。
+    if p.config.MaxEventAge > 0 {
+        now := p.clock.Now()
+        if age := now.Sub(event.CreatedAt); age > p.config.MaxEventAge {
+            ageErr := &WebhookError{
+                Code:    WebhookErrorCodeEventTooOld,
+                Message: fmt.Sprintf("event %s is %v old (max: %v)", event.ID, age, p.config.MaxEventAge),
+            }
+            if p.dlq != nil {
+                // 運用者が調査/再処理できるよう理由付きで DLQ に記録し、
+                // nil（ACK）で GW の無意味な再送を止める。
+                // RetryCount=0: ハンドラは一度も実行されていない。
+                // DLQ 送信失敗時は記録できていないため error を返す（GW が再送）。
+                if dlqErr := p.dlq.Send(ctx, &WebhookDLQEntry{
+                    EventID: event.ID, EventType: event.Type, Payload: event.RawData,
+                    LastError: ageErr.Error(), RetryCount: 0, CreatedAt: now,
+                }); dlqErr != nil {
+                    return fmt.Errorf("DLQ send failed: %w (original: %v)", dlqErr, ageErr)
+                }
+                // Warn ログ（event_id / age / max_event_age）
+                return nil
+            }
+            return ageErr // DLQ なし: GW 再送が唯一の回復チャネル
         }
     }
 
@@ -926,6 +971,8 @@ const (
     WebhookErrorCodeUnsupportedEvent WebhookErrorCode = "unsupported_event"
     WebhookErrorCodeDuplicate        WebhookErrorCode = "duplicate_event"
     WebhookErrorCodeProcessingFailed WebhookErrorCode = "processing_failed"
+    // MaxEventAge 超過（DLQ 未設定時のみ返る。DLQ ありなら DLQ 記録 + ACK）
+    WebhookErrorCodeEventTooOld      WebhookErrorCode = "event_too_old"
 )
 
 // WebhookError Webhook処理エラー
@@ -954,13 +1001,16 @@ func (e *WebhookError) Unwrap() error { return e.Cause }
 // | 処理成功                     | 200         | リトライしない | —                      |
 // | 重複イベント（正常系）          | 200         | リトライしない | ProcessWebhookがnil返却  |
 // | 非リトライエラー（DLQ行き）     | 200         | リトライしない | DLQで追跡               |
-// | 署名検証失敗                  | 401         | リトライする  | 不正リクエスト             |
-// | タイムスタンプ範囲外            | 400         | リトライする  | リプレイ攻撃 or クロックスキュー |
+// | 署名/トランスポートTS検証失敗   | 401         | リトライする  | 不正リクエスト（ParseAndVerify） |
+// | MaxEventAge 超過（DLQあり）     | 200         | リトライしない | DLQに記録済み + ACK（nil返却） |
+// | MaxEventAge 超過（DLQなし）     | 400         | リトライする  | event_too_old。再送が唯一の回復チャネル |
 // | 重複検出ストレージ障害          | 503         | リトライする  | Redis/DB一時障害         |
 // | リトライ可能な内部エラー         | 503         | リトライする  | ※ProcessWebhook内で処理済 |
 //
-// ※タイムスタンプ範囲外はリトライしても同じ結果になるが、
-//   400を返すことでGW側のダッシュボードに明確なエラーを表示させる
+// ※本文 CreatedAt の古さでは拒否しない（正当な再送を失うため。issue #191）。
+//   リプレイ防止は ParseAndVerify の署名済みトランスポート層タイムスタンプが担う。
+//   MaxEventAge 超過は一時的な状態ではないため、DLQ があれば ACK して再送ノイズを
+//   止める（PR #200 レビュー対応）。
 func MapWebhookErrorToHTTP(err error) int {
     var webhookErr *WebhookError
     if !errors.As(err, &webhookErr) {
@@ -971,6 +1021,8 @@ func MapWebhookErrorToHTTP(err error) int {
         return 401
     case WebhookErrorCodeInvalidPayload:
         return 400
+    case WebhookErrorCodeEventTooOld:
+        return 400 // DLQ 未設定時のみ到達（DLQ ありなら nil=200 で ACK 済み）
     case WebhookErrorCodeDuplicate:
         return 200 // 重複イベント → GW側のリトライは不要
     case WebhookErrorCodeProcessingFailed:

@@ -27,6 +27,19 @@ func TestWebhookProcessorConfig_Validate_NegativeTimestampTolerance(t *testing.T
 	}
 }
 
+func TestWebhookProcessorConfig_Validate_NegativeMaxEventAge(t *testing.T) {
+	cfg := WebhookProcessorConfig{
+		MaxEventAge: -1 * time.Hour,
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for negative MaxEventAge, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "MaxEventAge") {
+		t.Errorf("error message %q does not contain field name 'MaxEventAge'", got)
+	}
+}
+
 func TestWebhookProcessorConfig_Validate_NegativeMaxRetries(t *testing.T) {
 	cfg := WebhookProcessorConfig{
 		MaxRetries: -1,

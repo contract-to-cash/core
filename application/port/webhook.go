@@ -13,9 +13,25 @@ import (
 )
 
 // WebhookHandler parses and verifies incoming webhook payloads.
+//
+// Implementations are gateway-specific adapters and OWN transport-level replay
+// protection. ParseAndVerify MUST reject stale or future-dated requests using
+// the gateway's HMAC-SIGNED TRANSPORT TIMESTAMP (e.g. Stripe's
+// `Stripe-Signature` t=, Adyen's HMAC over the notification), which an attacker
+// cannot forge, comparing it against a short tolerance (Standard Webhooks
+// recommends 5 minutes). This is the correct place for replay defense because
+// the transport timestamp is covered by the signature.
+//
+// The event-body creation time ([WebhookEvent.CreatedAt]) is NOT a replay
+// control and MUST NOT be used as one: gateways legitimately redeliver a failed
+// webhook for hours-to-days while preserving the ORIGINAL CreatedAt, so treating
+// an old CreatedAt as an attack permanently drops recoverable events (issue
+// #191). [WebhookProcessor] therefore does not gate on CreatedAt for replay;
+// duplicates are handled by the [WebhookDeduplicator].
 type WebhookHandler interface {
-	// ParseAndVerify parses a raw webhook request, verifies its signature,
-	// and returns a structured WebhookEvent.
+	// ParseAndVerify parses a raw webhook request, verifies its signature AND
+	// its HMAC-signed transport timestamp (replay protection), and returns a
+	// structured WebhookEvent.
 	ParseAndVerify(ctx context.Context, req *WebhookRequest) (*WebhookEvent, error)
 }
 
@@ -130,10 +146,38 @@ func (e *WebhookRetryableError) Unwrap() error { return e.Err }
 
 // WebhookProcessorConfig configures the WebhookProcessor.
 type WebhookProcessorConfig struct {
-	TimestampTolerance time.Duration // default: 5 minutes
-	DeduplicationTTL   time.Duration // default: 72 hours
-	MaxRetries         int           // default: 3
-	RetryBackoff       time.Duration // default: 1 second
+	// Deprecated: TimestampTolerance is no longer applied to the event-body
+	// CreatedAt and has NO effect on ProcessWebhook. It previously rejected any
+	// event whose CreatedAt was outside a bidirectional window, which
+	// permanently dropped legitimate gateway redeliveries that carry the
+	// ORIGINAL (old) CreatedAt (issue #191). Transport-level replay protection
+	// now belongs to WebhookHandler.ParseAndVerify (the HMAC-signed transport
+	// timestamp); use MaxEventAge for an optional coarse staleness bound. The
+	// field is retained (and still validated as non-negative) only for
+	// source/config backward compatibility and will be removed in a future
+	// major version.
+	TimestampTolerance time.Duration
+
+	// MaxEventAge, when > 0, drops events whose body CreatedAt is older than
+	// this bound. It is a coarse ONE-DIRECTIONAL sanity/staleness guard (e.g. 30
+	// days) — NOT a replay control — meant only to discard absurdly old or
+	// garbage payloads. It defaults to 0 (DISABLED) so that legitimate
+	// redeliveries, which may arrive hours-to-days after the original event,
+	// always flow through to deduplication and the handler.
+	//
+	// Drop behavior: an over-age event is never a transient condition, so
+	// letting the gateway redeliver it is pointless. If a dead letter queue is
+	// configured, ProcessWebhook sends the event to the DLQ (LastError explains
+	// the MaxEventAge drop, RetryCount is 0 because the handler never ran),
+	// logs a warning, and returns nil so the gateway stops redelivering. If no
+	// DLQ is configured, ProcessWebhook returns a typed *WebhookError with
+	// code WebhookErrorCodeEventTooOld — gateway redelivery is then the only
+	// remaining recovery channel.
+	MaxEventAge time.Duration
+
+	DeduplicationTTL time.Duration // default: 72 hours
+	MaxRetries       int           // default: 3
+	RetryBackoff     time.Duration // default: 1 second
 }
 
 // Validate checks that all WebhookProcessorConfig fields have valid values.
@@ -141,6 +185,9 @@ type WebhookProcessorConfig struct {
 func (c WebhookProcessorConfig) Validate() error {
 	if c.TimestampTolerance < 0 {
 		return fmt.Errorf("TimestampTolerance must not be negative, got %v", c.TimestampTolerance)
+	}
+	if c.MaxEventAge < 0 {
+		return fmt.Errorf("MaxEventAge must not be negative, got %v", c.MaxEventAge)
 	}
 	if c.DeduplicationTTL < 0 {
 		return fmt.Errorf("DeduplicationTTL must not be negative, got %v", c.DeduplicationTTL)
@@ -198,9 +245,9 @@ func NewWebhookProcessor(
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid webhook processor config: %w", err)
 	}
-	if config.TimestampTolerance == 0 {
-		config.TimestampTolerance = 5 * time.Minute
-	}
+	// TimestampTolerance is deprecated and no longer defaulted or applied
+	// (issue #191). MaxEventAge defaults to 0 (disabled) intentionally, so
+	// legitimate old redeliveries are not dropped.
 	if config.DeduplicationTTL == 0 {
 		config.DeduplicationTTL = 72 * time.Hour
 	}
@@ -228,6 +275,14 @@ func NewWebhookProcessor(
 
 // ProcessWebhook parses, validates, deduplicates, and processes a webhook request.
 //
+// Replay protection is NOT performed here on the event-body CreatedAt. It is the
+// responsibility of [WebhookHandler.ParseAndVerify], which checks the gateway's
+// HMAC-signed transport timestamp. This processor deliberately lets old-but-
+// legitimate redeliveries through (they carry the original CreatedAt and may
+// arrive hours-to-days later; see issue #191); duplicates are suppressed by the
+// [WebhookDeduplicator]. An optional coarse staleness bound is available via
+// [WebhookProcessorConfig.MaxEventAge] (disabled by default).
+//
 // Delivery is AT-LEAST-ONCE: the deduplication marker is recorded via
 // [WebhookDeduplicator.MarkProcessed] ONLY AFTER the handler succeeds. A handler
 // that fails (after exhausting retries) leaves no marker, so a gateway
@@ -252,13 +307,55 @@ func (p *WebhookProcessor) ProcessWebhook(
 		return fmt.Errorf("webhook verification failed: %w", err)
 	}
 
-	// Step 2: Timestamp validation (bidirectional)
-	now := p.clock.Now()
-	if event.CreatedAt.Before(now.Add(-p.config.TimestampTolerance)) {
-		return fmt.Errorf("webhook timestamp too old: %v", event.CreatedAt)
-	}
-	if event.CreatedAt.After(now.Add(p.config.TimestampTolerance)) {
-		return fmt.Errorf("webhook timestamp too new: %v", event.CreatedAt)
+	// Step 2: Optional coarse staleness bound.
+	//
+	// Replay protection is handled upstream in ParseAndVerify (HMAC-signed
+	// transport timestamp), NOT here. We intentionally do NOT reject events for
+	// having an old (or future) body CreatedAt, because gateways redeliver
+	// failed webhooks over hours-to-days carrying the ORIGINAL CreatedAt;
+	// rejecting those permanently loses recoverable events (issue #191).
+	//
+	// MaxEventAge, when configured (> 0), is a one-directional sanity guard that
+	// drops only absurdly old payloads. It is disabled by default.
+	//
+	// When it triggers, an error response would only make the gateway redeliver
+	// the same over-age event again — each attempt re-rejected, pure noise — so:
+	//   - with a DLQ configured, the event is recorded there with a distinct
+	//     reason (operators can inspect/replay it) and the delivery is
+	//     ACKNOWLEDGED (nil) to stop redelivery;
+	//   - without a DLQ, gateway redelivery is the only recovery channel, so a
+	//     typed *WebhookError (WebhookErrorCodeEventTooOld) is returned.
+	if p.config.MaxEventAge > 0 {
+		now := p.clock.Now()
+		if age := now.Sub(event.CreatedAt); age > p.config.MaxEventAge {
+			ageErr := &WebhookError{
+				Code:    WebhookErrorCodeEventTooOld,
+				Message: fmt.Sprintf("webhook event %s exceeds MaxEventAge: %v old (max %v)", event.ID, age, p.config.MaxEventAge),
+			}
+			if p.dlq != nil {
+				entry := &WebhookDLQEntry{
+					EventID:    event.ID,
+					EventType:  event.Type,
+					Payload:    event.RawData,
+					LastError:  ageErr.Error(),
+					RetryCount: 0, // the handler never ran
+					CreatedAt:  now,
+				}
+				if dlqErr := p.dlq.Send(ctx, entry); dlqErr != nil {
+					// The drop could not be recorded; return an error so the
+					// gateway redelivers and a later attempt can DLQ it.
+					return fmt.Errorf("DLQ send failed: %w (original: %v)", dlqErr, ageErr)
+				}
+				p.logger.Warn("webhook event exceeds MaxEventAge; sent to DLQ and acknowledged to stop gateway redelivery",
+					"event_id", event.ID,
+					"event_type", event.Type,
+					"age", age,
+					"max_event_age", p.config.MaxEventAge,
+				)
+				return nil
+			}
+			return ageErr
+		}
 	}
 
 	// Step 3: Deduplication CHECK (record happens only after handler success).

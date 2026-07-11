@@ -61,6 +61,11 @@ const (
 	WebhookErrorCodeUnsupportedEvent WebhookErrorCode = "unsupported_event"
 	WebhookErrorCodeDuplicate        WebhookErrorCode = "duplicate_event"
 	WebhookErrorCodeProcessingFailed WebhookErrorCode = "processing_failed"
+	// WebhookErrorCodeEventTooOld is returned by WebhookProcessor.ProcessWebhook
+	// when WebhookProcessorConfig.MaxEventAge is enabled, the event's body
+	// CreatedAt exceeds the bound, and NO dead letter queue is configured (with a
+	// DLQ, the over-age event is sent there and acknowledged instead).
+	WebhookErrorCodeEventTooOld WebhookErrorCode = "event_too_old"
 )
 
 // WebhookError represents a webhook processing error.
