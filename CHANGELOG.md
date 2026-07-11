@@ -44,6 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Projection checkpointing (#192)** — new `projection.CheckpointStore` port
+  (`Load(ctx, projectionName) (int64, error)` / `Save(ctx, projectionName, position) error`)
+  with an in-memory reference implementation `inmemory.InMemoryCheckpointStore`.
+  `ProjectionOptions` gains `CheckpointStore` and `ProjectionName`: when a
+  checkpoint store is set, `ProjectionService.Start` loads the last processed
+  global position on entry, subscribes from there, and saves after each
+  successfully-processed event. This closes the "events appended while the
+  projector was down are never delivered" gap: a restart resumes exactly where
+  it left off. The checkpoint is never advanced past a failed event.
 - `port.CustomerGateway.SetDefaultPaymentMethod(ctx, customerID, paymentMethodID)`:
   sets the customer's default payment method used for automatic charges when no
   invoice- or contract-level method is specified, complementing the existing
@@ -97,6 +106,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Projection delivery is now lossless end-to-end (#192)** — several reliability
+  gaps in projection delivery were fixed:
+  - `inmemory.InMemoryEventStore.Subscribe` now **honours `fromPosition`**:
+    it replays stored events with `GlobalPosition > fromPosition` (backfill) then
+    switches to the live tail with **no gap and no duplicate** at the handover
+    (backfill snapshot + subscriber registration happen atomically under the
+    store lock, plus a monotonic position guard). Previously `fromPosition` was
+    ignored (live-only feed).
+  - Slow subscribers **no longer lose events**: `Append` buffers into an
+    unbounded per-subscriber queue and a pump goroutine delivers with a blocking
+    hand-off (escaped by context cancellation) instead of silently dropping when
+    a 100-slot channel filled. Delivery is now at-least-once; `Projector.Project`
+    is documented as requiring idempotency.
+  - `Subscribe` now honours context cancellation: it unregisters the subscriber
+    and closes the channel, so there is no goroutine/channel leak.
+  - `ProjectionService.Start` async-mode failures no longer advance the
+    checkpoint past a failed event (checkpoint is frozen for the rest of the run
+    so a restart redelivers it).
+  - **BREAKING (pre-v1.0) — `ProjectionOptions.MaxRetries` semantics**: it now
+    means the number of RETRIES *in addition to* the initial attempt (total
+    attempts = `MaxRetries+1`). Previously it was mis-implemented as a total
+    attempt count, so `MaxRetries=1` performed zero retries while the error
+    message claimed "failed after 1 retries". `MaxRetries=0` (single attempt, no
+    retry) is unchanged; `MaxRetries=N>0` now performs one more attempt than
+    before. The error message now reads "failed after N attempts (M retries)".
+  - The `eventstore.Store.Subscribe` interface signature is **unchanged**
+    (backward compatible); only its documented contract and the in-memory
+    implementation's behaviour changed.
 - **Low-priority batch cleanup (#162)** — a group of small, low-risk correctness
   and clarity fixes surfaced by the 2026-07-06 review:
   - **BREAKING (pre-v1.0)**: renamed `contract.Repository.FindTrialsEndingSoon`

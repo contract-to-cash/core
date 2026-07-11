@@ -280,6 +280,186 @@ type paginatingMockEventStore struct {
 	mockEventStore
 }
 
+// --- Checkpoint + retry tests (issue #192) ---
+
+// fromPositionMockStore honors fromPosition on Subscribe: it delivers the events
+// with GlobalPosition > fromPosition (ordered) and then closes the channel,
+// modelling a replay-then-terminate feed so Start returns after draining.
+type fromPositionMockStore struct {
+	mockEventStore
+}
+
+func (m *fromPositionMockStore) Subscribe(_ context.Context, fromPosition int64) (<-chan eventstore.Event, error) {
+	var selected []eventstore.Event
+	for _, e := range m.events {
+		if e.GlobalPosition > fromPosition {
+			selected = append(selected, e)
+		}
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].GlobalPosition < selected[j].GlobalPosition })
+	ch := make(chan eventstore.Event, len(selected))
+	for _, e := range selected {
+		ch <- e
+	}
+	close(ch)
+	return ch, nil
+}
+
+// mockCheckpointStore is an in-package CheckpointStore for tests.
+type mockCheckpointStore struct {
+	positions map[string]int64
+	saveErr   error
+}
+
+func newMockCheckpointStore() *mockCheckpointStore {
+	return &mockCheckpointStore{positions: make(map[string]int64)}
+}
+func (m *mockCheckpointStore) Load(_ context.Context, name string) (int64, error) {
+	return m.positions[name], nil
+}
+func (m *mockCheckpointStore) Save(_ context.Context, name string, pos int64) error {
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.positions[name] = pos
+	return nil
+}
+
+// positionRecordingProjector records the GlobalPositions it observed and can be
+// configured to fail on a specific position.
+type positionRecordingProjector struct {
+	seen   []int64
+	failAt int64 // 0 = never fail
+}
+
+func (p *positionRecordingProjector) Project(_ context.Context, e eventstore.Event) error {
+	if p.failAt != 0 && e.GlobalPosition == p.failAt {
+		return fmt.Errorf("forced failure at position %d", e.GlobalPosition)
+	}
+	p.seen = append(p.seen, e.GlobalPosition)
+	return nil
+}
+func (p *positionRecordingProjector) Rebuild(_ context.Context, _ time.Time) error { return nil }
+
+func TestProjectionService_CheckpointResumeAfterRestart(t *testing.T) {
+	es := &fromPositionMockStore{mockEventStore{events: []eventstore.Event{
+		{StreamID: "s", Type: "e", Version: 1, GlobalPosition: 1},
+		{StreamID: "s", Type: "e", Version: 2, GlobalPosition: 2},
+		{StreamID: "s", Type: "e", Version: 3, GlobalPosition: 3},
+	}}}
+	cp := newMockCheckpointStore()
+
+	// First run: process everything, checkpoint advances to 3.
+	proj1 := &positionRecordingProjector{}
+	svc1 := NewProjectionService(es, ProjectionOptions{SyncMode: true, MaxRetries: 0, CheckpointStore: cp, ProjectionName: "p"})
+	svc1.RegisterProjector(proj1)
+	if err := svc1.Start(context.Background()); err != nil {
+		t.Fatalf("first Start failed: %v", err)
+	}
+	if got := cp.positions["p"]; got != 3 {
+		t.Fatalf("expected checkpoint 3 after first run, got %d", got)
+	}
+	if len(proj1.seen) != 3 {
+		t.Fatalf("expected 3 events processed in first run, got %v", proj1.seen)
+	}
+
+	// Simulated restart: two more events arrive.
+	es.events = append(es.events,
+		eventstore.Event{StreamID: "s", Type: "e", Version: 4, GlobalPosition: 4},
+		eventstore.Event{StreamID: "s", Type: "e", Version: 5, GlobalPosition: 5},
+	)
+
+	// Second run with a FRESH projector: must deliver exactly the missed events.
+	proj2 := &positionRecordingProjector{}
+	svc2 := NewProjectionService(es, ProjectionOptions{SyncMode: true, MaxRetries: 0, CheckpointStore: cp, ProjectionName: "p"})
+	svc2.RegisterProjector(proj2)
+	if err := svc2.Start(context.Background()); err != nil {
+		t.Fatalf("second Start failed: %v", err)
+	}
+	if len(proj2.seen) != 2 || proj2.seen[0] != 4 || proj2.seen[1] != 5 {
+		t.Fatalf("expected exactly missed events [4 5], got %v", proj2.seen)
+	}
+	if got := cp.positions["p"]; got != 5 {
+		t.Fatalf("expected checkpoint 5 after second run, got %d", got)
+	}
+}
+
+func TestProjectionService_CheckpointNotAdvancedPastAsyncFailure(t *testing.T) {
+	es := &fromPositionMockStore{mockEventStore{events: []eventstore.Event{
+		{StreamID: "s", Type: "e", Version: 1, GlobalPosition: 1},
+		{StreamID: "s", Type: "e", Version: 2, GlobalPosition: 2},
+		{StreamID: "s", Type: "e", Version: 3, GlobalPosition: 3},
+	}}}
+	cp := newMockCheckpointStore()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	proj := &positionRecordingProjector{failAt: 2}
+	svc := NewProjectionService(es, ProjectionOptions{
+		SyncMode: false, MaxRetries: 0, CheckpointStore: cp, ProjectionName: "p", Logger: logger,
+	})
+	svc.RegisterProjector(proj)
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Event 1 succeeded (checkpoint 1). Event 2 failed → checkpoint frozen.
+	// Event 3 is still applied live, but the checkpoint must NOT advance past 1.
+	if got := cp.positions["p"]; got != 1 {
+		t.Fatalf("checkpoint must not advance past failed event: want 1, got %d", got)
+	}
+	if !strings.Contains(buf.String(), "projection failed") {
+		t.Errorf("expected async failure to be logged, got: %s", buf.String())
+	}
+}
+
+func TestProjectionService_MaxRetriesSemantics(t *testing.T) {
+	// A projector that fails failTimes then succeeds.
+	newProj := func(failTimes int) *flakyProjector { return &flakyProjector{failTimes: failTimes} }
+
+	// MaxRetries=0 -> 1 attempt: a single failure is not retried.
+	svc := NewProjectionService(&mockEventStore{}, ProjectionOptions{MaxRetries: 0})
+	p := newProj(1)
+	svc.RegisterProjector(p)
+	err := svc.ProcessEvent(context.Background(), eventstore.Event{GlobalPosition: 1})
+	if err == nil {
+		t.Fatal("MaxRetries=0 should give a single attempt and surface the failure")
+	}
+	if p.attempts != 1 {
+		t.Fatalf("MaxRetries=0: expected 1 attempt, got %d", p.attempts)
+	}
+	if !strings.Contains(err.Error(), "1 attempts") {
+		t.Errorf("error should report attempt count, got: %v", err)
+	}
+
+	// MaxRetries=2 -> 3 attempts: succeeds after 2 failures.
+	svc2 := NewProjectionService(&mockEventStore{}, ProjectionOptions{MaxRetries: 2})
+	p2 := newProj(2)
+	svc2.RegisterProjector(p2)
+	if err := svc2.ProcessEvent(context.Background(), eventstore.Event{GlobalPosition: 1}); err != nil {
+		t.Fatalf("MaxRetries=2 should retry twice and succeed, got: %v", err)
+	}
+	if p2.attempts != 3 {
+		t.Fatalf("MaxRetries=2: expected 3 attempts, got %d", p2.attempts)
+	}
+}
+
+type flakyProjector struct {
+	failTimes int
+	attempts  int
+}
+
+func (p *flakyProjector) Project(_ context.Context, _ eventstore.Event) error {
+	p.attempts++
+	if p.attempts <= p.failTimes {
+		return fmt.Errorf("attempt %d fails", p.attempts)
+	}
+	return nil
+}
+func (p *flakyProjector) Rebuild(_ context.Context, _ time.Time) error { return nil }
+
 func TestProjectionService_NoLogger_NoPanic(t *testing.T) {
 	projErr := fmt.Errorf("projector error")
 	es := &mockEventStore{
