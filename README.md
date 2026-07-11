@@ -70,7 +70,10 @@ func main() {
 
     // Create a Price and Contract
     price := shared.NewMoney(new(big.Rat).SetInt64(3000), shared.CurrencyJPY)
-    pe := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
+    pe, err := pricing.NewPrice(shared.NewProductID(), price, shared.CurrencyJPY, pricing.BillingCycleMonthly, nil, clock.Now())
+    if err != nil {
+        panic(err)
+    }
     priceRepo.Save(ctx, pe)
 
     cID := shared.NewContractID()
@@ -170,7 +173,7 @@ Full documentation is available at **[contract-to-cash.github.io/core](https://c
 ## Stability
 
 This project is **pre-v1.0**. Tagged releases start at
-[v0.1.0](https://github.com/contract-to-cash/core/releases) — pin a release tag rather
+[v0.2.0](https://github.com/contract-to-cash/core/releases) (the first curated release) — pin a release tag rather
 than a `main` pseudo-version. The API may change as we approach v1.0.
 
 - **Versioning** follows [Semantic Versioning](https://semver.org/). The plugin-API

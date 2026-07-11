@@ -8,12 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
-## [0.1.0] - 2026-07-11
+## [0.2.0] - 2026-07-11
 
-First tagged release. Everything below was previously accumulated under
+First curated release. Everything below was previously accumulated under
 [Unreleased]; consumers pinning pseudo-versions of `main` should move to this
 tag. Pre-v1.0: minor versions may contain breaking changes, each marked
 **BREAKING** in its entry.
+
+(Note: a `v0.1.0` tag exists from the 2026-07-03 introduction of the release
+workflow itself (PR #127); it predates this changelog's curation and carries
+no release notes. `v0.2.0` is the first release with tracked contents.)
 
 ### Docs
 
