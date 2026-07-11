@@ -217,6 +217,10 @@ func (p *loyaltyDiscountPlugin) CalculateDiscount(ctx *plugin.CalculationContext
 
 type inMemoryCouponRepo struct {
 	coupons []*coupon.Coupon
+	// redemptions is keyed by Redemption.IdempotencyKey() so that a retry /
+	// regeneration for the same (coupon, contract, billing period) confirms a
+	// single use (issue #185). Usage is reconciled from these rows.
+	redemptions map[string]*coupon.Redemption
 }
 
 func newInMemoryCouponRepo(clock shared.Clock) *inMemoryCouponRepo {
@@ -233,7 +237,10 @@ func newInMemoryCouponRepo(clock shared.Clock) *inMemoryCouponRepo {
 		&limit, 0, // usage limit 100, used 0
 		nil,
 	)
-	return &inMemoryCouponRepo{coupons: []*coupon.Coupon{c}}
+	return &inMemoryCouponRepo{
+		coupons:     []*coupon.Coupon{c},
+		redemptions: make(map[string]*coupon.Redemption),
+	}
 }
 
 func (r *inMemoryCouponRepo) FindByCode(_ context.Context, code string) (*coupon.Coupon, error) {
@@ -251,22 +258,32 @@ func (r *inMemoryCouponRepo) FindApplicable(_ context.Context, _ coupon.CouponQu
 
 func (r *inMemoryCouponRepo) Save(_ context.Context, _ *coupon.Coupon) error { return nil }
 
-func (r *inMemoryCouponRepo) RecordUsage(_ context.Context, _ coupon.CouponID, _ shared.ContractID) error {
-	fmt.Println("  >> [Coupon] Usage recorded for coupon SAVE10")
+// SaveRedemption idempotently confirms a redemption keyed by
+// (coupon, contract, billing period). A second confirmation of the same key is a
+// no-op, so billing retries / regenerations consume exactly one use (issue #185).
+func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, redemption *coupon.Redemption) error {
+	key := redemption.IdempotencyKey()
+	if _, exists := r.redemptions[key]; exists {
+		fmt.Println("  >> [Coupon] Redemption already confirmed for this period (idempotent no-op)")
+		return nil
+	}
+	r.redemptions[key] = redemption
+	fmt.Println("  >> [Coupon] Redemption confirmed for coupon SAVE10")
 	return nil
 }
 
-func (r *inMemoryCouponRepo) FindUsageByAccount(_ context.Context, _ coupon.CouponID, _ shared.AccountID) (int, error) {
-	return 0, nil
-}
-
-func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, _ *coupon.Redemption) error {
-	fmt.Println("  >> [Coupon] Redemption recorded")
-	return nil
-}
-
-func (r *inMemoryCouponRepo) FindRedemptions(_ context.Context, _ coupon.CouponID, _ *shared.AccountID) ([]*coupon.Redemption, error) {
-	return nil, nil
+func (r *inMemoryCouponRepo) FindRedemptions(_ context.Context, couponID coupon.CouponID, accountID *shared.AccountID) ([]*coupon.Redemption, error) {
+	var result []*coupon.Redemption
+	for _, rd := range r.redemptions {
+		if rd.CouponID() != couponID {
+			continue
+		}
+		if accountID != nil && rd.AccountID() != *accountID {
+			continue
+		}
+		result = append(result, rd)
+	}
+	return result, nil
 }
 
 // ── Helpers ──

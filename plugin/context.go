@@ -21,6 +21,7 @@ type CalculationContext struct {
 	contract              *contract.ContractAggregate
 	invoice               *invoice.Invoice
 	productID             shared.ProductID
+	billingPeriod         shared.DateRange
 	subtotal              shared.Money
 	subtotalAfterDiscount shared.Money
 	appliedDiscounts      []AppliedDiscount
@@ -99,6 +100,18 @@ func (cc *CalculationContext) ProductID() shared.ProductID { return cc.productID
 
 // SetProductID sets the product ID on the context.
 func (cc *CalculationContext) SetProductID(id shared.ProductID) { cc.productID = id }
+
+// BillingPeriod returns the billing period this invoice is being generated for.
+//
+// The core sets it before any calculation hook runs, so DiscountHook plugins can
+// read it (e.g. to key an idempotent coupon redemption by billing period). It is
+// the same period carried on the resulting invoice (Invoice.BillingPeriod()). It
+// may be the zero DateRange when a CalculationContext is constructed outside the
+// billing pipeline (e.g. in a standalone unit test).
+func (cc *CalculationContext) BillingPeriod() shared.DateRange { return cc.billingPeriod }
+
+// SetBillingPeriod sets the billing period on the context (called by the core).
+func (cc *CalculationContext) SetBillingPeriod(p shared.DateRange) { cc.billingPeriod = p }
 
 // Context provides a generic context for non-calculation hooks.
 //

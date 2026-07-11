@@ -526,6 +526,12 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 	currency := subtotal.Currency()
 	calcCtx := plugin.NewCalculationContext(ctx, agg, shared.Zero(currency))
 
+	// Expose the billing period to calculation hooks so plugins can key
+	// period-scoped side effects idempotently (e.g. coupon redemptions keyed by
+	// (coupon, contract, period) so a retry / RegenerateInvoice for the same
+	// period does not double-consume a use — issue #185).
+	calcCtx.SetBillingPeriod(input.period)
+
 	// Resolve ProductID from PriceID for plugin context (e.g. coupon applicability)
 	if priceID := agg.PriceID(); priceID != "" {
 		priceEntity, priceErr := s.priceRepo.FindByID(ctx, priceID)

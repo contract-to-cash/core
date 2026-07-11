@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/plugin"
 )
@@ -22,8 +23,19 @@ type CouponPlugin struct {
 	clock    shared.Clock
 }
 
-// Compile-time interface check.
-var _ plugin.DiscountHook = (*CouponPlugin)(nil)
+// Compile-time interface checks.
+//
+// The plugin implements DiscountHook (compute the discount) AND
+// InvoiceLifecycleHook (confirm the redemption in AfterCalculation, inside the
+// billing transaction, after the invoice is created). Splitting "compute" from
+// "confirm" is what fixes issue #185: CalculateDiscount has NO persistence side
+// effects, so a rolled-back pipeline never burns a coupon use, and the
+// idempotent redemption keyed by (coupon, contract, period) makes retries and
+// RegenerateInvoice for the same period consume exactly one use.
+var (
+	_ plugin.DiscountHook         = (*CouponPlugin)(nil)
+	_ plugin.InvoiceLifecycleHook = (*CouponPlugin)(nil)
+)
 
 // NewCouponPlugin creates a new CouponPlugin with the given repository and clock.
 func NewCouponPlugin(repo CouponRepository, clock shared.Clock) *CouponPlugin {
@@ -42,7 +54,7 @@ func NewCouponPlugin(repo CouponRepository, clock shared.Clock) *CouponPlugin {
 func (p *CouponPlugin) Name() string { return "coupon" }
 
 // Version returns the plugin version.
-func (p *CouponPlugin) Version() string { return "1.1.0" }
+func (p *CouponPlugin) Version() string { return "1.2.0" }
 
 // Priority returns the execution priority.
 func (p *CouponPlugin) Priority() int { return p.priority }
@@ -71,6 +83,14 @@ func (p *CouponPlugin) Initialize(_ context.Context, config plugin.Config) error
 func (p *CouponPlugin) Shutdown(_ context.Context) error { return nil }
 
 // CalculateDiscount calculates the total discount from applicable coupons.
+//
+// This method has NO persistence side effects (issue #185): it only reads
+// (applicable coupons, existing redemptions for usage limits) and records the
+// applied discounts on the CalculationContext. Redemptions are confirmed later,
+// idempotently, in AfterCalculation — which runs inside the billing transaction
+// after the invoice has been created. Because nothing is written here, a
+// pipeline that rolls back after this hook (e.g. a failed invoice save) never
+// consumes a coupon use.
 func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared.Money, error) {
 	currency := ctx.Subtotal().Currency()
 	zero := shared.Zero(currency)
@@ -179,11 +199,30 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 			}
 		}
 
-		// Check per-account usage limit
-		if c.perAccountUsageLimit != nil && accountID != "" {
-			used, err := p.repo.FindUsageByAccount(ctx.Context(), c.id, accountID)
+		// Usage limits are reconciled from redemption rows (issue #185), NOT from
+		// a side-channel counter. Both the global and per-account checks EXCLUDE
+		// the current (contract, billing period): the redemption this billing run
+		// is about to (re)confirm is the same logical use, so a retry after a
+		// rolled-back invoice — whose redemption is already persisted — must not
+		// count itself out of its own limit.
+
+		// Global usage limit: baseline UsedCount() (e.g. migrated historical
+		// usage) plus distinct redemptions since, excluding the current use.
+		if c.usageLimit != nil {
+			globalUsed, err := p.countRedemptions(ctx.Context(), c.id, nil, ctx.ContractID(), ctx.BillingPeriod())
 			if err != nil {
-				return zero, fmt.Errorf("coupon: find account usage: %w", err)
+				return zero, fmt.Errorf("coupon: count redemptions: %w", err)
+			}
+			if c.usedCount+globalUsed >= *c.usageLimit {
+				continue
+			}
+		}
+
+		// Per-account usage limit.
+		if c.perAccountUsageLimit != nil && accountID != "" {
+			used, err := p.countRedemptions(ctx.Context(), c.id, &accountID, ctx.ContractID(), ctx.BillingPeriod())
+			if err != nil {
+				return zero, fmt.Errorf("coupon: count account redemptions: %w", err)
 			}
 			if used >= *c.perAccountUsageLimit {
 				continue
@@ -212,28 +251,10 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		// applied limit ("first valid wins" when stacking is disabled).
 		applied++
 
-		// 6. Record redemption first (audit trail), then usage counter.
-		// This ordering is intentional: if redemption save fails, usage count
-		// is not incremented, avoiding phantom usage without an audit record.
-		redemption := NewRedemption(
-			RedemptionID(shared.GenerateID()),
-			c.id,
-			c.Code(),
-			c.codeType,
-			accountID,
-			ctx.ContractID(),
-			now,
-		)
-		if err := p.repo.SaveRedemption(ctx.Context(), redemption); err != nil {
-			return zero, fmt.Errorf("coupon: save redemption: %w", err)
-		}
-
-		// 7. Record usage (increment global counter)
-		if err := p.repo.RecordUsage(ctx.Context(), c.id, ctx.ContractID()); err != nil {
-			return zero, fmt.Errorf("coupon: record usage: %w", err)
-		}
-
-		// 8. Record discount in calculation context
+		// Record the applied discount on the context. The redemption is NOT
+		// written here — it is confirmed idempotently in AfterCalculation, inside
+		// the billing transaction, once the invoice (and thus the billing period
+		// the redemption is keyed by) exists (issue #185).
 		ctx.RecordDiscount(plugin.AppliedDiscount{
 			PluginName: p.Name(),
 			Code:       c.Code(),
@@ -259,4 +280,89 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 	}
 
 	return total, nil
+}
+
+// countRedemptions counts confirmed redemptions of a coupon (optionally filtered
+// to a single account) EXCLUDING the in-flight (contract, billing period) the
+// current billing run is about to (re)confirm. Excluding the current use makes
+// usage-limit enforcement retry-safe: a retry after a rolled-back invoice — whose
+// redemption is already persisted (the plugin's repository is not part of the
+// billing transaction) — does not count itself out of its own limit (issue #185).
+func (p *CouponPlugin) countRedemptions(
+	ctx context.Context,
+	couponID CouponID,
+	accountID *shared.AccountID,
+	excludeContractID shared.ContractID,
+	excludePeriod shared.DateRange,
+) (int, error) {
+	redemptions, err := p.repo.FindRedemptions(ctx, couponID, accountID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, r := range redemptions {
+		if r.ContractID() == excludeContractID && r.BillingPeriod().Equals(excludePeriod) {
+			continue
+		}
+		count++
+	}
+	return count, nil
+}
+
+// BeforeCalculation is a no-op for the coupon plugin; coupons only act during
+// discount calculation and redemption confirmation. It exists to satisfy
+// plugin.InvoiceLifecycleHook (issue #185).
+func (p *CouponPlugin) BeforeCalculation(_ *plugin.CalculationContext) error { return nil }
+
+// AfterCalculation idempotently confirms a redemption for every coupon this
+// plugin applied during CalculateDiscount.
+//
+// This runs inside the billing transaction, AFTER the invoice has been created
+// (so the billing period and invoice ID the redemption is keyed by are known)
+// and BEFORE the invoice is saved. Combined with SaveRedemption's idempotency on
+// (coupon, contract, billing period), this yields the issue #185 invariants:
+//
+//   - Pipeline failure does not permanently consume a use: if the invoice save
+//     fails and the transaction rolls back, a retry re-confirms the SAME key and
+//     reuses the redemption rather than adding a second one.
+//   - Retry / RegenerateInvoice for the same period consumes exactly one use.
+//   - Concurrent confirmations of the same key collapse to one redemption
+//     (repository idempotency contract).
+//
+// A confirmation error is returned (fatal) so the invoice rolls back rather than
+// being persisted without its coupon use recorded.
+func (p *CouponPlugin) AfterCalculation(ctx *plugin.CalculationContext, inv *invoice.Invoice) error {
+	if inv == nil {
+		return nil
+	}
+	for _, d := range ctx.AppliedDiscounts() {
+		if d.PluginName != p.Name() {
+			continue
+		}
+		c, err := p.repo.FindByCode(ctx.Context(), d.Code)
+		if err != nil {
+			return fmt.Errorf("coupon: resolve coupon %q for redemption: %w", d.Code, err)
+		}
+		if c == nil {
+			// The coupon vanished between calculation and confirmation. The
+			// discount already applied to this invoice; there is nothing to
+			// record. Skip rather than fail the computed invoice.
+			continue
+		}
+		redemption := NewRedemption(
+			RedemptionID(shared.GenerateID()),
+			c.ID(),
+			c.Code(),
+			c.CodeType(),
+			inv.AccountID(),
+			inv.ContractID(),
+			inv.BillingPeriod(),
+			inv.ID(),
+			p.clock.Now(),
+		)
+		if err := p.repo.SaveRedemption(ctx.Context(), redemption); err != nil {
+			return fmt.Errorf("coupon: confirm redemption for %q: %w", d.Code, err)
+		}
+	}
+	return nil
 }

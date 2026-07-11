@@ -1132,19 +1132,21 @@ func handleGatewaySucceed(env *testEnv) http.HandlerFunc {
 // --- Coupon plugin registration ---
 
 // inMemoryCouponRepo implements couponplugin.CouponRepository for E2E tests.
+//
+// Usage is reconciled from redemption rows (issue #185); there is no separate
+// usage counter. Redemptions are deduplicated on Redemption.IdempotencyKey()
+// so retries / regenerations for the same (coupon, contract, period) confirm a
+// single use.
 type inMemoryCouponRepo struct {
-	mu           sync.RWMutex
-	coupons      map[couponplugin.CouponID]*couponplugin.Coupon
-	usage        map[string]int // "couponID:contractID" -> count
-	accountUsage map[string]int // "couponID:accountID" -> count
-	redemptions  []*couponplugin.Redemption
+	mu          sync.RWMutex
+	coupons     map[couponplugin.CouponID]*couponplugin.Coupon
+	redemptions map[string]*couponplugin.Redemption // IdempotencyKey -> redemption
 }
 
 func newInMemoryCouponRepo() *inMemoryCouponRepo {
 	return &inMemoryCouponRepo{
-		coupons:      make(map[couponplugin.CouponID]*couponplugin.Coupon),
-		usage:        make(map[string]int),
-		accountUsage: make(map[string]int),
+		coupons:     make(map[couponplugin.CouponID]*couponplugin.Coupon),
+		redemptions: make(map[string]*couponplugin.Redemption),
 	}
 }
 
@@ -1178,28 +1180,16 @@ func (r *inMemoryCouponRepo) Save(_ context.Context, c *couponplugin.Coupon) err
 	return nil
 }
 
-func (r *inMemoryCouponRepo) RecordUsage(_ context.Context, couponID couponplugin.CouponID, contractID shared.ContractID) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	key := string(couponID) + ":" + string(contractID)
-	r.usage[key]++
-	return nil
-}
-
-func (r *inMemoryCouponRepo) FindUsageByAccount(_ context.Context, couponID couponplugin.CouponID, accountID shared.AccountID) (int, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	key := string(couponID) + ":" + string(accountID)
-	return r.accountUsage[key], nil
-}
-
+// SaveRedemption idempotently confirms a redemption keyed by
+// (coupon, contract, billing period) — a duplicate key is a no-op (issue #185).
 func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, redemption *couponplugin.Redemption) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.redemptions = append(r.redemptions, redemption)
-	// Also increment account usage
-	key := string(redemption.CouponID()) + ":" + string(redemption.AccountID())
-	r.accountUsage[key]++
+	key := redemption.IdempotencyKey()
+	if _, exists := r.redemptions[key]; exists {
+		return nil
+	}
+	r.redemptions[key] = redemption
 	return nil
 }
 
