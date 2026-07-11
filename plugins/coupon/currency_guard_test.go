@@ -67,8 +67,8 @@ func TestCouponPlugin_ForeignMaxDiscountPropagatesError(t *testing.T) {
 	if _, err := p.CalculateDiscount(ctx); err == nil {
 		t.Fatal("expected error to propagate from foreign maxDiscount, got nil")
 	}
-	if repo.recordUsageCalled != 0 {
-		t.Errorf("expected no usage recorded on error, got %d", repo.recordUsageCalled)
+	if repo.saveRedemptionCall != 0 {
+		t.Errorf("expected no redemption recorded on error, got %d", repo.saveRedemptionCall)
 	}
 }
 
@@ -92,8 +92,8 @@ func TestCouponPlugin_SkipsCouponWithForeignMinAmount(t *testing.T) {
 	if !discount.IsZero() {
 		t.Errorf("expected zero discount (coupon skipped), got %s", discount.Amount().RatString())
 	}
-	if repo.recordUsageCalled != 0 {
-		t.Errorf("expected no usage recorded for skipped coupon, got %d", repo.recordUsageCalled)
+	if repo.saveRedemptionCall != 0 {
+		t.Errorf("expected no redemption recorded for skipped coupon, got %d", repo.saveRedemptionCall)
 	}
 }
 

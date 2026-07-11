@@ -35,18 +35,34 @@ const (
 // RedemptionID uniquely identifies a coupon redemption.
 type RedemptionID string
 
-// Redemption tracks the usage of a specific coupon code by an account.
+// Redemption tracks the usage of a specific coupon code by an account for a
+// single billing period.
+//
+// Idempotency key (issue #185): (couponID, contractID, billingPeriod) uniquely
+// identifies a redemption. A coupon confirmed for a contract's billing period
+// must produce exactly one redemption regardless of how many times the billing
+// pipeline runs for that period (retry after a rolled-back invoice save, or
+// RegenerateInvoice for a void-and-recreate). CouponRepository.SaveRedemption
+// deduplicates on this key; usage counts are reconciled from redemption rows
+// (there is no separate usage counter), so a superseded/abandoned redemption
+// naturally counts as the single use it represents.
 type Redemption struct {
-	id         RedemptionID
-	couponID   CouponID
-	code       string
-	codeType   CodeType
-	accountID  shared.AccountID
-	contractID shared.ContractID
-	redeemedAt time.Time
+	id            RedemptionID
+	couponID      CouponID
+	code          string
+	codeType      CodeType
+	accountID     shared.AccountID
+	contractID    shared.ContractID
+	billingPeriod shared.DateRange
+	invoiceID     shared.InvoiceID
+	redeemedAt    time.Time
 }
 
 // NewRedemption creates a new Redemption.
+//
+// billingPeriod and invoiceID identify the invoice this redemption was confirmed
+// for. (couponID, contractID, billingPeriod) is the idempotency key repositories
+// deduplicate on — see the Redemption doc comment and issue #185.
 func NewRedemption(
 	id RedemptionID,
 	couponID CouponID,
@@ -54,17 +70,29 @@ func NewRedemption(
 	codeType CodeType,
 	accountID shared.AccountID,
 	contractID shared.ContractID,
+	billingPeriod shared.DateRange,
+	invoiceID shared.InvoiceID,
 	redeemedAt time.Time,
 ) *Redemption {
 	return &Redemption{
-		id:         id,
-		couponID:   couponID,
-		code:       code,
-		codeType:   codeType,
-		accountID:  accountID,
-		contractID: contractID,
-		redeemedAt: redeemedAt,
+		id:            id,
+		couponID:      couponID,
+		code:          code,
+		codeType:      codeType,
+		accountID:     accountID,
+		contractID:    contractID,
+		billingPeriod: billingPeriod,
+		invoiceID:     invoiceID,
+		redeemedAt:    redeemedAt,
 	}
+}
+
+// IdempotencyKey returns the (couponID, contractID, billingPeriod) tuple that
+// uniquely identifies this redemption. Repositories use it to deduplicate
+// SaveRedemption so retries / regenerations for the same period converge on a
+// single use (issue #185).
+func (r *Redemption) IdempotencyKey() string {
+	return string(r.couponID) + "|" + string(r.contractID) + "|" + r.billingPeriod.String()
 }
 
 // ID returns the redemption ID.
@@ -85,6 +113,12 @@ func (r *Redemption) AccountID() shared.AccountID { return r.accountID }
 // ContractID returns the contract the coupon was applied to.
 func (r *Redemption) ContractID() shared.ContractID { return r.contractID }
 
+// BillingPeriod returns the billing period this redemption was confirmed for.
+func (r *Redemption) BillingPeriod() shared.DateRange { return r.billingPeriod }
+
+// InvoiceID returns the invoice this redemption was confirmed for.
+func (r *Redemption) InvoiceID() shared.InvoiceID { return r.invoiceID }
+
 // RedeemedAt returns the time the coupon was redeemed.
 func (r *Redemption) RedeemedAt() time.Time { return r.redeemedAt }
 
@@ -101,7 +135,7 @@ type Coupon struct {
 	validFrom               time.Time
 	validUntil              time.Time
 	usageLimit              *int
-	usedCount               int
+	usedCount               int                     // MIGRATION BASELINE only — see UsedCount()
 	perAccountUsageLimit    *int                    // max uses per account (nil = unlimited)
 	applicableTo            []shared.ProductID      // applicable product IDs (empty = all products)
 	applicableContractTypes []contract.ContractType // applicable contract types (empty = all types)
@@ -204,7 +238,21 @@ func (c *Coupon) MaxDiscount() *shared.Money { return c.maxDiscount }
 // UsageLimit returns the global usage limit, or nil if unlimited.
 func (c *Coupon) UsageLimit() *int { return c.usageLimit }
 
-// UsedCount returns the current usage count.
+// UsedCount returns the coupon's usage-count MIGRATION BASELINE.
+//
+// Since issue #185, usedCount is strictly a baseline for uses that PREDATE
+// redemption rows (e.g. usage migrated from a system that only kept a counter).
+// The plugin NEVER increments it: every new use is recorded as an idempotent
+// Redemption row, and the global-limit check is
+// `usedCount + count(redemption rows) >= usageLimit`.
+//
+// A use must therefore be reflected in usedCount OR have a redemption row —
+// never both. The pre-#185 code wrote BOTH for every use, so deployments
+// upgrading with existing data would double-count each historical use and hit
+// the global limit early. Such deployments must run a one-time migration:
+// either reset usedCount to exclude uses that already have a redemption row,
+// or delete/exclude those historical rows. See the CHANGELOG upgrade note for
+// issue #185. Fresh deployments start at 0 and stay there.
 func (c *Coupon) UsedCount() int { return c.usedCount }
 
 // PerAccountUsageLimit returns the per-account usage limit, or nil if unlimited.

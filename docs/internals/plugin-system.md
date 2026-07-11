@@ -77,6 +77,7 @@ type CalculationContext struct {
     contract              *contract.ContractAggregate
     invoice               *invoice.Invoice
     productID             shared.ProductID       // 課金対象の Product ID（クーポン適用判定等に使用）
+    billingPeriod         shared.DateRange       // 請求対象期間（冪等なクーポン引換のキーに使用、#185）
     subtotal              shared.Money           // 基本料金（BeforeCalculation中はゼロ、後述）
     subtotalAfterDiscount shared.Money           // 割引後小計（TaxHookが参照）
     appliedDiscounts      []AppliedDiscount      // 適用された割引の記録
@@ -111,6 +112,12 @@ func (c *CalculationContext) AppliedDiscounts() []AppliedDiscount        { /* �
 
 // SetProductID コアが基本料金算出前に Price から解決して設定する
 func (c *CalculationContext) SetProductID(id shared.ProductID) { c.productID = id }
+
+// BillingPeriod / SetBillingPeriod 請求対象期間（生成される請求書の BillingPeriod と同一）。
+// コアが全計算フックの実行前に設定するため、DiscountHook から参照できる。
+// クーポンプラグインは (couponID, contractID, billingPeriod) を冪等な引換キーに使う（#185, §6.3）。
+func (c *CalculationContext) BillingPeriod() shared.DateRange     { return c.billingPeriod }
+func (c *CalculationContext) SetBillingPeriod(p shared.DateRange) { c.billingPeriod = p }
 
 // SetSubtotal コアが基本料金算出後に設定する
 func (c *CalculationContext) SetSubtotal(s shared.Money) { c.subtotal = s }
@@ -946,7 +953,7 @@ type Coupon struct {
     validFrom               time.Time
     validUntil              time.Time
     usageLimit              *int                    // グローバル使用回数制限
-    usedCount               int
+    usedCount               int                     // マイグレーションベースライン専用（§6.3、プラグインは加算しない）
     perAccountUsageLimit    *int                    // アカウントごとの使用回数上限（nil=無制限）
     applicableTo            []shared.ProductID      // 適用可能な Product ID（空なら全 Product）
     applicableContractTypes []contract.ContractType // 適用可能な契約タイプ（空なら全タイプ）
@@ -995,14 +1002,70 @@ func (c *Coupon) CalculateDiscount(subtotal shared.Money) (shared.Money, error) 
 // CouponRepository クーポンリポジトリ（実際のシグネチャは型付き ID を使う）
 type CouponRepository interface {
     FindByCode(ctx context.Context, code string) (*Coupon, error)
-    FindApplicable(ctx context.Context, contractID shared.ContractID, at time.Time) ([]*Coupon, error)
+    FindApplicable(ctx context.Context, query CouponQuery) ([]*Coupon, error)
     Save(ctx context.Context, coupon *Coupon) error
-    RecordUsage(ctx context.Context, couponID CouponID, contractID shared.ContractID) error
+    // SaveRedemption は (couponID, contractID, billingPeriod) で冪等（#185, §6.3）。
+    // 同一キーの2回目以降は no-op（重複行を作らず、使用回数も増やさない）。
+    SaveRedemption(ctx context.Context, redemption *Redemption) error
+    // FindRedemptions は使用回数の唯一の情報源。プラグインが redemption 行を数えて
+    // グローバル/アカウント別の使用上限を（進行中の (contract, period) を除外して）判定する。
+    FindRedemptions(ctx context.Context, couponID CouponID, accountID *shared.AccountID) ([]*Redemption, error)
 }
 ```
 
 > **注**: `CalculateDiscount` は「小計を超えない」clamp を行わない — 割引合計が subtotal を
 > 超えないガードは **コアの請求パイプライン**が担う（§5.1 手順3の割引上限ガード）。
+
+### 6.3 クーポン引換のトランザクション整合性（#185）
+
+**問題**: 引換（`Redemption`）の永続化と使用回数の加算を `CalculateDiscount`（＝**計算フック**、
+`tx.Run` の**前**に発火）の副作用として行うと、以下が壊れる。
+
+- **Burn（消し込み過ぎ）**: 割引フェーズで引換保存に成功 → tx 内の重複再チェックや
+  `Invoices.Save` が失敗してロールバック → 請求書も割引も無いのに単回クーポンが恒久的に消費される。
+- **二重引換**: `GenerateInvoice` のリトライ、または同一期間の `RegenerateInvoice` が
+  パイプラインを再実行 → 1 請求期間に対して引換行と使用回数が二重に加算される。
+  `usageLimit` 付きプロモが黙って枯渇し、`perAccountUsageLimit=1` は
+  **実際に成功するリトライで割引を拒否**してしまう。
+
+**設計**: 「計算」と「引換確定」を分離する。
+
+1. `CalculateDiscount` は**永続化の副作用を持たない**（計算して `ctx.RecordDiscount(...)` するだけ）。
+2. `CouponPlugin` は `InvoiceLifecycleHook` も実装し、`AfterCalculation`（**tx 内・請求書生成後・
+   保存前**に発火、§5.1 手順9）で引換を確定する。ここでは `invoice` から請求期間と請求書 ID を取得できる。
+3. 引換は **冪等**。キーは `(couponID, contractID, billingPeriod)`（`Redemption.IdempotencyKey()`）。
+   `SaveRedemption` は同一キーの2回目以降を no-op にする。
+4. 使用回数は redemption 行から**再構成**する（別カウンタを持たない）。グローバル/アカウント別の
+   上限判定は、**進行中の (contract, period)** を除外して redemption を数える（リトライ安全）。
+5. `Coupon.usedCount` は**マイグレーションベースライン専用**。redemption 行が存在する以前の
+   歴史的使用分（カウンタしか持たない旧システムからの移行等）だけを表し、
+   **プラグインは決してインクリメントしない**。グローバル上限判定は
+   `usedCount + count(redemption 行) >= usageLimit`。したがって1回の使用は
+   「usedCount に反映済み」**または**「redemption 行がある」の**どちらか一方**で
+   なければならない（両方だと二重カウント）。
+
+**保証される不変条件**:
+
+- **(i)** パイプライン失敗は使用回数を恒久消費しない（ロールバック後の引換はリトライが同一キーで再利用）。
+- **(ii)** 同一期間のリトライ / `RegenerateInvoice` はちょうど1回だけ消費する。
+- **(iii)** 同一キーの並行確定は1件の引換に収束する（リポジトリの冪等契約。DISTINCT キー同士の
+  グローバル上限 TOCTOU の完全なハードニングは #195 で別途対応）。
+
+> **リポジトリ実装の指針**: `SaveRedemption` は
+> `(coupon_id, contract_id, period_start, period_end)` の UNIQUE 制約 + upsert /
+> insert-or-ignore で冪等性と並行安全性を担保する。`AfterCalculation` からの引換確定エラーは
+> 致命（tx をロールバック）— 「請求書は保存されたのにクーポン使用が記録されない」状態を防ぐ。
+> 抽象的な発火順序・可観測性は §5.1 を参照。実装リファレンスは `plugins/coupon/plugin.go`。
+
+> **⚠️ アップグレード注意（#185 以前のデータ）**: 旧実装は1回の使用につき redemption 行の保存
+> （`SaveRedemption`）**と** `usedCount` の加算（`RecordUsage`）の**両方**を行っていた。
+> 既存データを持つデプロイメントがそのままアップグレードすると、歴史的使用が
+> ベースラインと行の両方で**二重カウント**され、グローバル上限に早く到達する
+> （例: 上限100・歴史的使用40のプロモは、新規20回で 40+40+20=100 に達してブロックされる）。
+> デプロイ前に一度だけ、**(a)** redemption 行が既にある使用分を `usedCount` から差し引く
+> （全使用が行を持つ場合は 0 にリセット）、**または (b)** `usedCount` に反映済みの歴史的
+> redemption 行を削除する（もしくは `FindRedemptions` の結果から除外する）こと。
+> 新規デプロイメント（既存 redemption データなし）は対応不要。
 
 ## 7. 税計算プラグイン実装例
 

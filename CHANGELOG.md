@@ -60,6 +60,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     snapshot gains `billing_anchor_day` (`schema_version` 3); legacy snapshots
     fall back to the current period's start day. Already-drifted historical
     contracts self-heal back to their anchor on the next renewal.
+- **Coupon redemption is no longer persisted outside the billing transaction
+  (#185)** — `coupon.CouponPlugin.CalculateDiscount` previously wrote a
+  `Redemption` and incremented a usage counter as side effects of the discount
+  *calculation* hook, which the billing pipeline fires BEFORE its `tx.Run`. A
+  pipeline that rolled back after that hook (e.g. a failed invoice save, or an
+  in-transaction duplicate re-check) permanently burned a single-use coupon, and
+  a retry or `RegenerateInvoice` for the same period double-redeemed it
+  (exhausting `usageLimit`-capped promos and denying `perAccountUsageLimit=1`
+  coupons on the retry that actually succeeded).
+  - `CalculateDiscount` now has **no persistence side effects**: it only computes
+    the discount and records it on the `CalculationContext`.
+  - `CouponPlugin` now also implements `plugin.InvoiceLifecycleHook`; the
+    redemption is confirmed in `AfterCalculation`, which runs inside the billing
+    transaction after the invoice is created. Redemptions are **idempotent**,
+    keyed by `(couponID, contractID, billingPeriod)` (`Redemption.IdempotencyKey()`),
+    so a rolled-back pipeline's redemption is reused by the retry instead of
+    burning an extra use, and a retry / regeneration for the same period consumes
+    exactly one use.
+  - Usage limits are now reconciled from redemption rows (there is no separate
+    usage counter). Both the global and per-account checks exclude the in-flight
+    `(contract, period)` so a retry is never denied by its own rolled-back
+    redemption.
+  - **BREAKING (pre-v1.0)**: `coupon.CouponRepository` changed. Removed
+    `RecordUsage` and `FindUsageByAccount`; `SaveRedemption` must now be
+    idempotent on `Redemption.IdempotencyKey()`; `NewRedemption` takes the
+    billing period and invoice ID. Redemption records gained `BillingPeriod()`,
+    `InvoiceID()`, and `IdempotencyKey()`.
+  - `plugin.CalculationContext` gained `BillingPeriod()` / `SetBillingPeriod()`
+    (additive); the billing pipeline sets it before any calculation hook runs.
+  - **Upgrade note — existing redemption data double-counts without a one-time
+    migration.** `Coupon.usedCount` is now strictly a **migration baseline**: it
+    covers only uses that predate redemption rows and is **never incremented by
+    the plugin**. The global-limit check is `usedCount + count(redemption rows)`.
+    The OLD code wrote BOTH a redemption row (`SaveRedemption`) AND incremented
+    the usage counter (`RecordUsage`) for every use, so on pre-existing data each
+    historical use is counted twice and coupons hit their global limit early —
+    e.g. a 100-use promo with 40 historical uses blocks after only 20 new uses
+    (40 baseline + 40 rows + 20 new = 100). Integrators upgrading with existing
+    redemption data must do ONE of the following before deploying:
+    - reset each coupon's `usedCount` baseline to exclude uses that already have
+      a redemption row (typically `usedCount -= count(redemption rows)`, i.e. 0
+      when every historical use produced a row), or
+    - delete — or exclude from `FindRedemptions` results — the historical
+      redemption rows that are already reflected in `usedCount`.
+    Fresh deployments (no pre-existing redemption data) need no action:
+    `usedCount` starts at 0 and stays there.
 
 ### Added
 

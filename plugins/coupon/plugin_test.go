@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/contract-to-cash/core/domain/contract"
+	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
@@ -15,24 +16,26 @@ import (
 )
 
 // mockCouponRepository is a test double for CouponRepository.
+//
+// Redemptions are stored by Redemption.IdempotencyKey() so SaveRedemption is
+// idempotent on (coupon, contract, billing period); usage is reconciled from
+// these rows (issue #185). saveRedemptionCall counts only NON-duplicate (i.e.
+// effective) confirmations.
 type mockCouponRepository struct {
 	coupons            []*Coupon
-	accountUsage       map[string]int // key: couponID:accountID
-	redemptions        []*Redemption
-	recordUsageCalled  int
+	redemptions        map[string]*Redemption // IdempotencyKey -> redemption
 	saveRedemptionCall int
 
 	// Error injection for testing error paths
-	findApplicableErr error
-	findUsageErr      error
-	recordUsageErr    error
-	saveRedemptionErr error
+	findApplicableErr  error
+	findRedemptionsErr error
+	saveRedemptionErr  error
 }
 
 func newMockRepo(coupons ...*Coupon) *mockCouponRepository {
 	return &mockCouponRepository{
-		coupons:      coupons,
-		accountUsage: make(map[string]int),
+		coupons:     coupons,
+		redemptions: make(map[string]*Redemption),
 	}
 }
 
@@ -56,43 +59,103 @@ func (m *mockCouponRepository) Save(_ context.Context, _ *Coupon) error {
 	return nil
 }
 
-func (m *mockCouponRepository) RecordUsage(_ context.Context, _ CouponID, _ shared.ContractID) error {
-	if m.recordUsageErr != nil {
-		return m.recordUsageErr
-	}
-	m.recordUsageCalled++
-	return nil
-}
-
-func (m *mockCouponRepository) FindUsageByAccount(_ context.Context, couponID CouponID, accountID shared.AccountID) (int, error) {
-	if m.findUsageErr != nil {
-		return 0, m.findUsageErr
-	}
-	key := string(couponID) + ":" + string(accountID)
-	return m.accountUsage[key], nil
-}
-
 func (m *mockCouponRepository) SaveRedemption(_ context.Context, r *Redemption) error {
 	if m.saveRedemptionErr != nil {
 		return m.saveRedemptionErr
 	}
+	key := r.IdempotencyKey()
+	if _, exists := m.redemptions[key]; exists {
+		return nil // idempotent no-op
+	}
+	m.redemptions[key] = r
 	m.saveRedemptionCall++
-	m.redemptions = append(m.redemptions, r)
 	return nil
 }
 
-func (m *mockCouponRepository) FindRedemptions(_ context.Context, _ CouponID, _ *shared.AccountID) ([]*Redemption, error) {
-	return m.redemptions, nil
+func (m *mockCouponRepository) FindRedemptions(_ context.Context, couponID CouponID, accountID *shared.AccountID) ([]*Redemption, error) {
+	if m.findRedemptionsErr != nil {
+		return nil, m.findRedemptionsErr
+	}
+	var result []*Redemption
+	for _, r := range m.redemptions {
+		if r.CouponID() != couponID {
+			continue
+		}
+		if accountID != nil && r.AccountID() != *accountID {
+			continue
+		}
+		result = append(result, r)
+	}
+	return result, nil
+}
+
+// allRedemptions returns every stored redemption (order unspecified).
+func (m *mockCouponRepository) allRedemptions() []*Redemption {
+	result := make([]*Redemption, 0, len(m.redemptions))
+	for _, r := range m.redemptions {
+		result = append(result, r)
+	}
+	return result
+}
+
+// seed pre-confirms a redemption, simulating prior committed usage.
+func (m *mockCouponRepository) seed(r *Redemption) {
+	m.redemptions[r.IdempotencyKey()] = r
 }
 
 var testClock = shared.FixedClock{FixedTime: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)}
 
+// testPeriod is the billing period used by unit-test calculation contexts.
+var testPeriod = mustDateRange(
+	time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+	time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+)
+
+func mustDateRange(start, end time.Time) shared.DateRange {
+	r, err := shared.NewDateRange(start, end)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func newTestContext(subtotal shared.Money) *plugin.CalculationContext {
-	return plugin.NewCalculationContext(context.Background(), nil, subtotal)
+	cc := plugin.NewCalculationContext(context.Background(), nil, subtotal)
+	cc.SetBillingPeriod(testPeriod)
+	return cc
 }
 
 func newTestContextWithContract(subtotal shared.Money, c *contract.ContractAggregate) *plugin.CalculationContext {
-	return plugin.NewCalculationContext(context.Background(), c, subtotal)
+	cc := plugin.NewCalculationContext(context.Background(), c, subtotal)
+	cc.SetBillingPeriod(testPeriod)
+	return cc
+}
+
+// confirmRedemptions drives AfterCalculation for a context whose discounts were
+// already computed by CalculateDiscount, building a minimal invoice for the given
+// account/contract and the context's billing period. It mirrors what the billing
+// pipeline does inside its transaction (issue #185).
+func confirmRedemptions(
+	t *testing.T,
+	p *CouponPlugin,
+	ctx *plugin.CalculationContext,
+	accountID shared.AccountID,
+	contractID shared.ContractID,
+) *invoice.Invoice {
+	t.Helper()
+	zero := shared.Zero(ctx.Subtotal().Currency())
+	inv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(), accountID, contractID,
+		ctx.Subtotal(), zero, zero,
+		invoice.WithBillingPeriod(ctx.BillingPeriod()),
+	)
+	if err != nil {
+		t.Fatalf("build test invoice: %v", err)
+	}
+	if err := p.AfterCalculation(ctx, inv); err != nil {
+		t.Fatalf("AfterCalculation: %v", err)
+	}
+	return inv
 }
 
 func newTestCoupon(id CouponID, code string, ct CouponType, value *big.Rat, applicableTo []shared.ProductID) *Coupon {
@@ -300,7 +363,9 @@ func TestCouponPlugin_NoStacking_InvalidFirstValidSecond(t *testing.T) {
 	if discounts[0].Code != "SAVE20" {
 		t.Errorf("expected valid coupon SAVE20 to be applied, got %s", discounts[0].Code)
 	}
-	// The expired coupon must not have produced a redemption.
+	// The expired coupon must not have produced a redemption: confirming only
+	// yields the single valid coupon's redemption.
+	confirmRedemptions(t, p, ctx, "", "")
 	if repo.saveRedemptionCall != 1 {
 		t.Errorf("expected exactly 1 redemption (valid coupon only), got %d", repo.saveRedemptionCall)
 	}
@@ -490,7 +555,12 @@ func TestCouponPlugin_PerAccountUsageLimit(t *testing.T) {
 	coupon := newTestCoupon("c1", "ONCE10", CouponTypePercentage, big.NewRat(10, 100), nil)
 	coupon.WithPerAccountUsageLimit(1)
 	repo := newMockRepo(coupon)
-	repo.accountUsage["c1:acc-1"] = 1 // already used once
+	// Prior committed redemption by the SAME account on a DIFFERENT contract —
+	// counts toward the per-account limit (it is not the in-flight use).
+	repo.seed(NewRedemption(
+		"r-prior", "c1", "ONCE10", CodeTypeShared,
+		"acc-1", "other-contract", testPeriod, "inv-prior", testClock.Now(),
+	))
 	p := NewCouponPlugin(repo, testClock)
 
 	agg := createTestAggregate(t, "acc-1")
@@ -521,13 +591,22 @@ func TestCouponPlugin_RedemptionRecorded(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	// CalculateDiscount must NOT persist anything (issue #185): the redemption is
+	// confirmed only in AfterCalculation, inside the billing transaction.
+	if repo.saveRedemptionCall != 0 {
+		t.Fatalf("CalculateDiscount must not save redemptions, got %d", repo.saveRedemptionCall)
+	}
+
+	confirmRedemptions(t, p, ctx, agg.AccountID(), agg.ContractID())
+
 	if repo.saveRedemptionCall != 1 {
 		t.Errorf("expected 1 redemption saved, got %d", repo.saveRedemptionCall)
 	}
-	if len(repo.redemptions) != 1 {
-		t.Fatalf("expected 1 redemption, got %d", len(repo.redemptions))
+	reds := repo.allRedemptions()
+	if len(reds) != 1 {
+		t.Fatalf("expected 1 redemption, got %d", len(reds))
 	}
-	r := repo.redemptions[0]
+	r := reds[0]
 	if r.CouponID() != "c1" {
 		t.Errorf("expected coupon ID c1, got %s", r.CouponID())
 	}
@@ -539,6 +618,9 @@ func TestCouponPlugin_RedemptionRecorded(t *testing.T) {
 	}
 	if r.CodeType() != CodeTypeShared {
 		t.Errorf("expected code type shared, got %s", r.CodeType())
+	}
+	if !r.BillingPeriod().Equals(testPeriod) {
+		t.Errorf("expected redemption keyed by billing period %s, got %s", testPeriod, r.BillingPeriod())
 	}
 }
 
@@ -601,15 +683,17 @@ func TestCouponPlugin_UniqueCodeType(t *testing.T) {
 		t.Errorf("expected discount 1000, got %s", discount.Amount().RatString())
 	}
 
-	// Verify redemption was saved with the unique code
-	if len(repo.redemptions) != 1 {
-		t.Fatalf("expected 1 redemption, got %d", len(repo.redemptions))
+	// Verify redemption was confirmed with the unique code (in AfterCalculation).
+	confirmRedemptions(t, p, ctx, agg.AccountID(), agg.ContractID())
+	reds := repo.allRedemptions()
+	if len(reds) != 1 {
+		t.Fatalf("expected 1 redemption, got %d", len(reds))
 	}
-	if repo.redemptions[0].Code() != "UNIQUE-ABC123" {
-		t.Errorf("expected unique code in redemption, got %s", repo.redemptions[0].Code())
+	if reds[0].Code() != "UNIQUE-ABC123" {
+		t.Errorf("expected unique code in redemption, got %s", reds[0].Code())
 	}
-	if repo.redemptions[0].CodeType() != CodeTypeUnique {
-		t.Errorf("expected code type unique in redemption, got %s", repo.redemptions[0].CodeType())
+	if reds[0].CodeType() != CodeTypeUnique {
+		t.Errorf("expected code type unique in redemption, got %s", reds[0].CodeType())
 	}
 }
 
@@ -734,7 +818,11 @@ func TestCouponPlugin_FindApplicableError(t *testing.T) {
 	}
 }
 
-func TestCouponPlugin_SaveRedemptionError_NoUsageRecorded(t *testing.T) {
+// TestCouponPlugin_CalculateDiscountHasNoWriteSideEffects verifies the core of
+// issue #185: CalculateDiscount computes and records the discount but performs no
+// persistence — even when the repository's SaveRedemption would fail, discount
+// calculation succeeds and nothing is written.
+func TestCouponPlugin_CalculateDiscountHasNoWriteSideEffects(t *testing.T) {
 	coupon := newTestCoupon("c1", "SAVE10", CouponTypePercentage, big.NewRat(10, 100), nil)
 	repo := newMockRepo(coupon)
 	repo.saveRedemptionErr = fmt.Errorf("redemption save failed")
@@ -743,14 +831,46 @@ func TestCouponPlugin_SaveRedemptionError_NoUsageRecorded(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContext(subtotal)
 
-	_, err := p.CalculateDiscount(ctx)
-	if err == nil {
-		t.Fatal("expected error from SaveRedemption, got nil")
+	discount, err := p.CalculateDiscount(ctx)
+	if err != nil {
+		t.Fatalf("CalculateDiscount must not touch the repository, got error: %v", err)
+	}
+	if discount.Amount().Cmp(big.NewRat(1000, 1)) != 0 {
+		t.Errorf("expected discount 1000, got %s", discount.Amount().RatString())
+	}
+	if repo.saveRedemptionCall != 0 {
+		t.Errorf("expected no redemptions written during calculation, got %d", repo.saveRedemptionCall)
+	}
+}
+
+// TestCouponPlugin_AfterCalculationSurfacesSaveError verifies that a redemption
+// confirmation failure in AfterCalculation is returned (fatal) so the billing
+// transaction rolls back rather than persisting an invoice without recording the
+// coupon use.
+func TestCouponPlugin_AfterCalculationSurfacesSaveError(t *testing.T) {
+	coupon := newTestCoupon("c1", "SAVE10", CouponTypePercentage, big.NewRat(10, 100), nil)
+	repo := newMockRepo(coupon)
+	p := NewCouponPlugin(repo, testClock)
+
+	agg := createTestAggregate(t, "acc-1")
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := newTestContextWithContract(subtotal, agg)
+
+	if _, err := p.CalculateDiscount(ctx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Usage should NOT have been recorded since redemption failed first
-	if repo.recordUsageCalled != 0 {
-		t.Errorf("expected 0 usage recordings when redemption fails, got %d", repo.recordUsageCalled)
+	repo.saveRedemptionErr = fmt.Errorf("redemption save failed")
+	inv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		subtotal, shared.Zero(shared.CurrencyJPY), shared.Zero(shared.CurrencyJPY),
+		invoice.WithBillingPeriod(ctx.BillingPeriod()),
+	)
+	if err != nil {
+		t.Fatalf("build invoice: %v", err)
+	}
+	if err := p.AfterCalculation(ctx, inv); err == nil {
+		t.Fatal("expected AfterCalculation to surface SaveRedemption error, got nil")
 	}
 }
 
