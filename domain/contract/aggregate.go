@@ -267,6 +267,7 @@ func (a *ContractAggregate) Suspend(config SuspensionConfiguration, metadata eve
 		SuspendedAt:     a.Clock().Now(),
 		BillingBehavior: config.BillingBehavior,
 		ResumeDate:      config.ResumeDate,
+		ExtendContract:  config.ExtendContract,
 		Reason:          config.Reason,
 	}
 
@@ -662,18 +663,44 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 
 	case *ContractSuspendedEvent:
 		a.status = ContractStatusSuspended
+		// Reconstruct the FULL SuspensionConfiguration from the event. Earlier
+		// this dropped SuspendedAt and ExtendContract (issue #194), so a
+		// suspension configured with ExtendContract=true replayed as false and
+		// SuspendedAt replayed as the zero time. Both are now carried on the
+		// event and restored here, so live mutation and replay agree.
+		//
 		// Build the value form first (so cloneValue's deep-copy of ResumeDate
 		// runs once, no extra construct-then-clone indirection) and take the
 		// address of the resulting independent copy.
 		cfg := SuspensionConfiguration{
+			SuspendedAt:     e.SuspendedAt,
 			BillingBehavior: e.BillingBehavior,
 			ResumeDate:      e.ResumeDate,
+			ExtendContract:  e.ExtendContract,
 			Reason:          e.Reason,
 		}.cloneValue()
 		a.suspensionConfig = &cfg
 		a.updatedAt = e.SuspendedAt
 
 	case *ContractResumedEvent:
+		// Honor ExtendContract (issue #194): when the suspension was configured
+		// to extend the contract, push the current billing period's end out by
+		// the suspension duration (resume time − suspended time). The suspension
+		// config is still present at this point — during replay it was set by
+		// the immediately-preceding ContractSuspendedEvent, and after a snapshot
+		// taken while suspended it is restored by LoadFromSnapshot — so both
+		// SuspendedAt and ExtendContract are available. The extension is thus
+		// reconstructed deterministically from event data (ResumedAt) plus
+		// replayed state, and ContractResumedEvent needs no extra field.
+		if sc := a.suspensionConfig; sc != nil && sc.ExtendContract && !a.currentPeriod.IsZero() {
+			if d := e.ResumedAt.Sub(sc.SuspendedAt); d > 0 {
+				extended, err := shared.NewDateRange(a.currentPeriod.Start(), a.currentPeriod.End().Add(d))
+				if err != nil {
+					return err
+				}
+				a.currentPeriod = extended
+			}
+		}
 		a.status = ContractStatusActive
 		a.suspensionConfig = nil
 		a.updatedAt = e.ResumedAt

@@ -16,6 +16,7 @@ var (
 	_ eventstore.SchemaVersioned = (*PriceChangedEvent)(nil)
 	_ eventstore.SchemaVersioned = (*TrialEndedEvent)(nil)
 	_ eventstore.SchemaVersioned = (*ContractRenewedEvent)(nil)
+	_ eventstore.SchemaVersioned = (*ContractSuspendedEvent)(nil)
 )
 
 // Event type constants.
@@ -81,15 +82,41 @@ type ContractActivatedEvent struct {
 func (e *ContractActivatedEvent) EventType() eventstore.EventType { return EventTypeContractActivated }
 
 // ContractSuspendedEvent is raised when a contract is suspended.
+//
+// ExtendContract and SuspendedAt were promoted onto the event in SchemaVersion 2
+// (issue #194). Previously ExtendContract lived only on the caller's
+// SuspensionConfiguration and was silently dropped through the event round-trip
+// (Apply reconstructed the config from BillingBehavior/ResumeDate/Reason only),
+// and SuspendedAt, though present on the event, was never copied back into the
+// replayed SuspensionConfiguration. Both are now carried on the event and fully
+// reconstructed by Apply so a suspension's ExtendContract flag and suspend
+// timestamp survive replay and snapshotting.
+//
+// SuspendedAt additionally serves as a reconstruction input: Resume extends the
+// current billing period by (resume time − SuspendedAt) when ExtendContract is
+// true, and that computation must be deterministic on replay.
+//
+// Schema: ContractSuspendedEventUpcaster marks legacy v1 payloads v2. Legacy
+// defaults are extend_contract=false (pre-#194 suspensions never extended the
+// period) and, defensively, suspended_at falls back to the event's OccurredAt
+// when absent or zero (real v1 payloads always carried suspended_at, but a zero
+// anchor would corrupt the resume-extension math).
 type ContractSuspendedEvent struct {
 	ContractID      shared.ContractID         `json:"contract_id"`
 	SuspendedAt     time.Time                 `json:"suspended_at"`
 	BillingBehavior SuspensionBillingBehavior `json:"billing_behavior"`
 	ResumeDate      *time.Time                `json:"resume_date,omitempty"`
+	ExtendContract  bool                      `json:"extend_contract"`
 	Reason          string                    `json:"reason"`
 }
 
 func (e *ContractSuspendedEvent) EventType() eventstore.EventType { return EventTypeContractSuspended }
+
+// CurrentSchemaVersion reports that the current ContractSuspendedEvent payload is
+// schema version 2 (carries extend_contract and a fully-reconstructed
+// suspended_at, issue #194). ContractSuspendedEventUpcaster marks legacy v1
+// payloads v2.
+func (e *ContractSuspendedEvent) CurrentSchemaVersion() int { return 2 }
 
 // ContractResumedEvent is raised when a suspended contract is resumed.
 type ContractResumedEvent struct {

@@ -372,6 +372,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`ContractSuspendedEvent` dropped `ExtendContract`/`SuspendedAt` through the
+  event round-trip (#194)**. `Apply(ContractSuspendedEvent)` reconstructed the
+  `SuspensionConfiguration` from `BillingBehavior`/`ResumeDate`/`Reason` only, so a
+  suspension configured with `ExtendContract: true` replayed (and snapshotted from
+  replayed state) as `ExtendContract=false` with a zero `SuspendedAt`.
+  - `ContractSuspendedEvent` now carries `ExtendContract` (and its already-present
+    `SuspendedAt` is now restored into the config); `Apply` reconstructs the full
+    configuration, so live mutation and replay agree.
+  - Event schema bumped to **SchemaVersion 2** with `ContractSuspendedEventUpcaster`
+    for legacy v1 payloads: `extend_contract` defaults to `false` (pre-#194
+    suspensions never extended the period), and `suspended_at` falls back to the
+    event's `OccurredAt` when absent or zero-valued (defensive — a zero anchor would
+    corrupt the resume-time extension math). `CanUpcast` matches only the exact
+    `fromVersion == 1` so the fixpoint chain stays order-independent.
+  - `Resume` now honors `ExtendContract`: it extends `currentPeriod.End` by the
+    suspension duration (resume time − `SuspendedAt`) inside
+    `Apply(ContractResumedEvent)`. The extension is reconstructed deterministically
+    from event data plus the still-present suspension config, so `ContractResumedEvent`
+    needs no new field and no snapshot-schema bump (the existing
+    `SuspensionConfiguration` already persists `SuspendedAt`/`ExtendContract`).
 - `pricing.TieredPrice` gains a validating constructor `NewTieredPrice(tiers, mode)`
   and no longer silently mis-bills a misconfigured tiered price (#156). Previously
   `TieredPrice` took its tiers through exported fields with no validation, so two
