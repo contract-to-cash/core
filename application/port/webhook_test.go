@@ -81,35 +81,54 @@ func noopHandler(_ context.Context, _ *WebhookEvent) error {
 
 // --- Tests ---
 
-func TestWebhookProcessor_TimestampTooOld(t *testing.T) {
+// TestWebhookProcessor_OldRedeliveryIsProcessed is the core regression for issue
+// #191: a legitimate gateway redelivery carrying the ORIGINAL (old) CreatedAt
+// must be processed, not rejected as "timestamp too old". Replay protection is
+// ParseAndVerify's job (transport timestamp), not this processor's job on the
+// event body. TimestampTolerance is set small on purpose to prove it no longer
+// gates the event body.
+func TestWebhookProcessor_OldRedeliveryIsProcessed(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	event := &WebhookEvent{
 		ID:        "evt_1",
 		Type:      WebhookEventPaymentSucceeded,
-		CreatedAt: now.Add(-10 * time.Minute), // 10 min ago
+		CreatedAt: now.Add(-48 * time.Hour), // redelivered 2 days later
+	}
+	cfg := defaultConfig()
+	cfg.TimestampTolerance = 5 * time.Minute // deprecated field: must have NO effect
+	dedup := &mockDeduplicator{}
+	called := false
+	handler := func(_ context.Context, _ *WebhookEvent) error {
+		called = true
+		return nil
 	}
 	p := newTestProcessor(
 		&mockWebhookHandler{event: event},
-		&mockDeduplicator{},
+		dedup,
 		&mockDLQ{},
 		shared.FixedClock{FixedTime: now},
-		defaultConfig(),
+		cfg,
 	)
-	err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler)
-	if err == nil {
-		t.Fatal("expected error for timestamp too old, got nil")
+	if err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, handler); err != nil {
+		t.Fatalf("old-but-legitimate redelivery must be processed, got: %v", err)
 	}
-	if got := err.Error(); !strings.Contains(got, "too old") {
-		t.Fatalf("expected error containing 'too old', got: %s", got)
+	if !called {
+		t.Fatal("handler must run for an old redelivery (issue #191)")
+	}
+	if len(dedup.recorded) != 1 {
+		t.Fatalf("expected the old redelivery to be marked processed, got recorded=%v", dedup.recorded)
 	}
 }
 
-func TestWebhookProcessor_TimestampTooNew(t *testing.T) {
+// TestWebhookProcessor_FutureCreatedAtIsProcessed verifies that a future-dated
+// event body no longer gates ProcessWebhook (clock-skew / future replay defense
+// belongs to ParseAndVerify's signed transport timestamp).
+func TestWebhookProcessor_FutureCreatedAtIsProcessed(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	event := &WebhookEvent{
 		ID:        "evt_2",
 		Type:      WebhookEventPaymentSucceeded,
-		CreatedAt: now.Add(10 * time.Minute), // 10 min in future
+		CreatedAt: now.Add(1 * time.Hour), // future body timestamp
 	}
 	p := newTestProcessor(
 		&mockWebhookHandler{event: event},
@@ -118,33 +137,73 @@ func TestWebhookProcessor_TimestampTooNew(t *testing.T) {
 		shared.FixedClock{FixedTime: now},
 		defaultConfig(),
 	)
-	err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler)
-	if err == nil {
-		t.Fatal("expected error for timestamp too new, got nil")
-	}
-	if got := err.Error(); !strings.Contains(got, "too new") {
-		t.Fatalf("expected error containing 'too new', got: %s", got)
+	if err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler); err != nil {
+		t.Fatalf("future body CreatedAt must not gate the processor, got: %v", err)
 	}
 }
 
-func TestWebhookProcessor_TimestampValid(t *testing.T) {
+// TestWebhookProcessor_MaxEventAge covers the optional coarse staleness bound.
+// Below the bound (or disabled) the event flows; beyond it, it is dropped.
+func TestWebhookProcessor_MaxEventAge(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	event := &WebhookEvent{
-		ID:        "evt_3",
-		Type:      WebhookEventPaymentSucceeded,
-		CreatedAt: now.Add(-2 * time.Minute), // within tolerance
-	}
-	p := newTestProcessor(
-		&mockWebhookHandler{event: event},
-		&mockDeduplicator{},
-		&mockDLQ{},
-		shared.FixedClock{FixedTime: now},
-		defaultConfig(),
-	)
-	err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
+
+	t.Run("disabled by default lets ancient events through", func(t *testing.T) {
+		event := &WebhookEvent{ID: "evt_old_ok", Type: WebhookEventPaymentSucceeded, CreatedAt: now.Add(-365 * 24 * time.Hour)}
+		p := newTestProcessor(
+			&mockWebhookHandler{event: event},
+			&mockDeduplicator{},
+			&mockDLQ{},
+			shared.FixedClock{FixedTime: now},
+			defaultConfig(),
+		)
+		if err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler); err != nil {
+			t.Fatalf("MaxEventAge disabled: ancient event must flow, got: %v", err)
+		}
+	})
+
+	t.Run("within bound is processed", func(t *testing.T) {
+		event := &WebhookEvent{ID: "evt_within", Type: WebhookEventPaymentSucceeded, CreatedAt: now.Add(-29 * 24 * time.Hour)}
+		cfg := defaultConfig()
+		cfg.MaxEventAge = 30 * 24 * time.Hour
+		p := newTestProcessor(
+			&mockWebhookHandler{event: event},
+			&mockDeduplicator{},
+			&mockDLQ{},
+			shared.FixedClock{FixedTime: now},
+			cfg,
+		)
+		if err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler); err != nil {
+			t.Fatalf("event within MaxEventAge must be processed, got: %v", err)
+		}
+	})
+
+	t.Run("beyond bound is dropped", func(t *testing.T) {
+		event := &WebhookEvent{ID: "evt_beyond", Type: WebhookEventPaymentSucceeded, CreatedAt: now.Add(-31 * 24 * time.Hour)}
+		cfg := defaultConfig()
+		cfg.MaxEventAge = 30 * 24 * time.Hour
+		called := false
+		handler := func(_ context.Context, _ *WebhookEvent) error {
+			called = true
+			return nil
+		}
+		p := newTestProcessor(
+			&mockWebhookHandler{event: event},
+			&mockDeduplicator{},
+			&mockDLQ{},
+			shared.FixedClock{FixedTime: now},
+			cfg,
+		)
+		err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, handler)
+		if err == nil {
+			t.Fatal("event beyond MaxEventAge must be dropped, got nil")
+		}
+		if got := err.Error(); !strings.Contains(got, "MaxEventAge") {
+			t.Fatalf("expected error mentioning MaxEventAge, got: %s", got)
+		}
+		if called {
+			t.Fatal("handler must not run for an event beyond MaxEventAge")
+		}
+	})
 }
 
 func TestWebhookProcessor_DuplicateEvent(t *testing.T) {
@@ -445,48 +504,29 @@ func TestWebhookProcessor_ParseAndVerifyFailure(t *testing.T) {
 	}
 }
 
-func TestWebhookProcessor_TimestampAtExactBoundary(t *testing.T) {
+// TestWebhookProcessor_MaxEventAgeExactBoundary verifies the staleness bound is
+// inclusive at the boundary (age == MaxEventAge is allowed; strictly greater is
+// dropped).
+func TestWebhookProcessor_MaxEventAgeExactBoundary(t *testing.T) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	tolerance := 5 * time.Minute
-
-	t.Run("exactly at past boundary", func(t *testing.T) {
-		event := &WebhookEvent{
-			ID:        "evt_boundary_old",
-			Type:      WebhookEventPaymentSucceeded,
-			CreatedAt: now.Add(-tolerance), // exactly 5min ago
-		}
-		p := newTestProcessor(
-			&mockWebhookHandler{event: event},
-			&mockDeduplicator{},
-			&mockDLQ{},
-			shared.FixedClock{FixedTime: now},
-			defaultConfig(),
-		)
-		// Before/After are strict: exactly at boundary should pass
-		err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler)
-		if err != nil {
-			t.Fatalf("expected no error at exact past boundary, got: %v", err)
-		}
-	})
-
-	t.Run("exactly at future boundary", func(t *testing.T) {
-		event := &WebhookEvent{
-			ID:        "evt_boundary_new",
-			Type:      WebhookEventPaymentSucceeded,
-			CreatedAt: now.Add(tolerance), // exactly 5min ahead
-		}
-		p := newTestProcessor(
-			&mockWebhookHandler{event: event},
-			&mockDeduplicator{},
-			&mockDLQ{},
-			shared.FixedClock{FixedTime: now},
-			defaultConfig(),
-		)
-		err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler)
-		if err != nil {
-			t.Fatalf("expected no error at exact future boundary, got: %v", err)
-		}
-	})
+	maxAge := 30 * 24 * time.Hour
+	event := &WebhookEvent{
+		ID:        "evt_boundary",
+		Type:      WebhookEventPaymentSucceeded,
+		CreatedAt: now.Add(-maxAge), // exactly at the bound
+	}
+	cfg := defaultConfig()
+	cfg.MaxEventAge = maxAge
+	p := newTestProcessor(
+		&mockWebhookHandler{event: event},
+		&mockDeduplicator{},
+		&mockDLQ{},
+		shared.FixedClock{FixedTime: now},
+		cfg,
+	)
+	if err := p.ProcessWebhook(context.Background(), &WebhookRequest{}, noopHandler); err != nil {
+		t.Fatalf("event exactly at MaxEventAge boundary must be processed, got: %v", err)
+	}
 }
 
 func TestWebhookProcessor_ContextCancelDuringRetry(t *testing.T) {
