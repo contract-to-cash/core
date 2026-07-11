@@ -14,6 +14,100 @@ import (
 // Compile-time interface check.
 var _ eventstore.Store = (*InMemoryEventStore)(nil)
 
+// subscriberBufferSize is the capacity of a subscriber's delivery channel. It
+// only affects delivery latency, not durability: a slow consumer causes events
+// to accumulate in the subscription's internal queue (unbounded) rather than
+// being dropped (issue #192).
+const subscriberBufferSize = 100
+
+// subscription is a live+backfill event feed for a single Subscribe caller.
+//
+// Append never blocks on and never drops for a slow consumer: it enqueues into
+// an unbounded internal queue under the subscription's own lock. A dedicated
+// pump goroutine drains the queue to the delivery channel with a blocking send
+// (escaped by context cancellation), providing at-least-once, lossless delivery
+// for the reference store.
+type subscription struct {
+	ch     chan eventstore.Event
+	mu     sync.Mutex
+	cond   *sync.Cond
+	queue  []eventstore.Event
+	closed bool
+	// lastPos is the highest GlobalPosition already enqueued. It is a monotonic
+	// guard that makes the backfill→live handover gap-free AND overlap-free:
+	// Subscribe seeds it from the backfill snapshot while holding the store lock,
+	// so any later Append (which also takes the store lock) carries strictly
+	// greater positions and is enqueued exactly once.
+	lastPos int64
+}
+
+func newSubscription(fromPosition int64) *subscription {
+	sub := &subscription{
+		ch:      make(chan eventstore.Event, subscriberBufferSize),
+		lastPos: fromPosition,
+	}
+	sub.cond = sync.NewCond(&sub.mu)
+	return sub
+}
+
+// enqueue appends the events whose GlobalPosition advances past lastPos. It is
+// non-blocking (a slice append) so it never stalls the writer.
+func (sub *subscription) enqueue(events []eventstore.Event) {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	if sub.closed {
+		return
+	}
+	appended := false
+	for _, e := range events {
+		if e.GlobalPosition <= sub.lastPos {
+			continue // already delivered / in backfill; skip (no duplicate, no gap)
+		}
+		sub.lastPos = e.GlobalPosition
+		sub.queue = append(sub.queue, e)
+		appended = true
+	}
+	if appended {
+		sub.cond.Signal()
+	}
+}
+
+// closeSub marks the subscription closed and wakes the pump so it can exit.
+func (sub *subscription) closeSub() {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	sub.closed = true
+	sub.cond.Signal()
+}
+
+// pump drains the queue to the delivery channel until the context is cancelled
+// or the subscription is closed. It closes the delivery channel on exit so the
+// consumer observes end-of-stream.
+func (sub *subscription) pump(ctx context.Context) {
+	defer close(sub.ch)
+	for {
+		sub.mu.Lock()
+		for len(sub.queue) == 0 && !sub.closed {
+			sub.cond.Wait()
+		}
+		if sub.closed {
+			sub.mu.Unlock()
+			return
+		}
+		batch := sub.queue
+		sub.queue = nil
+		sub.mu.Unlock()
+
+		for _, e := range batch {
+			select {
+			case sub.ch <- e:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
 // InMemoryEventStore is an in-memory implementation of eventstore.Store.
 type InMemoryEventStore struct {
 	mu          sync.RWMutex
@@ -21,7 +115,7 @@ type InMemoryEventStore struct {
 	allEvents   []eventstore.Event               // all events in global position order
 	snapshots   map[string][]eventstore.Snapshot // streamID -> snapshots (multiple)
 	position    int64                            // global position counter
-	subscribers []chan eventstore.Event
+	subscribers []*subscription
 	clock       shared.Clock
 }
 
@@ -81,15 +175,12 @@ func (s *InMemoryEventStore) Append(_ context.Context, streamID string, events [
 		s.allEvents = append(s.allEvents, e)
 	}
 
-	// Notify subscribers with the stored copies.
-	for _, ch := range s.subscribers {
-		for _, e := range stored {
-			select {
-			case ch <- e:
-			default:
-				// Drop if subscriber is slow.
-			}
-		}
+	// Notify subscribers with the stored copies. enqueue is non-blocking and
+	// lossless: it buffers into each subscription's internal queue rather than
+	// dropping for a slow consumer (issue #192). The monotonic lastPos guard
+	// makes this safe against the backfill→live boundary in Subscribe.
+	for _, sub := range s.subscribers {
+		sub.enqueue(stored)
 	}
 
 	return nil
@@ -171,27 +262,69 @@ func (s *InMemoryEventStore) LoadAll(_ context.Context, fromPosition int64, limi
 	return result, nil
 }
 
-// Subscribe returns a channel that receives events appended after subscription.
+// Subscribe returns a channel that delivers every event with a GlobalPosition
+// greater than fromPosition: first the historical backfill, then the live tail,
+// in global-position order, with no gap and no duplicate at the handover.
 //
-// Reference-implementation limitations (NOT suitable for production durability):
-//   - fromPosition is IGNORED: this is a live-only feed; historical events with a
-//     GlobalPosition at or after fromPosition are NOT replayed. Use LoadAll (or
-//     ProjectionService.RebuildAll) to catch up from a position, then Subscribe
-//     for the live tail.
-//   - Delivery is best-effort: if a subscriber's buffered channel is full (slow
-//     consumer), Append DROPS the event for that subscriber rather than blocking
-//     the writer (see Append). Combined with the ignored fromPosition, missed
-//     events are only recoverable via a full RebuildAll.
+// Delivery is at-least-once and lossless (issue #192):
+//   - fromPosition is HONOURED: events already stored with GlobalPosition >
+//     fromPosition are replayed (backfill) before live events. Pass a position
+//     obtained from a checkpoint to resume after a restart; pass 0 to receive
+//     the full history followed by the live tail.
+//   - A slow consumer never loses events: Append buffers into an unbounded
+//     per-subscriber queue instead of dropping. The blocking hand-off applies
+//     backpressure at the delivery channel only.
 //
-// A production eventstore.Store should honour fromPosition (replay-then-tail) and
-// provide durable, lossless delivery.
-func (s *InMemoryEventStore) Subscribe(_ context.Context, _ int64) (<-chan eventstore.Event, error) {
+// Gap-free handover: the backfill snapshot and the subscriber registration are
+// performed atomically under the store lock, and a monotonic position guard
+// (subscription.lastPos) rejects any live event whose position was already in
+// the backfill. Because positions are assigned under the same lock, any Append
+// racing with Subscribe is serialized either fully before (captured by backfill)
+// or fully after (delivered live) — never split.
+//
+// Lifecycle: when ctx is cancelled the subscriber is unregistered and the
+// channel is closed, so there is no goroutine or channel leak.
+//
+// A production eventstore.Store should provide the same replay-then-tail,
+// lossless semantics backed by durable storage.
+func (s *InMemoryEventStore) Subscribe(ctx context.Context, fromPosition int64) (<-chan eventstore.Event, error) {
+	sub := newSubscription(fromPosition)
+
+	s.mu.Lock()
+	// Backfill: snapshot events already stored with GlobalPosition > fromPosition.
+	start := sort.Search(len(s.allEvents), func(i int) bool {
+		return s.allEvents[i].GlobalPosition > fromPosition
+	})
+	if start < len(s.allEvents) {
+		backfill := make([]eventstore.Event, len(s.allEvents)-start)
+		copy(backfill, s.allEvents[start:])
+		sub.enqueue(backfill) // advances lastPos to the highest backfilled position
+	}
+	// Register while still holding the lock so no Append can slip in unseen
+	// between the backfill snapshot and live registration.
+	s.subscribers = append(s.subscribers, sub)
+	s.mu.Unlock()
+
+	go sub.pump(ctx)
+	go func() {
+		<-ctx.Done()
+		s.removeSubscriber(sub)
+		sub.closeSub()
+	}()
+
+	return sub.ch, nil
+}
+
+// removeSubscriber unregisters a subscription so Append stops enqueuing to it.
+func (s *InMemoryEventStore) removeSubscriber(target *subscription) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	ch := make(chan eventstore.Event, 100)
-	s.subscribers = append(s.subscribers, ch)
-	return ch, nil
+	for i, sub := range s.subscribers {
+		if sub == target {
+			s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
+			return
+		}
+	}
 }
 
 // SaveSnapshot saves an aggregate snapshot.

@@ -73,6 +73,11 @@ type Store interface {
     LoadAll(ctx context.Context, fromPosition int64, limit int) ([]Event, error)
 
     // 全ストリームのイベント購読（Projection用）
+    // fromPosition より後（GlobalPosition > fromPosition）のイベントを、
+    // 過去分（バックフィル）→ ライブ配信の順で、順序どおりに配信する。
+    // 配信は at-least-once（少なくとも1回）契約であり、再購読・再起動時に
+    // 同一イベントが複数回配信され得るため、Projector は冪等に実装すること。
+    // ctx がキャンセルされたら購読を解除しチャネルを閉じる。
     Subscribe(ctx context.Context, fromPosition int64) (<-chan Event, error)
     
     // スナップショット
@@ -800,43 +805,82 @@ type ProjectionService struct {
 }
 
 type ProjectionOptions struct {
-    SyncMode    bool          // true: 同期更新, false: 非同期更新
-    BatchSize   int           // 非同期時のバッチサイズ
-    MaxRetries  int           // リトライ回数
-    RetryDelay  time.Duration // リトライ間隔
+    SyncMode        bool            // true: 同期, false: 非同期（失敗をログしてスキップ）
+    BatchSize       int             // RebuildAll のバッチサイズ
+    MaxRetries      int             // リトライ「回数」（初回試行に追加。総試行数 = MaxRetries+1）
+    RetryDelay      time.Duration   // リトライ間隔
+    ProjectionName  string          // チェックポイントのキー（空なら "default"）
+    CheckpointStore CheckpointStore // 進捗の永続化（nil ならチェックポイントなし）
 }
 
 // Projector Projection更新インターフェース
 type Projector interface {
-    // Project イベントをProjectionに反映
+    // Project イベントをProjectionに反映（冪等であること）。
+    // 配信は at-least-once であり、購読の再配信・チェックポイント再開・
+    // ProcessEvent 内での部分適用（projector k が失敗すると 1..k-1 は適用済み）
+    // により同一イベントを複数回受け取り得る。UPSERT や GlobalPosition による
+    // スキップで冪等化すること。
     Project(ctx context.Context, event eventstore.Event) error
-    
+
     // Rebuild 指定時点までのProjectionを再構築
     Rebuild(ctx context.Context, until time.Time) error
 }
 
-// Start Projection更新を開始（非同期モード）
+// CheckpointStore 最後に処理したグローバル位置を Projection 名ごとに永続化する。
+// 再起動時に続きから再開でき、「停止中に追記されたイベントが二度と配信されない」
+// ギャップを塞ぐ。参照実装はイベントごとに Save するが、本番実装は N 件/T 秒ごとに
+// バッチ保存してよい（ただし未適用イベントより先の位置を保存してはならない）。
+type CheckpointStore interface {
+    Load(ctx context.Context, projectionName string) (int64, error)
+    Save(ctx context.Context, projectionName string, position int64) error
+}
+
+// Start Projection更新を開始（ctx キャンセルまでブロック）
+// CheckpointStore があれば起動時に位置をロードし、そこから Subscribe する
+// （バックフィル→ライブ配信、ロスなし）。イベントを正常処理するたびに Save する。
+// 失敗したイベントより先へチェックポイントを進めない:
+//   - SyncMode=true:  失敗（MaxRetries 回リトライ後）で Start が error を返す。
+//   - SyncMode=false: 失敗をログしてループは次イベントへ進む（読み取りモデルは
+//                     ライブ更新を継続）が、以降チェックポイントは凍結され、
+//                     失敗イベント以降の位置は保存されない。次回再起動時に
+//                     失敗イベント以降が再配信される（要冪等）。
 func (s *ProjectionService) Start(ctx context.Context) error {
-    if s.options.SyncMode {
-        return nil // 同期モードでは不要
+    var fromPosition int64
+    if s.options.CheckpointStore != nil {
+        pos, err := s.options.CheckpointStore.Load(ctx, s.projectionName())
+        if err != nil {
+            return err
+        }
+        fromPosition = pos
     }
-    
-    events, err := s.eventStore.Subscribe(ctx, 0)
+
+    eventCh, err := s.eventStore.Subscribe(ctx, fromPosition)
     if err != nil {
         return err
     }
-    
-    go func() {
-        for event := range events {
-            for _, projector := range s.projectors {
-                if err := projector.Project(ctx, event); err != nil {
-                    // エラーハンドリング（リトライ等）
+
+    checkpointFrozen := false
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case event, ok := <-eventCh:
+            if !ok {
+                return nil
+            }
+            if err := s.ProcessEvent(ctx, event); err != nil {
+                if s.options.SyncMode {
+                    return err
                 }
+                // ログして次へ。チェックポイントは凍結。
+                checkpointFrozen = true
+                continue
+            }
+            if s.options.CheckpointStore != nil && !checkpointFrozen {
+                _ = s.options.CheckpointStore.Save(ctx, s.projectionName(), event.GlobalPosition)
             }
         }
-    }()
-    
-    return nil
+    }
 }
 
 // RebuildAll 全Projectionを再構築
@@ -869,6 +913,19 @@ func (s *ProjectionService) RebuildAll(ctx context.Context) error {
     return nil
 }
 ```
+
+> **回復パターン（ギャップレス）**: 従来の「RebuildAll してから Subscribe する」手順は、
+> 最後の LoadAll バッチと Subscribe 登録の間に追記されたイベントを取りこぼす
+> 「塞げないギャップ」があった（issue #192）。現在は `Subscribe(ctx, fromPosition)` が
+> **バックフィル→ライブ配信をストア内部で原子的に**繋ぐため、このギャップは存在しない。
+> 推奨フローは 2 通り:
+> 1. **チェックポイント再開**: `CheckpointStore` を設定して `Start` を呼ぶだけ。
+>    起動時に最後の位置から Subscribe し、以降はイベントごとに Save する。
+>    再起動しても停止中のイベントを取りこぼさない。
+> 2. **全再構築**: Projection データを TRUNCATE → `RebuildAll` で 0 から再生成。
+>    その後 `Start` を呼べば、Subscribe が RebuildAll 完了時点以降を継ぎ目なく配信する
+>    （`CheckpointStore` を使う場合は RebuildAll 到達位置を Save しておけば `Start` が
+>    そこから再開する）。
 
 ### 7.2 契約Projectionの実装例
 
