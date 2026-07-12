@@ -128,8 +128,13 @@ type RefundInput struct {
 	// same payment use DIFFERENT keys; violating it reintroduces the double-refund
 	// window this field exists to close.
 	//
-	// SEQUENTIAL retries with the same explicit key are safe (the gateway
-	// replays; the recording converges). But if a CONCURRENT refund records
+	// SEQUENTIAL retries with the same explicit key are safe when the earlier
+	// attempt did NOT record locally (the gateway replays; the recording
+	// converges). Retrying a refund that already RECORDED (e.g. the caller
+	// lost the response of a fully successful invocation) books the amount a
+	// second time against a gateway replay that moved nothing — check the
+	// payment's RefundedAmount before retrying a lost-response refund. And if
+	// a CONCURRENT refund records
 	// against the payment while an explicit-key refund is in flight, Refund
 	// returns ErrCodeConflict WITHOUT recording and logs a manual-
 	// reconciliation error: for a caller-owned key the service cannot decide
