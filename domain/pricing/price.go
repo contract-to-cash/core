@@ -3,6 +3,7 @@ package pricing
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/contract-to-cash/core/domain/shared"
@@ -53,12 +54,10 @@ type PriceOption func(*Price)
 // its own map after construction cannot alter the (immutable) Price.
 func WithMetadata(m map[string]string) PriceOption {
 	return func(p *Price) {
-		for k, v := range m {
-			if p.metadata == nil {
-				p.metadata = make(map[string]string, len(m))
-			}
-			p.metadata[k] = v
+		if len(m) == 0 {
+			return // empty/nil input leaves metadata nil, as before
 		}
+		p.metadata = maps.Clone(m)
 	}
 }
 
@@ -186,9 +185,9 @@ func (p *Price) PricingModel() PricingModel { return clonePricingModel(p.pricing
 // (issue #219). Mutating the returned map does not affect the (immutable)
 // Price. It is never nil.
 func (p *Price) Metadata() map[string]string {
-	cp := make(map[string]string, len(p.metadata))
-	for k, v := range p.metadata {
-		cp[k] = v
+	cp := maps.Clone(p.metadata)
+	if cp == nil {
+		cp = map[string]string{}
 	}
 	return cp
 }

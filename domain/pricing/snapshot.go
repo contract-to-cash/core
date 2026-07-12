@@ -29,6 +29,7 @@
 package pricing
 
 import (
+	"maps"
 	"time"
 
 	"github.com/contract-to-cash/core/domain/shared"
@@ -70,14 +71,7 @@ type PriceSnapshot struct {
 
 // copyMetadata returns an independent copy of m (nil in, nil out).
 func copyMetadata(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	cp := make(map[string]string, len(m))
-	for k, v := range m {
-		cp[k] = v
-	}
-	return cp
+	return maps.Clone(m)
 }
 
 // ToSnapshot returns a flat, independent copy of the price's internal state.

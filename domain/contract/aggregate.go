@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/contract-to-cash/core/domain/pricing"
@@ -129,9 +130,9 @@ func (a *ContractAggregate) IdempotencyKey() string { return a.idempotencyKey }
 // aggregate. It is never nil — an aggregate replayed from pre-#219 history
 // (no metadata on ContractCreatedEvent) yields an empty map.
 func (a *ContractAggregate) Metadata() map[string]string {
-	cp := make(map[string]string, len(a.metadata))
-	for k, v := range a.metadata {
-		cp[k] = v
+	cp := maps.Clone(a.metadata)
+	if cp == nil {
+		cp = map[string]string{}
 	}
 	return cp
 }
@@ -908,14 +909,7 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 // aggregate state, event payloads, and snapshot state never alias the same
 // metadata map (issue #219).
 func copyMetadataMap(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	cp := make(map[string]string, len(m))
-	for k, v := range m {
-		cp[k] = v
-	}
-	return cp
+	return maps.Clone(m)
 }
 
 // anchorDayFrom returns the billing anchor day-of-month derived from a period's

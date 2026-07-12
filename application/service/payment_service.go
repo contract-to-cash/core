@@ -1038,11 +1038,14 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// and duplicate-key convergence (the raced-loser path above) can fire
 	// them more than once for the same payment ID — implementations must
 	// deduplicate by payment ID.
-	// The hooks reuse successCtx (payment + invoice) so metrics plugins can
-	// attribute the payment to a contract/account (issue #223).
+	// Fresh context per hook category (payment + invoice, issue #223): a
+	// mutation (SetContract) by an AfterCharge plugin must not leak into
+	// metrics hooks — the same isolation BeforeCharge already gets from its
+	// own dedicated context.
+	metricsCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetOnPaymentProcessedHooks() {
 		if hookErr := plugin.SafeInvoke("OnPaymentProcessedHook.OnPaymentProcessed", hook.Name(), func() error {
-			return hook.OnPaymentProcessed(successCtx)
+			return hook.OnPaymentProcessed(metricsCtx)
 		}); hookErr != nil {
 			plugin.LogNonFatalHookError(s.logger, "OnPaymentProcessed hook failed", hookErr,
 				"hook", hook.Name(),
@@ -1090,6 +1093,10 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 		p.SetIdempotencyKey(effectiveKey)
 	}
 
+	// racedLoser mirrors the gateway path's #97 convergence flag: set when this
+	// goroutine's Save lost a duplicate-idempotency-key race and converged on
+	// the winner's payment, leaving the local `inv` mutated but unpersisted.
+	var racedLoser bool
 	err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
 		invoiceRepo := repos.Invoices
 		if invoiceRepo == nil {
@@ -1159,6 +1166,7 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 				winner, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, effectiveKey)
 				if findErr == nil && winner != nil {
 					p = winner
+					racedLoser = true
 					return nil
 				}
 				return shared.NewDomainError(shared.ErrCodeConflict,
@@ -1175,6 +1183,27 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 		return nil, err
 	}
 
+	// Issue #97 (mirroring the gateway path): on the race-loser path, `inv` is
+	// still the pre-convergence local copy whose paidAmount/status were mutated
+	// by RecordPayment and never persisted (the tx returned before Invoices.Save).
+	// The winner's tx holds the authoritative invoice state, so we re-fetch
+	// before firing hooks to prevent plugins from observing a stale (loser-side)
+	// snapshot. Re-fetch failures are logged and the stale copy is used as a
+	// fallback — the settlement itself succeeded, so we must not fail it over a
+	// hook-input read error.
+	if racedLoser {
+		refreshed, refErr := s.invoiceRepo.FindByID(ctx, invoiceID)
+		if refErr != nil {
+			s.logger.Warn("invoice re-fetch after duplicate-key convergence failed; AfterCharge hooks will see a possibly-stale local copy",
+				"paymentID", p.ID(),
+				"invoiceID", invoiceID,
+				"error", refErr,
+			)
+		} else {
+			inv = refreshed
+		}
+	}
+
 	// AfterCharge + OnPaymentProcessed fire (non-fatal); BeforeCharge does not.
 	successCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetAfterChargeHooks() {
@@ -1188,11 +1217,14 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 			)
 		}
 	}
-	// Reuse successCtx (payment + invoice) so metrics plugins can attribute the
-	// zero-amount settlement to a contract/account (issue #223).
+	// Fresh context per hook category (payment + invoice, issue #223): a
+	// mutation (SetContract) by an AfterCharge plugin must not leak into
+	// metrics hooks — the same isolation BeforeCharge already gets from its
+	// own dedicated context.
+	metricsCtx := plugin.NewPaymentContext(ctx, p, inv)
 	for _, hook := range s.registry.GetOnPaymentProcessedHooks() {
 		if hookErr := plugin.SafeInvoke("OnPaymentProcessedHook.OnPaymentProcessed", hook.Name(), func() error {
-			return hook.OnPaymentProcessed(successCtx)
+			return hook.OnPaymentProcessed(metricsCtx)
 		}); hookErr != nil {
 			plugin.LogNonFatalHookError(s.logger, "OnPaymentProcessed hook failed", hookErr,
 				"hook", hook.Name(),

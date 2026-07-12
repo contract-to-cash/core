@@ -606,7 +606,7 @@ func TestNewEventsStampedCurrent_SkipUpcaster(t *testing.T) {
 		version int
 		event   eventstore.DomainEvent
 	}{
-		{"ContractCreated", EventTypeContractCreated, 4, &ContractCreatedEvent{ContractID: "c1", IdempotencyKey: "idem-1", Interval: pricing.Monthly(), CreatedAt: time.Now()}},
+		{"ContractCreated", EventTypeContractCreated, 4, &ContractCreatedEvent{ContractID: "c1", IdempotencyKey: "idem-1", Interval: pricing.Monthly(), CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}},
 		{"PriceChanged", EventTypePriceChanged, 2, &PriceChangedEvent{ContractID: "c1", OldPriceID: "a", NewPriceID: "b", Policy: ChangePolicyImmediate}},
 		{"TrialEnded", EventTypeTrialEnded, 2, &TrialEndedEvent{ContractID: "c1", Converted: true}},
 		{"ContractRenewed", EventTypeContractRenewed, 2, &ContractRenewedEvent{ContractID: "c1", OldInterval: pricing.Monthly(), NewInterval: pricing.Yearly()}},

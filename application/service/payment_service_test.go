@@ -3265,6 +3265,196 @@ func TestProcessPayment_ZeroAmount_Idempotent(t *testing.T) {
 	}
 }
 
+// newZeroAmountFinalizedInvoiceWithID is newZeroAmountFinalizedInvoice with a
+// caller-controlled ID, so a repo mock can return a FRESH instance per FindByID
+// (mirroring a real RDBMS's per-read isolation) while keeping the ID stable.
+func newZeroAmountFinalizedInvoiceWithID(id shared.InvoiceID) *invoice.Invoice {
+	inv, err := invoice.NewInvoice(
+		id,
+		shared.AccountID("acc-zero-race"),
+		shared.ContractID("con-zero-race"),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		invoice.WithAmountDue(shared.Zero(shared.CurrencyJPY)),
+	)
+	if err != nil {
+		panic("newZeroAmountFinalizedInvoiceWithID: " + err.Error())
+	}
+	_ = inv.Finalize()
+	return inv
+}
+
+// racedZeroInvoiceRepo returns a fresh invoice instance on every FindByID and
+// records each returned instance, so a test can assert BY POINTER which copy
+// the hooks observed (the post-convergence re-fetch vs the loser's local clone).
+type racedZeroInvoiceRepo struct {
+	mockInvoiceRepoForPayment
+	id       shared.InvoiceID
+	returned []*invoice.Invoice
+}
+
+func (r *racedZeroInvoiceRepo) FindByID(_ context.Context, _ shared.InvoiceID) (*invoice.Invoice, error) {
+	inv := newZeroAmountFinalizedInvoiceWithID(r.id)
+	r.returned = append(r.returned, inv)
+	return inv, nil
+}
+
+// racedZeroPaymentRepo simulates the #97 race loser for the zero-amount path:
+// the in-tx FindByIdempotencyKey sees no winner yet (the concurrent settlement
+// has not committed when the check runs), Save then collides with the winner's
+// unique idempotency key, and only after that collision does
+// FindByIdempotencyKey surface the winner's record.
+type racedZeroPaymentRepo struct {
+	mockPaymentRepo
+	winner        *payment.Payment
+	saveAttempted bool
+}
+
+func (r *racedZeroPaymentRepo) Save(_ context.Context, _ *payment.Payment) error {
+	r.saveAttempted = true
+	return payment.ErrDuplicateIdempotencyKey
+}
+
+func (r *racedZeroPaymentRepo) FindByIdempotencyKey(_ context.Context, _ string) (*payment.Payment, error) {
+	if r.saveAttempted {
+		return r.winner, nil
+	}
+	return nil, nil
+}
+
+// TestProcessPayment_ZeroAmount_RacedLoser_RefetchesInvoiceForHooks verifies
+// that the zero-amount settlement mirrors the gateway path's #97 convergence:
+// when Save loses the duplicate-idempotency-key race and converges on the
+// winner's payment, the invoice passed to AfterCharge / OnPaymentProcessed is
+// RE-FETCHED from the repository (the winner's persisted state), not the
+// loser's locally-mutated, never-persisted clone.
+func TestProcessPayment_ZeroAmount_RacedLoser_RefetchesInvoiceForHooks(t *testing.T) {
+	clock := newPaymentTestClock()
+	invoiceID := shared.NewInvoiceID()
+	invRepo := &racedZeroInvoiceRepo{id: invoiceID}
+
+	winner, err := payment.NewPayment(
+		shared.NewPaymentID(), invoiceID, shared.Zero(shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard, "", clock.Now(),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	if err := winner.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	winner.SetIdempotencyKey("idem-zero-race")
+	payRepo := &racedZeroPaymentRepo{winner: winner}
+
+	spy := &onPaymentProcessedSpyPlugin{}
+	reg := plugin.NewRegistry()
+	if err := reg.Register(spy); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// failCharge gateway proves the settlement never touches the gateway.
+	svc := NewPaymentService(&mockGateway{failCharge: true}, payRepo, invRepo, nil, &mockEventStore{}, reg, clock)
+
+	p, err := svc.ProcessPayment(context.Background(), invoiceID, ProcessPaymentInput{
+		Currency:       shared.CurrencyJPY,
+		IdempotencyKey: "idem-zero-race",
+	})
+	if err != nil {
+		t.Fatalf("raced-loser zero settlement must converge on the winner, got: %v", err)
+	}
+	if p.ID() != winner.ID() {
+		t.Errorf("expected convergence on winner payment %s, got %s", winner.ID(), p.ID())
+	}
+
+	// FindByID must have been called three times: initial load, in-tx reload,
+	// and the post-convergence re-fetch for the hooks.
+	if got := len(invRepo.returned); got != 3 {
+		t.Fatalf("expected 3 invoice FindByID calls (initial, in-tx, post-convergence re-fetch), got %d", got)
+	}
+	if !spy.called {
+		t.Fatal("OnPaymentProcessed hook must fire on the raced-loser path")
+	}
+	// The hook must observe the re-fetched instance (index 2), not the in-tx
+	// clone (index 1) whose RecordPayment mutation was never persisted.
+	if spy.receivedInvoice != invRepo.returned[2] {
+		t.Errorf("hooks must receive the re-fetched invoice (winner's persisted state), not the loser's local clone")
+	}
+	if spy.received == nil || spy.received.ID() != winner.ID() {
+		t.Errorf("hooks must receive the winner payment")
+	}
+}
+
+// contractLeakProbePlugin implements AfterChargeHook and OnPaymentProcessedHook.
+// AfterCharge mutates its context via SetContract; OnPaymentProcessed records
+// the contract it observes. It proves the two hook categories get ISOLATED
+// PaymentContexts: a SetContract by an AfterCharge plugin must not leak into
+// the metrics hooks (hidden inter-plugin coupling).
+type contractLeakProbePlugin struct {
+	clock            shared.Clock
+	metricsCalled    bool
+	metricsContract  *contract.ContractAggregate
+	metricsPaymentID shared.PaymentID
+}
+
+func (p *contractLeakProbePlugin) Name() string    { return "contract-leak-probe" }
+func (p *contractLeakProbePlugin) Version() string { return "1.0.0" }
+func (p *contractLeakProbePlugin) Priority() int   { return 500 }
+func (p *contractLeakProbePlugin) Initialize(_ context.Context, _ plugin.Config) error {
+	return nil
+}
+func (p *contractLeakProbePlugin) Shutdown(_ context.Context) error { return nil }
+
+func (p *contractLeakProbePlugin) AfterCharge(ctx *plugin.PaymentContext) error {
+	ctx.SetContract(contract.NewContractAggregate(shared.ContractID("leaked-contract"), p.clock))
+	return nil
+}
+
+func (p *contractLeakProbePlugin) OnPaymentProcessed(ctx *plugin.PaymentContext) error {
+	p.metricsCalled = true
+	p.metricsContract = ctx.Contract()
+	if pm := ctx.Payment(); pm != nil {
+		p.metricsPaymentID = pm.ID()
+	}
+	return nil
+}
+
+// TestProcessPayment_OnPaymentProcessed_ContextIsolatedFromAfterCharge verifies
+// that OnPaymentProcessed hooks receive a FRESH PaymentContext, not the one the
+// AfterCharge hooks ran against: a SetContract mutation by an AfterCharge
+// plugin must not be observable by metrics plugins.
+func TestProcessPayment_OnPaymentProcessed_ContextIsolatedFromAfterCharge(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	probe := &contractLeakProbePlugin{clock: clock}
+	reg := plugin.NewRegistry()
+	if err := reg.Register(probe); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	svc := NewPaymentService(&mockGateway{}, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, reg, clock)
+
+	if _, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "idem-ctx-isolation",
+	}); err != nil {
+		t.Fatalf("ProcessPayment: %v", err)
+	}
+
+	if !probe.metricsCalled {
+		t.Fatal("OnPaymentProcessed must fire on the success path")
+	}
+	if probe.metricsContract != nil {
+		t.Errorf("SetContract by an AfterCharge plugin leaked into the OnPaymentProcessed context: got contract %q, want nil",
+			probe.metricsContract.ContractID())
+	}
+	if probe.metricsPaymentID == "" {
+		t.Error("OnPaymentProcessed must still receive the payment on its fresh context")
+	}
+}
+
 // nilReturningInvoiceRepo mimics a BYO-DB adapter that violates the FindByID
 // convention by returning (nil, nil) for a missing invoice instead of an error.
 type nilReturningInvoiceRepo struct{ mockInvoiceRepoForPayment }

@@ -30,7 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `OnPaymentProcessed(ctx *PaymentContext)`, aligning it with the other payment hooks.
   `ctx.Payment()` is the processed payment; `ctx.Invoice()` / `ctx.ContractID()` /
   `ctx.AccountID()` let metrics plugins attribute `payment.processed` events to a
-  contract/account without an extra invoice lookup per event.
+  contract/account without an extra invoice lookup per event. Note that because Go
+  interface satisfaction is structural, an integrator plugin still implementing the old
+  signature will NOT fail to compile — it silently stops satisfying
+  `OnPaymentProcessedHook` and drops out of the `Registry`, so its metrics go quiet;
+  add a compile-time assertion such as
+  `var _ plugin.OnPaymentProcessedHook = (*MyPlugin)(nil)` to surface this at build time.
 
 ### Docs
 
