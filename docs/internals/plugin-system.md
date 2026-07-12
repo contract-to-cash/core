@@ -377,10 +377,13 @@ type OnInvoiceIssuedHook interface {
     OnInvoiceIssued(ctx *Context, invoice *invoice.Invoice) error
 }
 
-// OnPaymentProcessedHook 支払い処理メトリクス
+// OnPaymentProcessedHook 支払い処理メトリクス。
+// 他の支払いフックと同じ *PaymentContext を受け取る（issue #223）:
+// ctx.Payment() が処理済みの支払い、ctx.Invoice() / ctx.ContractID() /
+// ctx.AccountID() で追加のリポジトリ参照なしに契約・アカウントへ帰属できる。
 type OnPaymentProcessedHook interface {
     Plugin
-    OnPaymentProcessed(ctx *Context, payment *payment.Payment) error
+    OnPaymentProcessed(ctx *PaymentContext) error
 }
 
 // ContractChangeType 契約変更種別（型安全）
@@ -394,9 +397,12 @@ const (
     ContractChangeCancelled  ContractChangeType = "cancelled"
     ContractChangeRenewed   ContractChangeType = "renewed"
     ContractChangeTrialEnd  ContractChangeType = "trial_end"
-    // ContractChangeExpired は契約が満了（autoRenew=false / cancelAtPeriodEnd）で
-    // Expired へ遷移したことを表す。中途解約（ContractChangeCancelled）とは区別され、
-    // 解約チャーンと自然満了をメトリクスで混同しないためにある（issue #162 B3）。
+    // ContractChangeExpired は契約が autoRenew=false の自然満了で Expired へ
+    // 遷移したことを表す。ContractChangeCancelled とは区別され、解約チャーンと
+    // 自然満了をメトリクスで混同しないためにある（issue #162 B3）。
+    // 注意: スケジュール解約（cancelAtPeriodEnd）は更新時点で Cancelled へ遷移
+    // するため ContractChangeCancelled として報告される（期間境界で効力が生じても
+    // ユーザー起因のチャーンであり、Expired ではない）。
     ContractChangeExpired    ContractChangeType = "expired"
 )
 
@@ -794,7 +800,7 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 | `OnInvoiceRevisedHook` | `CreditNoteService.ReissueInvoice`（非致命） |
 | `OnContractRenewHook` | `batch.ContractRenewalProcessor`（保存後、非致命） |
 | `OnContractTrialEndHook` | `batch.TrialExpirationProcessor`（保存後、非致命） |
-| `OnContractChangeHook` | `batch.ContractRenewalProcessor`（renewed / 満了時は expired、autoRenew=false での解約は cancelled）、`batch.TrialExpirationProcessor`（trial_end） |
+| `OnContractChangeHook` | `batch.ContractRenewalProcessor`（renewed / autoRenew=false の自然満了は expired、cancelAtPeriodEnd のスケジュール解約は cancelled）、`batch.TrialExpirationProcessor`（trial_end） |
 
 > **発火タイミングの注意**: コアが「保存後」に発火するフック（`OnInvoiceIssuedHook` /
 > `AfterChargeHook` / `OnPaymentProcessedHook` 等）は、呼び出し側が自前のトランザクション内から

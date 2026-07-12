@@ -7,7 +7,6 @@ import (
 
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
-	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
@@ -63,7 +62,7 @@ func (p *allHooksPlugin) OnRefund(ctx *PaymentContext, refundAmount shared.Money
 // Metrics hooks
 func (p *allHooksPlugin) OnContractChange(ctx *Context, event ContractChangeEvent) error { return nil }
 func (p *allHooksPlugin) OnInvoiceIssued(ctx *Context, inv *invoice.Invoice) error       { return nil }
-func (p *allHooksPlugin) OnPaymentProcessed(ctx *Context, pmt *payment.Payment) error    { return nil }
+func (p *allHooksPlugin) OnPaymentProcessed(ctx *PaymentContext) error                   { return nil }
 
 // Invoice generation hooks
 func (p *allHooksPlugin) BuildDocument(ctx *Context, inv *invoice.Invoice, doc *InvoiceDocument) error {

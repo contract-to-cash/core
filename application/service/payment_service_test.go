@@ -3388,9 +3388,12 @@ func TestRefund_FullRefund_ForwardsResolvedAmountToGateway(t *testing.T) {
 // --- OnPaymentProcessed metrics hook ---
 
 type onPaymentProcessedSpyPlugin struct {
-	called   bool
-	received *payment.Payment
-	err      error // if set, OnPaymentProcessed returns this error
+	called             bool
+	received           *payment.Payment
+	receivedInvoice    *invoice.Invoice
+	receivedContractID shared.ContractID
+	receivedAccountID  shared.AccountID
+	err                error // if set, OnPaymentProcessed returns this error
 }
 
 func (p *onPaymentProcessedSpyPlugin) Name() string    { return "payment-processed-spy" }
@@ -3400,9 +3403,12 @@ func (p *onPaymentProcessedSpyPlugin) Initialize(_ context.Context, _ plugin.Con
 }
 func (p *onPaymentProcessedSpyPlugin) Shutdown(_ context.Context) error { return nil }
 func (p *onPaymentProcessedSpyPlugin) Priority() int                    { return 500 }
-func (p *onPaymentProcessedSpyPlugin) OnPaymentProcessed(_ *plugin.Context, pay *payment.Payment) error {
+func (p *onPaymentProcessedSpyPlugin) OnPaymentProcessed(ctx *plugin.PaymentContext) error {
 	p.called = true
-	p.received = pay
+	p.received = ctx.Payment()
+	p.receivedInvoice = ctx.Invoice()
+	p.receivedContractID = ctx.ContractID()
+	p.receivedAccountID = ctx.AccountID()
 	return p.err
 }
 
@@ -3434,6 +3440,17 @@ func TestProcessPayment_FiresOnPaymentProcessedHook(t *testing.T) {
 	}
 	if spy.received.Status() != payment.PaymentStatusCompleted {
 		t.Errorf("hook saw payment status %s, want completed", spy.received.Status())
+	}
+	// Issue #223: the hook receives a *PaymentContext carrying the invoice, so
+	// metrics plugins can attribute the payment to a contract/account.
+	if spy.receivedInvoice == nil || spy.receivedInvoice.ID() != inv.ID() {
+		t.Error("OnPaymentProcessed hook did not receive the paid invoice")
+	}
+	if spy.receivedContractID != inv.ContractID() {
+		t.Errorf("hook saw contract ID %s, want %s", spy.receivedContractID, inv.ContractID())
+	}
+	if spy.receivedAccountID != inv.AccountID() {
+		t.Errorf("hook saw account ID %s, want %s", spy.receivedAccountID, inv.AccountID())
 	}
 }
 

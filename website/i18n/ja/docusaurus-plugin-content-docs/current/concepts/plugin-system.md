@@ -130,7 +130,7 @@ type OnInvoiceIssuedHook interface {
 
 type OnPaymentProcessedHook interface {
     Plugin
-    OnPaymentProcessed(ctx *Context, payment *payment.Payment) error
+    OnPaymentProcessed(ctx *PaymentContext) error
 }
 ```
 

@@ -221,8 +221,10 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		if newStatus == contract.ContractStatusExpired || newStatus == contract.ContractStatusCancelled {
 			// Distinguish natural term-end expiry from a deliberate cancellation
 			// so churn metrics stay accurate (issue #162 B3). Expired means the
-			// contract reached its term with autoRenew=false / cancelAtPeriodEnd;
-			// Cancelled means it was cancelled outright.
+			// contract reached its term with autoRenew=false; Cancelled covers a
+			// scheduled cancellation (cancelAtPeriodEnd), which RenewWithInterval
+			// resolves to Cancelled at the period boundary — user-initiated churn,
+			// not natural expiry.
 			changeType := plugin.ContractChangeExpired
 			if newStatus == contract.ContractStatusCancelled {
 				changeType = plugin.ContractChangeCancelled

@@ -178,7 +178,10 @@ func (p *MetricsPlugin) OnInvoiceIssued(ctx *plugin.Context, inv *invoice.Invoic
     return nil
 }
 
-func (p *MetricsPlugin) OnPaymentProcessed(ctx *plugin.Context, pay *payment.Payment) error {
+// OnPaymentProcessed は支払いフックと同じ *PaymentContext を受け取るため、
+// ctx.ContractID() / ctx.AccountID() で支払いを契約・アカウントへ帰属できます。
+func (p *MetricsPlugin) OnPaymentProcessed(ctx *plugin.PaymentContext) error {
+    pay := ctx.Payment()
     p.metrics.RecordPayment(pay.Status(), pay.Amount())
     return nil
 }

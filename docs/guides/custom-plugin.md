@@ -193,7 +193,10 @@ func (p *MetricsPlugin) OnInvoiceIssued(ctx *plugin.Context, inv *invoice.Invoic
     return nil
 }
 
-func (p *MetricsPlugin) OnPaymentProcessed(ctx *plugin.Context, pay *payment.Payment) error {
+// OnPaymentProcessed receives a *PaymentContext (like the payment hooks), so the
+// payment can be attributed to a contract/account via ctx.ContractID()/ctx.AccountID().
+func (p *MetricsPlugin) OnPaymentProcessed(ctx *plugin.PaymentContext) error {
+    pay := ctx.Payment()
     p.metrics.RecordPayment(pay.Status(), pay.Amount())
     return nil
 }

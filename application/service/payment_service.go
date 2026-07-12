@@ -1038,10 +1038,11 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// and duplicate-key convergence (the raced-loser path above) can fire
 	// them more than once for the same payment ID — implementations must
 	// deduplicate by payment ID.
-	metricsCtx := plugin.NewContext(ctx)
+	// The hooks reuse successCtx (payment + invoice) so metrics plugins can
+	// attribute the payment to a contract/account (issue #223).
 	for _, hook := range s.registry.GetOnPaymentProcessedHooks() {
 		if hookErr := plugin.SafeInvoke("OnPaymentProcessedHook.OnPaymentProcessed", hook.Name(), func() error {
-			return hook.OnPaymentProcessed(metricsCtx, p)
+			return hook.OnPaymentProcessed(successCtx)
 		}); hookErr != nil {
 			plugin.LogNonFatalHookError(s.logger, "OnPaymentProcessed hook failed", hookErr,
 				"hook", hook.Name(),
@@ -1187,10 +1188,11 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 			)
 		}
 	}
-	metricsCtx := plugin.NewContext(ctx)
+	// Reuse successCtx (payment + invoice) so metrics plugins can attribute the
+	// zero-amount settlement to a contract/account (issue #223).
 	for _, hook := range s.registry.GetOnPaymentProcessedHooks() {
 		if hookErr := plugin.SafeInvoke("OnPaymentProcessedHook.OnPaymentProcessed", hook.Name(), func() error {
-			return hook.OnPaymentProcessed(metricsCtx, p)
+			return hook.OnPaymentProcessed(successCtx)
 		}); hookErr != nil {
 			plugin.LogNonFatalHookError(s.logger, "OnPaymentProcessed hook failed", hookErr,
 				"hook", hook.Name(),
