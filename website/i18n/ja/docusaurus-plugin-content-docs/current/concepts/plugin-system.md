@@ -84,6 +84,7 @@ type OnContractActivateHook interface {
 }
 
 // OnContractSuspendHook, OnContractResumeHook, OnContractCancelHook,
+// OnContractCancelScheduledHook, OnContractCancelUnscheduledHook,
 // OnContractRenewHook, OnContractTrialEndHook も同様
 ```
 

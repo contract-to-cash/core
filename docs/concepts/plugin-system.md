@@ -21,12 +21,12 @@ This page is an English summary. The canonical, in-depth specification is
 
 ## Hook Categories
 
-The plugin system provides **20 hook interfaces** across 6 categories:
+The plugin system provides **22 hook interfaces** across 6 categories:
 
 | Category | Hooks | Purpose |
 |----------|-------|---------|
 | **Billing Calculation** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | Discounts, tax, pre/post calculation |
-| **Contract Lifecycle** | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | React to contract state changes |
+| **Contract Lifecycle** | `OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled/Renew/TrialEndHook` | React to contract state changes |
 | **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | Hook into payment flow |
 | **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |
 | **Invoice Generation** | `InvoiceGenerationHook` | PDF rendering and delivery |

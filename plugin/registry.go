@@ -21,13 +21,15 @@ type Registry struct {
 	invoiceLifecycleHooks []InvoiceLifecycleHook
 
 	// Contract lifecycle hooks
-	onContractCreateHooks   []OnContractCreateHook
-	onContractActivateHooks []OnContractActivateHook
-	onContractSuspendHooks  []OnContractSuspendHook
-	onContractResumeHooks   []OnContractResumeHook
-	onContractCancelHooks   []OnContractCancelHook
-	onContractRenewHooks    []OnContractRenewHook
-	onContractTrialEndHooks []OnContractTrialEndHook
+	onContractCreateHooks            []OnContractCreateHook
+	onContractActivateHooks          []OnContractActivateHook
+	onContractSuspendHooks           []OnContractSuspendHook
+	onContractResumeHooks            []OnContractResumeHook
+	onContractCancelHooks            []OnContractCancelHook
+	onContractCancelScheduledHooks   []OnContractCancelScheduledHook
+	onContractCancelUnscheduledHooks []OnContractCancelUnscheduledHook
+	onContractRenewHooks             []OnContractRenewHook
+	onContractTrialEndHooks          []OnContractTrialEndHook
 
 	// Payment hooks
 	beforeChargeHooks    []BeforeChargeHook
@@ -93,6 +95,12 @@ func (r *Registry) Register(p Plugin) error {
 	}
 	if h, ok := p.(OnContractCancelHook); ok {
 		r.onContractCancelHooks = append(r.onContractCancelHooks, h)
+	}
+	if h, ok := p.(OnContractCancelScheduledHook); ok {
+		r.onContractCancelScheduledHooks = append(r.onContractCancelScheduledHooks, h)
+	}
+	if h, ok := p.(OnContractCancelUnscheduledHook); ok {
+		r.onContractCancelUnscheduledHooks = append(r.onContractCancelUnscheduledHooks, h)
 	}
 	if h, ok := p.(OnContractRenewHook); ok {
 		r.onContractRenewHooks = append(r.onContractRenewHooks, h)
@@ -283,6 +291,20 @@ func (r *Registry) GetOnContractCancelHooks() []OnContractCancelHook {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return sortedCopy(r.onContractCancelHooks)
+}
+
+// GetOnContractCancelScheduledHooks returns contract cancel-scheduled hooks sorted by priority.
+func (r *Registry) GetOnContractCancelScheduledHooks() []OnContractCancelScheduledHook {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return sortedCopy(r.onContractCancelScheduledHooks)
+}
+
+// GetOnContractCancelUnscheduledHooks returns contract cancel-unscheduled hooks sorted by priority.
+func (r *Registry) GetOnContractCancelUnscheduledHooks() []OnContractCancelUnscheduledHook {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return sortedCopy(r.onContractCancelUnscheduledHooks)
 }
 
 // GetOnContractRenewHooks returns contract renew hooks sorted by priority.

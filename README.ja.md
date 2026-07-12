@@ -149,7 +149,7 @@ batch/            # バッチプロセッサ（契約更新）
 | カテゴリ | フック | 用途 |
 |---------|--------|------|
 | **課金計算** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引、税計算、計算前後処理 |
-| **契約** | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | ライフサイクル反応 |
+| **契約** | `OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled/Renew/TrialEndHook` | ライフサイクル反応 |
 | **決済** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | 決済フロー |
 | **クレジットノート** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | クレジットノート発行、請求書再発行 |
 | **メトリクス** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI収集 |

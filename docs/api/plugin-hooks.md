@@ -127,6 +127,16 @@ type OnContractCancelHook interface {
     OnContractCancel(ctx *Context, contract *contract.ContractAggregate) error
 }
 
+type OnContractCancelScheduledHook interface {
+    Plugin
+    OnContractCancelScheduled(ctx *Context, contract *contract.ContractAggregate) error
+}
+
+type OnContractCancelUnscheduledHook interface {
+    Plugin
+    OnContractCancelUnscheduled(ctx *Context, contract *contract.ContractAggregate) error
+}
+
 type OnContractRenewHook interface {
     Plugin
     OnContractRenew(ctx *Context, contract *contract.ContractAggregate) error
@@ -299,6 +309,8 @@ registry.GetOnContractActivateHooks() []OnContractActivateHook
 registry.GetOnContractSuspendHooks() []OnContractSuspendHook
 registry.GetOnContractResumeHooks() []OnContractResumeHook
 registry.GetOnContractCancelHooks() []OnContractCancelHook
+registry.GetOnContractCancelScheduledHooks() []OnContractCancelScheduledHook
+registry.GetOnContractCancelUnscheduledHooks() []OnContractCancelUnscheduledHook
 registry.GetOnContractRenewHooks() []OnContractRenewHook
 registry.GetOnContractTrialEndHooks() []OnContractTrialEndHook
 registry.GetBeforeChargeHooks() []BeforeChargeHook
