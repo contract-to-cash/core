@@ -33,5 +33,11 @@ type BatchResult struct {
 	Total     int
 	Succeeded int
 	Failed    int
-	Errors    []error
+	// Skipped counts items that were deliberately not processed rather than
+	// failed — e.g. a zero-interval one_time contract that a permissive
+	// FindDueForRenewal adapter selected even though it has no billing period
+	// to renew (issue #218). Skipped items are included in Total but appear in
+	// neither Succeeded nor Failed and produce no Errors entry.
+	Skipped int
+	Errors  []error
 }

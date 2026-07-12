@@ -2373,3 +2373,84 @@ func TestGenerateInvoice_NegativeTaxRejected(t *testing.T) {
 		t.Errorf("expected error to name the plugin 'negative_tax', got %q", domErr.Error())
 	}
 }
+
+// --- Zero-interval one_time contracts (issue #218) ---
+
+// newActiveZeroIntervalOneTimeWithPrice creates an ACTIVE one_time contract
+// with no billing interval (issue #218) and a matching zero-interval one-time
+// Price entity. The contract's currentPeriod stays unset (zero-value).
+func newActiveZeroIntervalOneTimeWithPrice(t *testing.T, clock shared.Clock, amount shared.Money) (*contract.ContractAggregate, *pricing.Price) {
+	t.Helper()
+	priceEntity, err := pricing.NewOneTimePrice(shared.NewProductID(), amount, amount.Currency(), clock.Now())
+	if err != nil {
+		t.Fatalf("NewOneTimePrice failed: %v", err)
+	}
+	agg := contract.NewContractAggregate(shared.NewContractID(), clock)
+	meta := eventstore.EventMetadata{UserID: "test"}
+	if err := agg.Create(contract.CreateContractCommand{
+		IdempotencyKey: "idem-service-billing_service-onetime-218",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        priceEntity.ID(),
+		ContractType:   contract.ContractTypeOneTime,
+		// Interval intentionally unset (zero) — allowed for one_time (#218).
+		Price:     amount,
+		BasePrice: amount,
+	}, meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+	if !agg.CurrentPeriod().IsZero() {
+		t.Fatalf("expected zero-value current period, got %s", agg.CurrentPeriod())
+	}
+	return agg, priceEntity
+}
+
+// TestGenerateInvoice_ZeroIntervalOneTime verifies issue #218 end to end at the
+// billing layer: a one_time contract without a billing interval (currentPeriod
+// unset) generates an invoice for the flat Price amount when the caller passes
+// the contract's (zero-value) current period as the billing period.
+func TestGenerateInvoice_ZeroIntervalOneTime(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveZeroIntervalOneTimeWithPrice(t, clock, jpy(50000))
+	invRepo := &mockInvoiceRepo{}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	inv, err := svc.GenerateInvoice(context.Background(), agg.ContractID(), agg.CurrentPeriod())
+	if err != nil {
+		t.Fatalf("GenerateInvoice failed for zero-interval one_time: %v", err)
+	}
+	if inv.Subtotal().Amount().Cmp(jpy(50000).Amount()) != 0 {
+		t.Errorf("expected subtotal 50000, got %v", inv.Subtotal().Amount())
+	}
+	if !inv.BillingPeriod().IsZero() {
+		t.Errorf("expected zero-value invoice billing period, got %s", inv.BillingPeriod())
+	}
+	if invRepo.saved == nil {
+		t.Fatal("expected invoice to be saved")
+	}
+}
+
+// TestGenerateInvoice_ZeroIntervalOneTime_DuplicateBlocked verifies the
+// one_time duplicate guard still applies with an unset billing period: at most
+// one non-voided invoice ever exists for a one_time contract.
+func TestGenerateInvoice_ZeroIntervalOneTime_DuplicateBlocked(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveZeroIntervalOneTimeWithPrice(t, clock, jpy(50000))
+
+	existingInv, err := invoice.NewInvoice(
+		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
+		jpy(50000), jpy(0), jpy(0),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
+	invRepo := &mockInvoiceRepo{existingByContract: []*invoice.Invoice{existingInv}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err = svc.GenerateInvoice(context.Background(), agg.ContractID(), agg.CurrentPeriod())
+	if err == nil {
+		t.Fatal("expected duplicate guard to block second invoice for zero-interval one_time contract")
+	}
+}

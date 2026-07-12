@@ -63,6 +63,10 @@ infrastructure/  ドメイン IF の実装（現在は inmemory/ のみ。DB 実
   Upcaster が `interval` へ変換する（SchemaVersion 2）。
   `pricing.BillingCycle`（文字列型 + `Daily/Weekly/Monthly/Yearly` 定数、`BillingCycleToInterval` /
   `BillingInterval.ToBillingCycle`）は Price 構築・表示・アダプタ用に pricing パッケージ内でのみ残存する
+- one_time 契約は Interval 省略可（#218）: ゼロ interval → `currentPeriod` 未設定（zero 値）のまま
+  Activate され、更新バッチ（`FindDueForRenewal`）の対象外。`RenewWithInterval` は business-rule
+  エラー。Price 側は `pricing.NewOneTimePrice`（`NewPriceWithInterval` はゼロ interval を拒否したまま）。
+  既存の interval 付き one_time は後方互換（リプレイ・スナップショットとも無変更で有効）
 - `shared.MetricName`（型付き string）を使用。生の string でメトリック名を渡さない
 
 ### Event Sourcing

@@ -742,3 +742,106 @@ func TestContractCreatedIdempotencyKeyUpcaster_CanUpcastExactVersion(t *testing.
 		t.Error("expected CanUpcast=false at v3 (already migrated)")
 	}
 }
+
+// TestContractCreatedEventUpcaster_ZeroIntervalOneTimePassesThrough verifies
+// issue #218: a one_time ContractCreatedEvent with interval:null and NO legacy
+// billing_cycle is a legitimate zero-interval payload, not a legacy payload
+// needing recovery. The upcaster must pass it through unmodified (interval
+// stays null, no interval synthesized) and only bump the schema version.
+func TestContractCreatedEventUpcaster_ZeroIntervalOneTimePassesThrough(t *testing.T) {
+	u := &ContractCreatedEventUpcaster{}
+
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	payload := map[string]interface{}{
+		"contract_id":   "c-onetime-218",
+		"account_id":    "acc-001",
+		"contract_type": string(ContractTypeOneTime),
+		"interval":      nil, // BillingInterval zero value marshals to null
+		"price":         map[string]interface{}{"amount": "5000", "currency": "JPY"},
+		"created_at":    now,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	event := eventstore.Event{
+		Type:          EventTypeContractCreated,
+		SchemaVersion: 1,
+		Data:          data,
+	}
+
+	result, err := u.Upcast(event)
+	if err != nil {
+		t.Fatalf("Upcast failed: %v", err)
+	}
+	if result.SchemaVersion != 2 {
+		t.Errorf("expected SchemaVersion=2, got %d", result.SchemaVersion)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(result.Data, &raw); err != nil {
+		t.Fatalf("unmarshal upcasted data: %v", err)
+	}
+	if string(raw["interval"]) != "null" {
+		t.Errorf("expected interval to stay null, got %s", raw["interval"])
+	}
+	if _, ok := raw["billing_cycle"]; ok {
+		t.Error("expected no billing_cycle field to be introduced")
+	}
+
+	// The payload must deserialize to a zero-interval one_time created event.
+	domainEvent, err := contractEventRegistry.Deserialize(EventTypeContractCreated, result.Data)
+	if err != nil {
+		t.Fatalf("deserialize upcasted event: %v", err)
+	}
+	created, ok := domainEvent.(*ContractCreatedEvent)
+	if !ok {
+		t.Fatalf("expected *ContractCreatedEvent, got %T", domainEvent)
+	}
+	if !created.Interval.IsZero() {
+		t.Errorf("expected zero interval, got %v", created.Interval)
+	}
+	if created.ContractType != ContractTypeOneTime {
+		t.Errorf("expected one_time, got %s", created.ContractType)
+	}
+}
+
+// TestContractUpcasterChain_ZeroIntervalOneTimeFullChain runs the same payload
+// through the full package upcaster chain (v1 → v4 fixpoint) and asserts the
+// interval remains null end-to-end.
+func TestContractUpcasterChain_ZeroIntervalOneTimeFullChain(t *testing.T) {
+	chain := NewContractUpcasterChain()
+
+	payload := map[string]interface{}{
+		"contract_id":   "c-onetime-218-chain",
+		"account_id":    "acc-001",
+		"contract_type": string(ContractTypeOneTime),
+		"interval":      nil,
+		"created_at":    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	result, err := chain.Upcast(eventstore.Event{
+		Type:          EventTypeContractCreated,
+		SchemaVersion: 1,
+		Data:          data,
+	})
+	if err != nil {
+		t.Fatalf("chain Upcast failed: %v", err)
+	}
+	if result.SchemaVersion != 4 {
+		t.Errorf("expected SchemaVersion=4 after full chain, got %d", result.SchemaVersion)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(result.Data, &raw); err != nil {
+		t.Fatalf("unmarshal upcasted data: %v", err)
+	}
+	if string(raw["interval"]) != "null" {
+		t.Errorf("expected interval to stay null through the chain, got %s", raw["interval"])
+	}
+}

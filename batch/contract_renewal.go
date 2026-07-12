@@ -81,6 +81,10 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 	if concurrency == 1 || opts.DryRun {
 		// Sequential processing
 		for _, agg := range contracts {
+			if p.skipNoInterval(agg) {
+				result.Skipped++
+				continue
+			}
 			if err := p.processOne(ctx, agg, opts.DryRun); err != nil {
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Errorf("contract %s: %w", agg.ContractID(), err))
@@ -112,6 +116,13 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 			}
 		}
 
+		if p.skipNoInterval(agg) {
+			mu.Lock()
+			result.Skipped++
+			mu.Unlock()
+			continue
+		}
+
 		sem <- struct{}{}
 		go func(a *contract.ContractAggregate) {
 			defer func() { <-sem }()
@@ -138,6 +149,24 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 	}
 
 	return result, nil
+}
+
+// skipNoInterval reports whether the contract must be skipped because it has
+// no billing interval (a zero-interval one_time contract, issue #218) and thus
+// no billing period to renew. Repository implementations are expected to
+// exclude such contracts from FindDueForRenewal (their period end is the zero
+// time), but a custom DB adapter may not replicate that guard — this is
+// defense-in-depth so a mis-selected contract is counted as Skipped with a
+// Warn log rather than Failed with a confusing renewal error.
+func (p *ContractRenewalProcessor) skipNoInterval(agg *contract.ContractAggregate) bool {
+	if !agg.GetInterval().IsZero() {
+		return false
+	}
+	p.logger.Warn("skipping contract with no billing interval (nothing to renew)",
+		"contractID", agg.ContractID(),
+		"contractType", agg.GetContractType(),
+	)
+	return true
 }
 
 func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract.ContractAggregate, dryRun bool) error {

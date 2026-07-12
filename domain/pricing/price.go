@@ -112,8 +112,31 @@ func NewPriceWithInterval(
 	return newPrice(productID, amount, currency, interval, pricingModel, createdAt, opts...)
 }
 
-// newPrice is the shared constructor body for NewPrice / NewPriceWithInterval.
-// It enforces the amount invariants both public constructors share (issue #196).
+// NewOneTimePrice creates a new active Price with no billing interval,
+// intended for one_time contracts (issue #218): a single flat charge with no
+// recurrence. The resulting Price has a zero Interval() and an empty
+// BillingCycle(), and carries no pricing model (PricingModel() returns nil,
+// i.e. the flat Amount() is charged once).
+//
+// Amount validation mirrors NewPrice / NewPriceWithInterval (issue #196): a
+// negative amount and a currency mismatch between amount and the declared
+// currency are rejected. Only the interval requirement is waived here —
+// NewPriceWithInterval keeps rejecting zero intervals, so recurring prices
+// can never silently lose their interval.
+func NewOneTimePrice(
+	productID shared.ProductID,
+	amount shared.Money,
+	currency shared.Currency,
+	createdAt time.Time,
+	opts ...PriceOption,
+) (*Price, error) {
+	return newPrice(productID, amount, currency, BillingInterval{}, nil, createdAt, opts...)
+}
+
+// newPrice is the shared constructor body for NewPrice / NewPriceWithInterval /
+// NewOneTimePrice. It enforces the amount invariants all public constructors
+// share (issue #196); the interval requirement is enforced (or waived, for
+// NewOneTimePrice) by each public constructor.
 func newPrice(
 	productID shared.ProductID,
 	amount shared.Money,
