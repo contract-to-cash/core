@@ -12,6 +12,7 @@ import (
 	"github.com/contract-to-cash/core/domain/pricing"
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/eventstore"
+	"github.com/contract-to-cash/core/infrastructure/inmemory"
 	"github.com/contract-to-cash/core/plugin"
 )
 
@@ -598,5 +599,120 @@ func TestContractRenewalProcessor_NilPriceRepo_FallsBack(t *testing.T) {
 	}
 	if !agg.GetInterval().Equals(pricing.Monthly()) {
 		t.Errorf("expected interval monthly (fallback), got %s", agg.GetInterval())
+	}
+}
+
+// --- Zero-interval one_time contracts (issue #218) ---
+
+// newZeroIntervalOneTimeContract creates an ACTIVE one_time contract with no
+// billing interval (issue #218). Its currentPeriod stays unset, so a compliant
+// FindDueForRenewal never selects it. AutoRenew is set so a force-fed renewal
+// would reach the interval logic rather than the expire branch.
+func newZeroIntervalOneTimeContract(id string) *contract.ContractAggregate {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
+	agg := contract.NewContractAggregate(shared.ContractID(id), clock)
+	meta := eventstore.EventMetadata{UserID: "test"}
+	cmd := contract.CreateContractCommand{
+		IdempotencyKey: "idem-batch-contract_renewal-onetime-218",
+		AccountID:      shared.AccountID("a1"),
+		ContractType:   contract.ContractTypeOneTime,
+		// Interval intentionally unset (zero) — allowed for one_time (#218).
+		Price:     shared.NewMoney(big.NewRat(5000, 1), shared.CurrencyJPY),
+		BasePrice: shared.NewMoney(big.NewRat(5000, 1), shared.CurrencyJPY),
+		AutoRenew: true,
+	}
+	if err := agg.Create(cmd, meta); err != nil {
+		panic("failed to create contract: " + err.Error())
+	}
+	if err := agg.Activate(meta); err != nil {
+		panic("failed to activate contract: " + err.Error())
+	}
+	return agg
+}
+
+// TestContractRenewalProcessor_ZeroIntervalOneTime_NotSelectedByInMemoryRepo
+// verifies the primary line of defense: the in-memory FindDueForRenewal
+// excludes a zero-interval one_time contract (its period end is the zero
+// time), so the renewal batch never sees it.
+func TestContractRenewalProcessor_ZeroIntervalOneTime_NotSelectedByInMemoryRepo(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
+	store := inmemory.NewInMemoryEventStore(clock)
+	repo := inmemory.NewInMemoryContractRepository(store, clock)
+	ctx := context.Background()
+
+	agg := newZeroIntervalOneTimeContract("c-onetime-218")
+	if err := repo.Save(ctx, agg); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
+	result, err := processor.Process(ctx, BatchOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Total != 0 {
+		t.Errorf("Total: got %d, want 0 (zero-interval one_time must not be selected)", result.Total)
+	}
+	if result.Skipped != 0 || result.Failed != 0 {
+		t.Errorf("Skipped/Failed: got %d/%d, want 0/0", result.Skipped, result.Failed)
+	}
+}
+
+// TestContractRenewalProcessor_ZeroIntervalOneTime_SkippedWhenForceFed is the
+// defense-in-depth half of issue #218: a custom DB adapter that does NOT
+// replicate the zero-period-end guard may still return the contract from
+// FindDueForRenewal. The processor must skip it (Warn log, Skipped counter)
+// rather than fail it with a confusing renewal error.
+func TestContractRenewalProcessor_ZeroIntervalOneTime_SkippedWhenForceFed(t *testing.T) {
+	agg := newZeroIntervalOneTimeContract("c-onetime-forcefed")
+	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
+
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
+	result, err := processor.Process(context.Background(), BatchOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Total != 1 {
+		t.Errorf("Total: got %d, want 1", result.Total)
+	}
+	if result.Skipped != 1 {
+		t.Errorf("Skipped: got %d, want 1", result.Skipped)
+	}
+	if result.Succeeded != 0 || result.Failed != 0 {
+		t.Errorf("Succeeded/Failed: got %d/%d, want 0/0", result.Succeeded, result.Failed)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("Errors: got %v, want none", result.Errors)
+	}
+	// The contract must be untouched: still active, no renewal side effects.
+	if agg.Status() != contract.ContractStatusActive {
+		t.Errorf("status: got %s, want active", agg.Status())
+	}
+	if len(repo.saved) != 0 {
+		t.Errorf("expected no Save calls for skipped contract, got %d", len(repo.saved))
+	}
+}
+
+// TestContractRenewalProcessor_ZeroIntervalOneTime_SkippedConcurrent covers the
+// concurrent dispatch path: a force-fed zero-interval contract is skipped while
+// a normal renewable contract in the same batch still succeeds.
+func TestContractRenewalProcessor_ZeroIntervalOneTime_SkippedConcurrent(t *testing.T) {
+	zero := newZeroIntervalOneTimeContract("c-onetime-conc")
+	renewable := newActiveContract("c-renewable-conc")
+	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{zero, renewable}}
+
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
+	result, err := processor.Process(context.Background(), BatchOptions{Concurrency: 2, ContinueOnError: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Skipped != 1 {
+		t.Errorf("Skipped: got %d, want 1", result.Skipped)
+	}
+	if result.Succeeded != 1 {
+		t.Errorf("Succeeded: got %d, want 1", result.Succeeded)
+	}
+	if result.Failed != 0 {
+		t.Errorf("Failed: got %d, want 0", result.Failed)
 	}
 }

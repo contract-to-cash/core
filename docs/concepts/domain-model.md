@@ -192,7 +192,7 @@ The contract is the central entity, modeled as an event-sourced aggregate root. 
 
 | Type | Description |
 |------|-------------|
-| `one_time` | Single purchase, no recurring billing |
+| `one_time` | Single purchase, no recurring billing. May omit the billing interval entirely (#218) — see the internals spec for details |
 | `subscription` | Recurring billing at a fixed interval |
 | `usage_based` | Charges based on metered usage |
 

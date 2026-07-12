@@ -305,3 +305,81 @@ func TestPrice_PricingModel_ReturnsDefensiveCopy(t *testing.T) {
 			before.Amount().RatString(), after.Amount().RatString())
 	}
 }
+
+// --- NewOneTimePrice (issue #218) ---
+
+func TestNewOneTimePrice(t *testing.T) {
+	productID := shared.NewProductID()
+	createdAt := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	p, err := NewOneTimePrice(productID, jpy(50000), shared.CurrencyJPY, createdAt)
+	if err != nil {
+		t.Fatalf("NewOneTimePrice failed: %v", err)
+	}
+	if p.ID() == "" {
+		t.Error("expected non-empty price ID")
+	}
+	if p.ProductID() != productID {
+		t.Error("expected matching product ID")
+	}
+	if p.Amount().Amount().Cmp(new(big.Rat).SetInt64(50000)) != 0 {
+		t.Errorf("expected amount 50000, got %v", p.Amount().Amount())
+	}
+	if !p.Interval().IsZero() {
+		t.Errorf("expected zero interval, got %v", p.Interval())
+	}
+	if p.BillingCycle() != "" {
+		t.Errorf("expected empty billing cycle, got %q", p.BillingCycle())
+	}
+	if p.PricingModel() != nil {
+		t.Errorf("expected nil pricing model (flat one-time charge), got %T", p.PricingModel())
+	}
+	if p.Status() != PriceStatusActive {
+		t.Errorf("expected status active, got %s", p.Status())
+	}
+	if !p.CreatedAt().Equal(createdAt) {
+		t.Errorf("expected createdAt %v, got %v", createdAt, p.CreatedAt())
+	}
+}
+
+func TestNewOneTimePrice_AmountInvariants(t *testing.T) {
+	now := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	// Negative amount rejected (mirrors NewPrice / NewPriceWithInterval).
+	if _, err := NewOneTimePrice(shared.NewProductID(), jpy(-1), shared.CurrencyJPY, now); err == nil {
+		t.Error("expected error for negative amount")
+	}
+
+	// Currency mismatch rejected.
+	if _, err := NewOneTimePrice(shared.NewProductID(), usd(100), shared.CurrencyJPY, now); err == nil {
+		t.Error("expected error for currency mismatch")
+	}
+
+	// Metadata option is honored, same as the other constructors.
+	p, err := NewOneTimePrice(shared.NewProductID(), jpy(1000), shared.CurrencyJPY, now,
+		WithMetadata(map[string]string{"creator_id": "u1"}))
+	if err != nil {
+		t.Fatalf("NewOneTimePrice with metadata failed: %v", err)
+	}
+	if p.Metadata()["creator_id"] != "u1" {
+		t.Errorf("expected metadata creator_id=u1, got %v", p.Metadata())
+	}
+}
+
+// TestNewPriceWithInterval_StillRejectsZeroInterval pins the constraint that
+// NewOneTimePrice is the ONLY constructor that waives the interval requirement
+// (issue #218): NewPriceWithInterval keeps rejecting zero intervals.
+func TestNewPriceWithInterval_StillRejectsZeroInterval(t *testing.T) {
+	_, err := NewPriceWithInterval(shared.NewProductID(), jpy(1000), shared.CurrencyJPY,
+		BillingInterval{}, nil, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected NewPriceWithInterval to reject a zero interval")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if domErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected ErrCodeValidation, got %s", domErr.Code)
+	}
+}

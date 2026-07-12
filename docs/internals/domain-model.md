@@ -52,7 +52,7 @@ erDiagram
         ProductID productID FK
         Money amount
         Currency currency
-        BillingInterval interval "{unit, count} 例: {month, 3}"
+        BillingInterval interval "{unit, count} 例: {month, 3}。one_time 用の Price は zero 可（NewOneTimePrice、#218）"
         PricingModel pricingModel "flat | tiered | usage"
         PriceStatus status "active | archived"
         map metadata
@@ -65,8 +65,8 @@ erDiagram
         PriceID priceID FK
         ContractStatus status "draft | trialing | active | past_due | suspended | cancelled | expired"
         ContractType contractType "one_time | subscription | usage_based"
-        BillingInterval interval
-        DateRange currentPeriod
+        BillingInterval interval "one_time のみ省略可（zero、#218）"
+        DateRange currentPeriod "zero-interval one_time では未設定のまま（#218）"
         Money price
         Money basePrice
         bool autoRenew
@@ -560,7 +560,7 @@ type CreateContractCommand struct {
     AccountID      shared.AccountID
     PriceID        shared.PriceID
     ContractType   ContractType
-    Interval       BillingInterval
+    Interval       BillingInterval // one_time のみ省略可（zero、issue #218、§3.11）。他タイプは必須
     Price          shared.Money
     BasePrice      shared.Money
     AutoRenew      bool
@@ -598,7 +598,8 @@ func NewContractAggregate(id shared.ContractID, clock shared.Clock) *ContractAgg
 // Create の検証（issue #196）: 不変なイベントストリームに不正値を書かないよう、
 // nil Clock（NewContractAggregate に nil を渡した場合。panic ではなく validation error）、
 // 空 AccountID、PriceID も非ゼロ Price も無い（価格参照が皆無）、Price と BasePrice の
-// 通貨不一致（両者非ゼロのとき）を拒否する。
+// 通貨不一致（両者非ゼロのとき）を拒否する。zero の Interval は one_time のみ許容
+// （issue #218、§3.11）— 他タイプでは従来どおり validation error。
 func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) Activate(metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) Suspend(config SuspensionConfiguration, metadata eventstore.EventMetadata) error
@@ -615,6 +616,10 @@ func (a *ContractAggregate) ChangePaymentMethod(paymentMethodID *string, metadat
 // TrialEndDate、負の ConversionReminderDays を拒否する。
 func (a *ContractAggregate) StartTrial(config TrialConfiguration, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMetadata) error
+// RenewWithInterval: zero の newInterval、または currentPeriod 未設定
+// （zero-interval one_time）での更新は ErrCodeBusinessRule を返す（issue #218、§3.11）。
+// cancelAtPeriodEnd / autoRenew=false の早期分岐はこのガードより先に評価されるため、
+// 解約・満了は interval 無しでも従来どおり成立する。
 func (a *ContractAggregate) RenewWithInterval(newInterval BillingInterval, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) ScheduleCancellation(reason string, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) UnscheduleCancellation(metadata eventstore.EventMetadata) error
@@ -626,6 +631,9 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error)
 // LoadFromSnapshot のレガシー分岐（interval が無く billing_cycle のみ）は Strict 変換を使い、
 // 未知/欠落の billing_cycle を静かに Monthly へ丸めず validation error にする（issue #196 / #162 L-4）。
 // 正当なレガシースナップショット（daily/weekly/monthly/yearly）はそのままロードできる。
+// 例外（issue #218、§3.11）: contract_type が one_time で interval が zero かつ
+// billing_cycle も無いスナップショットは、壊れたレガシーではなく正当な
+// zero-interval one_time として受理する（billing_cycle が未知の非空値なら one_time でも失敗）。
 func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 
 // Getters
@@ -1047,6 +1055,52 @@ name-mangling を不要にする）。エンティティごとの扱い:
   自然なゼロ値で、バージョン判別によるフォールバック導出が不要なため）。
 - **後方互換（Price）**: `PriceSnapshot.Metadata` は nil 許容（#219 以前のスナップショットは
   nil のままロードされ、`Metadata()` は空 map を返す）。
+
+### 3.11 one_time 契約の interval 省略（issue #218）
+
+one_time 契約は単発課金であり繰り返しの課金サイクルを持たないため、
+`CreateContractCommand.Interval` を **省略（zero 値）できる**。設計は
+「zero interval → `currentPeriod` を未設定（zero 値 DateRange）のまま残す」:
+`shared.NewDateRange` は緩めず（start >= end は引き続き拒否）、`[now, now)` のような
+ゼロ幅期間も作らない。コードベースは既に zero 値 period を「課金期間なし」として扱う
+（`FindDueForRenewal` / `FindExpiring` は `!period.End().IsZero()` で除外し、
+`BillingService.calculateSubtotal` の期間一致検証は `CurrentPeriod().IsZero()` のとき
+スキップされる）。
+
+**挙動**:
+
+- **Create**: zero の `Interval` は `ContractType == one_time` のときのみ許容。
+  subscription / usage_based では従来どおり validation error（メッセージ不変）。
+- **Activate / EndTrial(converted=true)**: interval が zero なら初期課金期間を計算せず、
+  `ContractActivatedEvent` / `TrialEndedEvent` は zero 値の `CurrentPeriod` を運ぶ。
+  `currentPeriod` は未設定のまま、`billingAnchorDay` は 0（アンカー無し）。
+- **RenewWithInterval**: zero interval / 未設定 period の契約は
+  `ErrCodeBusinessRule`（"contract without a billing interval cannot be renewed"）。
+  cancelAtPeriodEnd / autoRenew=false の早期分岐はガードより先に評価される。
+- **更新バッチ**: 未設定 period は `FindDueForRenewal` に選択されない（in-memory 実装は
+  `!period.End().IsZero()` ガード）。加えて `batch.ContractRenewalProcessor` は
+  defense-in-depth として zero-interval 契約を **Skipped**（`BatchResult.Skipped`、
+  Warn ログ、Failed ではない）で除外する — zero-period-end ガードを再現しない
+  カスタム DB アダプタ対策。
+- **請求**: `GenerateInvoice` には `agg.CurrentPeriod()`（zero 値）をそのまま渡す。
+  期間一致検証はスキップされ、請求書の `BillingPeriod` も zero 値になる。
+  one_time の重複ガードは期間ではなく「契約あたり非 void 請求書は最大 1 枚」なので
+  影響しない。クーポンの冪等引換キー `(couponID, contractID, billingPeriod)` も
+  一意性を保つ（one_time は非 void 請求書が最大 1 枚のため）。
+- **`DateRange.Contains` 等の期間セマンティクス**は zero 値 period には適用されない
+  （未設定 period に対する時点判定は常に「期間外」扱いになる点に注意）。
+- **Price 側**: `pricing.NewOneTimePrice(productID, amount, currency, createdAt, opts...)`
+  が zero interval の Price を構築する（§7.2）。`Interval()` は zero、`BillingCycle()` は
+  空文字列。`NewPriceWithInterval` は従来どおり zero interval を拒否する。
+
+**後方互換**: 既存の「interval 付き one_time」（interval をカバレッジ期間として使う
+旧来の慣習）は**完全に有効なまま**であり、イベントリプレイ・スナップショットとも
+無変更で動作する。#218 は追加的（additive）変更で、新イベント種別・スキーマ変更は無い:
+zero interval の `ContractCreatedEvent` は `interval:null` として直列化され、既存の
+Upcaster チェーンを無変更で通過する（billing_cycle が無い interval:null の one_time
+ペイロードはレガシー復元の対象にならない）。スナップショットのレガシー分岐は
+「one_time かつ interval zero かつ billing_cycle 無し」を正当として受理する
+（§3.2 の LoadFromSnapshot 注記）。
 
 ## 4. Invoice（請求書）
 
@@ -1649,7 +1703,7 @@ type Price struct {
     createdAt    time.Time
 }
 
-// PriceOption は NewPrice / NewPriceWithInterval の functional option。
+// PriceOption は NewPrice / NewPriceWithInterval / NewOneTimePrice の functional option。
 type PriceOption func(*Price)
 
 // WithMetadata は構築時に統合者定義 metadata を設定する（issue #219）。
@@ -1680,6 +1734,19 @@ func NewPriceWithInterval(
     currency shared.Currency,
     interval BillingInterval,
     pricingModel PricingModel,
+    createdAt time.Time,
+    opts ...PriceOption,
+) (*Price, error)
+
+// NewOneTimePrice は one_time 契約向けに interval 無しの Price を構築する（issue #218、§3.11）。
+// 結果の Price は Interval() が zero、BillingCycle() が空文字列、PricingModel() が nil
+// （フラットな Amount() を 1 回だけ課金）。amount の検証（負値・通貨不一致）は
+// NewPrice / NewPriceWithInterval と同一で、interval 要件だけが免除される。
+// NewPriceWithInterval は従来どおり zero interval を拒否する。
+func NewOneTimePrice(
+    productID shared.ProductID,
+    amount shared.Money,
+    currency shared.Currency,
     createdAt time.Time,
     opts ...PriceOption,
 ) (*Price, error)

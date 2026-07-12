@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Zero-interval `one_time` contracts + `pricing.NewOneTimePrice` (#218)** — first-class
+  one-time modeling: `CreateContractCommand.Interval` may now be omitted (zero) when
+  `ContractType == ContractTypeOneTime`; the contract activates (or converts from trial)
+  with an unset `CurrentPeriod()` (zero-value `DateRange`), is excluded from
+  `FindDueForRenewal` / `FindExpiring` and the renewal batch (the processor now counts a
+  force-fed zero-interval contract as `BatchResult.Skipped` with a Warn log instead of
+  failing it), and `RenewWithInterval` rejects it with a clear business-rule error.
+  `pricing.NewOneTimePrice(productID, amount, currency, createdAt, opts...)` builds the
+  matching interval-less Price (zero `Interval()`, empty `BillingCycle()`, nil pricing
+  model); `NewPriceWithInterval` still rejects zero intervals. Non-breaking/additive: no
+  event-schema changes (a zero interval serializes as `interval:null` and passes the
+  existing upcaster chain unchanged), other contract types still require an interval with
+  the same error, and existing one_time contracts created WITH an interval replay and
+  snapshot-restore unchanged. `LoadFromSnapshot` now accepts a zero-interval one_time
+  snapshot instead of misclassifying it as a broken legacy (billing_cycle-only) snapshot.
+
 - **`OnContractCancelScheduledHook` / `OnContractCancelUnscheduledHook` (#227)** — two new
   integrator-fired contract lifecycle plugin hooks mirroring the existing five
   (Create/Activate/Suspend/Resume/Cancel). They correspond to the aggregate's existing

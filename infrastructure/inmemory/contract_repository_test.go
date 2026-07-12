@@ -408,3 +408,70 @@ func TestInMemoryContractRepository_FindByIDAsOf(t *testing.T) {
 		t.Error("expected error for non-existent contract")
 	}
 }
+
+// TestInMemoryContractRepository_ZeroIntervalOneTimeExcludedFromPeriodQueries
+// verifies issue #218: an ACTIVE one_time contract without a billing interval
+// has an unset (zero-value) currentPeriod, so the period-based finders
+// (FindExpiring / FindDueForRenewal) must never select it.
+func TestInMemoryContractRepository_ZeroIntervalOneTimeExcludedFromPeriodQueries(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	store := NewInMemoryEventStore(clock)
+	repo := NewInMemoryContractRepository(store, clock)
+	ctx := context.Background()
+	metadata := eventstore.EventMetadata{UserID: "test-user"}
+
+	agg := contract.NewContractAggregate(shared.NewContractID(), clock)
+	cmd := contract.CreateContractCommand{
+		IdempotencyKey: "idem-inmemory-contract_repository-onetime-218",
+		AccountID:      shared.NewAccountID(),
+		PriceID:        shared.NewPriceID(),
+		ContractType:   contract.ContractTypeOneTime,
+		// Interval intentionally unset (zero) — allowed for one_time (#218).
+		Price:     shared.NewMoney(new(big.Rat).SetInt64(5000), shared.CurrencyJPY),
+		BasePrice: shared.NewMoney(new(big.Rat).SetInt64(5000), shared.CurrencyJPY),
+		AutoRenew: true,
+	}
+	if err := agg.Create(cmd, metadata); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(metadata); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+	if !agg.CurrentPeriod().IsZero() {
+		t.Fatalf("expected zero-value current period, got %s", agg.CurrentPeriod())
+	}
+	if err := repo.Save(ctx, agg); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Far-future cutoffs: an active contract WITH a period would match both.
+	farFuture := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	expiring, err := repo.FindExpiring(ctx, farFuture)
+	if err != nil {
+		t.Fatalf("FindExpiring failed: %v", err)
+	}
+	if len(expiring) != 0 {
+		t.Errorf("FindExpiring: expected 0 results for unset-period contract, got %d", len(expiring))
+	}
+
+	due, err := repo.FindDueForRenewal(ctx, farFuture, 0)
+	if err != nil {
+		t.Fatalf("FindDueForRenewal failed: %v", err)
+	}
+	if len(due) != 0 {
+		t.Errorf("FindDueForRenewal: expected 0 results for unset-period contract, got %d", len(due))
+	}
+
+	// Sanity: the contract itself is still loadable and active with a zero period.
+	found, err := repo.FindByID(ctx, agg.ContractID())
+	if err != nil {
+		t.Fatalf("FindByID failed: %v", err)
+	}
+	if found.Status() != contract.ContractStatusActive {
+		t.Errorf("expected active, got %s", found.Status())
+	}
+	if !found.CurrentPeriod().IsZero() {
+		t.Errorf("expected zero-value period after rehydration, got %s", found.CurrentPeriod())
+	}
+}

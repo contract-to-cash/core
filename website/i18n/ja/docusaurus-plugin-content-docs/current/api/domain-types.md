@@ -115,6 +115,8 @@ agg := contract.NewContractAggregate(contractID, clock)
 
 **課金間隔（Billing interval）**: `pricing.BillingInterval`（`{unit, count}`）を使用する。便利なコンストラクタ: `pricing.Daily()`, `pricing.Weekly()`, `pricing.Monthly()`, `pricing.Yearly()`, `pricing.Quarterly()`, `pricing.SemiAnnual()`。`pricing.BillingCycle` 文字列定数（`BillingCycleDaily/Weekly/Monthly/Yearly`）は `Price` 構築・表示・アダプタ用に `pricing` パッケージ内へ残存するが、契約ドメインでは公開しない（#111 で撤去）。
 
+**one_time 契約は interval を省略可（#218）**: `ContractType == ContractTypeOneTime` のときのみ `CreateContractCommand.Interval` を zero のまま省略できる。その場合、契約は `CurrentPeriod()` 未設定（zero 値）のまま有効化され、更新/満了クエリと更新バッチの対象外になり、`RenewWithInterval` は business-rule エラーを返す。他の契約タイプでは従来どおり非 zero の interval が必須。Price 側は `pricing.NewOneTimePrice` を使う。interval 付きで作成済みの既存 one_time 契約は完全に有効なまま。
+
 #### コマンド
 
 | メソッド | 遷移元 | 遷移先 |
@@ -137,7 +139,7 @@ type CreateContractCommand struct {
     AccountID      shared.AccountID
     PriceID        shared.PriceID
     ContractType   ContractType
-    Interval       BillingInterval
+    Interval       BillingInterval // one_time のみ省略可（zero、#218）。他タイプは必須
     Price          shared.Money
     BasePrice      shared.Money
     AutoRenew      bool
@@ -430,6 +432,13 @@ Priceは**作成後は不変**。価格変更には新しいPriceを作成。
 
 ```go
 price := pricing.NewPrice(productID, amount, currency, billingCycle, pricingModel, createdAt)
+
+// 柔軟な interval（quarterly, semi-annual, ...）。zero interval は拒否する。
+price, err := pricing.NewPriceWithInterval(productID, amount, currency, interval, pricingModel, createdAt)
+
+// one_time 用 Price（#218）: Interval() は zero、BillingCycle() は空文字列、
+// PricingModel() は nil（フラットな金額を 1 回だけ課金）。one_time 契約向け。
+price, err := pricing.NewOneTimePrice(productID, amount, currency, createdAt)
 
 price.ID() shared.PriceID
 price.ProductID() shared.ProductID

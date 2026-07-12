@@ -115,6 +115,8 @@ agg := contract.NewContractAggregate(contractID, clock)
 
 **Billing interval**: use `pricing.BillingInterval` (`{unit, count}`). Convenience constructors: `pricing.Daily()`, `pricing.Weekly()`, `pricing.Monthly()`, `pricing.Yearly()`, `pricing.Quarterly()`, `pricing.SemiAnnual()`. The `pricing.BillingCycle` string constants (`BillingCycleDaily/Weekly/Monthly/Yearly`) remain in the `pricing` package for `Price` construction, display, and adapter code, but the contract domain no longer surfaces them (removed in #111).
 
+**One-time contracts may omit the interval (#218)**: `CreateContractCommand.Interval` may be left zero when `ContractType == ContractTypeOneTime`. The contract then activates with an unset (zero-value) `CurrentPeriod()`, is excluded from renewal/expiry queries and the renewal batch, and `RenewWithInterval` returns a business-rule error. All other contract types still require a non-zero interval. On the Price side, use `pricing.NewOneTimePrice`. Existing one_time contracts created WITH an interval remain fully valid.
+
 #### Commands
 
 | Method | From Status | To Status |
@@ -137,7 +139,7 @@ type CreateContractCommand struct {
     AccountID      shared.AccountID
     PriceID        shared.PriceID
     ContractType   ContractType
-    Interval       BillingInterval
+    Interval       BillingInterval // optional (zero) for one_time only (#218); required otherwise
     Price          shared.Money
     BasePrice      shared.Money
     AutoRenew      bool
@@ -419,6 +421,13 @@ Prices are **immutable after creation**. To change pricing, create a new Price.
 
 ```go
 price := pricing.NewPrice(productID, amount, currency, billingCycle, pricingModel, createdAt)
+
+// Flexible intervals (quarterly, semi-annual, ...). Rejects a zero interval.
+price, err := pricing.NewPriceWithInterval(productID, amount, currency, interval, pricingModel, createdAt)
+
+// One-time price (#218): zero Interval(), empty BillingCycle(), nil PricingModel
+// (the flat amount is charged once). For one_time contracts.
+price, err := pricing.NewOneTimePrice(productID, amount, currency, createdAt)
 
 price.ID() shared.PriceID
 price.ProductID() shared.ProductID

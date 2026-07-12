@@ -228,7 +228,11 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 		return shared.NewDomainError(shared.ErrCodeValidation,
 			"AccountID must be set")
 	}
-	if cmd.Interval.IsZero() {
+	// A one_time contract may omit the interval (issue #218): it has a single
+	// charge and no recurrence, so a zero interval means "no billing period"
+	// (currentPeriod stays unset after Activate). All other contract types
+	// require an interval to establish and renew billing periods.
+	if cmd.Interval.IsZero() && cmd.ContractType != ContractTypeOneTime {
 		return shared.NewDomainError(shared.ErrCodeValidation,
 			"Interval must be set")
 	}
@@ -289,11 +293,18 @@ func (a *ContractAggregate) Activate(metadata eventstore.EventMetadata) error {
 	}
 
 	now := a.Clock().Now()
-	// Calculate the initial billing period based on interval
-	periodEnd := a.interval.AddTo(now)
-	initialPeriod, err := shared.NewDateRange(now, periodEnd)
-	if err != nil {
-		return err
+	// Calculate the initial billing period based on interval. A zero-interval
+	// contract (only possible for one_time, issue #218) has no billing period:
+	// the event carries a zero-value CurrentPeriod, currentPeriod stays unset,
+	// and anchorDayFrom yields 0 (no billing anchor) on Apply.
+	var initialPeriod shared.DateRange
+	if !a.interval.IsZero() {
+		periodEnd := a.interval.AddTo(now)
+		period, err := shared.NewDateRange(now, periodEnd)
+		if err != nil {
+			return err
+		}
+		initialPeriod = period
 	}
 
 	event := &ContractActivatedEvent{
@@ -580,8 +591,11 @@ func (a *ContractAggregate) EndTrial(converted bool, metadata eventstore.EventMe
 		EndedAt:    now,
 		Converted:  converted,
 	}
-	if converted {
-		// Establish the initial billing period, mirroring Activate.
+	if converted && !a.interval.IsZero() {
+		// Establish the initial billing period, mirroring Activate. A
+		// zero-interval contract (only possible for one_time, issue #218)
+		// converts with no billing period: the event carries a zero-value
+		// CurrentPeriod and currentPeriod stays unset.
 		period, err := shared.NewDateRange(now, a.interval.AddTo(now))
 		if err != nil {
 			return err
@@ -608,6 +622,18 @@ func (a *ContractAggregate) RenewWithInterval(newInterval BillingInterval, metad
 
 	if !a.autoRenew {
 		return a.expire(metadata)
+	}
+
+	// A contract without a billing interval (zero-interval one_time, issue
+	// #218) has no current period to chain the next one from, and a zero
+	// newInterval cannot produce a period end. Reject explicitly with a
+	// business-rule error instead of failing deep inside NewDateRange with a
+	// confusing invalid-date-range error. This guard intentionally sits AFTER
+	// the cancelAtPeriodEnd / autoRenew=false branches above: cancelling or
+	// expiring needs no interval, so those transitions remain reachable.
+	if newInterval.IsZero() || a.currentPeriod.IsZero() {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"contract without a billing interval cannot be renewed")
 	}
 
 	// Calculate the next period, anchoring the end on the original billing day
@@ -841,7 +867,7 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		if e.Converted {
 			a.status = ContractStatusActive
 			period := e.CurrentPeriod
-			if period.IsZero() {
+			if period.IsZero() && !a.interval.IsZero() {
 				// Legacy TrialEndedEvent (schema v1) carried no current_period.
 				// Derive it deterministically from the billing interval —
 				// recovered from the earlier ContractCreatedEvent in this same
@@ -849,6 +875,12 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 				// establishes the initial period. This keeps replay
 				// deterministic and prevents converted trials from silently
 				// falling out of the renewal/billing cycle (issue #146).
+				//
+				// The !a.interval.IsZero() gate (issue #218): a zero-interval
+				// one_time contract legitimately converts with no billing
+				// period, so the period stays unset instead of attempting a
+				// derivation that would fail. Legacy (pre-#218) history always
+				// carried a non-zero interval, so the legacy path is unchanged.
 				derived, err := shared.NewDateRange(e.EndedAt, a.interval.AddTo(e.EndedAt))
 				if err != nil {
 					return err
@@ -1052,11 +1084,20 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 			return fmt.Errorf("failed to unmarshal legacy snapshot billing_cycle: %w", err)
 		}
 		interval, ok := pricing.BillingCycleToIntervalStrict(legacy.BillingCycle)
-		if !ok {
+		switch {
+		case ok:
+			a.interval = interval
+		case state.ContractType == ContractTypeOneTime && legacy.BillingCycle == "":
+			// A one_time snapshot with a zero interval and no legacy
+			// billing_cycle to recover is NOT a broken legacy snapshot — it is
+			// a legitimate zero-interval one_time contract (issue #218). Accept
+			// the zero interval as valid. A non-empty but unknown billing_cycle
+			// still fails loudly below, even for one_time (corrupt payload).
+			a.interval = BillingInterval{}
+		default:
 			return shared.NewDomainError(shared.ErrCodeValidation,
 				fmt.Sprintf("legacy snapshot has unknown or absent billing_cycle %q (expected daily, weekly, monthly, or yearly)", legacy.BillingCycle))
 		}
-		a.interval = interval
 	}
 	a.currentPeriod = state.CurrentPeriod
 	// Deep-copy pointer fields so the aggregate does not alias the local

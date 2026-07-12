@@ -1454,3 +1454,306 @@ func TestRenewWithInterval_SetsOldInterval(t *testing.T) {
 		t.Errorf("expected NewInterval SemiAnnual, got %v", renewed.NewInterval)
 	}
 }
+
+// --- Zero-interval one_time contracts (issue #218) ---
+
+// newOneTimeNoIntervalCommand builds a one_time CreateContractCommand with the
+// Interval intentionally left zero (allowed only for one_time, issue #218).
+func newOneTimeNoIntervalCommand(idem string) CreateContractCommand {
+	return CreateContractCommand{
+		IdempotencyKey: idem,
+		AccountID:      shared.AccountID("acc-001"),
+		ContractType:   ContractTypeOneTime,
+		Price:          newTestMoney(),
+		BasePrice:      newTestMoney(),
+	}
+}
+
+func createActiveZeroIntervalOneTime(t *testing.T) *ContractAggregate {
+	t.Helper()
+	agg := newTestAggregate()
+	meta := newTestMetadata()
+	if err := agg.Create(newOneTimeNoIntervalCommand("idem-onetime-zero-interval"), meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+	return agg
+}
+
+func TestCreate_ZeroInterval_OneTimeAllowed(t *testing.T) {
+	agg := newTestAggregate()
+	if err := agg.Create(newOneTimeNoIntervalCommand("idem-onetime-create"), newTestMetadata()); err != nil {
+		t.Fatalf("Create with zero interval for one_time should succeed, got: %v", err)
+	}
+	if agg.Status() != ContractStatusDraft {
+		t.Errorf("expected draft, got %s", agg.Status())
+	}
+	if !agg.GetInterval().IsZero() {
+		t.Errorf("expected zero interval, got %v", agg.GetInterval())
+	}
+}
+
+func TestCreate_ZeroInterval_OtherTypesRejected(t *testing.T) {
+	for _, ct := range []ContractType{ContractTypeSubscription, ContractTypeUsageBased} {
+		t.Run(string(ct), func(t *testing.T) {
+			agg := newTestAggregate()
+			cmd := newOneTimeNoIntervalCommand("idem-zero-interval-" + string(ct))
+			cmd.ContractType = ct
+			err := agg.Create(cmd, newTestMetadata())
+			if err == nil {
+				t.Fatalf("expected error for zero interval on %s contract", ct)
+			}
+			var domErr *shared.DomainError
+			if !errors.As(err, &domErr) {
+				t.Fatalf("expected DomainError, got %T: %v", err, err)
+			}
+			if domErr.Code != shared.ErrCodeValidation {
+				t.Errorf("expected ErrCodeValidation, got %s", domErr.Code)
+			}
+		})
+	}
+}
+
+func TestActivate_ZeroIntervalOneTime_LeavesPeriodUnset(t *testing.T) {
+	agg := createActiveZeroIntervalOneTime(t)
+
+	if agg.Status() != ContractStatusActive {
+		t.Errorf("expected active, got %s", agg.Status())
+	}
+	if !agg.CurrentPeriod().IsZero() {
+		t.Errorf("expected zero-value current period, got %s", agg.CurrentPeriod())
+	}
+	if agg.BillingAnchorDay() != 0 {
+		t.Errorf("expected billing anchor day 0, got %d", agg.BillingAnchorDay())
+	}
+}
+
+func TestZeroIntervalOneTime_EventReplayRoundTrip(t *testing.T) {
+	original := createActiveZeroIntervalOneTime(t)
+
+	events := original.UncommittedEvents()
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (create + activate), got %d", len(events))
+	}
+
+	restored := NewContractAggregate(shared.ContractID("test-contract-001"), newTestClock())
+	if err := restored.LoadFromHistory(events); err != nil {
+		t.Fatalf("LoadFromHistory failed: %v", err)
+	}
+
+	if restored.Status() != ContractStatusActive {
+		t.Errorf("expected active after replay, got %s", restored.Status())
+	}
+	if !restored.GetInterval().IsZero() {
+		t.Errorf("expected zero interval after replay, got %v", restored.GetInterval())
+	}
+	if !restored.CurrentPeriod().IsZero() {
+		t.Errorf("expected zero-value current period after replay, got %s", restored.CurrentPeriod())
+	}
+	if restored.GetContractType() != ContractTypeOneTime {
+		t.Errorf("expected one_time, got %s", restored.GetContractType())
+	}
+}
+
+func TestZeroIntervalOneTime_SnapshotRoundTrip(t *testing.T) {
+	agg := createActiveZeroIntervalOneTime(t)
+
+	data, err := agg.MarshalSnapshot()
+	if err != nil {
+		t.Fatalf("MarshalSnapshot failed: %v", err)
+	}
+
+	restored := NewContractAggregate(agg.ContractID(), newTestClock())
+	snapshot := eventstore.Snapshot{
+		StreamID: string(agg.ContractID()),
+		Version:  agg.Version(),
+		State:    data,
+	}
+	// A zero-interval one_time snapshot has interval:null and no legacy
+	// billing_cycle — it must load as a valid zero-interval contract, NOT trip
+	// the legacy billing_cycle recovery failure (issue #218).
+	if err := restored.LoadFromSnapshot(snapshot); err != nil {
+		t.Fatalf("LoadFromSnapshot failed for zero-interval one_time snapshot: %v", err)
+	}
+
+	if !restored.GetInterval().IsZero() {
+		t.Errorf("expected zero interval after snapshot restore, got %v", restored.GetInterval())
+	}
+	if !restored.CurrentPeriod().IsZero() {
+		t.Errorf("expected zero-value current period after snapshot restore, got %s", restored.CurrentPeriod())
+	}
+	if restored.Status() != ContractStatusActive {
+		t.Errorf("expected active, got %s", restored.Status())
+	}
+}
+
+// TestLoadFromSnapshot_ZeroIntervalNonOneTimeStillFailsLoudly guards the other
+// half of issue #218's snapshot fix: a NON-one_time snapshot with a zero
+// interval and no recoverable billing_cycle is still a broken legacy snapshot
+// and must fail loudly (issue #162 L-4 / #196 policy preserved).
+func TestLoadFromSnapshot_ZeroIntervalNonOneTimeStillFailsLoudly(t *testing.T) {
+	state := contractSnapshotState{
+		ContractID:   shared.ContractID("snap-legacy-broken"),
+		AccountID:    shared.AccountID("acc-001"),
+		Status:       ContractStatusActive,
+		ContractType: ContractTypeSubscription,
+		// Interval zero, no billing_cycle field in the payload.
+		Price:     newTestMoney(),
+		BasePrice: newTestMoney(),
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal snapshot state: %v", err)
+	}
+
+	agg := NewContractAggregate(shared.ContractID("snap-legacy-broken"), newTestClock())
+	err = agg.LoadFromSnapshot(eventstore.Snapshot{StreamID: "snap-legacy-broken", Version: 1, State: data})
+	if err == nil {
+		t.Fatal("expected loud failure for zero-interval subscription snapshot")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if domErr.Code != shared.ErrCodeValidation {
+		t.Errorf("expected ErrCodeValidation, got %s", domErr.Code)
+	}
+}
+
+// TestLoadFromSnapshot_OneTimeUnknownBillingCycleStillFails ensures the #218
+// acceptance path is narrow: a one_time snapshot with a zero interval but a
+// non-empty UNKNOWN billing_cycle is corrupt and must still fail loudly.
+func TestLoadFromSnapshot_OneTimeUnknownBillingCycleStillFails(t *testing.T) {
+	payload := map[string]interface{}{
+		"contract_id":   "snap-onetime-corrupt",
+		"account_id":    "acc-001",
+		"status":        string(ContractStatusActive),
+		"contract_type": string(ContractTypeOneTime),
+		"billing_cycle": "fortnightly", // unknown legacy cycle
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	agg := NewContractAggregate(shared.ContractID("snap-onetime-corrupt"), newTestClock())
+	err = agg.LoadFromSnapshot(eventstore.Snapshot{StreamID: "snap-onetime-corrupt", Version: 1, State: data})
+	if err == nil {
+		t.Fatal("expected loud failure for unknown billing_cycle even on one_time snapshot")
+	}
+}
+
+func TestRenewWithInterval_ZeroIntervalOneTime_BusinessRuleError(t *testing.T) {
+	meta := newTestMetadata()
+
+	agg := newTestAggregate()
+	cmd := newOneTimeNoIntervalCommand("idem-onetime-renew")
+	cmd.AutoRenew = true // reach the interval guard, not the expire branch
+	if err := agg.Create(cmd, meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+
+	// Renewing with the contract's own (zero) interval must fail with a clear
+	// business-rule error, not a confusing invalid-date-range error from deep
+	// inside NewDateRange (issue #218).
+	err := agg.RenewWithInterval(agg.GetInterval(), meta)
+	if err == nil {
+		t.Fatal("expected error renewing a zero-interval contract")
+	}
+	var domErr *shared.DomainError
+	if !errors.As(err, &domErr) {
+		t.Fatalf("expected DomainError, got %T: %v", err, err)
+	}
+	if domErr.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected ErrCodeBusinessRule, got %s", domErr.Code)
+	}
+
+	// Even a non-zero interval cannot renew a contract that has no current
+	// period to chain the next one from.
+	err = agg.RenewWithInterval(pricing.Monthly(), meta)
+	if err == nil {
+		t.Fatal("expected error renewing a contract with no current period")
+	}
+	if !errors.As(err, &domErr) || domErr.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected ErrCodeBusinessRule, got %v", err)
+	}
+
+	// The failed renewals must not have mutated state.
+	if agg.Status() != ContractStatusActive {
+		t.Errorf("expected active after failed renew, got %s", agg.Status())
+	}
+}
+
+// TestRenewWithInterval_ZeroIntervalOneTime_ScheduledCancellationStillCancels
+// verifies the guard placement: the cancelAtPeriodEnd early-exit sits BEFORE the
+// zero-interval guard, so a scheduled cancellation still resolves to Cancelled
+// (cancelling needs no interval).
+func TestRenewWithInterval_ZeroIntervalOneTime_ScheduledCancellationStillCancels(t *testing.T) {
+	meta := newTestMetadata()
+
+	agg := newTestAggregate()
+	cmd := newOneTimeNoIntervalCommand("idem-onetime-cancel-sched")
+	cmd.AutoRenew = true
+	if err := agg.Create(cmd, meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+	if err := agg.ScheduleCancellation("customer request", meta); err != nil {
+		t.Fatalf("ScheduleCancellation failed: %v", err)
+	}
+
+	if err := agg.RenewWithInterval(agg.GetInterval(), meta); err != nil {
+		t.Fatalf("RenewWithInterval (scheduled cancellation) failed: %v", err)
+	}
+	if agg.Status() != ContractStatusCancelled {
+		t.Errorf("expected cancelled, got %s", agg.Status())
+	}
+}
+
+func TestEndTrial_ZeroIntervalOneTime_ConvertedLeavesPeriodUnset(t *testing.T) {
+	agg := newTestAggregate()
+	meta := newTestMetadata()
+
+	if err := agg.Create(newOneTimeNoIntervalCommand("idem-onetime-trial"), meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.StartTrial(TrialConfiguration{
+		TrialEndDate: time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+	}, meta); err != nil {
+		t.Fatalf("StartTrial failed: %v", err)
+	}
+
+	if err := agg.EndTrial(true, meta); err != nil {
+		t.Fatalf("EndTrial(converted=true) failed: %v", err)
+	}
+	if agg.Status() != ContractStatusActive {
+		t.Errorf("expected active after conversion, got %s", agg.Status())
+	}
+	if !agg.CurrentPeriod().IsZero() {
+		t.Errorf("expected zero-value current period after conversion, got %s", agg.CurrentPeriod())
+	}
+	if agg.TrialConfig() != nil {
+		t.Error("expected trialConfig cleared after conversion")
+	}
+
+	// Replay the full history (create → trial start → trial end): the
+	// TrialEndedEvent carries a zero CurrentPeriod, and Apply must NOT attempt
+	// the legacy period derivation for a zero-interval contract (issue #218).
+	restored := NewContractAggregate(shared.ContractID("test-contract-001"), newTestClock())
+	if err := restored.LoadFromHistory(agg.UncommittedEvents()); err != nil {
+		t.Fatalf("LoadFromHistory failed: %v", err)
+	}
+	if restored.Status() != ContractStatusActive {
+		t.Errorf("expected active after replay, got %s", restored.Status())
+	}
+	if !restored.CurrentPeriod().IsZero() {
+		t.Errorf("expected zero-value current period after replay, got %s", restored.CurrentPeriod())
+	}
+}

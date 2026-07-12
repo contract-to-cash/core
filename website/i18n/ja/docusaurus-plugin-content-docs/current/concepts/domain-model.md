@@ -26,7 +26,7 @@ sidebar_position: 1
 
 | タイプ | 説明 |
 |-------|------|
-| `one_time` | 買い切り。定期課金なし |
+| `one_time` | 買い切り。定期課金なし。課金 interval は省略可（#218、詳細は internals 仕様参照） |
 | `subscription` | 一定間隔の定期課金 |
 | `usage_based` | メータリングされた使用量に基づく課金 |
 
