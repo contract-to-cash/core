@@ -2,7 +2,9 @@ package tax
 
 import (
 	"context"
+	"errors"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/contract-to-cash/core/domain/shared"
@@ -115,6 +117,40 @@ func TestTaxPlugin_UsesSubtotalAfterDiscount(t *testing.T) {
 	expected := big.NewRat(800, 1)
 	if tax.Amount().Cmp(expected) != 0 {
 		t.Errorf("expected tax 800 (10%% of post-discount 8000), got %s", tax.Amount().RatString())
+	}
+}
+
+// nilRateCalculator violates the TaxCalculator contract by returning nil.
+type nilRateCalculator struct{}
+
+func (c *nilRateCalculator) GetTaxRate(_ context.Context) *big.Rat { return nil }
+
+// TestTaxPlugin_NilRateFromCalculator_CleanErrorNoPanic guards the regression
+// where a nil rate reached Money.Multiply (which panics on a nil factor): the
+// plugin must convert the contract violation into a descriptive
+// ErrCodeBusinessRule DomainError instead of panicking, so a misconfigured
+// custom calculator produces an actionable error rather than a
+// PluginPanicError (with stack trace) vetoing every invoice generation.
+func TestTaxPlugin_NilRateFromCalculator_CleanErrorNoPanic(t *testing.T) {
+	p := NewTaxPlugin(&nilRateCalculator{})
+
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	ctx := plugin.NewCalculationContext(context.Background(), nil, subtotal)
+
+	// A panic here would fail the test on its own; assert the error shape too.
+	_, err := p.CalculateTax(ctx)
+	if err == nil {
+		t.Fatal("expected error for nil tax rate, got nil")
+	}
+	var de *shared.DomainError
+	if !errors.As(err, &de) {
+		t.Fatalf("expected *shared.DomainError, got %T: %v", err, err)
+	}
+	if de.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected code %s, got %s", shared.ErrCodeBusinessRule, de.Code)
+	}
+	if !strings.Contains(err.Error(), "TaxCalculator") {
+		t.Errorf("error should name the TaxCalculator contract violation, got: %v", err)
 	}
 }
 

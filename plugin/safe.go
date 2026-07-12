@@ -97,3 +97,30 @@ func LogNonFatalHookError(logger *slog.Logger, msg string, err error, attrs ...a
 	}
 	logger.Log(context.Background(), level, msg, logAttrs...)
 }
+
+// FireNonFatal invokes a single hook with the same panic isolation and
+// non-fatal fatality policy the core applies to its own non-fatal hook sites
+// (docs/internals/plugin-system.md §5.4): fn runs inside SafeInvoke, so a
+// plugin panic is converted into a *PluginPanicError, and any error — returned
+// or recovered — is logged via LogNonFatalHookError (hook type and plugin name
+// attached; panics at Error level with stack, plain errors at Warn) instead of
+// being propagated. One misbehaving plugin therefore cannot abort the caller's
+// flow or starve later hooks in the same loop.
+//
+// It is intended for integrator-fired hooks that are outside the core's own
+// SafeInvoke wrapping — the contract lifecycle hooks
+// (OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/
+// CancelUnscheduled, §5.3) and adapter-fired InvoiceGenerationHook phases —
+// where the documented policy is "log and continue". A nil logger falls back
+// to slog.Default(). Hooks with veto semantics (where an error must abort the
+// operation) should use SafeInvoke directly and handle the returned error.
+//
+// Reference usage: examples/hosting-integration-demo/main.go fires every
+// integrator-fired lifecycle hook through this helper after saving the
+// contract transition.
+func FireNonFatal(logger *slog.Logger, hookType, pluginName string, fn func() error) {
+	if err := SafeInvoke(hookType, pluginName, fn); err != nil {
+		LogNonFatalHookError(logger, "non-fatal hook failed", err,
+			"hook", hookType, "plugin", pluginName)
+	}
+}

@@ -130,13 +130,13 @@ func (r *InMemoryCouponRepository) SaveRedemption(_ context.Context, redemption 
 
 	// (b) Atomic limit enforcement against existing distinct rows (#195).
 	if limits.GlobalLimit != nil {
-		if limits.GlobalBaseline+r.countRedemptionsLocked(redemption.CouponID(), nil) >= *limits.GlobalLimit {
+		if limits.GlobalBaseline+len(r.filterRedemptionsLocked(redemption.CouponID(), nil)) >= *limits.GlobalLimit {
 			return coupon.ErrUsageLimitReached
 		}
 	}
 	if limits.PerAccountLimit != nil {
 		accountID := redemption.AccountID()
-		if r.countRedemptionsLocked(redemption.CouponID(), &accountID) >= *limits.PerAccountLimit {
+		if len(r.filterRedemptionsLocked(redemption.CouponID(), &accountID)) >= *limits.PerAccountLimit {
 			return coupon.ErrUsageLimitReached
 		}
 	}
@@ -153,6 +153,16 @@ func (r *InMemoryCouponRepository) FindRedemptions(_ context.Context, couponID c
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	return r.filterRedemptionsLocked(couponID, accountID), nil
+}
+
+// filterRedemptionsLocked returns the distinct redemption rows for a coupon,
+// optionally filtered to a single account. Callers must hold r.mu (read or
+// write). The O(N) scan over all redemptions is deliberate: this is
+// reference/test infrastructure that favors contract clarity over speed — a
+// SQL implementation should use indexed queries (e.g. on coupon_id,
+// account_id), not replicate this scan.
+func (r *InMemoryCouponRepository) filterRedemptionsLocked(couponID coupon.CouponID, accountID *shared.AccountID) []*coupon.Redemption {
 	var result []*coupon.Redemption
 	for _, red := range r.redemptions {
 		if red.CouponID() != couponID {
@@ -163,21 +173,5 @@ func (r *InMemoryCouponRepository) FindRedemptions(_ context.Context, couponID c
 		}
 		result = append(result, red)
 	}
-	return result, nil
-}
-
-// countRedemptionsLocked counts distinct redemption rows for a coupon,
-// optionally filtered to a single account. Callers must hold r.mu.
-func (r *InMemoryCouponRepository) countRedemptionsLocked(couponID coupon.CouponID, accountID *shared.AccountID) int {
-	n := 0
-	for _, red := range r.redemptions {
-		if red.CouponID() != couponID {
-			continue
-		}
-		if accountID != nil && red.AccountID() != *accountID {
-			continue
-		}
-		n++
-	}
-	return n
+	return result
 }

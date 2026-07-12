@@ -232,6 +232,19 @@ func ReposFromContext(ctx context.Context) (Repos, bool) {
 	return reposFromContext(ctx)
 }
 
+// InTransaction reports whether ctx carries an in-progress transaction started
+// by an outer Run — i.e. a nested Run on this ctx would JOIN the caller's
+// transaction instead of opening a new one. Use it when the intent is only the
+// yes/no probe, not access to the transaction-scoped repos (use
+// ReposFromContext for that). Services use it to detect "joined" mode, where a
+// failed statement may have left the CALLER-OWNED ambient transaction aborted
+// (e.g. Postgres 25P02), making further reads on ctx unsafe until the caller
+// rolls back (see PaymentService's duplicate-key convergence, issue #233).
+func InTransaction(ctx context.Context) bool {
+	_, ok := reposFromContext(ctx)
+	return ok
+}
+
 // IsVersionConflict reports whether err represents an optimistic-lock conflict,
 // regardless of which of the two encodings it uses: the ErrVersionConflict
 // sentinel (state-stored repositories) or a *shared.DomainError carrying

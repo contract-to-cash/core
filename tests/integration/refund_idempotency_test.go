@@ -323,13 +323,21 @@ func TestRefund_ConcurrentRefunds_SingleRealRefund(t *testing.T) {
 			successes, failures, errs)
 	}
 
-	// The loser's error must be a domain error (invalid state / over-refund),
-	// NOT a manual-reconciliation persistence failure.
+	// The loser's error must be a clean domain error, NOT a
+	// manual-reconciliation persistence failure. Depending on when the loser's
+	// pre-flight read lands relative to the winner's commit it converges via
+	// one of two equivalent paths (issue #235 convergence policy):
+	//   - pre-flight ValidateRefund against the winner's committed state →
+	//     invalid_state_transition / business_rule (no gateway call at all); or
+	//   - in-tx consumed-key-slot detection (the gateway replayed the loser's
+	//     call without moving money) → conflict.
 	var domainErr *shared.DomainError
 	if !errors.As(loserErr, &domainErr) {
 		t.Fatalf("loser error must be a domain error, got %T: %v", loserErr, loserErr)
 	}
-	if domainErr.Code != shared.ErrCodeInvalidStateTransition && domainErr.Code != shared.ErrCodeBusinessRule {
+	if domainErr.Code != shared.ErrCodeInvalidStateTransition &&
+		domainErr.Code != shared.ErrCodeBusinessRule &&
+		domainErr.Code != shared.ErrCodeConflict {
 		t.Errorf("unexpected domain error code %q: %v", domainErr.Code, loserErr)
 	}
 

@@ -8,7 +8,10 @@ package service
 // cumulative refunded total always equals the gateway-moved total.
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
 	"math/big"
 	"sync"
 	"testing"
@@ -186,25 +189,26 @@ func TestRefund_ConcurrentDistinctAmounts_LedgerMatchesGatewayMovedTotal(t *test
 		t.Errorf("gateway-moved total (%s) must equal ledger total (%s) — issue #235",
 			moved.RatString(), stored.RefundedAmount().Amount().RatString())
 	}
-	// Distinct amounts ⇒ distinct keys ⇒ two real movements, and the loser's
-	// conflict retry must NOT have re-hit the gateway (its first call was a
-	// real movement under a unique key).
+	// Distinct amounts ⇒ distinct keys ⇒ two real movements, and the second
+	// invocation's recording (against the advanced total) must NOT have hit
+	// the gateway a second time (one invocation = at most one movement).
 	if got := gw.callCount(); got != 2 {
-		t.Errorf("expected exactly 2 gateway Refund calls (both real, no re-hit), got %d: %v", got, gw.keys)
+		t.Errorf("expected exactly 2 gateway Refund calls (both real, one per invocation), got %d: %v", got, gw.keys)
 	}
 	if len(gw.moved) != 2 {
 		t.Errorf("expected 2 REAL gateway refunds (distinct keys), got %d: %v", len(gw.moved), gw.keys)
 	}
 }
 
-// TestRefund_ConcurrentSameAmount_ReplayedLoserReHitsGatewayUnderFreshKey pins
-// the re-derivation half of issue #235: two racing refunds of the SAME amount
-// from the same prior total share a key, so the gateway replays the loser's
-// first call without moving money. The loser's retry must re-derive the key
-// from the fresh total and hit the gateway under it (a REAL movement) before
-// recording — otherwise the ledger would book a refund the gateway never
-// executed.
-func TestRefund_ConcurrentSameAmount_ReplayedLoserReHitsGatewayUnderFreshKey(t *testing.T) {
+// TestRefund_ConcurrentSameAmount_LoserGetsConflict_SingleMovement pins the
+// single-movement convergence policy for concurrent IDENTICAL refunds (issue
+// #235 review): two racing refunds of the same amount from the same prior
+// total share a derived key, so the gateway executes exactly ONE movement and
+// replays the loser's call. The loser must NOT record (that would book a
+// phantom refund) and must NOT re-hit the gateway under a fresh key (one
+// Refund invocation = at most one gateway movement) — it returns
+// ErrCodeConflict and the ledger stays equal to the gateway-moved total.
+func TestRefund_ConcurrentSameAmount_LoserGetsConflict_SingleMovement(t *testing.T) {
 	clock := newPaymentTestClock()
 	ctx := context.Background()
 
@@ -225,38 +229,204 @@ func TestRefund_ConcurrentSameAmount_ReplayedLoserReHitsGatewayUnderFreshKey(t *
 
 	amount := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
 
-	// First refund: 3000, normal path — key derived from prior=0.
+	// First refund: 3000, normal path — key derived from prior=0. Real movement.
 	if err := svc.Refund(ctx, seed.ID(), RefundInput{Amount: &amount, Reason: port.RefundReasonRequestedByCustomer}); err != nil {
 		t.Fatalf("first refund failed: %v", err)
 	}
 
-	// Second, DISTINCT 3000 refund whose pre-flight load is stale (prior=0):
-	// it derives the same key, the gateway replays it (no movement), and the
-	// in-tx guard forces a retry that re-derives from prior=3000 and re-hits.
+	// Concurrent duplicate: another 3000 refund whose pre-flight load is stale
+	// (prior=0). It derives the SAME key, the gateway replays it (no
+	// movement), and the in-tx classification detects the consumed key slot
+	// (advance == own amount) → ErrCodeConflict, nothing recorded, no re-hit.
 	repo.arm(mkStale(), 1)
-	if err := svc.Refund(ctx, seed.ID(), RefundInput{Amount: &amount, Reason: port.RefundReasonRequestedByCustomer}); err != nil {
-		t.Fatalf("second refund must converge and succeed, got: %v", err)
+	err := svc.Refund(ctx, seed.ID(), RefundInput{Amount: &amount, Reason: port.RefundReasonRequestedByCustomer})
+	if err == nil {
+		t.Fatal("concurrent identical refund loser must get a conflict, got nil")
 	}
+	assertDomainError(t, err, shared.ErrCodeConflict)
 
-	stored, err := inner.FindByID(ctx, seed.ID())
-	if err != nil {
-		t.Fatalf("final load: %v", err)
+	stored, ferr := inner.FindByID(ctx, seed.ID())
+	if ferr != nil {
+		t.Fatalf("final load: %v", ferr)
 	}
-	wantLedger := big.NewRat(6000, 1)
-	if stored.RefundedAmount().Amount().Cmp(wantLedger) != 0 {
-		t.Errorf("ledger refunded total = %s, want 6000", stored.RefundedAmount().Amount().RatString())
+	// Exactly ONE movement: ledger 3000 == gateway-moved 3000.
+	if stored.RefundedAmount().Amount().Cmp(big.NewRat(3000, 1)) != 0 {
+		t.Errorf("ledger refunded total = %s, want 3000 (single movement)", stored.RefundedAmount().Amount().RatString())
 	}
 	if moved := gw.totalMoved(); moved.Cmp(stored.RefundedAmount().Amount()) != 0 {
-		t.Errorf("gateway-moved total (%s) must equal ledger total (%s) — the replayed loser must re-hit under a fresh key",
+		t.Errorf("gateway-moved total (%s) must equal ledger total (%s)",
 			moved.RatString(), stored.RefundedAmount().Amount().RatString())
 	}
-	// Three calls: first real, loser's stale-key replay (no movement), loser's
-	// fresh-key re-hit (real). Two distinct keys moved money.
-	if got := gw.callCount(); got != 3 {
-		t.Errorf("expected 3 gateway Refund calls (real, replay, fresh-key re-hit), got %d: %v", got, gw.keys)
+	// Two gateway calls (one real, one replay under the shared key); only one
+	// key ever moved money, and the loser never re-hit under a fresh key.
+	if got := gw.callCount(); got != 2 {
+		t.Errorf("expected 2 gateway Refund calls (real + replay, no fresh-key re-hit), got %d: %v", got, gw.keys)
 	}
-	if len(gw.moved) != 2 {
-		t.Errorf("expected 2 REAL gateway refunds, got %d: %v", len(gw.moved), gw.keys)
+	if len(gw.moved) != 1 {
+		t.Errorf("expected exactly 1 REAL gateway refund, got %d: %v", len(gw.moved), gw.keys)
+	}
+}
+
+// failFirstSavePaymentRepo delegates to an inner repository but fails the
+// first `failures` Save calls with a generic (non-version-conflict) error.
+type failFirstSavePaymentRepo struct {
+	inner    payment.Repository
+	mu       sync.Mutex
+	failures int
+}
+
+func (r *failFirstSavePaymentRepo) Save(ctx context.Context, p *payment.Payment) error {
+	r.mu.Lock()
+	if r.failures > 0 {
+		r.failures--
+		r.mu.Unlock()
+		return fmt.Errorf("simulated save outage")
+	}
+	r.mu.Unlock()
+	return r.inner.Save(ctx, p)
+}
+
+func (r *failFirstSavePaymentRepo) FindByID(ctx context.Context, id shared.PaymentID) (*payment.Payment, error) {
+	return r.inner.FindByID(ctx, id)
+}
+
+func (r *failFirstSavePaymentRepo) FindByInvoiceID(ctx context.Context, id shared.InvoiceID) ([]*payment.Payment, error) {
+	return r.inner.FindByInvoiceID(ctx, id)
+}
+
+func (r *failFirstSavePaymentRepo) FindByIdempotencyKey(ctx context.Context, key string) (*payment.Payment, error) {
+	return r.inner.FindByIdempotencyKey(ctx, key)
+}
+
+// TestRefund_ExplicitKey_SequentialRetry_RecordsOnce verifies the legitimate
+// explicit-key retry contract survives the concurrent-advance guard: gateway
+// moved + recording failed → the caller retries with the SAME key → the prior
+// total is unchanged (advance == 0), the gateway replays without moving money,
+// and the retry records exactly once. Ledger == gateway-moved.
+func TestRefund_ExplicitKey_SequentialRetry_RecordsOnce(t *testing.T) {
+	clock := newPaymentTestClock()
+	ctx := context.Background()
+
+	inner := inmemory.NewInMemoryPaymentRepository()
+	seed, _ := seedRefundablePayment(t, ctx, inner, clock)
+	repo := &failFirstSavePaymentRepo{inner: inner, failures: 1}
+	gw := newDedupingRefundGateway()
+
+	svc := NewPaymentService(
+		gw,
+		repo,
+		&mockInvoiceRepoForPayment{},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	amount := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+	in := RefundInput{
+		Amount:         &amount,
+		Reason:         port.RefundReasonRequestedByCustomer,
+		IdempotencyKey: "edge-refund-token-77",
+	}
+
+	// Invocation 1: gateway moves 3000, local Save fails → reconciliation error.
+	if err := svc.Refund(ctx, seed.ID(), in); err == nil {
+		t.Fatal("expected error when local save fails after gateway refund")
+	}
+
+	// Invocation 2, SAME explicit key: prior total unchanged (advance == 0) →
+	// the gateway replays (no new movement) and the recording succeeds.
+	if err := svc.Refund(ctx, seed.ID(), in); err != nil {
+		t.Fatalf("sequential retry with the same explicit key must succeed, got: %v", err)
+	}
+
+	stored, ferr := inner.FindByID(ctx, seed.ID())
+	if ferr != nil {
+		t.Fatalf("final load: %v", ferr)
+	}
+	if stored.RefundedAmount().Amount().Cmp(big.NewRat(3000, 1)) != 0 {
+		t.Errorf("ledger refunded total = %s, want 3000 (recorded once)", stored.RefundedAmount().Amount().RatString())
+	}
+	if moved := gw.totalMoved(); moved.Cmp(stored.RefundedAmount().Amount()) != 0 {
+		t.Errorf("gateway-moved total (%s) must equal ledger total (%s)",
+			moved.RatString(), stored.RefundedAmount().Amount().RatString())
+	}
+	if len(gw.moved) != 1 {
+		t.Errorf("expected exactly 1 REAL gateway refund across both invocations, got %d: %v", len(gw.moved), gw.keys)
+	}
+}
+
+// TestRefund_ExplicitKey_ConcurrentAdvance_ConflictNoRecord pins the
+// explicit-key half of the concurrent-advance guard (issue #235 review): when
+// a concurrent refund records against the payment while an explicit-key
+// refund is in flight, replay-vs-real cannot be decided for a caller-owned
+// key, so the service must return ErrCodeConflict WITHOUT recording, never
+// re-hit the gateway, and log a MANUAL RECONCILIATION error.
+func TestRefund_ExplicitKey_ConcurrentAdvance_ConflictNoRecord(t *testing.T) {
+	clock := newPaymentTestClock()
+	ctx := context.Background()
+
+	inner := inmemory.NewInMemoryPaymentRepository()
+	seed, mkStale := seedRefundablePayment(t, ctx, inner, clock)
+	repo := &staleReadPaymentRepo{inner: inner}
+	gw := newDedupingRefundGateway()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	svc := NewPaymentService(
+		gw,
+		repo,
+		&mockInvoiceRepoForPayment{},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentLogger(logger),
+	)
+
+	amount := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+
+	// Winner: records 3000 under explicit key "EXPL" (real movement).
+	if err := svc.Refund(ctx, seed.ID(), RefundInput{
+		Amount:         &amount,
+		Reason:         port.RefundReasonRequestedByCustomer,
+		IdempotencyKey: "EXPL",
+	}); err != nil {
+		t.Fatalf("winner refund failed: %v", err)
+	}
+
+	// Loser: same explicit key, stale pre-flight load (prior=0). The gateway
+	// replays "EXPL" (no movement); the in-tx reload sees the total advanced →
+	// conflict, nothing recorded, no fresh-key re-hit.
+	repo.arm(mkStale(), 1)
+	err := svc.Refund(ctx, seed.ID(), RefundInput{
+		Amount:         &amount,
+		Reason:         port.RefundReasonRequestedByCustomer,
+		IdempotencyKey: "EXPL",
+	})
+	if err == nil {
+		t.Fatal("explicit-key loser must get a conflict on concurrent advance, got nil")
+	}
+	assertDomainError(t, err, shared.ErrCodeConflict)
+
+	stored, ferr := inner.FindByID(ctx, seed.ID())
+	if ferr != nil {
+		t.Fatalf("final load: %v", ferr)
+	}
+	// Nothing double-recorded: ledger 3000 == gateway-moved 3000.
+	if stored.RefundedAmount().Amount().Cmp(big.NewRat(3000, 1)) != 0 {
+		t.Errorf("ledger refunded total = %s, want 3000", stored.RefundedAmount().Amount().RatString())
+	}
+	if moved := gw.totalMoved(); moved.Cmp(stored.RefundedAmount().Amount()) != 0 {
+		t.Errorf("gateway-moved total (%s) must equal ledger total (%s)",
+			moved.RatString(), stored.RefundedAmount().Amount().RatString())
+	}
+	if len(gw.moved) != 1 {
+		t.Errorf("expected exactly 1 REAL gateway refund, got %d: %v", len(gw.moved), gw.keys)
+	}
+	// The ambiguity must be escalated for manual reconciliation.
+	if !containsAll(logBuf.String(), "MANUAL RECONCILIATION", "EXPL") {
+		t.Errorf("expected MANUAL RECONCILIATION error log for explicit-key concurrent advance, got:\n%s", logBuf.String())
 	}
 }
 

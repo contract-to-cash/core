@@ -97,8 +97,14 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 	if concurrency == 1 || opts.DryRun {
 		// Sequential processing
 		for _, agg := range contracts {
-			action, err := p.processOne(ctx, agg, opts.DryRun)
-			if err != nil {
+			// External cancellation aborts the run: the remainder is skipped
+			// and the cancellation is surfaced as the run's error, so a
+			// cancelled run is never mistaken for a clean one (issue #242).
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				result.Skipped = result.Total - result.Succeeded - result.Failed
+				return result, ctxErr
+			}
+			if err := p.processOne(ctx, agg, opts.DryRun); err != nil {
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Errorf("contract %s: %w", agg.ContractID(), err))
 				if !opts.ContinueOnError {
@@ -106,19 +112,19 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 					// skipped, not failed, so Total == Succeeded+Failed+Skipped
 					// (issue #242).
 					result.Skipped = result.Total - result.Succeeded - result.Failed
-					return result, nil
+					return result, ctx.Err()
 				}
 			} else {
 				result.Succeeded++
 				if opts.DryRun {
 					result.DryRunActions = append(result.DryRunActions, DryRunAction{
 						ItemID: string(agg.ContractID()),
-						Action: action,
+						Action: dryRunRenewalAction(agg),
 					})
 				}
 			}
 		}
-		return result, nil
+		return result, ctx.Err()
 	}
 
 	// Concurrent processing
@@ -127,9 +133,22 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 
 	sem := make(chan struct{}, concurrency)
 	var mu sync.Mutex
+	// stopped marks the internal early stop (ContinueOnError=false after a
+	// genuine failure). It is set under mu BEFORE cancel() so an in-flight
+	// item failing with context.Canceled can tell an internal early stop
+	// (benign: counted as Skipped) apart from an external caller cancellation
+	// (abnormal: counted as Failed and surfaced via the returned error)
+	// (issue #242).
+	stopped := false
 	launched := 0
 
 	for _, agg := range contracts {
+		// External cancellation aborts the launch loop; unlaunched items are
+		// counted as skipped below and the cancellation is surfaced as the
+		// run's error.
+		if ctx.Err() != nil {
+			break
+		}
 		// Check if we should stop early (ContinueOnError=false and an error occurred)
 		if !opts.ContinueOnError {
 			mu.Lock()
@@ -145,12 +164,12 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 		go func(a *contract.ContractAggregate) {
 			defer func() { <-sem }()
 
-			if _, err := p.processOne(cctx, a, opts.DryRun); err != nil {
+			if err := p.processOne(cctx, a, opts.DryRun); err != nil {
 				mu.Lock()
-				if cctx.Err() != nil && errors.Is(err, context.Canceled) {
-					// The run was already aborted (early stop cancelled the
-					// shared context); an in-flight cancellation is not a
-					// genuine per-item failure (issue #242).
+				if stopped && errors.Is(err, context.Canceled) {
+					// The run was already stopped internally (the early stop
+					// cancelled the shared context); an in-flight cancellation
+					// is not a genuine per-item failure (issue #242).
 					result.Skipped++
 				} else {
 					result.Failed++
@@ -158,6 +177,9 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 				}
 				mu.Unlock()
 				if !opts.ContinueOnError {
+					mu.Lock()
+					stopped = true
+					mu.Unlock()
 					cancel()
 				}
 			} else {
@@ -173,17 +195,33 @@ func (p *ContractRenewalProcessor) Process(ctx context.Context, opts BatchOption
 		sem <- struct{}{}
 	}
 
-	// Items never launched because of the early stop are skipped, not failed
-	// (issue #242).
+	// Items never launched because of an early stop or an external
+	// cancellation are skipped, not failed (issue #242).
 	result.Skipped += result.Total - launched
 
-	return result, nil
+	// Surface an external cancellation so a cancelled run is never mistaken
+	// for a clean partial run (nil when the caller's context is intact).
+	return result, ctx.Err()
+}
+
+// dryRunRenewalAction classifies the action a real run would take for a
+// contract that passed the dry-run guards, in the same order
+// RenewWithInterval branches (issue #242).
+func dryRunRenewalAction(agg *contract.ContractAggregate) string {
+	switch {
+	case agg.CancelAtPeriodEnd():
+		return RenewalActionCancel
+	case !agg.AutoRenew():
+		return RenewalActionExpire
+	default:
+		return RenewalActionRenew
+	}
 }
 
 // processOne validates and (for real runs) executes the renewal of a single
-// contract. The returned action label (RenewalActionRenew / RenewalActionExpire
-// / RenewalActionCancel) is only populated for dry runs; real runs return "".
-func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract.ContractAggregate, dryRun bool) (string, error) {
+// contract. For dry runs it only validates the guards; the would-be action is
+// classified separately by dryRunRenewalAction in the sequential dry-run path.
+func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract.ContractAggregate, dryRun bool) error {
 	metadata := eventstore.EventMetadata{
 		UserID: "system:batch:contract_renewal",
 	}
@@ -193,11 +231,11 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		// mirroring the real run's branching (issue #242): cancelAtPeriodEnd
 		// and autoRenew=false contracts are processed SUCCESSFULLY by the real
 		// run (RenewWithInterval resolves them to Cancelled / Expired and the
-		// post-commit hooks fire), so the dry run classifies them as
-		// would-succeed with the action they would take instead of reporting
-		// them as failures.
+		// post-commit hooks fire), so the dry run treats them as would-succeed
+		// (Process reports the action via dryRunRenewalAction) instead of
+		// reporting them as failures.
 		if agg.Status() != contract.ContractStatusActive {
-			return "", shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
 				fmt.Sprintf("cannot renew: status is %s", agg.Status()))
 		}
 		// Validate the same interval resolution the real run performs. The
@@ -207,17 +245,9 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		// the expire/cancel branches — and must fail the dry run the same way
 		// instead of passing it and then blowing up in production (issue #162 B2).
 		if _, err := p.resolveInterval(ctx, agg); err != nil {
-			return "", err
+			return err
 		}
-		// Classify in the same order RenewWithInterval branches.
-		switch {
-		case agg.CancelAtPeriodEnd():
-			return RenewalActionCancel, nil
-		case !agg.AutoRenew():
-			return RenewalActionExpire, nil
-		default:
-			return RenewalActionRenew, nil
-		}
+		return nil
 	}
 
 	// Load-mutate-save inside the transaction against a repository-loaded
@@ -264,7 +294,7 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		renewed = loaded
 		return nil
 	}); err != nil {
-		return "", err
+		return err
 	}
 
 	// Subsequent post-commit hooks operate on the persisted,
@@ -345,7 +375,7 @@ func (p *ContractRenewalProcessor) processOne(ctx context.Context, agg *contract
 		}
 	}
 
-	return "", nil
+	return nil
 }
 
 // resolveInterval determines the billing interval for the next period.

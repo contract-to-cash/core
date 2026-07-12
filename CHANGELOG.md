@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Fixes from the 2026-07-12 objective review (#231–#246). Contains several
+**BREAKING** changes, marked below per the pre-v1.0 convention; see the
+per-entry upgrade notes.
+
 ### Added
 
 - **`OnContractCancelScheduledHook` / `OnContractCancelUnscheduledHook` (#227)** — two new
@@ -16,6 +20,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GetOnContractCancelUnscheduledHooks()`, then saves (reference:
   `examples/hosting-integration-demo/main.go`). No event-schema or `ContractChangeType`
   changes; hook interface total goes from 20 to 22.
+- **`port.CustomerIDResolver` + `WithCustomerIDResolver` (#231)** — `PaymentService` now
+  resolves the gateway-side customer ID before `Charge`/`GetCustomer` instead of passing
+  the internal `AccountID` verbatim. Unwired, the identity fallback preserves existing
+  behavior — but it only suits gateways that accept caller-chosen customer IDs; Stripe-style
+  ID-minting gateways MUST wire a resolver. Resolver errors abort before the gateway call.
+- **`infrastructure/inmemory.CouponRepository` (#240)** — shipped reference implementation
+  of the atomic `SaveRedemption` contract ((a) idempotent same-key no-op, (b) atomic limit
+  enforcement with `ErrUsageLimitReached`, (c) insert — all under one mutex), with
+  concurrency tests. The e2e/integration/example bespoke copies now delegate to it.
+- **`plugin.Config.Int` / `plugin.Config.Bool` (#239)** — type-coercing config readers
+  (accept `int` and integral JSON `float64`; descriptive error on mismatch). Official
+  plugins now use them and **return an error from `Initialize` on mistyped values**
+  instead of silently applying defaults (a config typo now fails startup loudly).
+- **`plugin.FireNonFatal`** — exported composition of `SafeInvoke` +
+  `LogNonFatalHookError` for integrator-fired lifecycle hooks (the §5.4 pattern);
+  the hosting demo now uses it.
+- **`Invoice.ParticipatesInPeriodUniqueness()`** — single-source predicate for the
+  period-uniqueness contract (not voided / not proration / non-zero period), used by the
+  billing-service guards, the in-memory repository, and referenced by the
+  `invoice.Repository.Save` contract docs.
+- **`TieredPrice.Validate()` / `UsagePrice.Validate()` (#238)** — graceful pre-checks
+  mirroring the constructor invariants, for validating persisted/literal models.
+- **`tx.InTransaction(ctx)`** — intent-revealing probe for "running inside a caller's
+  transaction" (used by the #233 joined-tx guards).
+- **`projection.ErrSubscriptionClosed` (#246)** — `ProjectionService.Start` now returns
+  this sentinel when the subscription channel closes while the context is live
+  (previously `nil`, indistinguishable from graceful shutdown); a close after
+  cancellation consistently returns `ctx.Err()`.
+- **`batch.BatchResult.Skipped` + `DryRunActions` (#242)** — result accounting invariant
+  `Total == Succeeded + Failed + Skipped`; renewal dry-runs now mirror the real run's
+  classification (`renew`/`expire`/`cancel` actions) instead of reporting
+  `cancelAtPeriodEnd`/`autoRenew=false` contracts as failures. External context
+  cancellation now surfaces as a non-nil error from `Process` (previously a cancelled
+  run could look like a clean one).
+
+### Changed
+
+- **BREAKING — `ProcessPayment` rejects an empty `IdempotencyKey` (#241)** with
+  `ErrCodeValidation` before any work. Previously an empty key silently disabled every
+  dedup layer (a retried request double-charged). Callers must supply a key; the e2e
+  harness shows the pattern.
+- **BREAKING — refund idempotency keys now bind the amount (#235)**:
+  `refund-<paymentID>-<currency>-<prior>-<amount>` (was `...-<prior>`), and `Refund` now
+  guarantees **at most one gateway movement per invocation**: the gateway is called once
+  before the recording transaction; concurrent same-amount duplicates collapse to a single
+  movement (the loser gets `ErrCodeConflict`); concurrent distinct amounts are both real
+  and both recorded; explicit-key conflicts are never recorded and log a
+  MANUAL RECONCILIATION error. **Upgrade note**: the key format changed — a refund left
+  ambiguous across the deploy (gateway moved money, local record failed) must be verified
+  at the gateway before retrying, because the retry will derive a fresh key.
+- **BREAKING — `NewInvoice(..., WithStatus(s))` errors for `s != draft` (#238)** —
+  non-draft statuses carry state construction cannot supply (paid amounts, void reasons),
+  so minting them created invariant-violating invoices. Persistence adapters keep using
+  `InvoiceFromSnapshot`; tests use real transitions.
+- **BREAKING — `coupon.NewCoupon` returns `(*Coupon, error)` (#244)** and rejects a nil
+  value, so a nil-value coupon fails at construction instead of panicking inside the
+  billing pipeline.
+- **BREAKING — `Money.Multiply(nil)` panics (#244)** instead of silently returning zero
+  (a nil rate is a caller bug that previously produced a silent zero charge). The official
+  tax plugin guards its `TaxCalculator` contract and returns a clean `ErrCodeBusinessRule`
+  error for a nil rate — custom `TaxCalculator`s must return `big.NewRat(0,1)` for
+  "no tax", never nil.
+- **BREAKING — struct-literal `TieredPrice`/`UsagePrice` bypasses now fail loudly (#238)**:
+  `CalculatePrice` validates tier ordering and clamp currencies (previously produced
+  silently wrong amounts, e.g. a wrong-currency `Maximum` was ignored and usage bills
+  sailed past their cap). The billing pipeline converts a poisoned *persisted* price into
+  a per-contract `DomainError` naming the price (no process crash); direct misuse panics
+  per the documented policy.
+- **`Contract.Create` validates `ContractType` (#243)** — unknown/empty types are rejected
+  at command intake (previously persisted uncorrectably and failed at first invoice).
+- **`DateRange.Next` / `AddBillingCycleDuration` deprecated (#244)** — they silently
+  default unknown cycle strings to monthly; use `pricing.BillingInterval`.
+
+### Fixed
+
+- **Duplicate-invoice guards now exempt proration invoices (#232)** — a mid-period
+  proration invoice no longer permanently blocks `GenerateInvoice` /
+  `RegenerateInvoice` / `ReissueInvoice` for its period (matching the repository
+  uniqueness contract and both SQL adapters' indexes). `RegenerateInvoice`'s
+  voided-invoice selection likewise excludes prorations, so a voided proration can no
+  longer become the revision root, hijack the balance restoration target, or authorize
+  minting a net-new invoice.
+- **Joined-tx duplicate-key race no longer refunds the winner's charge (#233)** —
+  inside a caller's transaction, `ProcessPayment` returns a retryable conflict instead
+  of reading through the aborted tx and firing saga compensation; a top-level
+  winner-read failure also converges without compensation.
+- **Terminal-state replay no longer double-refunds (#234)** — an in-tx idempotency
+  collision with a `Refunded`/`PartiallyRefunded`/`ChargedBack` record converges without
+  compensation (WARN logged); `Failed` still routes to compensation because a captured
+  response cannot be a replay of a never-captured charge.
+- **Silent misbilling guards (#241)** — the billing pipeline and
+  `RestoreBalancesForVoidedInvoice` now fail loudly when `WithBalanceRepo` is wired but
+  the TxManager's repos omit `Balances` (previously credit application / restoration was
+  silently skipped); `Refund`'s in-tx reload nil-guard added; zero-amount duplicate-key
+  losers converge after the tx exits.
+- **Trial-expiration decisions re-evaluated inside the transaction (#242)** — a payment
+  method detached between scan and tx can no longer auto-convert a trial the
+  `RequirePaymentMethod` gate should block. Renewal `ContractChangeEvent`s now populate
+  `OldPriceID`/`NewPriceID` when a pending price change is applied.
+- **`ContractExpiredEvent` clears pending price change and trial state (#243)** — a
+  terminal Expired contract no longer reports `HasPendingChange() == true` forever.
+- **Reference demo corrected (#236)** — `hosting-integration-demo` no longer double-fires
+  `AfterCharge` (core fires it), fires lifecycle hooks after save (not before), isolates
+  integrator-fired hooks via `plugin.FireNonFatal`, and uses the injected clock.
+- **`eventstore.Store` godocs now specify the full BYO implementer contract (#237)** —
+  conflict-error encoding for `tx.RetryOnConflict`, Load ordering, gap-free monotonic
+  `GlobalPosition` visibility, Subscribe semantics, empty-stream behavior, and
+  `Event.Version` handling. `BaseAggregate.UncommittedEvents` returns a copy.
+- **Coupon plugin no longer writes the core-owned `SetSubtotalAfterDiscount` (#244)**.
+
+### Docs
+
+- Canonical docs synced with all behavior changes above: `payment-gateway.md`
+  (empty-key rejection, amount-bound refund keys + convergence policy, terminal-state
+  policy, `CustomerIDResolver`), `domain-model.md` (17 domain events incl.
+  PastDue/Recovered, `WithStatus` draft-only, `ContractType` validation, Expired-clearing,
+  `ParticipatesInPeriodUniqueness`), `plugin-system.md` (pre-1.0 versioning note, §5.4
+  Name/Priority isolation gap, `Config.Int/Bool` + `FireNonFatal`, in-memory
+  `CouponRepository` reference), SECURITY.md (tagged releases exist; pin the latest tag),
+  CLAUDE.md (lint scope, CreditNote lifecycle), and removal of the ghost `domain/billing`
+  package references.
 
 ## [0.3.0] - 2026-07-12
 

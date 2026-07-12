@@ -378,3 +378,92 @@ func TestRestoreBalancesForVoidedInvoice_NoBalanceRepo_StillNoop(t *testing.T) {
 	}
 	assertDomainError(t, err, shared.ErrCodeBusinessRule)
 }
+
+// newVoidedProrationInvoiceForTest builds a VOIDED proration adjustment invoice
+// with a caller-controlled ID (comparable against other fixture IDs).
+func newVoidedProrationInvoiceForTest(t *testing.T, id shared.InvoiceID, agg *contract.ContractAggregate, period shared.DateRange) *invoice.Invoice {
+	t.Helper()
+	inv, err := invoice.NewInvoice(
+		id, agg.AccountID(), agg.ContractID(),
+		jpy(2000), jpy(0), jpy(0),
+		invoice.WithBillingPeriod(period),
+		invoice.WithMetadata(map[string]string{
+			invoice.MetadataKeyInvoiceType: invoice.InvoiceTypeProration,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating proration invoice: %v", err)
+	}
+	transitionInvoiceForTest(inv, invoice.InvoiceStatusVoided)
+	return inv
+}
+
+// TestRegenerateInvoice_VoidedProrationNotSelectedAsRevisionRoot guards the
+// review finding on issue #232: when the period holds a voided REGULAR invoice
+// and a voided PRORATION invoice with a GREATER ID, the max-ID selection must
+// skip the proration — otherwise the revision chain and the balance
+// restoration (restoreVoidedInvoiceID) would target the proration invoice,
+// restoring its consumed credit while the regular invoice's credit stays lost.
+func TestRegenerateInvoice_VoidedProrationNotSelectedAsRevisionRoot(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	// Controlled, comparable IDs: the proration's ID sorts GREATER than the
+	// regular invoice's, so the old (unfixed) max-ID selection would pick it.
+	const regularID = shared.InvoiceID("inv-aaa-regular")
+	const prorationID = shared.InvoiceID("inv-bbb-proration")
+
+	voidedRegular, err := invoice.NewInvoice(
+		regularID, agg.AccountID(), agg.ContractID(),
+		jpy(1000), jpy(0), jpy(0),
+		invoice.WithBillingPeriod(period),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error creating invoice: %v", err)
+	}
+	transitionInvoiceForTest(voidedRegular, invoice.InvoiceStatusVoided)
+	voidedProration := newVoidedProrationInvoiceForTest(t, prorationID, agg, period)
+
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedRegular, voidedProration}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	inv, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err != nil {
+		t.Fatalf("regenerate failed: %v", err)
+	}
+	if inv.RevisionOf() == nil {
+		t.Fatal("expected RevisionOf to be set")
+	}
+	if *inv.RevisionOf() != regularID {
+		t.Errorf("RevisionOf = %q, want %q (the voided REGULAR invoice, not the higher-ID voided proration)",
+			*inv.RevisionOf(), regularID)
+	}
+	if inv.OriginalInvoiceID() == nil || *inv.OriginalInvoiceID() != regularID {
+		t.Errorf("OriginalInvoiceID = %v, want %q", inv.OriginalInvoiceID(), regularID)
+	}
+}
+
+// TestRegenerateInvoice_VoidedProrationAloneDoesNotAuthorize guards the second
+// review finding on issue #232: a voided PRORATION invoice alone must not
+// satisfy RegenerateInvoice's "must have a voided invoice for the period" gate
+// — otherwise regeneration could mint a net-new full-period regular invoice
+// for a period that never had one, defeating the gate's purpose.
+func TestRegenerateInvoice_VoidedProrationAloneDoesNotAuthorize(t *testing.T) {
+	clock := newTestClock()
+	agg, priceEntity := newActiveAggWithPrice(clock, contract.ContractTypeSubscription, jpy(1000))
+	period := currentPeriodOf(agg)
+
+	voidedProration := newVoidedProrationInvoiceForTest(t, shared.NewInvoiceID(), agg, period)
+	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedProration}}
+	svc := newBillingSvcWithPrice(agg, invRepo, priceEntity, clock)
+
+	_, err := svc.RegenerateInvoice(context.Background(), agg.ContractID(), period)
+	if err == nil {
+		t.Fatal("a voided proration alone must not authorize regeneration")
+	}
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
+	if !strings.Contains(err.Error(), "no voided invoice") {
+		t.Errorf("expected the no-voided-invoice gate error, got %q", err.Error())
+	}
+}

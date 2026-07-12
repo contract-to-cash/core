@@ -608,17 +608,14 @@ func must(action string, err error) {
 	}
 }
 
-// fireNonFatal invokes one integrator-fired lifecycle hook with the same
-// panic isolation and fatality policy the core applies to its own hook sites
-// (docs/internals/plugin-system.md §5.4): plugin.SafeInvoke converts a plugin
-// panic into a *PluginPanicError, and both errors and panics are non-fatal —
-// logged via plugin.LogNonFatalHookError (nil logger = slog.Default()) so one
-// misbehaving plugin cannot abort the integration flow or starve later hooks.
+// fireNonFatal invokes one integrator-fired lifecycle hook via
+// plugin.FireNonFatal — panic isolation (SafeInvoke) plus non-fatal
+// error/panic logging (LogNonFatalHookError, nil logger = slog.Default()),
+// exactly the fatality policy docs/internals/plugin-system.md §5.4 prescribes
+// for integrator-fired hooks. One misbehaving plugin cannot abort the
+// integration flow or starve later hooks.
 func fireNonFatal(hookType, pluginName string, fn func() error) {
-	if err := plugin.SafeInvoke(hookType, pluginName, fn); err != nil {
-		plugin.LogNonFatalHookError(nil, "lifecycle hook failed", err,
-			"hook", hookType, "plugin", pluginName)
-	}
+	plugin.FireNonFatal(nil, hookType, pluginName, fn)
 }
 
 func fatal(action string, err error) {

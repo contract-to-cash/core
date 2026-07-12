@@ -96,6 +96,13 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 	if concurrency == 1 || opts.DryRun {
 		// Sequential processing
 		for _, agg := range contracts {
+			// External cancellation aborts the run: the remainder is skipped
+			// and the cancellation is surfaced as the run's error, so a
+			// cancelled run is never mistaken for a clean one (issue #242).
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				result.Skipped = result.Total - result.Succeeded - result.Failed
+				return result, ctxErr
+			}
 			if err := p.processOne(ctx, agg, opts.DryRun); err != nil {
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Errorf("contract %s: %w", agg.ContractID(), err))
@@ -104,13 +111,13 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 					// skipped, not failed, so Total == Succeeded+Failed+Skipped
 					// (issue #242).
 					result.Skipped = result.Total - result.Succeeded - result.Failed
-					return result, nil
+					return result, ctx.Err()
 				}
 			} else {
 				result.Succeeded++
 			}
 		}
-		return result, nil
+		return result, ctx.Err()
 	}
 
 	// Concurrent processing
@@ -119,9 +126,22 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 
 	sem := make(chan struct{}, concurrency)
 	var mu sync.Mutex
+	// stopped marks the internal early stop (ContinueOnError=false after a
+	// genuine failure). It is set under mu BEFORE cancel() so an in-flight
+	// item failing with context.Canceled can tell an internal early stop
+	// (benign: counted as Skipped) apart from an external caller cancellation
+	// (abnormal: counted as Failed and surfaced via the returned error)
+	// (issue #242).
+	stopped := false
 	launched := 0
 
 	for _, agg := range contracts {
+		// External cancellation aborts the launch loop; unlaunched items are
+		// counted as skipped below and the cancellation is surfaced as the
+		// run's error.
+		if ctx.Err() != nil {
+			break
+		}
 		// Check if we should stop early (ContinueOnError=false and an error occurred)
 		if !opts.ContinueOnError {
 			mu.Lock()
@@ -139,10 +159,10 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 
 			if err := p.processOne(cctx, a, opts.DryRun); err != nil {
 				mu.Lock()
-				if cctx.Err() != nil && errors.Is(err, context.Canceled) {
-					// The run was already aborted (early stop cancelled the
-					// shared context); an in-flight cancellation is not a
-					// genuine per-item failure (issue #242).
+				if stopped && errors.Is(err, context.Canceled) {
+					// The run was already stopped internally (the early stop
+					// cancelled the shared context); an in-flight cancellation
+					// is not a genuine per-item failure (issue #242).
 					result.Skipped++
 				} else {
 					result.Failed++
@@ -150,6 +170,9 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 				}
 				mu.Unlock()
 				if !opts.ContinueOnError {
+					mu.Lock()
+					stopped = true
+					mu.Unlock()
 					cancel()
 				}
 			} else {
@@ -165,11 +188,13 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 		sem <- struct{}{}
 	}
 
-	// Items never launched because of the early stop are skipped, not failed
-	// (issue #242).
+	// Items never launched because of an early stop or an external
+	// cancellation are skipped, not failed (issue #242).
 	result.Skipped += result.Total - launched
 
-	return result, nil
+	// Surface an external cancellation so a cancelled run is never mistaken
+	// for a clean partial run (nil when the caller's context is intact).
+	return result, ctx.Err()
 }
 
 // evaluateTrialEnd validates the trial-end guards against the given aggregate

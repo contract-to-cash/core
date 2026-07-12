@@ -127,6 +127,9 @@ paymentService := service.NewPaymentService(
     clock,         // shared.Clock
     // Optional:
     service.WithCustomerGateway(customerGateway),  // port.CustomerGateway — fallback resolution
+    service.WithCustomerIDResolver(resolver),      // port.CustomerIDResolver — maps AccountID → gateway customer ID (issue #231).
+                                                   // Without it, the AccountID is sent verbatim (only valid for gateways that
+                                                   // accept caller-chosen customer IDs); Stripe-style ID-minting gateways MUST wire one.
     service.WithPaymentTxManager(txManager),       // tx.TxManager — REQUIRED for production; without it, defaults to NoopTxManager (non-atomic, warns at construction)
     service.WithPaymentLogger(logger),             // *slog.Logger (defaults to slog.Default())
 )
@@ -139,7 +142,7 @@ type ProcessPaymentInput struct {
     PaymentMethodID string       // Optional (resolved via fallback chain if empty)
     Amount          shared.Money
     Currency        shared.Currency
-    IdempotencyKey  string       // Required for deduplication
+    IdempotencyKey  string       // Required — an empty key is rejected up front with ErrCodeValidation (issue #241)
     Metadata        map[string]string
 }
 
@@ -158,6 +161,10 @@ Flow: BeforeChargeHook → Gateway.Charge → AfterChargeHook (success) / OnPaym
 type RefundInput struct {
     Amount *shared.Money     // nil = refund full remaining amount
     Reason port.RefundReason
+    // Optional explicit gateway idempotency key. Leave empty (common case) to let
+    // Refund derive a deterministic, amount-bound key (issue #235); see
+    // docs/internals/payment-gateway.md §6.3.2 for the derivation and caller contract.
+    IdempotencyKey string
 }
 
 func (s *PaymentService) Refund(

@@ -2,6 +2,7 @@ package batch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sync"
@@ -753,5 +754,101 @@ func TestContractRenewalProcessor_NilPriceRepo_FallsBack(t *testing.T) {
 	}
 	if !agg.GetInterval().Equals(pricing.Monthly()) {
 		t.Errorf("expected interval monthly (fallback), got %s", agg.GetInterval())
+	}
+}
+
+// cancellingRenewalRepo cancels the parent context on the first FindByID call
+// (i.e. while the first item is being processed), simulating an external
+// caller cancellation mid-run.
+type cancellingRenewalRepo struct {
+	mockRenewalRepo
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (r *cancellingRenewalRepo) FindByID(ctx context.Context, id shared.ContractID) (*contract.ContractAggregate, error) {
+	r.once.Do(r.cancel)
+	return r.mockRenewalRepo.FindByID(ctx, id)
+}
+
+// TestContractRenewalProcessor_ParentCancellation_Sequential_NotCleanRun is
+// the issue #242 review regression: an EXTERNAL context cancellation must not
+// be misclassified as a benign partial run. With ContinueOnError=true the
+// internal early-stop cancel is never invoked, so a parent-ctx cancellation
+// must surface as a non-nil error from Process with the unprocessed remainder
+// accounted as Skipped.
+func TestContractRenewalProcessor_ParentCancellation_Sequential_NotCleanRun(t *testing.T) {
+	agg1 := newActiveContract("c-cancel-1")
+	agg2 := newActiveContract("c-cancel-2")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	repo := &cancellingRenewalRepo{
+		mockRenewalRepo: mockRenewalRepo{contracts: []*contract.ContractAggregate{agg1, agg2}},
+		cancel:          cancel,
+	}
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
+
+	result, err := processor.Process(ctx, BatchOptions{ContinueOnError: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Process error: got %v, want context.Canceled (cancelled run must not look clean)", err)
+	}
+	// The first item completes (the mock repo ignores ctx); the remainder is
+	// skipped, keeping Total == Succeeded+Failed+Skipped.
+	if result.Total != 2 || result.Succeeded != 1 || result.Failed != 0 || result.Skipped != 1 {
+		t.Errorf("result: got Total=%d Succeeded=%d Failed=%d Skipped=%d, want Total=2 Succeeded=1 Failed=0 Skipped=1",
+			result.Total, result.Succeeded, result.Failed, result.Skipped)
+	}
+}
+
+// blockingRenewalRepo blocks FindByID until the context is cancelled, so a
+// concurrent run's in-flight items observe the external cancellation.
+type blockingRenewalRepo struct {
+	mockRenewalRepo
+}
+
+func (r *blockingRenewalRepo) FindByID(ctx context.Context, _ shared.ContractID) (*contract.ContractAggregate, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestContractRenewalProcessor_ParentCancellation_Concurrent_NotCleanRun
+// verifies the concurrent path: with ContinueOnError=true (the internal
+// early-stop flag never set), items aborted by an EXTERNAL cancellation are
+// recorded as genuine failures with their errors, and Process returns the
+// cancellation error — the result is never a clean partial run (issue #242).
+func TestContractRenewalProcessor_ParentCancellation_Concurrent_NotCleanRun(t *testing.T) {
+	contracts := make([]*contract.ContractAggregate, 4)
+	for i := 0; i < 4; i++ {
+		contracts[i] = newActiveContract(fmt.Sprintf("c-cc-%d", i))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	repo := &blockingRenewalRepo{
+		mockRenewalRepo: mockRenewalRepo{contracts: contracts},
+	}
+	processor := NewContractRenewalProcessor(repo, nil, nil, processorClock(), nil, nil)
+
+	timer := time.AfterFunc(20*time.Millisecond, cancel)
+	defer timer.Stop()
+
+	result, err := processor.Process(ctx, BatchOptions{ContinueOnError: true, Concurrency: 2})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Process error: got %v, want context.Canceled (cancelled run must not look clean)", err)
+	}
+	if result.Succeeded != 0 {
+		t.Errorf("Succeeded: got %d, want 0", result.Succeeded)
+	}
+	// In-flight items cancelled externally are genuine failures with recorded
+	// errors (NOT silently skipped); items never launched are skipped.
+	if result.Failed < 1 {
+		t.Errorf("Failed: got %d, want >= 1 (external cancellation must not be masked as Skipped)", result.Failed)
+	}
+	if len(result.Errors) != result.Failed {
+		t.Errorf("Errors count: got %d, want %d (one per failed item)", len(result.Errors), result.Failed)
+	}
+	if got := result.Succeeded + result.Failed + result.Skipped; got != result.Total {
+		t.Errorf("accounting: Succeeded+Failed+Skipped=%d, want Total=%d", got, result.Total)
 	}
 }

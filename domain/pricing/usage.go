@@ -28,17 +28,37 @@ type UsagePrice struct {
 // clamp shares UnitPrice's currency. This surfaces a misconfigured clamp as an
 // error instead of letting CalculatePrice silently drop it (issue #148).
 func NewUsagePrice(unitPrice shared.Money, minimum, maximum *shared.Money) (UsagePrice, error) {
-	if minimum != nil && minimum.Currency() != unitPrice.Currency() {
-		return UsagePrice{}, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+	p := UsagePrice{UnitPrice: unitPrice, Minimum: minimum, Maximum: maximum}
+	if err := p.Validate(); err != nil {
+		return UsagePrice{}, err
+	}
+	return p, nil
+}
+
+// Validate reports whether this UsagePrice satisfies the invariants that
+// NewUsagePrice enforces at construction time, returning the same
+// shared.DomainErrors the constructor produces (nil when valid): any
+// Minimum/Maximum clamp must share UnitPrice's currency
+// (ErrCodeCurrencyMismatch).
+//
+// Use it to check a model that did NOT go through the constructor — most
+// notably one reconstructed from persistence (Price.FromSnapshot carries the
+// stored model through as-is for replay safety) — before its first use.
+// CalculatePrice on an invalid model panics (the issue #238 direct-misuse
+// policy); Validate surfaces the same violation as an error so persistence
+// adapters and tooling can reject or repair a poisoned price gracefully.
+func (p UsagePrice) Validate() error {
+	if p.Minimum != nil && p.Minimum.Currency() != p.UnitPrice.Currency() {
+		return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
 			fmt.Sprintf("usage price minimum currency %s does not match unit price currency %s",
-				minimum.Currency(), unitPrice.Currency()))
+				p.Minimum.Currency(), p.UnitPrice.Currency()))
 	}
-	if maximum != nil && maximum.Currency() != unitPrice.Currency() {
-		return UsagePrice{}, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+	if p.Maximum != nil && p.Maximum.Currency() != p.UnitPrice.Currency() {
+		return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
 			fmt.Sprintf("usage price maximum currency %s does not match unit price currency %s",
-				maximum.Currency(), unitPrice.Currency()))
+				p.Maximum.Currency(), p.UnitPrice.Currency()))
 	}
-	return UsagePrice{UnitPrice: unitPrice, Minimum: minimum, Maximum: maximum}, nil
+	return nil
 }
 
 // CalculatePrice calculates usage * UnitPrice, clamped by Minimum and Maximum.
@@ -59,7 +79,10 @@ func NewUsagePrice(unitPrice shared.Money, minimum, maximum *shared.Money) (Usag
 // mismatch), producing a silently wrong amount — a caller bug that must
 // surface loudly. This is the same policy as mustAddTier and
 // assertNonNegativeUsage; the signature returns no error, so a panic is the
-// only loud channel.
+// only loud channel. Callers that may face a model reconstructed from
+// persistence should check Validate() first (error form) or recover the panic
+// at their boundary — the core billing pipeline does the latter and converts
+// it to a per-contract DomainError naming the price.
 func (p UsagePrice) CalculatePrice(usage int64) shared.Money {
 	assertNonNegativeUsage("UsagePrice", usage)
 	if usage == 0 {
@@ -68,13 +91,10 @@ func (p UsagePrice) CalculatePrice(usage int64) shared.Money {
 
 	// Invariant re-check for constructor bypass (issue #238): a wrong-currency
 	// clamp must not be silently dropped by the GreaterThan comparisons below.
-	if p.Minimum != nil && p.Minimum.Currency() != p.UnitPrice.Currency() {
-		panic(fmt.Sprintf("UsagePrice.CalculatePrice: minimum currency %s does not match unit price currency %s (construct via NewUsagePrice)",
-			p.Minimum.Currency(), p.UnitPrice.Currency()))
-	}
-	if p.Maximum != nil && p.Maximum.Currency() != p.UnitPrice.Currency() {
-		panic(fmt.Sprintf("UsagePrice.CalculatePrice: maximum currency %s does not match unit price currency %s (construct via NewUsagePrice)",
-			p.Maximum.Currency(), p.UnitPrice.Currency()))
+	// Reuses Validate() so the constructor, the error form, and this panic all
+	// enforce the same invariants from one place.
+	if err := p.Validate(); err != nil {
+		panic(fmt.Sprintf("UsagePrice.CalculatePrice: %v (construct via NewUsagePrice)", err))
 	}
 
 	factor := new(big.Rat).SetInt64(usage)

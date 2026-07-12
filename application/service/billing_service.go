@@ -358,8 +358,15 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 		return nil, fmt.Errorf("failed to check existing invoices: %w", err)
 	}
 
-	// Require a voided invoice for the same period — this distinguishes regeneration
-	// from net-new invoice creation and prevents misuse as a bypass.
+	// Require a voided REGULAR (non-proration) invoice for the same period —
+	// this distinguishes regeneration from net-new invoice creation and prevents
+	// misuse as a bypass. Voided proration invoices are excluded from both the
+	// gate and the selection (issue #232): RegenerateInvoice regenerates the
+	// period's REGULAR invoice, so (a) a voided proration must never become the
+	// revision root / balance-restoration target (its restoration would return
+	// the proration's consumed credit while the voided regular invoice's credit
+	// stays lost), and (b) a voided proration ALONE must not authorize minting a
+	// net-new full-period invoice for a period that never had a regular one.
 	//
 	// Deterministic selection (issue #197): FindByContractAndPeriod returns
 	// invoices in an unspecified order (the in-memory repo iterates a map), so
@@ -373,7 +380,7 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 	// stand-in; the choice is documented on RegenerateInvoice.
 	var voidedInv *invoice.Invoice
 	for _, inv := range existing {
-		if inv.Status() != invoice.InvoiceStatusVoided {
+		if inv.Status() != invoice.InvoiceStatusVoided || inv.IsProration() {
 			continue
 		}
 		if voidedInv == nil || inv.ID() > voidedInv.ID() {
@@ -385,18 +392,18 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 			"cannot regenerate invoice: no voided invoice found for this period")
 	}
 
-	// Inline duplicate check: reject if a non-voided, non-proration invoice
-	// already exists for this period (same logic as checkDuplicateInvoice for
-	// subscription/usage-based, but using the already-fetched existing slice).
-	// Proration invoices are exempt (issue #232): they intentionally coexist
-	// with the period's regular invoice, matching the per-period uniqueness
-	// contract in invoice.Repository.Save and its adapter implementations.
+	// Inline duplicate check: reject if an invoice that participates in the
+	// per-period uniqueness constraint already exists for this period (same
+	// logic as checkDuplicateInvoice for subscription/usage-based, but using the
+	// already-fetched existing slice). Voided and proration invoices are exempt
+	// (issue #232) — the predicate is the domain's
+	// Invoice.ParticipatesInPeriodUniqueness, the same one the repository
+	// constraint enforces, so the layers cannot drift.
 	for _, inv := range existing {
-		if inv.Status() == invoice.InvoiceStatusVoided || inv.IsProration() {
-			continue
+		if inv.ParticipatesInPeriodUniqueness() {
+			return nil, shared.NewDomainError(shared.ErrCodeConflict,
+				"invoice already exists for this billing period")
 		}
-		return nil, shared.NewDomainError(shared.ErrCodeConflict,
-			"invoice already exists for this billing period")
 	}
 
 	// Calculate subtotal based on contract type
@@ -985,8 +992,13 @@ func (s *BillingService) calculateUsageCharge(
 			billableUsage = 0
 		}
 
-		// Use the Price's pricing model
-		metricPrice := price.PricingModel().CalculatePrice(billableUsage)
+		// Use the Price's pricing model. safeCalculatePrice recovers a panic
+		// from an invalid persisted model and converts it to a per-contract
+		// DomainError instead of crashing the caller (see the helper's doc).
+		metricPrice, err := safeCalculatePrice(price.PricingModel(), billableUsage, price.ID())
+		if err != nil {
+			return shared.Money{}, nil, err
+		}
 		totalCharge, err = totalCharge.Add(metricPrice)
 		if err != nil {
 			return shared.Money{}, nil, fmt.Errorf("failed to sum usage charge: %w", err)
@@ -1018,6 +1030,37 @@ func (s *BillingService) calculateUsageCharge(
 	}
 
 	return totalCharge, lineItems, nil
+}
+
+// safeCalculatePrice invokes model.CalculatePrice(usage) with a recover guard,
+// converting a panic into a shared.DomainError that names the price.
+//
+// Why: pricing model invariants (mixed-currency tiers, unsorted tiers,
+// wrong-currency Min/Max clamps) are enforced by the constructors, and
+// CalculatePrice PANICS on a violation rather than silently mis-billing (the
+// issue #238 direct-misuse policy). But a price persisted BEFORE those
+// invariants existed is reconstructed as-is by pricing's FromSnapshot (replay
+// safety: stored prices always load), so its first use inside the billing
+// pipeline would otherwise crash the integrator's scheduler goroutine — there
+// is no recover anywhere between here and GenerateInvoice/RegenerateInvoice.
+// This boundary mirrors plugin.SafeInvoke (plugin/safe.go): recover → a
+// structured, per-contract error, so one poisoned price fails that contract's
+// billing run loudly without taking the process down.
+//
+// The returned error advises running the model's Validate() method (exported
+// on pricing.TieredPrice / pricing.UsagePrice) and re-persisting a corrected
+// price. Negative-usage panics cannot normally reach this guard — callers
+// clamp billableUsage to zero first — but would be converted the same way.
+func safeCalculatePrice(model pricing.PricingModel, usage int64, priceID shared.PriceID) (result shared.Money, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = shared.NewDomainError(shared.ErrCodeBusinessRule,
+				fmt.Sprintf("price %s: pricing model rejected calculation: %v "+
+					"(the persisted pricing model is invalid; check it with its Validate() method, "+
+					"fix the price data, and re-persist)", priceID, r))
+		}
+	}()
+	return model.CalculatePrice(usage), nil
 }
 
 // applyBalances applies available credits to the total using FIFO order.
@@ -1248,19 +1291,19 @@ func (s *BillingService) restoreBalances(ctx context.Context, balanceRepo balanc
 // it as its in-tx duplicate re-check (issue #149): the voided original is
 // excluded, so void-and-recreate for the same period still succeeds. Proration
 // invoices are likewise excluded (issue #232): they intentionally coexist with
-// the period's regular invoice, mirroring the per-period uniqueness contract in
-// invoice.Repository.Save (voided and proration invoices are exempt).
+// the period's regular invoice. The predicate is the domain's
+// Invoice.ParticipatesInPeriodUniqueness — the same one the
+// invoice.Repository.Save constraint enforces — so the layers cannot drift.
 func (s *BillingService) rejectIfActivePeriodInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) error {
 	existing, err := s.invoiceRepoFor(ctx).FindByContractAndPeriod(ctx, contractID, billingPeriod)
 	if err != nil {
 		return fmt.Errorf("failed to check existing invoices for period: %w", err)
 	}
 	for _, inv := range existing {
-		if inv.Status() == invoice.InvoiceStatusVoided || inv.IsProration() {
-			continue
+		if inv.ParticipatesInPeriodUniqueness() {
+			return shared.NewDomainError(shared.ErrCodeConflict,
+				"invoice already exists for this billing period")
 		}
-		return shared.NewDomainError(shared.ErrCodeConflict,
-			"invoice already exists for this billing period")
 	}
 	return nil
 }
@@ -1298,7 +1341,11 @@ func (s *BillingService) checkDuplicateInvoice(ctx context.Context, agg *contrac
 
 	case agg.GetContractType() == contract.ContractTypeOneTime:
 		// One-time contracts: only one regular invoice ever (voided and
-		// proration invoices are exempt)
+		// proration invoices are exempt). This branch deliberately does NOT use
+		// Invoice.ParticipatesInPeriodUniqueness: the "one invoice ever" rule is
+		// per-CONTRACT, not per-period, and FindByContractID can return regular
+		// invoices without a billing period — the full predicate's non-zero-period
+		// dimension would wrongly exempt those and weaken this guard.
 		existing, err := invoiceRepo.FindByContractID(ctx, agg.ContractID())
 		if err != nil {
 			return fmt.Errorf("failed to check existing invoices: %w", err)
@@ -1312,18 +1359,19 @@ func (s *BillingService) checkDuplicateInvoice(ctx context.Context, agg *contrac
 		}
 
 	default:
-		// Subscription/usage-based: one regular invoice per billing period
-		// (voided and proration invoices are exempt)
+		// Subscription/usage-based: one invoice per billing period that
+		// participates in the per-period uniqueness constraint (voided and
+		// proration invoices are exempt). Predicate shared with the repository
+		// constraint via Invoice.ParticipatesInPeriodUniqueness.
 		existing, err := invoiceRepo.FindByContractAndPeriod(ctx, agg.ContractID(), billingPeriod)
 		if err != nil {
 			return fmt.Errorf("failed to check existing invoices for period: %w", err)
 		}
 		for _, inv := range existing {
-			if inv.Status() == invoice.InvoiceStatusVoided || inv.IsProration() {
-				continue
+			if inv.ParticipatesInPeriodUniqueness() {
+				return shared.NewDomainError(shared.ErrCodeConflict,
+					"invoice already exists for this billing period")
 			}
-			return shared.NewDomainError(shared.ErrCodeConflict,
-				"invoice already exists for this billing period")
 		}
 	}
 

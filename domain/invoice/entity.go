@@ -617,6 +617,27 @@ func (inv *Invoice) IsProration() bool {
 	return inv.metadata[MetadataKeyInvoiceType] == InvoiceTypeProration
 }
 
+// ParticipatesInPeriodUniqueness reports whether the invoice is subject to the
+// per-period uniqueness constraint documented on Repository.Save: at most one
+// such invoice may exist per (contract_id, billing_period). An invoice
+// participates when it is NOT voided, NOT a proration adjustment, and has a
+// non-zero billing period — mirroring the partial unique index the Save
+// contract recommends (voided invoices are exempt so void-and-recreate leaves
+// the original alongside its replacement; proration invoices are exempt
+// because they intentionally coexist with the period's regular invoice; an
+// invoice without a billing period has no period slot to occupy).
+//
+// This is the single source of truth for the exemption predicate: repository
+// implementations (see infrastructure/inmemory) and the BillingService
+// duplicate-invoice guards both delegate to it so the service-level
+// check-then-insert guards and the storage-level constraint can never drift
+// apart (issue #232).
+func (inv *Invoice) ParticipatesInPeriodUniqueness() bool {
+	return inv.status != InvoiceStatusVoided &&
+		!inv.IsProration() &&
+		!inv.billingPeriod.IsZero()
+}
+
 // WithIssueDate sets the issue date.
 func WithIssueDate(t time.Time) InvoiceOption {
 	return func(inv *Invoice) {

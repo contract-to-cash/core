@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/shared"
@@ -61,62 +60,24 @@ func (p *CouponPlugin) Version() string { return "1.2.0" }
 // Priority returns the execution priority.
 func (p *CouponPlugin) Priority() int { return p.priority }
 
-// configInt reads an optional integer key from config. It accepts both a Go int
-// and a JSON-decoded float64 with an integral value (encoding/json decodes all
-// numbers into float64, so a config loaded from JSON would otherwise never
-// match a plain int assertion — issue #239). A key that is present but has the
-// wrong type (or a non-integral float) returns a descriptive error instead of
-// being silently ignored. Unknown/absent keys return present=false.
-func configInt(config plugin.Config, key string) (value int, present bool, err error) {
-	v, ok := config[key]
-	if !ok {
-		return 0, false, nil
-	}
-	switch n := v.(type) {
-	case int:
-		return n, true, nil
-	case float64:
-		if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) {
-			return 0, false, fmt.Errorf("config %q must be an integer, got %v", key, n)
-		}
-		return int(n), true, nil
-	default:
-		return 0, false, fmt.Errorf("config %q must be an integer, got %T (%v)", key, v, v)
-	}
-}
-
-// configBool reads an optional bool key from config. A key that is present but
-// not a bool returns a descriptive error instead of being silently ignored
-// (issue #239). Unknown/absent keys return present=false.
-func configBool(config plugin.Config, key string) (value bool, present bool, err error) {
-	v, ok := config[key]
-	if !ok {
-		return false, false, nil
-	}
-	b, ok := v.(bool)
-	if !ok {
-		return false, false, fmt.Errorf("config %q must be a bool, got %T (%v)", key, v, v)
-	}
-	return b, true, nil
-}
-
 // Initialize initializes the plugin with the given configuration.
 //
 // A present-but-mistyped value is a configuration error and is returned rather
 // than silently ignored (issue #239); JSON-decoded numbers (float64 with an
-// integral value) are accepted for the integer keys. Unknown keys are ignored.
+// integral value) are accepted for the integer keys via plugin.Config.Int.
+// Unknown keys are ignored.
 func (p *CouponPlugin) Initialize(_ context.Context, config plugin.Config) error {
-	if n, ok, err := configInt(config, "maxCouponsPerInvoice"); err != nil {
+	if n, ok, err := config.Int("maxCouponsPerInvoice"); err != nil {
 		return fmt.Errorf("coupon: %w", err)
 	} else if ok {
 		p.config.MaxCouponsPerInvoice = n
 	}
-	if b, ok, err := configBool(config, "allowStacking"); err != nil {
+	if b, ok, err := config.Bool("allowStacking"); err != nil {
 		return fmt.Errorf("coupon: %w", err)
 	} else if ok {
 		p.config.AllowStacking = b
 	}
-	if n, ok, err := configInt(config, "priority"); err != nil {
+	if n, ok, err := config.Int("priority"); err != nil {
 		return fmt.Errorf("coupon: %w", err)
 	} else if ok {
 		p.priority = n

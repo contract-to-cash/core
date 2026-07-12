@@ -13,8 +13,6 @@ import (
 // instead of being silently dropped by CalculatePrice (Money.GreaterThan returns
 // false on a currency mismatch).
 func TestNewUsagePrice_ClampCurrencyGuards(t *testing.T) {
-	jpy := func(n int64) shared.Money { return shared.NewMoney(new(big.Rat).SetInt64(n), shared.CurrencyJPY) }
-	usd := func(n int64) shared.Money { return shared.NewMoney(new(big.Rat).SetInt64(n), shared.CurrencyUSD) }
 	ptr := func(m shared.Money) *shared.Money { return &m }
 
 	tests := []struct {

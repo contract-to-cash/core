@@ -1151,112 +1151,6 @@ func handleGatewaySucceed(env *testEnv) http.HandlerFunc {
 
 // --- Coupon plugin registration ---
 
-// inMemoryCouponRepo implements couponplugin.CouponRepository for E2E tests.
-//
-// Usage is reconciled from redemption rows (issue #185); there is no separate
-// usage counter. Redemptions are deduplicated on Redemption.IdempotencyKey()
-// so retries / regenerations for the same (coupon, contract, period) confirm a
-// single use.
-type inMemoryCouponRepo struct {
-	mu          sync.RWMutex
-	coupons     map[couponplugin.CouponID]*couponplugin.Coupon
-	redemptions map[string]*couponplugin.Redemption // IdempotencyKey -> redemption
-}
-
-func newInMemoryCouponRepo() *inMemoryCouponRepo {
-	return &inMemoryCouponRepo{
-		coupons:     make(map[couponplugin.CouponID]*couponplugin.Coupon),
-		redemptions: make(map[string]*couponplugin.Redemption),
-	}
-}
-
-func (r *inMemoryCouponRepo) FindByCode(_ context.Context, code string) (*couponplugin.Coupon, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, c := range r.coupons {
-		if c.Code() == code {
-			return c, nil
-		}
-	}
-	return nil, fmt.Errorf("coupon not found: %s", code)
-}
-
-func (r *inMemoryCouponRepo) FindApplicable(_ context.Context, q couponplugin.CouponQuery) ([]*couponplugin.Coupon, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	var result []*couponplugin.Coupon
-	for _, c := range r.coupons {
-		if c.IsValid(q.At) && c.IsApplicableToProduct(q.ProductID) {
-			result = append(result, c)
-		}
-	}
-	return result, nil
-}
-
-func (r *inMemoryCouponRepo) Save(_ context.Context, c *couponplugin.Coupon) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.coupons[c.ID()] = c
-	return nil
-}
-
-// SaveRedemption atomically confirms a redemption keyed by
-// (coupon, contract, billing period) — a duplicate key is a no-op (issue #185) —
-// and enforces usage limits under the same lock (issue #195).
-func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, redemption *couponplugin.Redemption, limits couponplugin.RedemptionLimits) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	key := redemption.IdempotencyKey()
-	if _, exists := r.redemptions[key]; exists {
-		return nil // (a) idempotent no-op
-	}
-	// (b) atomic limit check against existing distinct rows.
-	if limits.GlobalLimit != nil {
-		if limits.GlobalBaseline+r.countRedemptionsLocked(redemption.CouponID(), nil) >= *limits.GlobalLimit {
-			return couponplugin.ErrUsageLimitReached
-		}
-	}
-	if limits.PerAccountLimit != nil {
-		acct := redemption.AccountID()
-		if r.countRedemptionsLocked(redemption.CouponID(), &acct) >= *limits.PerAccountLimit {
-			return couponplugin.ErrUsageLimitReached
-		}
-	}
-	// (c) insert
-	r.redemptions[key] = redemption
-	return nil
-}
-
-// countRedemptionsLocked counts distinct redemptions of a coupon (optionally
-// filtered to an account). Callers must hold r.mu.
-func (r *inMemoryCouponRepo) countRedemptionsLocked(couponID couponplugin.CouponID, accountID *shared.AccountID) int {
-	n := 0
-	for _, rd := range r.redemptions {
-		if rd.CouponID() != couponID {
-			continue
-		}
-		if accountID != nil && rd.AccountID() != *accountID {
-			continue
-		}
-		n++
-	}
-	return n
-}
-
-func (r *inMemoryCouponRepo) FindRedemptions(_ context.Context, couponID couponplugin.CouponID, accountID *shared.AccountID) ([]*couponplugin.Redemption, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	var result []*couponplugin.Redemption
-	for _, rd := range r.redemptions {
-		if rd.CouponID() == couponID {
-			if accountID == nil || rd.AccountID() == *accountID {
-				result = append(result, rd)
-			}
-		}
-	}
-	return result, nil
-}
-
 func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -1275,7 +1169,10 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 			return
 		}
 
-		repo := newInMemoryCouponRepo()
+		// Canonical in-memory CouponRepository (infrastructure/inmemory): the
+		// reference implementation of the atomic SaveRedemption contract
+		// (issues #185/#195/#240) — no bespoke duplicate needed here.
+		repo := inmemory.NewInMemoryCouponRepository()
 		for _, c := range req.Coupons {
 			validFrom, err := time.Parse("2006-01-02", c.ValidFrom)
 			if err != nil {

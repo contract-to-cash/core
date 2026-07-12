@@ -1,9 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"sync"
@@ -2914,14 +2916,20 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 	// the in-tx terminal rejection would silently pass the main test
 	// suite (pre-charge catches everything in the happy path).
 	tests := []struct {
-		name     string
-		mutate   func(p *payment.Payment)
-		wantCode shared.ErrorCode
+		name   string
+		mutate func(p *payment.Payment)
+		// wantCompensation: whether the saga compensation refund must fire
+		// (issue #234). Refunded / PartiallyRefunded / ChargedBack account
+		// their money as already moved, so the Charge was an idempotent
+		// replay and compensating would reverse the original transaction a
+		// second time. Failed captured NOTHING, so the fresh Captured charge
+		// is real and unbacked — compensation MUST reverse it.
+		wantCompensation bool
 	}{
-		{"Refunded", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkRefunded() }, shared.ErrCodeConflict},
-		{"PartiallyRefunded", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkPartiallyRefunded() }, shared.ErrCodeConflict},
-		{"Failed", func(p *payment.Payment) { _ = p.Fail("declined") }, shared.ErrCodeConflict},
-		{"ChargedBack", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkChargedBack() }, shared.ErrCodeConflict},
+		{"Refunded", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkRefunded() }, false},
+		{"PartiallyRefunded", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkPartiallyRefunded() }, false},
+		{"Failed", func(p *payment.Payment) { _ = p.Fail("declined") }, true},
+		{"ChargedBack", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkChargedBack() }, false},
 	}
 
 	for _, tc := range tests {
@@ -2943,6 +2951,8 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 
 			paymentRepo := newRaceFakePaymentRepo(delayed)
 			gw := &trackingGateway{}
+			var logBuf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			svc := NewPaymentService(
 				gw,
@@ -2952,6 +2962,7 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 				&mockEventStore{},
 				plugin.NewRegistry(),
 				clock,
+				WithPaymentLogger(logger),
 			)
 
 			pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
@@ -2965,12 +2976,7 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error for in-tx terminal-state race (%s)", tc.name)
 			}
-			var domainErr *shared.DomainError
-			if !errors.As(err, &domainErr) {
-				t.Errorf("expected shared.DomainError, got %T: %v", err, err)
-			} else if domainErr.Code != tc.wantCode {
-				t.Errorf("expected error code %q, got %q", tc.wantCode, domainErr.Code)
-			}
+			assertDomainError(t, err, shared.ErrCodeConflict)
 			if pmt != nil {
 				t.Errorf("expected nil payment, got %+v", pmt)
 			}
@@ -2982,12 +2988,23 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 				t.Errorf("expected 1 Charge call (pre-charge lookup missed), got %d", len(gw.chargeKeys))
 			}
 
-			// Compensation MUST NOT fire (issue #234): the Charge above
-			// was an idempotent replay of the transaction that already
-			// backs the terminal record — the gateway moved no new money.
-			// A compensation Void/Refund here would be a SECOND real
-			// reversal of the original transaction (worst on ChargedBack,
-			// where the network already pulled the funds back).
+			if tc.wantCompensation {
+				// Failed-state conflict: the Captured charge is REAL (nothing
+				// was captured by the Failed record) → the generic saga path
+				// must reverse it. trackingGateway's Void fails (captured
+				// txn), so compensation lands as one comp- Refund.
+				if len(gw.refundTxnIDs) != 1 {
+					t.Errorf("Failed-state conflict must fire saga compensation exactly once, got refunds: %v", gw.refundTxnIDs)
+				}
+				return
+			}
+
+			// Refunded / PartiallyRefunded / ChargedBack: compensation MUST
+			// NOT fire (issue #234) — the Charge above was an idempotent
+			// replay of the transaction that already backs the terminal
+			// record; a compensation Void/Refund would be a SECOND real
+			// reversal (worst on ChargedBack, where the network already
+			// pulled the funds back).
 			if len(gw.refundTxnIDs) != 0 {
 				t.Errorf("compensation must NOT fire on in-tx terminal-state conflict (issue #234), got refunds: %v", gw.refundTxnIDs)
 			}
@@ -2995,6 +3012,11 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 				if strings.HasPrefix(k, "comp-") {
 					t.Errorf("no comp- refund key may reach the gateway on terminal-state replay, got %q", k)
 				}
+			}
+			// The no-compensation path must be observable: a Warn naming the
+			// key and terminal status is emitted.
+			if !containsAll(logBuf.String(), "terminal payment record", "key-race") {
+				t.Errorf("expected warn log on the no-compensation terminal-replay path, got:\n%s", logBuf.String())
 			}
 		})
 	}

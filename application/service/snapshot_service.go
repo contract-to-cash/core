@@ -66,12 +66,12 @@ func (s *SnapshotService) CreateSnapshot(ctx context.Context, agg eventstore.Agg
 	// followed by replay of events after Version()) reconstructs a corrupt
 	// aggregate — double-applying or skipping the uncommitted events. Callers
 	// must persist (append + ClearUncommittedEvents) BEFORE snapshotting.
-	if len(agg.UncommittedEvents()) > 0 {
+	if uncommitted := agg.UncommittedEvents(); len(uncommitted) > 0 {
 		return shared.NewDomainError(
 			shared.ErrCodeBusinessRule,
 			fmt.Sprintf("cannot snapshot aggregate %s: it has %d uncommitted event(s); "+
 				"persist the aggregate (append events + ClearUncommittedEvents) before creating a snapshot",
-				agg.ID(), len(agg.UncommittedEvents())),
+				agg.ID(), len(uncommitted)),
 		)
 	}
 

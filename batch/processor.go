@@ -47,10 +47,12 @@ type BatchResult struct {
 	Succeeded int
 	Failed    int
 	// Skipped counts items that were not attempted because the run stopped
-	// early after a failure with ContinueOnError=false, including in-flight
-	// concurrent items that were aborted by the early-stop context
-	// cancellation (a cancellation is not a genuine per-item failure and is
-	// not recorded in Errors).
+	// early — after a failure with ContinueOnError=false (including in-flight
+	// concurrent items aborted by the internal early-stop cancellation, which
+	// is not a genuine per-item failure and is not recorded in Errors), or
+	// because the caller's context was cancelled. An external cancellation is
+	// additionally surfaced as a non-nil error from Process, so a cancelled
+	// run is never mistaken for a clean one.
 	Skipped int
 	Errors  []error
 	// DryRunActions lists, for dry runs only, the action a real run would
