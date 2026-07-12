@@ -86,6 +86,41 @@ func TestPrice_Metadata_DefensiveCopies(t *testing.T) {
 	}
 }
 
+// TestPrice_WithMetadata_NilAndEmptyInputs pins the WithMetadata boundary
+// cases: passing nil or an empty map at construction (i) still yields an
+// empty, never-nil Metadata(), and (ii) leaves the internal metadata field
+// nil — identical to a price built without the option — so the snapshot
+// round-trip matches the existing legacy/nil-snapshot behaviour.
+func TestPrice_WithMetadata_NilAndEmptyInputs(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		input map[string]string
+	}{
+		{name: "nil map", input: nil},
+		{name: "empty map", input: map[string]string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := newMetadataTestPrice(t, WithMetadata(tc.input))
+
+			got := p.Metadata()
+			if got == nil {
+				t.Fatal("Metadata() must never return nil")
+			}
+			if len(got) != 0 {
+				t.Errorf("expected empty metadata, got %v", got)
+			}
+			if p.metadata != nil {
+				t.Errorf("internal metadata must stay nil for empty input (as without the option), got %v", p.metadata)
+			}
+		})
+	}
+}
+
 func TestPrice_Metadata_EmptyByDefault(t *testing.T) {
 	t.Parallel()
 

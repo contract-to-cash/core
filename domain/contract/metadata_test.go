@@ -43,7 +43,19 @@ func TestCreate_CarriesMetadataOnEvent(t *testing.T) {
 	}
 }
 
-func TestCreate_Metadata_DefensiveCopies(t *testing.T) {
+// TestCreate_Metadata_IsolatedFromCallerMutation verifies that mutating the
+// caller-owned command map after Create is not observable anywhere: the
+// aggregate state is protected by the Apply-time copy (copyMetadataMap of
+// e.Metadata) plus the getter clone, and the event payload is protected because
+// RaiseEvent serializes the event to JSON inside Create, before the caller can
+// mutate anything.
+//
+// Note: the intake copy in Create (Metadata: copyMetadataMap(cmd.Metadata)) is
+// defense-in-depth only and is NOT verified here. The typed event object never
+// escapes Create — UncommittedEvents carries the already-serialized payload —
+// so an aliasing bug in the intake copy is unobservable under the current
+// architecture; this test locks in the observable isolation guarantees above.
+func TestCreate_Metadata_IsolatedFromCallerMutation(t *testing.T) {
 	agg := newTestAggregate()
 	cmd := newTestCommand()
 	src := map[string]string{"creator_id": "user-42"}
@@ -54,7 +66,8 @@ func TestCreate_Metadata_DefensiveCopies(t *testing.T) {
 	}
 
 	// Mutating the caller-owned command map after Create must not rewrite the
-	// aggregate state or the raised event payload (intake defense).
+	// aggregate state (Apply-time copy) or the event payload (serialized during
+	// Create by RaiseEvent).
 	src["creator_id"] = "tampered"
 	src["extra"] = "tampered"
 	if got := agg.Metadata(); got["creator_id"] != "user-42" || len(got) != 1 {

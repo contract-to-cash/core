@@ -37,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   add a compile-time assertion such as
   `var _ plugin.OnPaymentProcessedHook = (*MyPlugin)(nil)` to surface this at build time.
 
+### Fixed
+
+- **Zero-amount settlement re-fetches the invoice before firing hooks after a
+  raced-loser convergence (#97, found during the #223 review)** —
+  `settleZeroAmountPayment` now mirrors the gateway path's #97 handling: when its
+  payment `Save` loses a duplicate-idempotency-key race and converges on the winner's
+  payment, the invoice is re-fetched from the repository before `AfterCharge` /
+  `OnPaymentProcessed` fire. Previously the hooks on this path could observe a
+  locally-mutated but never-persisted invoice (the loser's clone, whose
+  `RecordPayment` mutation was rolled back with the transaction).
+
 ### Docs
 
 - **`ContractChangeExpired` semantics reconciled with code (#220)** — the hook-constant

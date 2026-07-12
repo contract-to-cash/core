@@ -257,8 +257,10 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 		Interval:       cmd.Interval,
 		ContractType:   cmd.ContractType,
 		AutoRenew:      cmd.AutoRenew,
-		// Intake defense: deep-copy the caller-owned metadata map so a
-		// post-call mutation by the caller cannot rewrite the event payload.
+		// Defense-in-depth: deep-copy the caller-owned metadata map. Not
+		// observable today — Apply copies e.Metadata again and RaiseEvent
+		// serializes the payload before Create returns — but it keeps a future
+		// refactor that defers serialization from aliasing the caller's map.
 		Metadata:  copyMetadataMap(cmd.Metadata),
 		CreatedAt: now,
 	}

@@ -3455,6 +3455,42 @@ func TestProcessPayment_OnPaymentProcessed_ContextIsolatedFromAfterCharge(t *tes
 	}
 }
 
+// TestProcessPayment_ZeroAmount_OnPaymentProcessed_ContextIsolatedFromAfterCharge
+// verifies the same context isolation on the settleZeroAmountPayment path
+// (AmountDue()==0, gateway never called): OnPaymentProcessed hooks must receive
+// a FRESH PaymentContext, so a SetContract mutation by an AfterCharge plugin is
+// not observable by metrics plugins on this path either.
+func TestProcessPayment_ZeroAmount_OnPaymentProcessed_ContextIsolatedFromAfterCharge(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newZeroAmountFinalizedInvoice()
+	probe := &contractLeakProbePlugin{clock: clock}
+	reg := plugin.NewRegistry()
+	if err := reg.Register(probe); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// failCharge gateway proves the settlement never touches the gateway.
+	svc := NewPaymentService(&mockGateway{failCharge: true}, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, reg, clock)
+
+	if _, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		Currency:       shared.CurrencyJPY,
+		IdempotencyKey: "idem-zero-ctx-isolation",
+	}); err != nil {
+		t.Fatalf("ProcessPayment: %v", err)
+	}
+
+	if !probe.metricsCalled {
+		t.Fatal("OnPaymentProcessed must fire on the zero-amount settlement path")
+	}
+	if probe.metricsContract != nil {
+		t.Errorf("SetContract by an AfterCharge plugin leaked into the OnPaymentProcessed context on the zero-amount path: got contract %q, want nil",
+			probe.metricsContract.ContractID())
+	}
+	if probe.metricsPaymentID == "" {
+		t.Error("OnPaymentProcessed must still receive the payment on its fresh context")
+	}
+}
+
 // nilReturningInvoiceRepo mimics a BYO-DB adapter that violates the FindByID
 // convention by returning (nil, nil) for a missing invoice instead of an error.
 type nilReturningInvoiceRepo struct{ mockInvoiceRepoForPayment }
