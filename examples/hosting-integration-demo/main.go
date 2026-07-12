@@ -152,10 +152,33 @@ func main() {
 
 	serverMgr.PrintStatus()
 
-	// ── 6. Month 2: renewal payment fails -> suspend ──
-	printSection("Phase 3: Payment Failed -> Server Suspended")
+	// ── 6. Customer schedules cancellation, then changes their mind ──
+	// ScheduleCancellation requires an Active contract; UnscheduleCancellation
+	// requires a pending scheduled cancellation. Like the other lifecycle hooks,
+	// the integrator fires OnContractCancelScheduled/OnContractCancelUnscheduled.
+	printSection("Phase 3: Scheduled Cancellation -> Change of Mind")
 
-	clock.Advance(30 * 24 * time.Hour) // May 1
+	clock.Advance(10 * 24 * time.Hour) // April 11
+	agg, _ = contractRepo.FindByID(ctx, contractID)
+	must("schedule-cancel", agg.ScheduleCancellation("budget review", metadata))
+	for _, h := range registry.GetOnContractCancelScheduledHooks() {
+		must("hook:cancel-scheduled", h.OnContractCancelScheduled(plugin.NewContext(ctx), agg))
+	}
+	must("save", contractRepo.Save(ctx, agg))
+
+	clock.Advance(2 * 24 * time.Hour) // April 13: customer decides to stay
+	must("unschedule-cancel", agg.UnscheduleCancellation(metadata))
+	for _, h := range registry.GetOnContractCancelUnscheduledHooks() {
+		must("hook:cancel-unscheduled", h.OnContractCancelUnscheduled(plugin.NewContext(ctx), agg))
+	}
+	must("save", contractRepo.Save(ctx, agg))
+
+	serverMgr.PrintStatus()
+
+	// ── 7. Month 2: renewal payment fails -> suspend ──
+	printSection("Phase 4: Payment Failed -> Server Suspended")
+
+	clock.Advance(18 * 24 * time.Hour) // May 1
 	gateway.failNext = true            // simulate payment failure
 
 	agg, _ = contractRepo.FindByID(ctx, contractID)
@@ -187,8 +210,8 @@ func main() {
 
 	serverMgr.PrintStatus()
 
-	// ── 7. Customer updates payment method and pays -> resume ──
-	printSection("Phase 4: Payment Retry -> Server Resumed")
+	// ── 8. Customer updates payment method and pays -> resume ──
+	printSection("Phase 5: Payment Retry -> Server Resumed")
 
 	clock.Advance(3 * 24 * time.Hour) // May 4
 	gateway.failNext = false          // payment method updated
@@ -218,8 +241,8 @@ func main() {
 
 	serverMgr.PrintStatus()
 
-	// ── 8. Customer cancels -> server terminated ──
-	printSection("Phase 5: Cancellation -> Server Terminated")
+	// ── 9. Customer cancels -> server terminated ──
+	printSection("Phase 6: Cancellation -> Server Terminated")
 
 	clock.Advance(20 * 24 * time.Hour)
 	agg, _ = contractRepo.FindByID(ctx, contractID)
@@ -238,6 +261,8 @@ func main() {
 	fmt.Println("  Contract Created     -> OnContractCreate        -> (prepare resources)")
 	fmt.Println("  Contract Activated   -> OnContractActivate      -> (mark ready)")
 	fmt.Println("  Payment Completed    -> AfterCharge             -> Provision server")
+	fmt.Println("  Cancel Scheduled     -> OnContractCancelScheduled   -> (flag decommission)")
+	fmt.Println("  Cancel Unscheduled   -> OnContractCancelUnscheduled -> (clear flag)")
 	fmt.Println("  Payment Failed       -> OnPaymentFailed         -> (alert)")
 	fmt.Println("  Contract Suspended   -> OnContractSuspend       -> Stop server")
 	fmt.Println("  Contract Resumed     -> OnContractResume        -> Restart server")
@@ -362,7 +387,8 @@ func (m *serverManager) PrintStatus() {
 // ═══════════════════════════════════════════════════════════════════
 // ServerProvisioningPlugin - bridges billing events to server management
 // Implements: OnContractCreate, OnContractActivate, OnContractSuspend,
-//             OnContractResume, OnContractCancel, AfterCharge, OnPaymentFailed
+//             OnContractResume, OnContractCancel, OnContractCancelScheduled,
+//             OnContractCancelUnscheduled, AfterCharge, OnPaymentFailed
 // ═══════════════════════════════════════════════════════════════════
 
 type serverProvisioningPlugin struct {
@@ -436,6 +462,20 @@ func (p *serverProvisioningPlugin) OnContractResume(_ *plugin.Context, c *contra
 // OnContractCancelHook - terminate the server
 func (p *serverProvisioningPlugin) OnContractCancel(_ *plugin.Context, c *contract.ContractAggregate) error {
 	p.mgr.Terminate(string(c.ContractID()), c.UpdatedAt())
+	return nil
+}
+
+// OnContractCancelScheduledHook - flag the server for end-of-period decommission
+func (p *serverProvisioningPlugin) OnContractCancelScheduled(_ *plugin.Context, c *contract.ContractAggregate) error {
+	fmt.Printf("  >> [Provisioning] Cancellation scheduled: %s - server keeps running until period end\n",
+		c.ContractID())
+	return nil
+}
+
+// OnContractCancelUnscheduledHook - clear the pending decommission flag
+func (p *serverProvisioningPlugin) OnContractCancelUnscheduled(_ *plugin.Context, c *contract.ContractAggregate) error {
+	fmt.Printf("  >> [Provisioning] Cancellation unscheduled: %s - pending decommission cleared\n",
+		c.ContractID())
 	return nil
 }
 

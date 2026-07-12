@@ -237,7 +237,7 @@ All hooks follow ISP (Interface Segregation Principle). Implement only the hooks
 | Category | Hooks | Purpose |
 |----------|-------|---------|
 | **Billing calculation** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | Discounts, tax, pre/post calculation |
-| **Contract lifecycle** | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | React to individual contract events |
+| **Contract lifecycle** | `OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled/Renew/TrialEndHook` | React to individual contract events |
 | **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | Pre/post charge, failure, refund |
 | **Credit notes** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | CN issuance, invoice revision |
 | **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |
@@ -245,7 +245,7 @@ All hooks follow ISP (Interface Segregation Principle). Implement only the hooks
 
 ### 6.2 Hook Firing Responsibility
 
-Not every hook is fired by the core. Of the 20 hook interfaces, 14 are invoked
+Not every hook is fired by the core. Of the 22 hook interfaces, 14 are invoked
 automatically by core services/batch processors; the rest are fired by the
 integrator or by an adapter (see `docs/internals/plugin-system.md` section 5.3
 for the per-hook detail):
@@ -256,7 +256,7 @@ for the per-hook detail):
 | | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentProcessedHook`, `OnPaymentFailedHook`, `OnRefundHook` | `PaymentService` |
 | | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | `CreditNoteService` |
 | | `OnContractRenewHook`, `OnContractTrialEndHook`, `OnContractChangeHook` | `batch.ContractRenewalProcessor`, `batch.TrialExpirationProcessor` |
-| **Integrator** (5) | `OnContractCreate/Activate/Suspend/Resume/Cancel Hook` | Contract lifecycle operations call aggregate methods directly (no core application service), so the integrator fires the matching hooks. Reference: `examples/hosting-integration-demo/main.go` |
+| **Integrator** (7) | `OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled Hook` | Contract lifecycle operations (including `ScheduleCancellation`/`UnscheduleCancellation`) call aggregate methods directly (no core application service), so the integrator fires the matching hooks. Reference: `examples/hosting-integration-demo/main.go` |
 | **Adapter** (1) | `InvoiceGenerationHook` | Invoice rendering/delivery is out of core scope; the consumer's invoice-generation adapter fires BuildDocument/AfterRender/AfterDelivery |
 
 ### 6.3 Billing Pipeline

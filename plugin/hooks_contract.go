@@ -32,6 +32,18 @@ type OnContractCancelHook interface {
 	OnContractCancel(ctx *Context, contract *contract.ContractAggregate) error
 }
 
+// OnContractCancelScheduledHook is called when an end-of-period cancellation is scheduled.
+type OnContractCancelScheduledHook interface {
+	Plugin
+	OnContractCancelScheduled(ctx *Context, contract *contract.ContractAggregate) error
+}
+
+// OnContractCancelUnscheduledHook is called when a scheduled cancellation is revoked.
+type OnContractCancelUnscheduledHook interface {
+	Plugin
+	OnContractCancelUnscheduled(ctx *Context, contract *contract.ContractAggregate) error
+}
+
 // OnContractRenewHook is called when a contract is renewed.
 type OnContractRenewHook interface {
 	Plugin

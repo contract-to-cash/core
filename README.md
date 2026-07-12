@@ -149,7 +149,7 @@ Implement only the hooks you need:
 | Category | Hooks | Purpose |
 |----------|-------|---------|
 | **Billing** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | Discounts, tax, pre/post calculation |
-| **Contract** | `OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook` | Lifecycle reactions |
+| **Contract** | `OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled/Renew/TrialEndHook` | Lifecycle reactions |
 | **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | Payment flow |
 | **Credit Note** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | Credit note issuance, invoice revision |
 | **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |

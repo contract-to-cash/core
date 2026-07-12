@@ -278,6 +278,18 @@ type OnContractCancelHook interface {
     OnContractCancel(ctx *Context, contract *contract.ContractAggregate) error
 }
 
+// OnContractCancelScheduledHook 期末解約の予約時（ScheduleCancellation）
+type OnContractCancelScheduledHook interface {
+    Plugin
+    OnContractCancelScheduled(ctx *Context, contract *contract.ContractAggregate) error
+}
+
+// OnContractCancelUnscheduledHook 予約済み解約の取消時（UnscheduleCancellation）
+type OnContractCancelUnscheduledHook interface {
+    Plugin
+    OnContractCancelUnscheduled(ctx *Context, contract *contract.ContractAggregate) error
+}
+
 // OnContractRenewHook 契約更新時
 type OnContractRenewHook interface {
     Plugin
@@ -496,13 +508,15 @@ type Registry struct {
     invoiceLifecycleHooks  []InvoiceLifecycleHook
 
     // 契約ライフサイクルフック（ISP分離）
-    onContractCreateHooks   []OnContractCreateHook
-    onContractActivateHooks []OnContractActivateHook
-    onContractSuspendHooks  []OnContractSuspendHook
-    onContractResumeHooks   []OnContractResumeHook
-    onContractCancelHooks   []OnContractCancelHook
-    onContractRenewHooks    []OnContractRenewHook
-    onContractTrialEndHooks []OnContractTrialEndHook
+    onContractCreateHooks            []OnContractCreateHook
+    onContractActivateHooks          []OnContractActivateHook
+    onContractSuspendHooks           []OnContractSuspendHook
+    onContractResumeHooks            []OnContractResumeHook
+    onContractCancelHooks            []OnContractCancelHook
+    onContractCancelScheduledHooks   []OnContractCancelScheduledHook
+    onContractCancelUnscheduledHooks []OnContractCancelUnscheduledHook
+    onContractRenewHooks             []OnContractRenewHook
+    onContractTrialEndHooks          []OnContractTrialEndHook
 
     // 支払いフック（ISP分離）
     beforeChargeHooks    []BeforeChargeHook
@@ -554,6 +568,8 @@ func (r *Registry) Register(plugin Plugin) error {
     if h, ok := plugin.(OnContractSuspendHook); ok { r.onContractSuspendHooks = append(r.onContractSuspendHooks, h) }
     if h, ok := plugin.(OnContractResumeHook); ok { r.onContractResumeHooks = append(r.onContractResumeHooks, h) }
     if h, ok := plugin.(OnContractCancelHook); ok { r.onContractCancelHooks = append(r.onContractCancelHooks, h) }
+    if h, ok := plugin.(OnContractCancelScheduledHook); ok { r.onContractCancelScheduledHooks = append(r.onContractCancelScheduledHooks, h) }
+    if h, ok := plugin.(OnContractCancelUnscheduledHook); ok { r.onContractCancelUnscheduledHooks = append(r.onContractCancelUnscheduledHooks, h) }
     if h, ok := plugin.(OnContractRenewHook); ok { r.onContractRenewHooks = append(r.onContractRenewHooks, h) }
     if h, ok := plugin.(OnContractTrialEndHook); ok { r.onContractTrialEndHooks = append(r.onContractTrialEndHooks, h) }
 
@@ -681,6 +697,8 @@ func (r *Registry) GetInvoiceLifecycleHooks() []InvoiceLifecycleHook {
 func (r *Registry) GetOnContractCreateHooks() []OnContractCreateHook { ... }
 func (r *Registry) GetOnContractActivateHooks() []OnContractActivateHook { ... }
 func (r *Registry) GetOnContractCancelHooks() []OnContractCancelHook { ... }
+func (r *Registry) GetOnContractCancelScheduledHooks() []OnContractCancelScheduledHook { ... }
+func (r *Registry) GetOnContractCancelUnscheduledHooks() []OnContractCancelUnscheduledHook { ... }
 // ... 他の契約ライフサイクルフックも同様
 
 // 支払い（各イベント個別）
@@ -779,7 +797,7 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 
 ### 5.3 Hook発火責任（誰がフックを呼ぶか）
 
-全20種のフックのうち、コアが自動発火するのは14種。残りは統合者（サービス開発者）
+全22種のフックのうち、コアが自動発火するのは14種。残りは統合者（サービス開発者）
 またはアダプタが発火する。プラグインを書く前に、実装するフックが「誰に呼ばれるか」を
 この表で確認すること。
 
@@ -810,14 +828,17 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 > また、冪等リプレイの収束（同一冪等キーへの並行リクエスト等）により同一エンティティに対して
 > 複数回発火し得るため、メトリクス系フックは対象 ID でのデデュープを前提に実装する。
 
-**統合者が発火するフック（5種）**
+**統合者が発火するフック（7種）**
 
-契約の Create / Activate / Suspend / Resume / Cancel はコアにアプリケーション
+契約の Create / Activate / Suspend / Resume / Cancel、および期末解約の予約・取消
+（`ScheduleCancellation` / `UnscheduleCancellation`）はコアにアプリケーション
 サービスが存在しない（集約メソッドを統合者コードが直接呼ぶ）ため、対応するフックも
 統合者が発火する:
 
 - `OnContractCreateHook` / `OnContractActivateHook` / `OnContractSuspendHook` /
   `OnContractResumeHook` / `OnContractCancelHook`
+- `OnContractCancelScheduledHook` / `OnContractCancelUnscheduledHook`
+  （統合者が集約の `ScheduleCancellation` / `UnscheduleCancellation` を呼んだ後に発火する）
 
 実装リファレンス: `examples/hosting-integration-demo/main.go`（集約の状態遷移を
 実行 → 保存 → `registry.GetOnContract*Hooks()` をループして発火するパターン）。
@@ -849,7 +870,8 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 | **非致命（non-fatal）** | `AfterChargeHook` / `OnPaymentProcessedHook` / `OnPaymentFailedHook` / `OnRefundHook` / `OnInvoiceIssuedHook` / `OnCreditNoteIssuedHook` / `OnInvoiceRevisedHook` / `OnContractRenewHook` / `OnContractTrialEndHook` / `OnContractChangeHook`（バッチ含む） | パニック → `plugin.LogNonFatalHookError` が**プラグイン名・フック種別・スタックを Error レベルでログ**し、処理を継続する。同種の後続フックも通常どおり実行される（1 つのパニックが他フックを止めない） |
 | **ライフサイクル** | `InitializeAll` / `ShutdownAll` の `Plugin.Initialize` / `Plugin.Shutdown` | パニック → エラーへ変換して返す。パニックする `Initialize` は起動を**回復不能にクラッシュさせず**、`*PluginPanicError` を含むエラーとして扱う |
 
-> **注**: 統合者が発火するフック（契約 Create/Activate/Suspend/Resume/Cancel の 5 種）と
+> **注**: 統合者が発火するフック（契約 Create/Activate/Suspend/Resume/Cancel/
+> CancelScheduled/CancelUnscheduled の 7 種）と
 > アダプタが発火する `InvoiceGenerationHook` はコアの発火経路外のため、コアの
 > `SafeInvoke` ラップは適用されない。統合者・アダプタは自コードで同様のパニック隔離を
 > 行うことが推奨される（`plugin.SafeInvoke` / `plugin.LogNonFatalHookError` は公開 API なので
@@ -1567,14 +1589,14 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 
 ```
 請求計算:        DiscountHook / TaxHook / InvoiceLifecycleHook
-契約ライフサイクル: OnContractCreate/Activate/Suspend/Resume/Cancel/Renew/TrialEndHook（7種）
+契約ライフサイクル: OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled/Renew/TrialEndHook（9種）
 支払い:          BeforeChargeHook / AfterChargeHook / OnPaymentFailedHook / OnRefundHook（4種）
 メトリクス:       OnContractChangeHook / OnInvoiceIssuedHook / OnPaymentProcessedHook（3種）
 クレジットノート:   OnCreditNoteIssuedHook / OnInvoiceRevisedHook（2種）
 請求書生成:       InvoiceGenerationHook（1種）
 ```
 
-（完全な定義は §3、カテゴリ別一覧は §5.3 を参照。合計20種。）
+（完全な定義は §3、カテゴリ別一覧は §5.3 を参照。合計22種。）
 
 `InvoiceCalculationHook`（割引・税・ライフサイクルの統合インターフェース）は
 ISP違反と計算順序の脆さの懸念から、設計段階で分割を決定した。

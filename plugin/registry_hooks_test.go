@@ -10,7 +10,7 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
-// allHooksPlugin implements every one of the 20 hook interfaces so that a single
+// allHooksPlugin implements every one of the 22 hook interfaces so that a single
 // registration can be asserted to fan out into all hook slices.
 type allHooksPlugin struct {
 	basePlugin
@@ -42,6 +42,12 @@ func (p *allHooksPlugin) OnContractResume(ctx *Context, c *contract.ContractAggr
 	return nil
 }
 func (p *allHooksPlugin) OnContractCancel(ctx *Context, c *contract.ContractAggregate) error {
+	return nil
+}
+func (p *allHooksPlugin) OnContractCancelScheduled(ctx *Context, c *contract.ContractAggregate) error {
+	return nil
+}
+func (p *allHooksPlugin) OnContractCancelUnscheduled(ctx *Context, c *contract.ContractAggregate) error {
 	return nil
 }
 func (p *allHooksPlugin) OnContractRenew(ctx *Context, c *contract.ContractAggregate) error {
@@ -83,30 +89,32 @@ func (p *allHooksPlugin) OnInvoiceRevised(ctx *Context, original, replacement *i
 
 // Compile-time assertions that allHooksPlugin implements every hook interface.
 var (
-	_ DiscountHook           = (*allHooksPlugin)(nil)
-	_ TaxHook                = (*allHooksPlugin)(nil)
-	_ InvoiceLifecycleHook   = (*allHooksPlugin)(nil)
-	_ OnContractCreateHook   = (*allHooksPlugin)(nil)
-	_ OnContractActivateHook = (*allHooksPlugin)(nil)
-	_ OnContractSuspendHook  = (*allHooksPlugin)(nil)
-	_ OnContractResumeHook   = (*allHooksPlugin)(nil)
-	_ OnContractCancelHook   = (*allHooksPlugin)(nil)
-	_ OnContractRenewHook    = (*allHooksPlugin)(nil)
-	_ OnContractTrialEndHook = (*allHooksPlugin)(nil)
-	_ BeforeChargeHook       = (*allHooksPlugin)(nil)
-	_ AfterChargeHook        = (*allHooksPlugin)(nil)
-	_ OnPaymentFailedHook    = (*allHooksPlugin)(nil)
-	_ OnRefundHook           = (*allHooksPlugin)(nil)
-	_ OnContractChangeHook   = (*allHooksPlugin)(nil)
-	_ OnInvoiceIssuedHook    = (*allHooksPlugin)(nil)
-	_ OnPaymentProcessedHook = (*allHooksPlugin)(nil)
-	_ InvoiceGenerationHook  = (*allHooksPlugin)(nil)
-	_ OnCreditNoteIssuedHook = (*allHooksPlugin)(nil)
-	_ OnInvoiceRevisedHook   = (*allHooksPlugin)(nil)
+	_ DiscountHook                    = (*allHooksPlugin)(nil)
+	_ TaxHook                         = (*allHooksPlugin)(nil)
+	_ InvoiceLifecycleHook            = (*allHooksPlugin)(nil)
+	_ OnContractCreateHook            = (*allHooksPlugin)(nil)
+	_ OnContractActivateHook          = (*allHooksPlugin)(nil)
+	_ OnContractSuspendHook           = (*allHooksPlugin)(nil)
+	_ OnContractResumeHook            = (*allHooksPlugin)(nil)
+	_ OnContractCancelHook            = (*allHooksPlugin)(nil)
+	_ OnContractCancelScheduledHook   = (*allHooksPlugin)(nil)
+	_ OnContractCancelUnscheduledHook = (*allHooksPlugin)(nil)
+	_ OnContractRenewHook             = (*allHooksPlugin)(nil)
+	_ OnContractTrialEndHook          = (*allHooksPlugin)(nil)
+	_ BeforeChargeHook                = (*allHooksPlugin)(nil)
+	_ AfterChargeHook                 = (*allHooksPlugin)(nil)
+	_ OnPaymentFailedHook             = (*allHooksPlugin)(nil)
+	_ OnRefundHook                    = (*allHooksPlugin)(nil)
+	_ OnContractChangeHook            = (*allHooksPlugin)(nil)
+	_ OnInvoiceIssuedHook             = (*allHooksPlugin)(nil)
+	_ OnPaymentProcessedHook          = (*allHooksPlugin)(nil)
+	_ InvoiceGenerationHook           = (*allHooksPlugin)(nil)
+	_ OnCreditNoteIssuedHook          = (*allHooksPlugin)(nil)
+	_ OnInvoiceRevisedHook            = (*allHooksPlugin)(nil)
 )
 
 // TestRegister_DistributesToAllHookSlices verifies that a plugin implementing all
-// 20 hook interfaces is registered into every corresponding getter's slice.
+// 22 hook interfaces is registered into every corresponding getter's slice.
 func TestRegister_DistributesToAllHookSlices(t *testing.T) {
 	r := NewRegistry()
 	p := &allHooksPlugin{
@@ -128,6 +136,8 @@ func TestRegister_DistributesToAllHookSlices(t *testing.T) {
 		{"onContractSuspend", len(r.GetOnContractSuspendHooks())},
 		{"onContractResume", len(r.GetOnContractResumeHooks())},
 		{"onContractCancel", len(r.GetOnContractCancelHooks())},
+		{"onContractCancelScheduled", len(r.GetOnContractCancelScheduledHooks())},
+		{"onContractCancelUnscheduled", len(r.GetOnContractCancelUnscheduledHooks())},
 		{"onContractRenew", len(r.GetOnContractRenewHooks())},
 		{"onContractTrialEnd", len(r.GetOnContractTrialEndHooks())},
 		{"beforeCharge", len(r.GetBeforeChargeHooks())},
@@ -141,8 +151,8 @@ func TestRegister_DistributesToAllHookSlices(t *testing.T) {
 		{"onCreditNoteIssued", len(r.GetOnCreditNoteIssuedHooks())},
 		{"onInvoiceRevised", len(r.GetOnInvoiceRevisedHooks())},
 	}
-	if len(checks) != 20 {
-		t.Fatalf("expected 20 hook categories, got %d", len(checks))
+	if len(checks) != 22 {
+		t.Fatalf("expected 22 hook categories, got %d", len(checks))
 	}
 	for _, c := range checks {
 		if c.n != 1 {
@@ -174,6 +184,8 @@ func TestRegister_NarrowPluginOnlyPopulatesImplementedHooks(t *testing.T) {
 		len(r.GetOnContractSuspendHooks()),
 		len(r.GetOnContractResumeHooks()),
 		len(r.GetOnContractCancelHooks()),
+		len(r.GetOnContractCancelScheduledHooks()),
+		len(r.GetOnContractCancelUnscheduledHooks()),
 		len(r.GetOnContractRenewHooks()),
 		len(r.GetOnContractTrialEndHooks()),
 		len(r.GetBeforeChargeHooks()),

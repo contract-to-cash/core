@@ -6,7 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`OnContractCancelScheduledHook` / `OnContractCancelUnscheduledHook` (#227)** — two new
+  integrator-fired contract lifecycle plugin hooks mirroring the existing five
+  (Create/Activate/Suspend/Resume/Cancel). They correspond to the aggregate's existing
+  `ScheduleCancellation` / `UnscheduleCancellation` operations: the integrator calls the
+  aggregate method, fires `registry.GetOnContractCancelScheduledHooks()` /
+  `GetOnContractCancelUnscheduledHooks()`, then saves (reference:
+  `examples/hosting-integration-demo/main.go`). No event-schema or `ContractChangeType`
+  changes; hook interface total goes from 20 to 22.
 
 ## [0.3.0] - 2026-07-12
 
