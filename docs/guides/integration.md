@@ -6,6 +6,11 @@ sidebar_position: 1
 
 This guide explains how to integrate Contract Billing Core into your service.
 
+> **BYO-DB integrators: start from the [contract-to-cash/adapters](https://github.com/contract-to-cash/adapters) repository.**
+> It ships production implementations of the interfaces covered below — PostgreSQL/MySQL
+> persistence and Stripe/fincode payment gateways — so you can use (or fork) those instead
+> of hand-writing everything from the snippets in this guide.
+
 ## Prerequisites
 
 - Go 1.25+
@@ -23,6 +28,11 @@ Contract Billing Core defines repository interfaces in the domain layer. You imp
 > without it, concurrent `ProcessPayment` calls with the same
 > `IdempotencyKey` can silently refund legitimate gateway charges (see
 > issue #97).
+>
+> Production implementations of all of these interfaces (event store, repositories
+> including `CreditNoteRepository`, `tx.TxManager`, `projection.Projector`) ship in the
+> [adapters](https://github.com/contract-to-cash/adapters) repository's `postgres/` and
+> `mysql/` packages.
 
 ### Example: PostgreSQL Contract Repository
 
@@ -97,7 +107,11 @@ func (s *PostgresEventStore) Append(ctx context.Context, streamID string, events
 
 ## Step 3: Implement Payment Gateway
 
-Implement `application/port.PaymentGateway` for your payment provider:
+Implement `application/port.PaymentGateway` for your payment provider. Ready-made Stripe
+and fincode gateways (implementing `port.PaymentGateway`, `port.CustomerGateway`, and
+`port.WebhookHandler`) ship in the
+[adapters](https://github.com/contract-to-cash/adapters) repository's `stripe/` and
+`fincode/` packages:
 
 ```go
 type MyGateway struct { /* ... */ }

@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `examples/hosting-integration-demo/main.go`). No event-schema or `ContractChangeType`
   changes; hook interface total goes from 20 to 22.
 
+### Documentation
+
+- **Cross-links to the `adapters` repository (#199)** — README (EN/JA), the integration
+  guide, and the Postgres payment repository guide now point BYO-DB integrators to
+  [contract-to-cash/adapters](https://github.com/contract-to-cash/adapters)
+  (PostgreSQL/MySQL persistence, Stripe/fincode payment gateways) as the primary starting
+  point, with a compatibility note: adapters is versioned separately (currently targeting
+  core v0.2.0) — check its README/`go.mod` for the supported core version and pin
+  compatible tags together.
+
 ## [0.3.0] - 2026-07-12
 
 Implements field-driven requests from platform integration (#219, #221, #223,

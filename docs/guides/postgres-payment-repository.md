@@ -11,6 +11,10 @@ specific error-translation pattern that `PaymentService.ProcessPayment`
 relies on to handle concurrent-success races without refunding legitimate
 gateway charges.
 
+> The [adapters](https://github.com/contract-to-cash/adapters) repository already ships
+> production `payment.Repository` implementations (`postgres/` and `mysql/`) that follow
+> this pattern — use them directly, or read on to build your own.
+
 ## Why this matters
 
 `PaymentService.ProcessPayment` may be invoked concurrently with the same
@@ -327,3 +331,5 @@ application's perspective".
   compensation-marker flow.
 - Issue [#97](https://github.com/contract-to-cash/core/issues/97) — the
   original report and discussion.
+- [github.com/contract-to-cash/adapters](https://github.com/contract-to-cash/adapters) —
+  production Postgres/MySQL implementations of this repository contract.
