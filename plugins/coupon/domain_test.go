@@ -380,6 +380,258 @@ func TestCoupon_Getters_NilOptionalFields(t *testing.T) {
 	})
 }
 
+// TestCoupon_Getters_SliceAndCurrencyFields covers the getters added for issue
+// #221 (Currency / ApplicableContractTypes / AllowedAccountIDs /
+// BlockedAccountIDs) plus ApplicableTo, verifying both the returned values and
+// that slice getters return defensive copies.
+func TestCoupon_Getters_SliceAndCurrencyFields(t *testing.T) {
+	products := []shared.ProductID{"prod-a", "prod-b"}
+	contractTypes := []contract.ContractType{contract.ContractTypeSubscription, contract.ContractTypeUsageBased}
+	allowed := []shared.AccountID{"acct-1", "acct-2"}
+	blocked := []shared.AccountID{"acct-3"}
+
+	c := NewCoupon(
+		"c1", "FIX500", CouponTypeFixed,
+		big.NewRat(500, 1), shared.CurrencyJPY,
+		nil, nil,
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+		nil, 0, products,
+	).
+		WithApplicableContractTypes(contractTypes).
+		WithAllowedAccountIDs(allowed).
+		WithBlockedAccountIDs(blocked)
+
+	t.Run("Currency", func(t *testing.T) {
+		if got := c.Currency(); got != shared.CurrencyJPY {
+			t.Errorf("Currency() = %v, want %v", got, shared.CurrencyJPY)
+		}
+	})
+
+	t.Run("ApplicableTo returns values", func(t *testing.T) {
+		got := c.ApplicableTo()
+		if len(got) != 2 || got[0] != "prod-a" || got[1] != "prod-b" {
+			t.Errorf("ApplicableTo() = %v, want %v", got, products)
+		}
+	})
+
+	t.Run("ApplicableContractTypes returns values", func(t *testing.T) {
+		got := c.ApplicableContractTypes()
+		if len(got) != 2 || got[0] != contract.ContractTypeSubscription || got[1] != contract.ContractTypeUsageBased {
+			t.Errorf("ApplicableContractTypes() = %v, want %v", got, contractTypes)
+		}
+	})
+
+	t.Run("AllowedAccountIDs returns values", func(t *testing.T) {
+		got := c.AllowedAccountIDs()
+		if len(got) != 2 || got[0] != "acct-1" || got[1] != "acct-2" {
+			t.Errorf("AllowedAccountIDs() = %v, want %v", got, allowed)
+		}
+	})
+
+	t.Run("BlockedAccountIDs returns values", func(t *testing.T) {
+		got := c.BlockedAccountIDs()
+		if len(got) != 1 || got[0] != "acct-3" {
+			t.Errorf("BlockedAccountIDs() = %v, want %v", got, blocked)
+		}
+	})
+
+	t.Run("ApplicableTo returns defensive copy", func(t *testing.T) {
+		got := c.ApplicableTo()
+		got[0] = "mutated"
+		if c.ApplicableTo()[0] != "prod-a" {
+			t.Error("mutating ApplicableTo() result changed internal state")
+		}
+		if !c.IsApplicableToProduct("prod-a") {
+			t.Error("internal applicableTo was mutated: prod-a no longer applicable")
+		}
+	})
+
+	t.Run("ApplicableContractTypes returns defensive copy", func(t *testing.T) {
+		got := c.ApplicableContractTypes()
+		got[0] = contract.ContractTypeOneTime
+		if c.ApplicableContractTypes()[0] != contract.ContractTypeSubscription {
+			t.Error("mutating ApplicableContractTypes() result changed internal state")
+		}
+		if !c.IsApplicableToContractType(contract.ContractTypeSubscription) {
+			t.Error("internal applicableContractTypes was mutated: subscription no longer applicable")
+		}
+	})
+
+	t.Run("AllowedAccountIDs returns defensive copy", func(t *testing.T) {
+		got := c.AllowedAccountIDs()
+		got[0] = "mutated"
+		if c.AllowedAccountIDs()[0] != "acct-1" {
+			t.Error("mutating AllowedAccountIDs() result changed internal state")
+		}
+		if !c.IsAccountAllowed("acct-1") {
+			t.Error("internal allowedAccountIDs was mutated: acct-1 no longer allowed")
+		}
+	})
+
+	t.Run("BlockedAccountIDs returns defensive copy", func(t *testing.T) {
+		got := c.BlockedAccountIDs()
+		got[0] = "mutated"
+		if c.BlockedAccountIDs()[0] != "acct-3" {
+			t.Error("mutating BlockedAccountIDs() result changed internal state")
+		}
+		if c.IsAccountAllowed("acct-3") {
+			t.Error("internal blockedAccountIDs was mutated: acct-3 no longer blocked")
+		}
+	})
+
+	t.Run("empty slices stay empty", func(t *testing.T) {
+		plain := NewCoupon(
+			"c2", "PLAIN", CouponTypePercentage,
+			big.NewRat(10, 100), shared.CurrencyJPY,
+			nil, nil,
+			time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+			nil, 0, nil,
+		)
+		if got := plain.ApplicableTo(); len(got) != 0 {
+			t.Errorf("ApplicableTo() = %v, want empty", got)
+		}
+		if got := plain.ApplicableContractTypes(); len(got) != 0 {
+			t.Errorf("ApplicableContractTypes() = %v, want empty", got)
+		}
+		if got := plain.AllowedAccountIDs(); len(got) != 0 {
+			t.Errorf("AllowedAccountIDs() = %v, want empty", got)
+		}
+		if got := plain.BlockedAccountIDs(); len(got) != 0 {
+			t.Errorf("BlockedAccountIDs() = %v, want empty", got)
+		}
+	})
+}
+
+// TestCoupon_GetterRoundTrip verifies the motivation of issue #221: a
+// repository implementation can rebuild an equivalent Coupon from getters
+// alone (NewCoupon + With* builders), without any side table.
+func TestCoupon_GetterRoundTrip(t *testing.T) {
+	minAmount := shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY)
+	maxDiscount := shared.NewMoney(big.NewRat(300, 1), shared.CurrencyJPY)
+	usageLimit := 100
+
+	original := NewCoupon(
+		"c1", "FIX500", CouponTypeFixed,
+		big.NewRat(500, 1), shared.CurrencyJPY,
+		&minAmount, &maxDiscount,
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+		&usageLimit, 7, []shared.ProductID{"prod-a"},
+	).
+		WithCodeType(CodeTypeUnique).
+		WithPerAccountUsageLimit(2).
+		WithApplicableContractTypes([]contract.ContractType{contract.ContractTypeSubscription}).
+		WithAllowedAccountIDs([]shared.AccountID{"acct-1"}).
+		WithBlockedAccountIDs([]shared.AccountID{"acct-9"})
+
+	// Rebuild exclusively from public getters (what Save/FindByCode round-trip
+	// through a repository does).
+	rebuilt := NewCoupon(
+		original.ID(), original.Code(), original.CouponType(),
+		original.Value(), original.Currency(),
+		original.MinAmount(), original.MaxDiscount(),
+		original.ValidFrom(), original.ValidUntil(),
+		original.UsageLimit(), original.UsedCount(),
+		original.ApplicableTo(),
+	).
+		WithCodeType(original.CodeType()).
+		WithApplicableContractTypes(original.ApplicableContractTypes()).
+		WithAllowedAccountIDs(original.AllowedAccountIDs()).
+		WithBlockedAccountIDs(original.BlockedAccountIDs())
+	if l := original.PerAccountUsageLimit(); l != nil {
+		rebuilt.WithPerAccountUsageLimit(*l)
+	}
+
+	if rebuilt.ID() != original.ID() {
+		t.Errorf("ID: got %v, want %v", rebuilt.ID(), original.ID())
+	}
+	if rebuilt.Code() != original.Code() {
+		t.Errorf("Code: got %v, want %v", rebuilt.Code(), original.Code())
+	}
+	if rebuilt.CodeType() != original.CodeType() {
+		t.Errorf("CodeType: got %v, want %v", rebuilt.CodeType(), original.CodeType())
+	}
+	if rebuilt.CouponType() != original.CouponType() {
+		t.Errorf("CouponType: got %v, want %v", rebuilt.CouponType(), original.CouponType())
+	}
+	if rebuilt.Value().Cmp(original.Value()) != 0 {
+		t.Errorf("Value: got %s, want %s", rebuilt.Value().RatString(), original.Value().RatString())
+	}
+	if rebuilt.Currency() != original.Currency() {
+		t.Errorf("Currency: got %v, want %v", rebuilt.Currency(), original.Currency())
+	}
+	if rebuilt.MinAmount() == nil || rebuilt.MinAmount().Amount().Cmp(original.MinAmount().Amount()) != 0 ||
+		rebuilt.MinAmount().Currency() != original.MinAmount().Currency() {
+		t.Errorf("MinAmount: got %v, want %v", rebuilt.MinAmount(), original.MinAmount())
+	}
+	if rebuilt.MaxDiscount() == nil || rebuilt.MaxDiscount().Amount().Cmp(original.MaxDiscount().Amount()) != 0 ||
+		rebuilt.MaxDiscount().Currency() != original.MaxDiscount().Currency() {
+		t.Errorf("MaxDiscount: got %v, want %v", rebuilt.MaxDiscount(), original.MaxDiscount())
+	}
+	if !rebuilt.ValidFrom().Equal(original.ValidFrom()) {
+		t.Errorf("ValidFrom: got %v, want %v", rebuilt.ValidFrom(), original.ValidFrom())
+	}
+	if !rebuilt.ValidUntil().Equal(original.ValidUntil()) {
+		t.Errorf("ValidUntil: got %v, want %v", rebuilt.ValidUntil(), original.ValidUntil())
+	}
+	if rebuilt.UsageLimit() == nil || *rebuilt.UsageLimit() != *original.UsageLimit() {
+		t.Errorf("UsageLimit: got %v, want %v", rebuilt.UsageLimit(), original.UsageLimit())
+	}
+	if rebuilt.UsedCount() != original.UsedCount() {
+		t.Errorf("UsedCount: got %d, want %d", rebuilt.UsedCount(), original.UsedCount())
+	}
+	if rebuilt.PerAccountUsageLimit() == nil || *rebuilt.PerAccountUsageLimit() != *original.PerAccountUsageLimit() {
+		t.Errorf("PerAccountUsageLimit: got %v, want %v", rebuilt.PerAccountUsageLimit(), original.PerAccountUsageLimit())
+	}
+	if got, want := rebuilt.ApplicableTo(), original.ApplicableTo(); len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("ApplicableTo: got %v, want %v", got, want)
+	}
+	if got, want := rebuilt.ApplicableContractTypes(), original.ApplicableContractTypes(); len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("ApplicableContractTypes: got %v, want %v", got, want)
+	}
+	if got, want := rebuilt.AllowedAccountIDs(), original.AllowedAccountIDs(); len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("AllowedAccountIDs: got %v, want %v", got, want)
+	}
+	if got, want := rebuilt.BlockedAccountIDs(), original.BlockedAccountIDs(); len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("BlockedAccountIDs: got %v, want %v", got, want)
+	}
+
+	// Behavioral equivalence: the rebuilt coupon computes the same discount and
+	// applies the same eligibility rules as the original.
+	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	origDiscount, err := original.CalculateDiscount(subtotal)
+	if err != nil {
+		t.Fatalf("original.CalculateDiscount: %v", err)
+	}
+	rebuiltDiscount, err := rebuilt.CalculateDiscount(subtotal)
+	if err != nil {
+		t.Fatalf("rebuilt.CalculateDiscount: %v", err)
+	}
+	if rebuiltDiscount.Amount().Cmp(origDiscount.Amount()) != 0 || rebuiltDiscount.Currency() != origDiscount.Currency() {
+		t.Errorf("CalculateDiscount: got %s %s, want %s %s",
+			rebuiltDiscount.Amount().RatString(), rebuiltDiscount.Currency(),
+			origDiscount.Amount().RatString(), origDiscount.Currency())
+	}
+	at := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	if rebuilt.IsValid(at) != original.IsValid(at) {
+		t.Error("IsValid mismatch between original and rebuilt coupon")
+	}
+	if rebuilt.IsApplicableToProduct("prod-a") != original.IsApplicableToProduct("prod-a") {
+		t.Error("IsApplicableToProduct mismatch between original and rebuilt coupon")
+	}
+	if rebuilt.IsApplicableToContractType(contract.ContractTypeSubscription) != original.IsApplicableToContractType(contract.ContractTypeSubscription) {
+		t.Error("IsApplicableToContractType mismatch between original and rebuilt coupon")
+	}
+	if rebuilt.IsAccountAllowed("acct-1") != original.IsAccountAllowed("acct-1") {
+		t.Error("IsAccountAllowed(allowed) mismatch between original and rebuilt coupon")
+	}
+	if rebuilt.IsAccountAllowed("acct-9") != original.IsAccountAllowed("acct-9") {
+		t.Error("IsAccountAllowed(blocked) mismatch between original and rebuilt coupon")
+	}
+}
+
 func TestCoupon_IsApplicableToContractType(t *testing.T) {
 	tests := []struct {
 		name          string
