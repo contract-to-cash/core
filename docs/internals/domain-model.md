@@ -55,6 +55,7 @@ erDiagram
         BillingInterval interval "{unit, count} 例: {month, 3}"
         PricingModel pricingModel "flat | tiered | usage"
         PriceStatus status "active | archived"
+        map metadata
         timestamp createdAt
     }
 
@@ -563,6 +564,7 @@ type CreateContractCommand struct {
     Price          shared.Money
     BasePrice      shared.Money
     AutoRenew      bool
+    Metadata       map[string]string // 任意。統合者定義の key-value（例 creator_id）。issue #219
 }
 
 // ContractAggregate はイベントソーシングに対応した契約集約
@@ -585,6 +587,7 @@ type ContractAggregate struct {
     cancelAtPeriodEnd bool
     pendingPriceID    *shared.PriceID
     billingAnchorDay  int              // 課金アンカー日（1..31）。月末ドリフト防止（issue #186）。3.9 参照
+    metadata          map[string]string // 統合者定義 metadata（作成時のみ、issue #219）。3.10 参照
     createdAt         time.Time
     updatedAt         time.Time
 }
@@ -643,6 +646,7 @@ func (a *ContractAggregate) CancelAtPeriodEnd() bool
 func (a *ContractAggregate) PendingPriceID() *shared.PriceID
 func (a *ContractAggregate) HasPendingChange() bool
 func (a *ContractAggregate) BillingAnchorDay() int // 課金アンカー日（未確立なら 0）。3.9 参照
+func (a *ContractAggregate) Metadata() map[string]string // 防御的コピー（常に非 nil）。3.10 参照
 func (a *ContractAggregate) CreatedAt() time.Time
 func (a *ContractAggregate) UpdatedAt() time.Time
 ```
@@ -682,6 +686,7 @@ type ContractCreatedEvent struct {
     Interval       BillingInterval
     ContractType   ContractType
     AutoRenew      bool
+    Metadata       map[string]string // SchemaVersion 4 で追加（issue #219）。歴史的イベントでは nil
     CreatedAt      time.Time
 }
 
@@ -1016,6 +1021,32 @@ type Repository interface {
   旧スナップショット（`schema_version ≤ 2`）はこのフィールドを持たないため、`LoadFromSnapshot` は
   `currentPeriod.Start().Day()` へフォールバックする（ドリフト済み期間ではクランプのみへ縮退する
   ベストエフォート復元。新スナップショットは真のアンカーを保持する）。
+
+### 3.10 統合者定義 metadata（issue #219）
+
+Stripe 型の `metadata map[string]string` を **Product / Price / Contract** に持たせ、
+統合者が `creator_id` 等の独自キーを付与できるようにする（product 名への
+name-mangling を不要にする）。エンティティごとの扱い:
+
+| エンティティ | 受け取り方 | 変更可否 |
+|---|---|---|
+| Product | `SetMetadata(key, value)`（作成後いつでも） | 可変（Product は可変エンティティ） |
+| Price | `NewPrice` / `NewPriceWithInterval` の `WithMetadata(map)` オプション（§7.2） | 不変（Price の不変性に従い構築時のみ） |
+| Contract | `CreateContractCommand.Metadata`（作成時のみ） | 不変（更新 API なし。更新イベント種別は増やさない） |
+
+共通ルール:
+
+- **防御的コピー**: コマンド/オプションからの受け取り（intake defense）、イベント/スナップ
+  ショットへの書き出し、getter の返却のすべてで map をコピーする。呼び出し側が自分の map や
+  getter の戻り値を変更しても内部状態・イベントペイロードは変わらない。getter は常に非 nil。
+- **後方互換（Contract）**: metadata は `ContractCreatedEvent` の **SchemaVersion 4** で追加
+  （`json:"metadata,omitempty"`）。`ContractCreatedMetadataUpcaster`（3→4、バージョンを上げる
+  のみ）が歴史的ペイロードをマークし、metadata 欠損は nil にデシリアライズされて `Apply` が
+  許容する — pre-#219 履歴のリプレイは決して失敗しない。スナップショットは idempotency_key
+  前例（#159）に倣い**バージョン bump なし**で `metadata,omitempty` を追加（欠損 = nil は
+  自然なゼロ値で、バージョン判別によるフォールバック導出が不要なため）。
+- **後方互換（Price）**: `PriceSnapshot.Metadata` は nil 許容（#219 以前のスナップショットは
+  nil のままロードされ、`Metadata()` は空 map を返す）。
 
 ## 4. Invoice（請求書）
 
@@ -1614,8 +1645,17 @@ type Price struct {
     interval     BillingInterval  // 課金サイクル（新 API）。旧 billingCycle は #111 で撤去
     pricingModel PricingModel
     status       PriceStatus
+    metadata     map[string]string // 統合者定義 metadata（構築時のみ、issue #219）。§3.10 参照
     createdAt    time.Time
 }
+
+// PriceOption は NewPrice / NewPriceWithInterval の functional option。
+type PriceOption func(*Price)
+
+// WithMetadata は構築時に統合者定義 metadata を設定する（issue #219）。
+// map はコピーされるため、呼び出し側が構築後に自分の map を変更しても
+// （不変な）Price には影響しない。Price は不変なのでセッターは存在しない。
+func WithMetadata(m map[string]string) PriceOption
 
 // NewPrice は後方互換の BillingCycle 文字列を受け取り、内部で BillingInterval に変換する。
 // 検証（issue #196）: Price は不変なので構築時に不正値を弾く。負の amount、
@@ -1629,6 +1669,7 @@ func NewPrice(
     billingCycle BillingCycle,
     pricingModel PricingModel,
     createdAt time.Time,
+    opts ...PriceOption,
 ) (*Price, error)
 
 // NewPriceWithInterval は BillingInterval を直接受け取る（新規コード推奨）。
@@ -1640,6 +1681,7 @@ func NewPriceWithInterval(
     interval BillingInterval,
     pricingModel PricingModel,
     createdAt time.Time,
+    opts ...PriceOption,
 ) (*Price, error)
 
 func (p *Price) ID() shared.PriceID
@@ -1653,6 +1695,8 @@ func (p *Price) BillingCycle() BillingCycle
 // PricingModel は防御的コピーを返す（issue #196）: 返り値（例 TieredPrice.Tiers の
 // 背後配列）を変更しても Price 内部のモデルや以降の CalculatePrice 結果は変わらない。
 func (p *Price) PricingModel() PricingModel
+// Metadata は防御的コピーを返す（常に非 nil。issue #219）。
+func (p *Price) Metadata() map[string]string
 func (p *Price) Status() PriceStatus
 func (p *Price) CreatedAt() time.Time
 func (p *Price) Archive() error

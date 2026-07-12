@@ -10,7 +10,7 @@ import (
 // Compile-time assertions that the schema-versioned events self-declare their
 // current schema version (so RaiseEvent stamps them with it, not v1). These are
 // the events with a corresponding Upcaster in upcaster.go. ContractCreatedEvent
-// is at v3 (idempotency_key, issue #159); the others are at v2.
+// is at v4 (metadata, issue #219); the others are at v2.
 var (
 	_ eventstore.SchemaVersioned = (*ContractCreatedEvent)(nil)
 	_ eventstore.SchemaVersioned = (*PriceChangedEvent)(nil)
@@ -49,6 +49,11 @@ const (
 // SchemaVersion 3; historical v1/v2 payloads have no idempotency_key and
 // deserialize with an empty string, which Apply tolerates (replay of
 // pre-#159 history must never fail).
+//
+// Metadata carries optional integrator-defined key-value pairs (e.g.
+// "creator_id", issue #219). It was added in SchemaVersion 4; historical
+// v1/v2/v3 payloads have no metadata and deserialize with a nil map, which
+// Apply tolerates (replay of pre-#219 history must never fail).
 type ContractCreatedEvent struct {
 	ContractID     shared.ContractID `json:"contract_id"`
 	AccountID      shared.AccountID  `json:"account_id"`
@@ -59,18 +64,21 @@ type ContractCreatedEvent struct {
 	ContractType   ContractType      `json:"contract_type"`
 	BasePrice      shared.Money      `json:"base_price"`
 	AutoRenew      bool              `json:"auto_renew"`
+	Metadata       map[string]string `json:"metadata,omitempty"` // added in schema v4 (issue #219)
 	CreatedAt      time.Time         `json:"created_at"`
 }
 
 func (e *ContractCreatedEvent) EventType() eventstore.EventType { return EventTypeContractCreated }
 
 // CurrentSchemaVersion reports that the current ContractCreatedEvent payload is
-// schema version 3 (carries idempotency_key, issue #159). Version 2 was the
-// interval-based shape (post-#111). ContractCreatedEventUpcaster migrates
-// legacy v1 payloads (billing_cycle-only) to the v2 shape, and
-// ContractCreatedIdempotencyKeyUpcaster marks v2 payloads v3 (a missing
-// idempotency_key deserializes to "", which Apply tolerates).
-func (e *ContractCreatedEvent) CurrentSchemaVersion() int { return 3 }
+// schema version 4 (carries metadata, issue #219). Version 3 added
+// idempotency_key (issue #159); version 2 was the interval-based shape
+// (post-#111). ContractCreatedEventUpcaster migrates legacy v1 payloads
+// (billing_cycle-only) to the v2 shape, ContractCreatedIdempotencyKeyUpcaster
+// marks v2 payloads v3 (a missing idempotency_key deserializes to "", which
+// Apply tolerates), and ContractCreatedMetadataUpcaster marks v3 payloads v4
+// (a missing metadata deserializes to nil, which Apply tolerates).
+func (e *ContractCreatedEvent) CurrentSchemaVersion() int { return 4 }
 
 // ContractActivatedEvent is raised when a contract is activated.
 type ContractActivatedEvent struct {

@@ -60,7 +60,24 @@ type PriceSnapshot struct {
 	Interval     BillingInterval
 	PricingModel PricingModel
 	Status       PriceStatus
-	CreatedAt    time.Time
+	// Metadata carries integrator-defined key-value pairs (issue #219). It is
+	// copied on both ToSnapshot and FromSnapshot so snapshot and entity never
+	// alias the same map. Nil in snapshots persisted before #219 — FromSnapshot
+	// tolerates that (Metadata() then returns an empty map).
+	Metadata  map[string]string
+	CreatedAt time.Time
+}
+
+// copyMetadata returns an independent copy of m (nil in, nil out).
+func copyMetadata(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	return cp
 }
 
 // ToSnapshot returns a flat, independent copy of the price's internal state.
@@ -75,6 +92,7 @@ func (p *Price) ToSnapshot() PriceSnapshot {
 		Interval:     p.interval,
 		PricingModel: p.pricingModel,
 		Status:       p.status,
+		Metadata:     copyMetadata(p.metadata),
 		CreatedAt:    p.createdAt,
 	}
 }
@@ -97,6 +115,7 @@ func FromSnapshot(s PriceSnapshot) (*Price, error) {
 		interval:     s.Interval,
 		pricingModel: s.PricingModel,
 		status:       s.Status,
+		metadata:     copyMetadata(s.Metadata),
 		createdAt:    s.CreatedAt,
 	}, nil
 }
