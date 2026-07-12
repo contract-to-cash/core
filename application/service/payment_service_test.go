@@ -296,9 +296,7 @@ func newSimpleFinalizedInvoice() *invoice.Invoice {
 }
 
 func newFinalizedInvoice(accountID shared.AccountID, contractID shared.ContractID, amount shared.Money, pmID *string) *invoice.Invoice {
-	opts := []invoice.InvoiceOption{
-		invoice.WithStatus(invoice.InvoiceStatusFinalized),
-	}
+	var opts []invoice.InvoiceOption
 	if pmID != nil {
 		opts = append(opts, invoice.WithPaymentMethodID(pmID))
 	}
@@ -314,7 +312,7 @@ func newFinalizedInvoice(accountID shared.AccountID, contractID shared.ContractI
 	if err != nil {
 		panic("newFinalizedInvoice: " + err.Error())
 	}
-	return inv
+	return transitionInvoiceForTest(inv, invoice.InvoiceStatusFinalized)
 }
 
 func strPtr(s string) *string {

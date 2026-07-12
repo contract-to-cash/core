@@ -11,15 +11,7 @@ import (
 // --- VoidWithReason tests ---
 
 func TestVoidWithReason_FromIssued(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusIssued),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusIssued)
 
 	if err := inv.VoidWithReason("billing error"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -33,15 +25,7 @@ func TestVoidWithReason_FromIssued(t *testing.T) {
 }
 
 func TestVoidWithReason_FromPaid(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusPaid),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusPaid)
 
 	if err := inv.VoidWithReason("credit note issued"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -52,15 +36,7 @@ func TestVoidWithReason_FromPaid(t *testing.T) {
 }
 
 func TestVoidWithReason_FromOverdue(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusOverdue),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusOverdue)
 
 	if err := inv.VoidWithReason("order cancelled"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -94,15 +70,7 @@ func TestVoidWithReason_FromFinalized(t *testing.T) {
 }
 
 func TestVoidWithReason_FromPartialPaid(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusPartialPaid),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusPartialPaid)
 
 	if err := inv.VoidWithReason("credit note issued for partial refund"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -125,15 +93,7 @@ func TestVoidWithReason_FromVoided_Rejected(t *testing.T) {
 }
 
 func TestVoidWithReason_FromRefunded_Rejected(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusRefunded),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusRefunded)
 
 	if err := inv.VoidWithReason("already refunded"); err == nil {
 		t.Fatal("expected error voiding refunded invoice")

@@ -131,12 +131,12 @@ func TestRegenerateInvoice_ProrationCoexists_Succeeds(t *testing.T) {
 	voidedInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(1000), jpy(0), jpy(0),
-		invoice.WithStatus(invoice.InvoiceStatusVoided),
 		invoice.WithBillingPeriod(period),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error creating voided invoice: %v", err)
 	}
+	transitionInvoiceForTest(voidedInv, invoice.InvoiceStatusVoided)
 	prorationInv := newProrationInvoiceForTest(t, agg, period, jpy(2000))
 
 	invRepo := &mockInvoiceRepo{existingByPeriod: []*invoice.Invoice{voidedInv, prorationInv}}
@@ -290,11 +290,11 @@ func TestRestoreBalancesForVoidedInvoice_BalanceRepoWiredButTxReposOmitBalances_
 	voidedInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(1000), jpy(0), jpy(0),
-		invoice.WithStatus(invoice.InvoiceStatusVoided),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error creating voided invoice: %v", err)
 	}
+	transitionInvoiceForTest(voidedInv, invoice.InvoiceStatusVoided)
 	invRepo := &mockInvoiceRepo{byID: voidedInv}
 
 	svc := NewBillingService(
@@ -335,11 +335,11 @@ func TestRestoreBalancesForVoidedInvoice_NoBalanceRepo_StillNoop(t *testing.T) {
 	voidedInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(1000), jpy(0), jpy(0),
-		invoice.WithStatus(invoice.InvoiceStatusVoided),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error creating voided invoice: %v", err)
 	}
+	transitionInvoiceForTest(voidedInv, invoice.InvoiceStatusVoided)
 	invRepo := &mockInvoiceRepo{byID: voidedInv}
 
 	svc := NewBillingService(

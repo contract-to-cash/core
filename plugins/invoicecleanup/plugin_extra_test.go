@@ -106,13 +106,21 @@ func TestInvoiceCleanupPlugin_LeavesNonDraftFinalizedUntouched(t *testing.T) {
 	accountID := shared.NewAccountID()
 
 	// An overdue invoice must be left untouched (requires human judgment).
+	// WithStatus accepts only Draft (issue #238), so reach overdue via the
+	// real transitions: a past due date + finalize + MarkOverdue.
 	overdue, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), accountID, contractID,
 		jpy(3000), jpy(0), jpy(0),
-		invoice.WithStatus(invoice.InvoiceStatusOverdue),
+		invoice.WithDueDate(time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)),
 	)
 	if err != nil {
 		t.Fatalf("create overdue invoice: %v", err)
+	}
+	if err := overdue.Finalize(); err != nil {
+		t.Fatalf("finalize overdue invoice: %v", err)
+	}
+	if err := overdue.MarkOverdue(clock.Now()); err != nil {
+		t.Fatalf("mark overdue: %v", err)
 	}
 	_ = repo.Save(ctx, overdue)
 

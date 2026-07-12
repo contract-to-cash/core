@@ -48,14 +48,20 @@ func TestOnContractCancel_VoidsDraftAndFinalized(t *testing.T) {
 	_ = finalizedInv.Finalize()
 	_ = invoiceRepo.Save(ctx, finalizedInv)
 
-	// Create a paid invoice (should NOT be voided)
+	// Create a paid invoice (should NOT be voided). WithStatus accepts only
+	// Draft (issue #238), so reach paid via the real transitions.
 	paidInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), accountID, contractID,
 		jpy(3000), jpy(0), jpy(0),
-		invoice.WithStatus(invoice.InvoiceStatusPaid),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error creating paid invoice: %v", err)
+	}
+	if err := paidInv.Finalize(); err != nil {
+		t.Fatalf("finalize paid invoice: %v", err)
+	}
+	if err := paidInv.RecordPayment(paidInv.AmountDue(), clock.Now()); err != nil {
+		t.Fatalf("record payment: %v", err)
 	}
 	_ = invoiceRepo.Save(ctx, paidInv)
 

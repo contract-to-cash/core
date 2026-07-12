@@ -161,10 +161,12 @@ func TestInvoice_ValidatePayment_SignAndCurrencyGuards(t *testing.T) {
 		inv, err := NewInvoice(
 			shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
 			subtotal, shared.Zero(subtotal.Currency()), shared.Zero(subtotal.Currency()),
-			WithStatus(InvoiceStatusFinalized),
 		)
 		if err != nil {
 			t.Fatalf("new invoice: %v", err)
+		}
+		if err := inv.Finalize(); err != nil {
+			t.Fatalf("finalize: %v", err)
 		}
 		return inv
 	}
@@ -201,10 +203,13 @@ func TestInvoice_ValidatePayment_SignAndCurrencyGuards(t *testing.T) {
 		inv, err := NewInvoice(
 			shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
 			jpy(1000), jpy(0), jpy(0),
-			WithStatus(InvoiceStatusFinalized), WithAllowPartialPayment(true),
+			WithAllowPartialPayment(true),
 		)
 		if err != nil {
 			t.Fatalf("new invoice: %v", err)
+		}
+		if err := inv.Finalize(); err != nil {
+			t.Fatalf("finalize: %v", err)
 		}
 		assertDomainCode(t, inv.ValidatePayment(jpy(-500)), shared.ErrCodeValidation)
 	})

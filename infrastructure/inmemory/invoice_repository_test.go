@@ -137,7 +137,7 @@ func TestInMemoryInvoiceRepository_FindByStatus(t *testing.T) {
 	// Draft invoice (default).
 	inv1 := newTestInvoice(t, accountID, contractID)
 	// Finalized invoice.
-	inv2 := newTestInvoice(t, accountID, contractID, invoice.WithStatus(invoice.InvoiceStatusFinalized))
+	inv2 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusFinalized)
 	// Another draft.
 	inv3 := newTestInvoice(t, accountID, contractID)
 
@@ -174,7 +174,7 @@ func TestInMemoryInvoiceRepository_FindByContractAndStatus(t *testing.T) {
 	contractID2 := shared.NewContractID()
 
 	inv1 := newTestInvoice(t, accountID, contractID1)
-	inv2 := newTestInvoice(t, accountID, contractID1, invoice.WithStatus(invoice.InvoiceStatusFinalized))
+	inv2 := newTestInvoiceInStatus(t, accountID, contractID1, invoice.InvoiceStatusFinalized)
 	inv3 := newTestInvoice(t, accountID, contractID2)
 
 	for _, inv := range []*invoice.Invoice{inv1, inv2, inv3} {
@@ -258,13 +258,13 @@ func TestInMemoryInvoiceRepository_FindUnpaidByContract(t *testing.T) {
 	// Draft (unpaid).
 	inv1 := newTestInvoice(t, accountID, contractID)
 	// Finalized (unpaid).
-	inv2 := newTestInvoice(t, accountID, contractID, invoice.WithStatus(invoice.InvoiceStatusFinalized))
+	inv2 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusFinalized)
 	// Paid (not unpaid).
-	inv3 := newTestInvoice(t, accountID, contractID, invoice.WithStatus(invoice.InvoiceStatusPaid))
+	inv3 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusPaid)
 	// Voided (not unpaid).
-	inv4 := newTestInvoice(t, accountID, contractID, invoice.WithStatus(invoice.InvoiceStatusVoided))
+	inv4 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusVoided)
 	// Overdue (unpaid).
-	inv5 := newTestInvoice(t, accountID, contractID, invoice.WithStatus(invoice.InvoiceStatusOverdue))
+	inv5 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusOverdue)
 
 	for _, inv := range []*invoice.Invoice{inv1, inv2, inv3, inv4, inv5} {
 		if err := repo.Save(ctx, inv); err != nil {
@@ -292,30 +292,27 @@ func TestInMemoryInvoiceRepository_FindOverdue(t *testing.T) {
 	contractID := shared.NewContractID()
 
 	// Explicitly overdue status.
-	inv1 := newTestInvoice(t, accountID, contractID, invoice.WithStatus(invoice.InvoiceStatusOverdue))
+	inv1 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusOverdue)
 
 	// Issued with past due date — should be found as overdue.
 	pastDue := time.Date(2026, 2, 15, 0, 0, 0, 0, time.UTC)
-	inv2 := newTestInvoice(t, accountID, contractID,
-		invoice.WithStatus(invoice.InvoiceStatusIssued),
+	inv2 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusIssued,
 		invoice.WithDueDate(pastDue),
 	)
 
 	// Finalized with past due date — should also be found as overdue.
-	inv3 := newTestInvoice(t, accountID, contractID,
-		invoice.WithStatus(invoice.InvoiceStatusFinalized),
+	inv3 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusFinalized,
 		invoice.WithDueDate(pastDue),
 	)
 
 	// Issued with future due date — should NOT be found.
 	futureDue := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
-	inv4 := newTestInvoice(t, accountID, contractID,
-		invoice.WithStatus(invoice.InvoiceStatusIssued),
+	inv4 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusIssued,
 		invoice.WithDueDate(futureDue),
 	)
 
 	// Paid — should NOT be found.
-	inv5 := newTestInvoice(t, accountID, contractID, invoice.WithStatus(invoice.InvoiceStatusPaid))
+	inv5 := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusPaid)
 
 	for _, inv := range []*invoice.Invoice{inv1, inv2, inv3, inv4, inv5} {
 		if err := repo.Save(ctx, inv); err != nil {
@@ -502,9 +499,8 @@ func TestInMemoryInvoiceRepository_Save_PeriodUniqueness(t *testing.T) {
 	}
 
 	// A voided invoice for the same period is exempt and coexists.
-	voided := newTestInvoice(t, accountID, contractID,
+	voided := newTestInvoiceInStatus(t, accountID, contractID, invoice.InvoiceStatusVoided,
 		invoice.WithBillingPeriod(period),
-		invoice.WithStatus(invoice.InvoiceStatusVoided),
 	)
 	if err := repo.Save(ctx, voided); err != nil {
 		t.Errorf("voided invoice must be exempt from period uniqueness, got: %v", err)

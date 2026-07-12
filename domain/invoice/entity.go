@@ -172,8 +172,26 @@ type Invoice struct {
 type InvoiceOption func(*Invoice)
 
 // WithStatus sets the initial status of the invoice.
+//
+// Only InvoiceStatusDraft is accepted (issue #238, pre-1.0 tightening): any
+// other status makes NewInvoice return a validation DomainError. Every other
+// status carries state that construction cannot supply (paid amounts, void or
+// refund reasons, version bumps), so an invoice constructed directly in, say,
+// Paid would report paidAmount=0 — an inconsistent entity. Drive the invoice
+// to its target status through the real transitions instead (Finalize,
+// MarkIssued, MarkOverdue, RecordPayment, Void, VoidWithReason, MarkRefunded);
+// persistence adapters reconstitute historical statuses via
+// InvoiceFromSnapshot, which is exempt by design.
 func WithStatus(s InvoiceStatus) InvoiceOption {
 	return func(inv *Invoice) {
+		if s != InvoiceStatusDraft {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("WithStatus accepts only %s: an invoice cannot be constructed directly in status %s — use the state-transition methods (or InvoiceFromSnapshot in persistence adapters)",
+						InvoiceStatusDraft, s))
+			}
+			return
+		}
 		inv.status = s
 	}
 }

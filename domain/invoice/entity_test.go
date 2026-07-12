@@ -111,7 +111,6 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 	credit := shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY)
 
 	inv, err := NewInvoice(id, acct, contract, subtotal, discount, tax,
-		WithStatus(InvoiceStatusFinalized),
 		WithBillingPeriod(period),
 		WithDueDate(due),
 		WithAppliedBalance(credit),
@@ -120,6 +119,11 @@ func TestNewInvoice_WithOptions(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	// WithStatus accepts only Draft (issue #238) — reach finalized via the
+	// real transition.
+	if err := inv.Finalize(); err != nil {
+		t.Fatalf("finalize: %v", err)
 	}
 
 	if inv.Status() != InvoiceStatusFinalized {
