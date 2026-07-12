@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-07-12
+
+Implements field-driven requests from platform integration (#219, #221, #223,
+#220 docs) plus review fixes. Contains one **BREAKING** plugin-API change
+(`OnPaymentProcessedHook`), marked below per the pre-v1.0 convention.
+
 ### Added
 
 - **Integrator-defined `metadata` on Price and ContractAggregate (#219)** — Stripe-style
