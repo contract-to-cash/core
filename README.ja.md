@@ -6,7 +6,7 @@
 
 [English](README.md) | [ドキュメント](https://contract-to-cash.github.io/core/ja/)
 
-SaaS・サブスクリプションビジネス向けのイベントソーシング課金エンジン。プラグインアーキテクチャによる拡張性を備え、ドメインモデル、課金パイプライン、拡張ポイントを提供します。データベースと決済ゲートウェイはあなた自身が用意します。
+SaaS・サブスクリプションビジネス向けのイベントソーシング課金エンジン。プラグインアーキテクチャによる拡張性を備え、ドメインモデル、課金パイプライン、拡張ポイントを提供します。データベースと決済ゲートウェイはあなた自身が用意します。本番向けの実装（PostgreSQL/MySQL 永続化、Stripe/fincode ゲートウェイ）は姉妹リポジトリ [contract-to-cash/adapters](https://github.com/contract-to-cash/adapters) で提供しています。
 
 ## 特徴
 
@@ -51,7 +51,8 @@ func main() {
     ctx := context.Background()
     clock := shared.FixedClock{FixedTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)}
 
-    // インフラ（本番環境では独自の実装に置き換え）
+    // インフラ（本番環境では独自の実装に置き換え。本番向け実装は
+    // https://github.com/contract-to-cash/adapters で提供）
     es := inmemory.NewInMemoryEventStore(clock)
     contractRepo := inmemory.NewInMemoryContractRepository(es, clock)
     invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
@@ -169,6 +170,7 @@ batch/            # バッチプロセッサ（契約更新）
 | [コア概念](https://contract-to-cash.github.io/core/ja/docs/concepts/domain-model) | ドメインモデル、イベントソーシング、プラグイン、決済ゲートウェイ |
 | [ガイド](https://contract-to-cash.github.io/core/ja/docs/guides/integration) | 統合、カスタムプラグイン、時間旅行クエリ |
 | [APIリファレンス](https://contract-to-cash.github.io/core/ja/docs/api/domain-types) | 型、サービス、フック、Event Store |
+| [Adapters](https://github.com/contract-to-cash/adapters) | 本番向け実装: PostgreSQL/MySQL 永続化、Stripe/fincode 決済ゲートウェイ |
 
 ## 安定性（Stability）
 
@@ -184,6 +186,9 @@ v1.0 に向けて API が変更される可能性があります。
   `BREAKING (pre-v1.0)` と明記します。
 - 再現可能なビルドには[リリースタグ](https://github.com/contract-to-cash/core/releases)を
   固定してください。`main` の追跡は未リリースの変更を取り込む前提がある場合のみ推奨します。
+- [adapters](https://github.com/contract-to-cash/adapters) リポジトリは独立して
+  バージョニングされており、現時点では core v0.2.0 を対象としています。対応する core の
+  バージョンは adapters の README / `go.mod` で確認し、互換性のあるタグ同士を固定してください。
 
 セキュリティ報告と統合者向けのハードニングは [SECURITY.md](SECURITY.md) を参照してください。
 

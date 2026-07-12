@@ -6,7 +6,7 @@
 
 [日本語](README.ja.md) | [Documentation](https://contract-to-cash.github.io/core/)
 
-An event-sourced billing engine with a plugin architecture for SaaS and subscription businesses. Provides domain models, billing pipelines, and extension points — you bring your own database and payment gateway.
+An event-sourced billing engine with a plugin architecture for SaaS and subscription businesses. Provides domain models, billing pipelines, and extension points — you bring your own database and payment gateway. Ready-made production implementations (PostgreSQL/MySQL persistence, Stripe/fincode gateways) are available in the companion [contract-to-cash/adapters](https://github.com/contract-to-cash/adapters) repository.
 
 ## Features
 
@@ -51,7 +51,8 @@ func main() {
     ctx := context.Background()
     clock := shared.FixedClock{FixedTime: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)}
 
-    // Infrastructure (replace with your own in production)
+    // Infrastructure (replace with your own in production — production
+    // implementations are available at https://github.com/contract-to-cash/adapters)
     es := inmemory.NewInMemoryEventStore(clock)
     contractRepo := inmemory.NewInMemoryContractRepository(es, clock)
     invoiceRepo := inmemory.NewInMemoryInvoiceRepository(clock)
@@ -169,6 +170,7 @@ Full documentation is available at **[contract-to-cash.github.io/core](https://c
 | [Core Concepts](https://contract-to-cash.github.io/core/docs/concepts/domain-model) | Domain model, event sourcing, plugins, payment gateway |
 | [Guides](https://contract-to-cash.github.io/core/docs/guides/integration) | Integration, custom plugins, temporal queries |
 | [API Reference](https://contract-to-cash.github.io/core/docs/api/domain-types) | Types, services, hooks, event store |
+| [Adapters](https://github.com/contract-to-cash/adapters) | Production implementations: PostgreSQL/MySQL persistence, Stripe/fincode payment gateways |
 
 ## Stability
 
@@ -184,6 +186,9 @@ than a `main` pseudo-version. The API may change as we approach v1.0.
   breaking changes are marked `BREAKING (pre-v1.0)`.
 - Pin a [release tag](https://github.com/contract-to-cash/core/releases) for
   reproducible builds; track `main` only if you accept absorbing unreleased changes.
+- The [adapters](https://github.com/contract-to-cash/adapters) repository is versioned
+  separately and currently targets core v0.2.0 — check its README/`go.mod` for the core
+  version it supports, and pin compatible tags of both modules together.
 
 For security reporting and integrator hardening, see [SECURITY.md](SECURITY.md).
 
