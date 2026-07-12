@@ -194,7 +194,7 @@ ctx.SetContract(c *contract.ContractAggregate)
 
 ```go
 type ContractChangeType string
-// created, activated, suspended, resumed, cancelled, renewed, trial_end
+// created, activated, suspended, resumed, cancelled, renewed, trial_end, expired
 
 type ContractChangeEvent struct {
     ContractID shared.ContractID
@@ -219,9 +219,14 @@ type OnInvoiceIssuedHook interface {
 
 type OnPaymentProcessedHook interface {
     Plugin
-    OnPaymentProcessed(ctx *Context, payment *payment.Payment) error
+    OnPaymentProcessed(ctx *PaymentContext) error
 }
 ```
+
+`OnPaymentProcessedHook` receives the same `*PaymentContext` as the payment hooks
+(issue #223): `ctx.Payment()` is the processed payment, and `ctx.Invoice()` /
+`ctx.ContractID()` / `ctx.AccountID()` let metrics plugins attribute the payment
+to a contract and account without extra lookups.
 
 ---
 

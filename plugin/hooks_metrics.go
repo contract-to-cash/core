@@ -5,7 +5,6 @@ import (
 
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
-	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
@@ -21,10 +20,13 @@ const (
 	ContractChangeRenewed   ContractChangeType = "renewed"
 	ContractChangeTrialEnd  ContractChangeType = "trial_end"
 	// ContractChangeExpired marks a contract that reached its natural term end
-	// (autoRenew=false or cancelAtPeriodEnd) and transitioned to Expired. It is
-	// distinct from ContractChangeCancelled (a deliberate mid-term cancellation)
-	// so churn metrics do not conflate voluntary cancellation with natural
-	// expiry (issue #162 B3).
+	// with autoRenew=false and transitioned to Expired. It is distinct from
+	// ContractChangeCancelled so churn metrics do not conflate voluntary
+	// cancellation with natural expiry (issue #162 B3). Note that a scheduled
+	// cancellation (cancelAtPeriodEnd) transitions the contract to Cancelled at
+	// renewal time and is therefore reported as ContractChangeCancelled, not
+	// Expired — it is user-initiated churn, even though it takes effect at the
+	// period boundary.
 	ContractChangeExpired ContractChangeType = "expired"
 )
 
@@ -55,10 +57,14 @@ type OnInvoiceIssuedHook interface {
 }
 
 // OnPaymentProcessedHook is called when a payment is processed, for metrics/analytics.
+// It receives the same *PaymentContext as the other payment hooks (issue #223):
+// ctx.Payment() is the processed payment, and ctx.Invoice() / ctx.ContractID() /
+// ctx.AccountID() let implementations attribute the payment to a contract and
+// account without extra repository lookups.
 // Implementations must be idempotent (deduplicate by payment ID): concurrent
 // requests converging on the same idempotency key can deliver the same
 // payment more than once.
 type OnPaymentProcessedHook interface {
 	Plugin
-	OnPaymentProcessed(ctx *Context, payment *payment.Payment) error
+	OnPaymentProcessed(ctx *PaymentContext) error
 }

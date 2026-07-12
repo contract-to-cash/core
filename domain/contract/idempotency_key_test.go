@@ -148,9 +148,9 @@ func TestContractCreatedIdempotencyKeyUpcaster_ChainToV3(t *testing.T) {
 		t.Error("expected CanUpcast=false for other event types")
 	}
 
-	// A v1 payload runs through the full chain and lands at v3 with the
-	// payload migration (billing_cycle → interval) from the v1→v2 upcaster
-	// preserved.
+	// A v1 payload runs through the full chain and lands at the current
+	// version (v4 since issue #219) with the payload migration
+	// (billing_cycle → interval) from the v1→v2 upcaster preserved.
 	legacy := map[string]interface{}{
 		"contract_id":   "c1",
 		"billing_cycle": "yearly",
@@ -162,8 +162,8 @@ func TestContractCreatedIdempotencyKeyUpcaster_ChainToV3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("chain Upcast failed: %v", err)
 	}
-	if out.SchemaVersion != 3 {
-		t.Errorf("expected chain to land at SchemaVersion 3, got %d", out.SchemaVersion)
+	if out.SchemaVersion != 4 {
+		t.Errorf("expected chain to land at SchemaVersion 4, got %d", out.SchemaVersion)
 	}
 	domainEvent, err := contractEventRegistry.Deserialize(out.Type, out.Data)
 	if err != nil {

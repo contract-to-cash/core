@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/contract-to-cash/core/domain/pricing"
@@ -59,6 +60,11 @@ type CreateContractCommand struct {
 	Price          shared.Money
 	BasePrice      shared.Money
 	AutoRenew      bool
+	// Metadata carries optional integrator-defined key-value pairs (e.g.
+	// "creator_id", issue #219). It is copied onto ContractCreatedEvent at
+	// creation time; there is no update API, so it is immutable for the
+	// contract's lifetime.
+	Metadata map[string]string
 }
 
 // ContractAggregate is the event-sourced aggregate for contracts.
@@ -89,8 +95,12 @@ type ContractAggregate struct {
 	// survives clamping (Jan 31 -> Feb 28 -> Mar 31, not -> Mar 28). See
 	// RenewWithInterval and BillingInterval.AddToWithAnchorDay.
 	billingAnchorDay int
-	createdAt        time.Time
-	updatedAt        time.Time
+	// metadata carries integrator-defined key-value pairs recorded at creation
+	// (ContractCreatedEvent schema v4, issue #219). Nil for aggregates replayed
+	// from pre-#219 history or restored from legacy snapshots.
+	metadata  map[string]string
+	createdAt time.Time
+	updatedAt time.Time
 }
 
 // NewContractAggregate creates a new ContractAggregate.
@@ -114,6 +124,18 @@ func (a *ContractAggregate) AccountID() shared.AccountID { return a.accountID }
 // snapshots; it is always non-empty for contracts created since, because
 // Create validates it.
 func (a *ContractAggregate) IdempotencyKey() string { return a.idempotencyKey }
+
+// Metadata returns a copy of the integrator-defined metadata recorded at
+// creation (issue #219). Mutating the returned map does not affect the
+// aggregate. It is never nil — an aggregate replayed from pre-#219 history
+// (no metadata on ContractCreatedEvent) yields an empty map.
+func (a *ContractAggregate) Metadata() map[string]string {
+	cp := maps.Clone(a.metadata)
+	if cp == nil {
+		cp = map[string]string{}
+	}
+	return cp
+}
 
 // Status returns the current status.
 func (a *ContractAggregate) Status() ContractStatus { return a.status }
@@ -235,7 +257,12 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 		Interval:       cmd.Interval,
 		ContractType:   cmd.ContractType,
 		AutoRenew:      cmd.AutoRenew,
-		CreatedAt:      now,
+		// Defense-in-depth: deep-copy the caller-owned metadata map. Not
+		// observable today — Apply copies e.Metadata again and RaiseEvent
+		// serializes the payload before Create returns — but it keeps a future
+		// refactor that defers serialization from aliasing the caller's map.
+		Metadata:  copyMetadataMap(cmd.Metadata),
+		CreatedAt: now,
 	}
 
 	if err := a.Apply(event); err != nil {
@@ -705,6 +732,10 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 		a.interval = e.Interval
 		a.contractType = e.ContractType
 		a.autoRenew = e.AutoRenew
+		// Nil for historical events recorded before schema version 4 (metadata
+		// was never persisted); replay must tolerate that (issue #219). Deep-copy
+		// so the aggregate owns its metadata independently of the event payload.
+		a.metadata = copyMetadataMap(e.Metadata)
 		a.status = ContractStatusDraft
 		a.createdAt = e.CreatedAt
 		a.updatedAt = e.CreatedAt
@@ -876,6 +907,13 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 	return nil
 }
 
+// copyMetadataMap returns an independent copy of m (nil in, nil out), so
+// aggregate state, event payloads, and snapshot state never alias the same
+// metadata map (issue #219).
+func copyMetadataMap(m map[string]string) map[string]string {
+	return maps.Clone(m)
+}
+
 // anchorDayFrom returns the billing anchor day-of-month derived from a period's
 // start. It returns 0 for a zero-value period (no billing established), which
 // AddToWithAnchorDay treats as "no anchor" and falls back to plain clamping.
@@ -915,6 +953,7 @@ func (a *ContractAggregate) MarshalSnapshot() ([]byte, error) {
 		CancelAtPeriodEnd: a.cancelAtPeriodEnd,
 		PendingPriceID:    a.pendingPriceID,
 		BillingAnchorDay:  a.billingAnchorDay,
+		Metadata:          copyMetadataMap(a.metadata),
 		CreatedAt:         a.createdAt,
 		UpdatedAt:         a.updatedAt,
 	}
@@ -951,6 +990,11 @@ func (a *ContractAggregate) LoadFromHistory(events []eventstore.Event) error {
 // and LoadFromSnapshot converts it to an interval on read. Version 3 added
 // billing_anchor_day (issue #186); legacy snapshots (schema_version <= 2) omit
 // it and LoadFromSnapshot derives it from the current period's start day.
+//
+// metadata (issue #219) was added WITHOUT a version bump, mirroring the
+// idempotency_key precedent (issue #159): it is purely optional with a natural
+// zero value (nil map) and needs no version-discriminated fallback on load —
+// a missing field and an empty map are indistinguishable and both correct.
 const contractSnapshotSchemaVersion = 3
 
 // contractSnapshotState is the JSON representation of aggregate state for snapshots.
@@ -973,6 +1017,7 @@ type contractSnapshotState struct {
 	CancelAtPeriodEnd bool                     `json:"cancel_at_period_end"`
 	PendingPriceID    *shared.PriceID          `json:"pending_price_id,omitempty"`
 	BillingAnchorDay  int                      `json:"billing_anchor_day,omitempty"` // added in schema v3 (issue #186); 0 in legacy snapshots
+	Metadata          map[string]string        `json:"metadata,omitempty"`           // added with issue #219; absent in legacy snapshots (nil, tolerated on load)
 	CreatedAt         time.Time                `json:"created_at"`
 	UpdatedAt         time.Time                `json:"updated_at"`
 }
@@ -1035,6 +1080,10 @@ func (a *ContractAggregate) LoadFromSnapshot(snapshot eventstore.Snapshot) error
 	if a.billingAnchorDay == 0 {
 		a.billingAnchorDay = anchorDayFrom(state.CurrentPeriod)
 	}
+	// Nil in snapshots written before issue #219 — tolerated, mirroring replay
+	// of historical ContractCreatedEvent payloads without metadata. Deep-copy so
+	// the aggregate does not alias the local snapshot state.
+	a.metadata = copyMetadataMap(state.Metadata)
 	a.createdAt = state.CreatedAt
 	a.updatedAt = state.UpdatedAt
 	a.SetVersion(snapshot.Version)

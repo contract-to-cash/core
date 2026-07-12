@@ -575,15 +575,16 @@ func TestLoadFromHistory_UpcastsLegacyTrialEndedConverted(t *testing.T) {
 // TestNewEventsStampedCurrent_SkipUpcaster is the core replay-safety proof for
 // issue #153. Two claims:
 //  1. Events raised today carry their true (current) schema version, not a
-//     hardcoded 1. ContractCreatedEvent is at v3 since issue #159
-//     (idempotency_key); the other versioned events are at v2.
+//     hardcoded 1. ContractCreatedEvent is at v4 since issue #219
+//     (metadata; v3 added idempotency_key in issue #159); the other versioned
+//     events are at v2.
 //  2. An event stamped with its current version passes through the contract
 //     upcaster chain UNTOUCHED — every upcaster's CanUpcast requires
 //     fromVersion below the current version, so a current event is skipped.
 //     This is what makes a future non-idempotent upcaster safe: it can never
 //     re-run against a freshly written event.
 func TestNewEventsStampedCurrent_SkipUpcaster(t *testing.T) {
-	// 1. Raising a ContractCreatedEvent through the aggregate stamps SchemaVersion 3.
+	// 1. Raising a ContractCreatedEvent through the aggregate stamps SchemaVersion 4.
 	agg := newTestAggregate()
 	if err := agg.Create(newTestCommand(), newTestMetadata()); err != nil {
 		t.Fatalf("Create failed: %v", err)
@@ -592,8 +593,8 @@ func TestNewEventsStampedCurrent_SkipUpcaster(t *testing.T) {
 	if len(created) != 1 || created[0].Type != EventTypeContractCreated {
 		t.Fatalf("expected 1 ContractCreatedEvent, got %+v", created)
 	}
-	if created[0].SchemaVersion != 3 {
-		t.Errorf("new ContractCreatedEvent must be stamped SchemaVersion 3, got %d", created[0].SchemaVersion)
+	if created[0].SchemaVersion != 4 {
+		t.Errorf("new ContractCreatedEvent must be stamped SchemaVersion 4, got %d", created[0].SchemaVersion)
 	}
 
 	// 2. Each versioned event type, stamped with its current version, must pass
@@ -605,7 +606,7 @@ func TestNewEventsStampedCurrent_SkipUpcaster(t *testing.T) {
 		version int
 		event   eventstore.DomainEvent
 	}{
-		{"ContractCreated", EventTypeContractCreated, 3, &ContractCreatedEvent{ContractID: "c1", IdempotencyKey: "idem-1", Interval: pricing.Monthly(), CreatedAt: time.Now()}},
+		{"ContractCreated", EventTypeContractCreated, 4, &ContractCreatedEvent{ContractID: "c1", IdempotencyKey: "idem-1", Interval: pricing.Monthly(), CreatedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}},
 		{"PriceChanged", EventTypePriceChanged, 2, &PriceChangedEvent{ContractID: "c1", OldPriceID: "a", NewPriceID: "b", Policy: ChangePolicyImmediate}},
 		{"TrialEnded", EventTypeTrialEnded, 2, &TrialEndedEvent{ContractID: "c1", Converted: true}},
 		{"ContractRenewed", EventTypeContractRenewed, 2, &ContractRenewedEvent{ContractID: "c1", OldInterval: pricing.Monthly(), NewInterval: pricing.Yearly()}},

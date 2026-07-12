@@ -194,7 +194,7 @@ ctx.SetContract(c *contract.ContractAggregate)
 
 ```go
 type ContractChangeType string
-// created, activated, suspended, resumed, cancelled, renewed, trial_end
+// created, activated, suspended, resumed, cancelled, renewed, trial_end, expired
 
 type ContractChangeEvent struct {
     ContractID shared.ContractID
@@ -219,9 +219,14 @@ type OnInvoiceIssuedHook interface {
 
 type OnPaymentProcessedHook interface {
     Plugin
-    OnPaymentProcessed(ctx *Context, payment *payment.Payment) error
+    OnPaymentProcessed(ctx *PaymentContext) error
 }
 ```
+
+`OnPaymentProcessedHook` は支払いフックと同じ `*PaymentContext` を受け取ります
+（issue #223）。`ctx.Payment()` が処理済みの支払い、`ctx.Invoice()` /
+`ctx.ContractID()` / `ctx.AccountID()` で追加の参照なしに支払いを契約・
+アカウントへ帰属できます。
 
 ---
 

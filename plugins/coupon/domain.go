@@ -3,6 +3,7 @@ package coupon
 import (
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/contract-to-cash/core/domain/contract"
@@ -213,11 +214,30 @@ func (c *Coupon) Code() string { return c.code }
 // CodeType returns the code type (shared or unique).
 func (c *Coupon) CodeType() CodeType { return c.codeType }
 
-// ApplicableTo returns the applicable product IDs.
-func (c *Coupon) ApplicableTo() []shared.ProductID { return c.applicableTo }
+// ApplicableTo returns the applicable product IDs (empty = all products).
+// Returns a defensive copy to protect internal state.
+func (c *Coupon) ApplicableTo() []shared.ProductID { return slices.Clone(c.applicableTo) }
+
+// ApplicableContractTypes returns the applicable contract types (empty = all types).
+// Returns a defensive copy to protect internal state.
+func (c *Coupon) ApplicableContractTypes() []contract.ContractType {
+	return slices.Clone(c.applicableContractTypes)
+}
+
+// AllowedAccountIDs returns the account allowlist (empty = no restriction).
+// Returns a defensive copy to protect internal state.
+func (c *Coupon) AllowedAccountIDs() []shared.AccountID { return slices.Clone(c.allowedAccountIDs) }
+
+// BlockedAccountIDs returns the account blocklist.
+// Returns a defensive copy to protect internal state.
+func (c *Coupon) BlockedAccountIDs() []shared.AccountID { return slices.Clone(c.blockedAccountIDs) }
 
 // CouponType returns the coupon type (percentage or fixed).
 func (c *Coupon) CouponType() CouponType { return c.couponType }
+
+// Currency returns the discount currency for fixed-amount coupons.
+// It is meaningful only when CouponType() == CouponTypeFixed.
+func (c *Coupon) Currency() shared.Currency { return c.currency }
 
 // Value returns the discount value (percentage rate or fixed amount).
 // Returns a defensive copy to protect internal state.

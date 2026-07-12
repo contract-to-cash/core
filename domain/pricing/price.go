@@ -3,6 +3,7 @@ package pricing
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/contract-to-cash/core/domain/shared"
@@ -38,7 +39,26 @@ type Price struct {
 	interval     BillingInterval
 	pricingModel PricingModel
 	status       PriceStatus
-	createdAt    time.Time
+	// metadata carries integrator-defined key-value pairs (issue #219), e.g.
+	// "creator_id". Because Price is immutable, metadata is accepted only at
+	// construction time (WithMetadata option) — there is no setter.
+	metadata  map[string]string
+	createdAt time.Time
+}
+
+// PriceOption is a functional option for NewPrice / NewPriceWithInterval.
+type PriceOption func(*Price)
+
+// WithMetadata sets integrator-defined metadata key-value pairs on the price
+// at construction time (issue #219). The map is copied, so a caller mutating
+// its own map after construction cannot alter the (immutable) Price.
+func WithMetadata(m map[string]string) PriceOption {
+	return func(p *Price) {
+		if len(m) == 0 {
+			return // empty/nil input leaves metadata nil, as before
+		}
+		p.metadata = maps.Clone(m)
+	}
 }
 
 // NewPrice creates a new active Price.
@@ -60,13 +80,14 @@ func NewPrice(
 	billingCycle BillingCycle,
 	pricingModel PricingModel,
 	createdAt time.Time,
+	opts ...PriceOption,
 ) (*Price, error) {
 	interval, ok := BillingCycleToIntervalStrict(billingCycle)
 	if !ok {
 		return nil, shared.NewDomainError(shared.ErrCodeValidation,
 			fmt.Sprintf("unknown billing cycle %q (expected daily, weekly, monthly, or yearly)", billingCycle))
 	}
-	return newPrice(productID, amount, currency, interval, pricingModel, createdAt)
+	return newPrice(productID, amount, currency, interval, pricingModel, createdAt, opts...)
 }
 
 // NewPriceWithInterval creates a new active Price with a BillingInterval.
@@ -82,12 +103,13 @@ func NewPriceWithInterval(
 	interval BillingInterval,
 	pricingModel PricingModel,
 	createdAt time.Time,
+	opts ...PriceOption,
 ) (*Price, error) {
 	if interval.IsZero() {
 		return nil, shared.NewDomainError(shared.ErrCodeValidation,
 			"billing interval must be set")
 	}
-	return newPrice(productID, amount, currency, interval, pricingModel, createdAt)
+	return newPrice(productID, amount, currency, interval, pricingModel, createdAt, opts...)
 }
 
 // newPrice is the shared constructor body for NewPrice / NewPriceWithInterval.
@@ -99,6 +121,7 @@ func newPrice(
 	interval BillingInterval,
 	pricingModel PricingModel,
 	createdAt time.Time,
+	opts ...PriceOption,
 ) (*Price, error) {
 	if amount.IsNegative() {
 		return nil, shared.NewDomainError(shared.ErrCodeValidation,
@@ -114,7 +137,7 @@ func newPrice(
 			fmt.Sprintf("price amount currency %s does not match declared currency %s",
 				amount.Currency(), currency))
 	}
-	return &Price{
+	p := &Price{
 		id:           shared.NewPriceID(),
 		productID:    productID,
 		amount:       amount,
@@ -123,7 +146,11 @@ func newPrice(
 		pricingModel: pricingModel,
 		status:       PriceStatusActive,
 		createdAt:    createdAt,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p, nil
 }
 
 // ID returns the price ID.
@@ -153,6 +180,17 @@ func (p *Price) Interval() BillingInterval { return p.interval }
 // change subsequent CalculatePrice results — preserving the documented
 // immutability of Price (issue #196). See clonePricingModel.
 func (p *Price) PricingModel() PricingModel { return clonePricingModel(p.pricingModel) }
+
+// Metadata returns a copy of the price's integrator-defined metadata
+// (issue #219). Mutating the returned map does not affect the (immutable)
+// Price. It is never nil.
+func (p *Price) Metadata() map[string]string {
+	cp := maps.Clone(p.metadata)
+	if cp == nil {
+		cp = map[string]string{}
+	}
+	return cp
+}
 
 // Status returns the price status.
 func (p *Price) Status() PriceStatus { return p.status }

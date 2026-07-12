@@ -1172,18 +1172,19 @@ func (c *UpcasterChain) Upcast(event Event) (Event, error) {
 
 `domain/contract/upcaster.go` の `NewContractUpcasterChain()` が以下を登録する。
 すべて冪等。versioned なイベントは `SchemaVersioned.CurrentSchemaVersion()` で
-現行バージョンを自己申告するため（`contract.created` は v3、
+現行バージョンを自己申告するため（`contract.created` は v4、
 `contract.price_changed` / `contract.trial_ended` / `contract.renewed` は v2）、
 `RaiseEvent` が新規イベントを現行バージョンで刻む。よって**新規イベントは各
 Upcaster の `CanUpcast` が false となりチェーンを素通り**し、履歴上の旧バージョン
 イベントだけが変換される（issue #153）。v1 の `contract.created` は
-チェーンの不動点ループにより v1→v2→v3 と 2 段で変換される。
+チェーンの不動点ループにより v1→v2→v3→v4 と 3 段で変換される。
 
 | Upcaster | 対象イベント | 変換内容 |
 |----------|------------|---------|
 | `PriceChangedEventUpcaster` | `contract.price_changed` | Money ベース v1 → PriceID ベース v2（`policy` / `*_price_id` を補完） |
 | `ContractCreatedEventUpcaster` | `contract.created` | 旧 `billing_cycle` → `interval`（v1 → v2） |
 | `ContractCreatedIdempotencyKeyUpcaster` | `contract.created` | v2 → v3（`idempotency_key` 追加、issue #159）。SchemaVersion を上げるのみ — 歴史的イベントのキーは復元不能（記録されていない）ため空のまま。Apply が空を許容する |
+| `ContractCreatedMetadataUpcaster` | `contract.created` | v3 → v4（`metadata` 追加、issue #219）。SchemaVersion を上げるのみ — 歴史的イベントに metadata は無く復元不能のため nil のまま。Apply が nil を許容する（`CanUpcast` は fromVersion==3 の完全一致、#197 の順序非依存ガード） |
 | `ContractRenewedEventUpcaster` | `contract.renewed` | 旧 `old/new_billing_cycle` → `old/new_interval` |
 | `TrialEndedEventUpcaster` | `contract.trial_ended` | v1 → v2（`current_period` 追加、issue #146）。SchemaVersion を上げるのみ |
 

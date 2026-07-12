@@ -175,6 +175,38 @@ func (u *ContractCreatedIdempotencyKeyUpcaster) Upcast(event eventstore.Event) (
 	return event, nil
 }
 
+// ContractCreatedMetadataUpcaster migrates ContractCreatedEvent payloads from
+// schema version 3 to version 4. Version 4 added the optional metadata field
+// (issue #219) carrying integrator-defined key-value pairs.
+//
+// Historical events never carried metadata, and none can be recovered, so this
+// upcaster only bumps SchemaVersion to 4 (idempotently, mirroring
+// ContractCreatedIdempotencyKeyUpcaster): a missing metadata field deserializes
+// to a nil map, which the aggregate's Apply tolerates. Replay of pre-#219
+// history therefore never fails. A v1 payload reaches v4 through the
+// UpcasterChain fixpoint loop: 1→2 (billing_cycle → interval), 2→3
+// (idempotency_key), then 3→4 (here).
+type ContractCreatedMetadataUpcaster struct{}
+
+// CanUpcast returns true ONLY for ContractCreatedEvent at exactly schema
+// version 3. Matching the exact fromVersion (not <= 3) keeps the fixpoint chain
+// order-independent (issue #197): were this upcaster to accept <= 3 and be
+// applied first, a v1 payload would jump straight to v4 and SKIP the v1→v2
+// billing_cycle→interval migration entirely. Restricting to == 3 forces the
+// chain to run 1→2, 2→3, 3→4 regardless of registration order — mirroring
+// ContractCreatedIdempotencyKeyUpcaster's exact-version guard.
+func (u *ContractCreatedMetadataUpcaster) CanUpcast(eventType eventstore.EventType, fromVersion int) bool {
+	return eventType == EventTypeContractCreated && fromVersion == 3
+}
+
+// Upcast bumps a ContractCreatedEvent to schema version 4. It leaves the
+// payload otherwise untouched: a missing metadata field deserializes to nil,
+// which Apply recognizes as "historical event, metadata never recorded".
+func (u *ContractCreatedMetadataUpcaster) Upcast(event eventstore.Event) (eventstore.Event, error) {
+	event.SchemaVersion = 4
+	return event, nil
+}
+
 // ContractRenewedEventUpcaster migrates historical ContractRenewedEvent payloads
 // that carried only the deprecated old_billing_cycle/new_billing_cycle strings
 // into the interval-based schema (old_interval/new_interval). It is idempotent
@@ -326,6 +358,7 @@ func NewContractUpcasterChain() *eventstore.UpcasterChain {
 		&PriceChangedEventUpcaster{},
 		&ContractCreatedEventUpcaster{},
 		&ContractCreatedIdempotencyKeyUpcaster{},
+		&ContractCreatedMetadataUpcaster{},
 		&ContractRenewedEventUpcaster{},
 		&TrialEndedEventUpcaster{},
 		&ContractSuspendedEventUpcaster{},
