@@ -228,3 +228,72 @@ func assertDomainErrorCode(t *testing.T, err error, code shared.ErrorCode) {
 		t.Fatalf("expected code %q, got %q", code, de.Code)
 	}
 }
+
+// --- CalculatePrice invariant re-check on constructor bypass (issue #238) ---
+
+// mustPanic runs fn and fails the test unless it panics.
+func mustPanic(t *testing.T, why string, fn func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic (%s), got none", why)
+		}
+	}()
+	fn()
+}
+
+// A struct-literal TieredPrice with unsorted tiers previously produced a
+// silently wrong (negative tier-capacity) charge; CalculatePrice must panic
+// instead (issue #238).
+func TestTieredPrice_CalculatePrice_UnsortedTiersPanics(t *testing.T) {
+	tp := TieredPrice{
+		Tiers: []PriceTier{
+			{UpTo: 20, UnitPrice: shared.NewMoney(big.NewRat(80, 1), shared.CurrencyJPY), FlatFee: shared.Zero(shared.CurrencyJPY)},
+			{UpTo: 10, UnitPrice: shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY), FlatFee: shared.Zero(shared.CurrencyJPY)},
+		},
+		Mode: TieredPricingGraduated,
+	}
+	mustPanic(t, "unsorted tiers", func() { tp.CalculatePrice(15) })
+}
+
+// A non-final unlimited tier (UpTo=0) swallows all usage at that tier's rate,
+// silently ignoring later tiers; CalculatePrice must panic instead (issue #238).
+func TestTieredPrice_CalculatePrice_NonFinalUnlimitedTierPanics(t *testing.T) {
+	tp := TieredPrice{
+		Tiers: []PriceTier{
+			{UpTo: 0, UnitPrice: shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY), FlatFee: shared.Zero(shared.CurrencyJPY)},
+			{UpTo: 20, UnitPrice: shared.NewMoney(big.NewRat(80, 1), shared.CurrencyJPY), FlatFee: shared.Zero(shared.CurrencyJPY)},
+		},
+		Mode: TieredPricingVolume,
+	}
+	mustPanic(t, "non-final unlimited tier", func() { tp.CalculatePrice(15) })
+}
+
+// Mixed-currency tiers must panic even on paths that never reach a cross-tier
+// Money.Add (e.g. volume mode resolving entirely within the first tier), where
+// the mustAddTier backstop alone would not fire (issue #238).
+func TestTieredPrice_CalculatePrice_MixedCurrencySingleTierPathPanics(t *testing.T) {
+	tp := TieredPrice{
+		Tiers: []PriceTier{
+			{UpTo: 10, UnitPrice: shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY), FlatFee: shared.Zero(shared.CurrencyJPY)},
+			{UpTo: 20, UnitPrice: shared.NewMoney(big.NewRat(80, 1), shared.CurrencyUSD), FlatFee: shared.Zero(shared.CurrencyUSD)},
+		},
+		Mode: TieredPricingVolume,
+	}
+	mustPanic(t, "mixed-currency tiers", func() { tp.CalculatePrice(5) })
+}
+
+// Zero usage takes the early return and never consults the tiers, so it stays
+// panic-free even for an invalid literal — no wrong amount can be produced.
+func TestTieredPrice_CalculatePrice_ZeroUsageDoesNotValidate(t *testing.T) {
+	tp := TieredPrice{
+		Tiers: []PriceTier{
+			{UpTo: 20, UnitPrice: shared.NewMoney(big.NewRat(80, 1), shared.CurrencyJPY), FlatFee: shared.Zero(shared.CurrencyJPY)},
+			{UpTo: 10, UnitPrice: shared.NewMoney(big.NewRat(100, 1), shared.CurrencyJPY), FlatFee: shared.Zero(shared.CurrencyJPY)},
+		},
+		Mode: TieredPricingGraduated,
+	}
+	if got := tp.CalculatePrice(0); !got.IsZero() {
+		t.Errorf("expected zero for zero usage, got %s", got.Amount().RatString())
+	}
+}

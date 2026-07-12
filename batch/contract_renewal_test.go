@@ -19,6 +19,7 @@ import (
 type renewalChangeSpy struct {
 	mu          sync.Mutex
 	changeTypes []plugin.ContractChangeType
+	events      []plugin.ContractChangeEvent
 }
 
 func (p *renewalChangeSpy) Name() string                                        { return "renewal-change-spy" }
@@ -31,6 +32,7 @@ func (p *renewalChangeSpy) OnContractChange(_ *plugin.Context, event plugin.Cont
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.changeTypes = append(p.changeTypes, event.ChangeType)
+	p.events = append(p.events, event)
 	return nil
 }
 
@@ -290,8 +292,19 @@ func TestContractRenewalProcessor_DryRun(t *testing.T) {
 	if agg.CurrentPeriod() != oldPeriod {
 		t.Errorf("period changed during dry run: got %v, want %v", agg.CurrentPeriod(), oldPeriod)
 	}
+	// The dry run reports the action the real run would take.
+	if len(result.DryRunActions) != 1 ||
+		result.DryRunActions[0].ItemID != "c1" ||
+		result.DryRunActions[0].Action != RenewalActionRenew {
+		t.Errorf("DryRunActions: got %+v, want [{c1 renew}]", result.DryRunActions)
+	}
 }
 
+// TestContractRenewalProcessor_DryRun_CancelAtPeriodEnd verifies the dry run
+// mirrors the real run (issue #242): a cancelAtPeriodEnd contract is processed
+// SUCCESSFULLY by a real run (RenewWithInterval resolves it to Cancelled), so
+// the dry run must classify it as would-succeed with action "cancel", not as a
+// failure.
 func TestContractRenewalProcessor_DryRun_CancelAtPeriodEnd(t *testing.T) {
 	agg := newActiveContract("c1")
 	meta := eventstore.EventMetadata{UserID: "test"}
@@ -306,15 +319,23 @@ func TestContractRenewalProcessor_DryRun_CancelAtPeriodEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Failed != 1 {
-		t.Errorf("Failed: got %d, want 1", result.Failed)
+	if result.Succeeded != 1 {
+		t.Errorf("Succeeded: got %d, want 1 (real run cancels this contract successfully)", result.Succeeded)
 	}
-	if result.Succeeded != 0 {
-		t.Errorf("Succeeded: got %d, want 0", result.Succeeded)
+	if result.Failed != 0 {
+		t.Errorf("Failed: got %d, want 0", result.Failed)
+	}
+	if len(result.DryRunActions) != 1 ||
+		result.DryRunActions[0].ItemID != "c1" ||
+		result.DryRunActions[0].Action != RenewalActionCancel {
+		t.Errorf("DryRunActions: got %+v, want [{c1 cancel}]", result.DryRunActions)
 	}
 	// Contract should still be active (dry run — no side effects).
 	if agg.Status() != contract.ContractStatusActive {
 		t.Errorf("status: got %s, want active (dry run should not mutate)", agg.Status())
+	}
+	if len(repo.saved) != 0 {
+		t.Errorf("saved count: got %d, want 0 (dry run)", len(repo.saved))
 	}
 }
 
@@ -345,11 +366,22 @@ func TestContractRenewalProcessor_DryRun_AutoRenewFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Failed != 1 {
-		t.Errorf("Failed: got %d, want 1", result.Failed)
+	// Mirror the real run (issue #242): an autoRenew=false contract is
+	// processed successfully by a real run (it expires), so the dry run
+	// classifies it as would-succeed with action "expire".
+	if result.Succeeded != 1 {
+		t.Errorf("Succeeded: got %d, want 1 (real run expires this contract successfully)", result.Succeeded)
 	}
-	if result.Succeeded != 0 {
-		t.Errorf("Succeeded: got %d, want 0", result.Succeeded)
+	if result.Failed != 0 {
+		t.Errorf("Failed: got %d, want 0", result.Failed)
+	}
+	if len(result.DryRunActions) != 1 ||
+		result.DryRunActions[0].ItemID != "c1" ||
+		result.DryRunActions[0].Action != RenewalActionExpire {
+		t.Errorf("DryRunActions: got %+v, want [{c1 expire}]", result.DryRunActions)
+	}
+	if agg.Status() != contract.ContractStatusActive {
+		t.Errorf("status: got %s, want active (dry run should not mutate)", agg.Status())
 	}
 }
 
@@ -419,6 +451,11 @@ func TestContractRenewalProcessor_StopOnError(t *testing.T) {
 	// Second contract should NOT have been processed.
 	if result.Succeeded != 0 {
 		t.Errorf("Succeeded: got %d, want 0 (should stop after first error)", result.Succeeded)
+	}
+	// The unattempted contract is accounted as skipped, keeping
+	// Total == Succeeded + Failed + Skipped coherent (issue #242).
+	if result.Skipped != 1 {
+		t.Errorf("Skipped: got %d, want 1", result.Skipped)
 	}
 	if len(repo.saved) != 0 {
 		t.Errorf("saved count: got %d, want 0", len(repo.saved))
@@ -578,6 +615,124 @@ func TestContractRenewalProcessor_BillingCycleChange(t *testing.T) {
 	// PriceID should be promoted
 	if agg.PriceID() != yearlyPriceID {
 		t.Errorf("expected priceID %s, got %s", yearlyPriceID, agg.PriceID())
+	}
+}
+
+// TestContractRenewalProcessor_Renewal_PriceChange_PopulatesPriceFields
+// verifies that a renewal which applies a pending price change reports the
+// price transition on the emitted ContractChangeEvent (issue #242):
+// OldPriceID/NewPriceID are populated; MRRChange stays nil because the
+// processor does not load price amounts.
+func TestContractRenewalProcessor_Renewal_PriceChange_PopulatesPriceFields(t *testing.T) {
+	clock := shared.FixedClock{FixedTime: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)}
+	agg := contract.NewContractAggregate(shared.ContractID("c-price-change"), clock)
+	meta := eventstore.EventMetadata{UserID: "test"}
+
+	oldPriceID := shared.PriceID("price-monthly")
+	cmd := contract.CreateContractCommand{
+		IdempotencyKey: "idem-batch-contract_renewal-6",
+		AccountID:      shared.AccountID("a1"),
+		PriceID:        oldPriceID,
+		ContractType:   contract.ContractTypeSubscription,
+		Interval:       pricing.Monthly(),
+		Price:          shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
+		BasePrice:      shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY),
+		AutoRenew:      true,
+	}
+	if err := agg.Create(cmd, meta); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := agg.Activate(meta); err != nil {
+		t.Fatalf("Activate failed: %v", err)
+	}
+
+	newPriceID := shared.PriceID("price-yearly")
+	if err := agg.ChangePrice(newPriceID, contract.ChangePolicyEndOfTerm, nil, meta); err != nil {
+		t.Fatalf("ChangePrice failed: %v", err)
+	}
+
+	yearlyPrice, yearlyPriceErr := pricing.NewPrice(
+		shared.NewProductID(),
+		shared.NewMoney(big.NewRat(30000, 1), shared.CurrencyJPY),
+		shared.CurrencyJPY,
+		pricing.BillingCycleYearly,
+		nil,
+		clock.Now(),
+	)
+	if yearlyPriceErr != nil {
+		t.Fatalf("failed to create yearly price: %v", yearlyPriceErr)
+	}
+	priceRepo := &mockPriceRepo{
+		prices: map[shared.PriceID]*pricing.Price{newPriceID: yearlyPrice},
+	}
+
+	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
+	spy := &renewalChangeSpy{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy: %v", err)
+	}
+
+	processor := NewContractRenewalProcessor(repo, priceRepo, registry, processorClock(), nil, nil)
+
+	result, err := processor.Process(context.Background(), BatchOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Succeeded != 1 {
+		t.Fatalf("Succeeded: got %d, want 1", result.Succeeded)
+	}
+
+	if len(spy.events) != 1 {
+		t.Fatalf("OnContractChange events: got %d, want 1", len(spy.events))
+	}
+	event := spy.events[0]
+	if event.ChangeType != plugin.ContractChangeRenewed {
+		t.Errorf("ChangeType: got %s, want renewed", event.ChangeType)
+	}
+	if event.OldPriceID == nil || *event.OldPriceID != oldPriceID {
+		t.Errorf("OldPriceID: got %v, want %s", event.OldPriceID, oldPriceID)
+	}
+	if event.NewPriceID == nil || *event.NewPriceID != newPriceID {
+		t.Errorf("NewPriceID: got %v, want %s", event.NewPriceID, newPriceID)
+	}
+	if event.MRRChange != nil {
+		t.Errorf("MRRChange: got %v, want nil (price amounts are not loaded by the processor)", event.MRRChange)
+	}
+}
+
+// TestContractRenewalProcessor_PlainRenewal_PriceFieldsNil verifies that a
+// renewal without a pending price change leaves OldPriceID/NewPriceID nil on
+// the emitted ContractChangeEvent (issue #242).
+func TestContractRenewalProcessor_PlainRenewal_PriceFieldsNil(t *testing.T) {
+	agg := newActiveContract("c-plain")
+	repo := &mockRenewalRepo{contracts: []*contract.ContractAggregate{agg}}
+	spy := &renewalChangeSpy{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register spy: %v", err)
+	}
+
+	processor := NewContractRenewalProcessor(repo, nil, registry, processorClock(), nil, nil)
+
+	result, err := processor.Process(context.Background(), BatchOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Succeeded != 1 {
+		t.Fatalf("Succeeded: got %d, want 1", result.Succeeded)
+	}
+
+	if len(spy.events) != 1 {
+		t.Fatalf("OnContractChange events: got %d, want 1", len(spy.events))
+	}
+	event := spy.events[0]
+	if event.ChangeType != plugin.ContractChangeRenewed {
+		t.Errorf("ChangeType: got %s, want renewed", event.ChangeType)
+	}
+	if event.OldPriceID != nil || event.NewPriceID != nil {
+		t.Errorf("price fields: got Old=%v New=%v, want both nil on a plain renewal",
+			event.OldPriceID, event.NewPriceID)
 	}
 }
 

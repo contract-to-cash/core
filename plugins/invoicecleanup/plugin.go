@@ -3,6 +3,7 @@ package invoicecleanup
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/contract-to-cash/core/domain/contract"
 	"github.com/contract-to-cash/core/domain/invoice"
@@ -10,8 +11,10 @@ import (
 )
 
 // InvoiceCleanupPlugin voids orphaned Draft and Finalized invoices
-// when a contract is cancelled. Invoices in other statuses (Paid,
-// PartialPaid, Overdue) are left untouched as they require human judgment.
+// when a contract is cancelled. Invoices in other statuses (Issued, Paid,
+// PartialPaid, Overdue) are left untouched as they require human judgment
+// (FindUnpaidByContract also returns Issued invoices; the status filter
+// below skips them).
 type InvoiceCleanupPlugin struct {
 	invoiceRepo invoice.Repository
 	priority    int
@@ -35,11 +38,39 @@ func (p *InvoiceCleanupPlugin) Name() string    { return "invoice-cleanup" }
 func (p *InvoiceCleanupPlugin) Version() string { return "1.0.0" }
 func (p *InvoiceCleanupPlugin) Priority() int   { return p.priority }
 
-func (p *InvoiceCleanupPlugin) Initialize(_ context.Context, config plugin.Config) error {
-	if v, ok := config["priority"]; ok {
-		if n, ok := v.(int); ok {
-			p.priority = n
+// configInt reads an optional integer key from config. It accepts both a Go int
+// and a JSON-decoded float64 with an integral value (encoding/json decodes all
+// numbers into float64 — issue #239). A key that is present but has the wrong
+// type (or a non-integral float) returns a descriptive error instead of being
+// silently ignored. Unknown/absent keys return present=false.
+func configInt(config plugin.Config, key string) (value int, present bool, err error) {
+	v, ok := config[key]
+	if !ok {
+		return 0, false, nil
+	}
+	switch n := v.(type) {
+	case int:
+		return n, true, nil
+	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) || n != math.Trunc(n) {
+			return 0, false, fmt.Errorf("config %q must be an integer, got %v", key, n)
 		}
+		return int(n), true, nil
+	default:
+		return 0, false, fmt.Errorf("config %q must be an integer, got %T (%v)", key, v, v)
+	}
+}
+
+// Initialize initializes the plugin with the given configuration.
+//
+// A present-but-mistyped "priority" is a configuration error and is returned
+// rather than silently ignored (issue #239); JSON-decoded numbers (float64 with
+// an integral value) are accepted. Unknown keys are ignored.
+func (p *InvoiceCleanupPlugin) Initialize(_ context.Context, config plugin.Config) error {
+	if n, ok, err := configInt(config, "priority"); err != nil {
+		return fmt.Errorf("invoice-cleanup: %w", err)
+	} else if ok {
+		p.priority = n
 	}
 	return nil
 }

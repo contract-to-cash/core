@@ -62,7 +62,7 @@ func main() {
 
 	// Integration: server provisioning (the star of this demo)
 	serverMgr := newServerManager()
-	provPlugin := newServerProvisioningPlugin(serverMgr)
+	provPlugin := newServerProvisioningPlugin(serverMgr, clock)
 	must("register provisioning", registry.Register(provPlugin))
 
 	must("init plugins", registry.InitializeAll(ctx, map[string]plugin.Config{
@@ -98,27 +98,40 @@ func main() {
 		AutoRenew:      true,
 	}, metadata))
 
-	// Fire OnContractCreate hooks
-	for _, h := range registry.GetOnContractCreateHooks() {
-		must("hook:create", h.OnContractCreate(plugin.NewContext(ctx), agg))
-	}
+	// Integrator-fired lifecycle hooks follow "transition -> SAVE -> fire"
+	// (docs/internals/plugin-system.md §5.3): firing before the save would
+	// notify plugins about a state that may never persist. Each invocation is
+	// wrapped in plugin.SafeInvoke so a panicking plugin cannot crash the
+	// integration flow, and failures are non-fatal — logged via
+	// plugin.LogNonFatalHookError and processing continues (§5.4).
 	must("save", contractRepo.Save(ctx, agg))
+	for _, h := range registry.GetOnContractCreateHooks() {
+		fireNonFatal("OnContractCreateHook.OnContractCreate", h.Name(), func() error {
+			return h.OnContractCreate(plugin.NewContext(ctx), agg)
+		})
+	}
 
 	// ── 4. Activate contract ──
 	must("activate", agg.Activate(metadata))
-	for _, h := range registry.GetOnContractActivateHooks() {
-		must("hook:activate", h.OnContractActivate(plugin.NewContext(ctx), agg))
-	}
 	must("save", contractRepo.Save(ctx, agg))
+	for _, h := range registry.GetOnContractActivateHooks() {
+		fireNonFatal("OnContractActivateHook.OnContractActivate", h.Name(), func() error {
+			return h.OnContractActivate(plugin.NewContext(ctx), agg)
+		})
+	}
 
 	// ── 5. First invoice + payment -> server provisioned ──
 	printSection("Phase 2: First Payment & Server Provisioning")
 
+	// WithoutTransactions: this demo intentionally runs on in-memory
+	// repositories without a TxManager (issue #187) — the explicit opt-in
+	// suppresses the "running without a transaction manager" warning.
 	billingService := service.NewBillingService(
 		contractRepo, invoiceRepo, usageRepo,
 		balance.BalanceConfig{}, priceRepo, productRepo, registry,
 		service.BillingConfig{DaysUntilDue: 30}, clock,
 		service.WithBalanceRepo(balanceRepo),
+		service.WithoutTransactions(),
 	)
 	inv, err := billingService.GenerateInvoice(ctx, contractID, agg.CurrentPeriod())
 	if err != nil {
@@ -133,7 +146,13 @@ func main() {
 		inv.TaxAmount().Amount().RatString())
 
 	gateway := &mockPaymentGateway{clock: clock}
-	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, contractRepo, es, registry, clock)
+	paymentService := service.NewPaymentService(gateway, paymentRepo, invoiceRepo, contractRepo, es, registry, clock,
+		service.WithoutPaymentTransactions())
+
+	// Payment hooks are CORE-fired (§5.3): ProcessPayment itself fires
+	// BeforeCharge before the gateway call and AfterCharge on success, so the
+	// provisioning below happens inside this call — no manual hook loop needed.
+	fmt.Println("  Processing payment (PaymentService fires AfterCharge automatically)...")
 	pmt, err := paymentService.ProcessPayment(ctx, inv.ID(), service.ProcessPaymentInput{
 		PaymentMethodID: "pm-visa-tanaka",
 		Amount:          inv.AmountDue(),
@@ -144,11 +163,6 @@ func main() {
 		fatal("payment", err)
 	}
 	fmt.Printf("  Payment: ¥%s -> %s\n\n", pmt.Amount().Amount().RatString(), pmt.Status())
-
-	// AfterCharge hooks fire the provisioning
-	for _, h := range registry.GetAfterChargeHooks() {
-		must("hook:after-charge", h.AfterCharge(plugin.NewPaymentContext(ctx, pmt, inv)))
-	}
 
 	serverMgr.PrintStatus()
 
@@ -161,17 +175,21 @@ func main() {
 	clock.Advance(10 * 24 * time.Hour) // April 11
 	agg, _ = contractRepo.FindByID(ctx, contractID)
 	must("schedule-cancel", agg.ScheduleCancellation("budget review", metadata))
-	for _, h := range registry.GetOnContractCancelScheduledHooks() {
-		must("hook:cancel-scheduled", h.OnContractCancelScheduled(plugin.NewContext(ctx), agg))
-	}
 	must("save", contractRepo.Save(ctx, agg))
+	for _, h := range registry.GetOnContractCancelScheduledHooks() {
+		fireNonFatal("OnContractCancelScheduledHook.OnContractCancelScheduled", h.Name(), func() error {
+			return h.OnContractCancelScheduled(plugin.NewContext(ctx), agg)
+		})
+	}
 
 	clock.Advance(2 * 24 * time.Hour) // April 13: customer decides to stay
 	must("unschedule-cancel", agg.UnscheduleCancellation(metadata))
-	for _, h := range registry.GetOnContractCancelUnscheduledHooks() {
-		must("hook:cancel-unscheduled", h.OnContractCancelUnscheduled(plugin.NewContext(ctx), agg))
-	}
 	must("save", contractRepo.Save(ctx, agg))
+	for _, h := range registry.GetOnContractCancelUnscheduledHooks() {
+		fireNonFatal("OnContractCancelUnscheduledHook.OnContractCancelUnscheduled", h.Name(), func() error {
+			return h.OnContractCancelUnscheduled(plugin.NewContext(ctx), agg)
+		})
+	}
 
 	serverMgr.PrintStatus()
 
@@ -189,6 +207,8 @@ func main() {
 	must("finalize", inv2.Finalize())
 	must("save invoice", invoiceRepo.Save(ctx, inv2))
 
+	// On gateway failure ProcessPayment fires OnPaymentFailedHook (core-fired,
+	// non-fatal) — the plugin's alert below is printed from inside this call.
 	_, err = paymentService.ProcessPayment(ctx, inv2.ID(), service.ProcessPaymentInput{
 		PaymentMethodID: "pm-visa-tanaka",
 		Amount:          inv2.AmountDue(),
@@ -203,10 +223,12 @@ func main() {
 		BillingBehavior: contract.SuspensionBillingSkip,
 		Reason:          "payment overdue",
 	}, metadata))
-	for _, h := range registry.GetOnContractSuspendHooks() {
-		must("hook:suspend", h.OnContractSuspend(plugin.NewContext(ctx), agg))
-	}
 	must("save", contractRepo.Save(ctx, agg))
+	for _, h := range registry.GetOnContractSuspendHooks() {
+		fireNonFatal("OnContractSuspendHook.OnContractSuspend", h.Name(), func() error {
+			return h.OnContractSuspend(plugin.NewContext(ctx), agg)
+		})
+	}
 
 	serverMgr.PrintStatus()
 
@@ -216,6 +238,9 @@ func main() {
 	clock.Advance(3 * 24 * time.Hour) // May 4
 	gateway.failNext = false          // payment method updated
 
+	// ProcessPayment again fires AfterCharge automatically. The server is
+	// already provisioned (just stopped), so the plugin takes no provisioning
+	// action here — the restart is driven by the Resume hook below.
 	pmt2, err := paymentService.ProcessPayment(ctx, inv2.ID(), service.ProcessPaymentInput{
 		PaymentMethodID: "pm-visa-tanaka-new",
 		Amount:          inv2.AmountDue(),
@@ -230,13 +255,11 @@ func main() {
 	// Payment succeeded -> resume the contract
 	agg, _ = contractRepo.FindByID(ctx, contractID)
 	must("resume", agg.Resume(metadata))
-	for _, h := range registry.GetOnContractResumeHooks() {
-		must("hook:resume", h.OnContractResume(plugin.NewContext(ctx), agg))
-	}
 	must("save", contractRepo.Save(ctx, agg))
-
-	for _, h := range registry.GetAfterChargeHooks() {
-		must("hook:after-charge", h.AfterCharge(plugin.NewPaymentContext(ctx, pmt2, inv2)))
+	for _, h := range registry.GetOnContractResumeHooks() {
+		fireNonFatal("OnContractResumeHook.OnContractResume", h.Name(), func() error {
+			return h.OnContractResume(plugin.NewContext(ctx), agg)
+		})
 	}
 
 	serverMgr.PrintStatus()
@@ -247,10 +270,12 @@ func main() {
 	clock.Advance(20 * 24 * time.Hour)
 	agg, _ = contractRepo.FindByID(ctx, contractID)
 	must("cancel", agg.Cancel("switching to competitor", metadata))
-	for _, h := range registry.GetOnContractCancelHooks() {
-		must("hook:cancel", h.OnContractCancel(plugin.NewContext(ctx), agg))
-	}
 	must("save", contractRepo.Save(ctx, agg))
+	for _, h := range registry.GetOnContractCancelHooks() {
+		fireNonFatal("OnContractCancelHook.OnContractCancel", h.Name(), func() error {
+			return h.OnContractCancel(plugin.NewContext(ctx), agg)
+		})
+	}
 
 	serverMgr.PrintStatus()
 
@@ -260,14 +285,20 @@ func main() {
 	fmt.Println("  " + strings.Repeat("-", 70))
 	fmt.Println("  Contract Created     -> OnContractCreate        -> (prepare resources)")
 	fmt.Println("  Contract Activated   -> OnContractActivate      -> (mark ready)")
-	fmt.Println("  Payment Completed    -> AfterCharge             -> Provision server")
+	fmt.Println("  Payment Completed    -> AfterCharge             -> Provision server (once)")
 	fmt.Println("  Cancel Scheduled     -> OnContractCancelScheduled   -> (flag decommission)")
 	fmt.Println("  Cancel Unscheduled   -> OnContractCancelUnscheduled -> (clear flag)")
 	fmt.Println("  Payment Failed       -> OnPaymentFailed         -> (alert)")
 	fmt.Println("  Contract Suspended   -> OnContractSuspend       -> Stop server")
+	fmt.Println("  Payment Retried      -> AfterCharge             -> (already provisioned)")
 	fmt.Println("  Contract Resumed     -> OnContractResume        -> Restart server")
-	fmt.Println("  Payment Completed    -> AfterCharge             -> (confirm active)")
 	fmt.Println("  Contract Cancelled   -> OnContractCancel        -> Terminate server")
+	fmt.Println()
+	fmt.Println("  Firing responsibility (docs/internals/plugin-system.md §5.3):")
+	fmt.Println("    - Payment hooks (AfterCharge/OnPaymentFailed) are fired by the CORE")
+	fmt.Println("      inside PaymentService.ProcessPayment — never fire them manually.")
+	fmt.Println("    - Contract lifecycle hooks are fired by the INTEGRATOR, after the")
+	fmt.Println("      state transition is saved, via plugin.SafeInvoke (non-fatal).")
 	fmt.Println()
 	fmt.Println("  The plugin system makes this integration:")
 	fmt.Println("    - Declarative: just implement the hook interfaces")
@@ -391,16 +422,30 @@ func (m *serverManager) PrintStatus() {
 //             OnContractCancelUnscheduled, AfterCharge, OnPaymentFailed
 // ═══════════════════════════════════════════════════════════════════
 
+// Compile-time interface checks.
+var (
+	_ plugin.OnContractCreateHook            = (*serverProvisioningPlugin)(nil)
+	_ plugin.OnContractActivateHook          = (*serverProvisioningPlugin)(nil)
+	_ plugin.OnContractSuspendHook           = (*serverProvisioningPlugin)(nil)
+	_ plugin.OnContractResumeHook            = (*serverProvisioningPlugin)(nil)
+	_ plugin.OnContractCancelHook            = (*serverProvisioningPlugin)(nil)
+	_ plugin.OnContractCancelScheduledHook   = (*serverProvisioningPlugin)(nil)
+	_ plugin.OnContractCancelUnscheduledHook = (*serverProvisioningPlugin)(nil)
+	_ plugin.AfterChargeHook                 = (*serverProvisioningPlugin)(nil)
+	_ plugin.OnPaymentFailedHook             = (*serverProvisioningPlugin)(nil)
+)
+
 type serverProvisioningPlugin struct {
 	mgr      *serverManager
+	clock    shared.Clock
 	priority int
 	// In production, you'd look up the contract from the invoice via a repository.
 	// For this demo, we track the active contract ID directly.
 	activeContractID shared.ContractID
 }
 
-func newServerProvisioningPlugin(mgr *serverManager) *serverProvisioningPlugin {
-	return &serverProvisioningPlugin{mgr: mgr}
+func newServerProvisioningPlugin(mgr *serverManager, clock shared.Clock) *serverProvisioningPlugin {
+	return &serverProvisioningPlugin{mgr: mgr, clock: clock}
 }
 
 // Plugin interface
@@ -432,14 +477,27 @@ func (p *serverProvisioningPlugin) OnContractActivate(_ *plugin.Context, c *cont
 	return nil
 }
 
-// AfterChargeHook - payment succeeded -> provision or confirm server
-func (p *serverProvisioningPlugin) AfterCharge(ctx *plugin.PaymentContext) error {
+// AfterChargeHook - payment succeeded -> provision or confirm server.
+// Fired automatically by PaymentService.ProcessPayment (§5.3); provisioning
+// happens exactly once because it only triggers from the none/pending states.
+func (p *serverProvisioningPlugin) AfterCharge(_ *plugin.PaymentContext) error {
 	// PaymentContext provides type-safe access to invoice and contract
 	cid := string(p.activeContractID)
 	state := p.mgr.GetState(cid)
 	if state == serverStateNone || state == serverStatePending {
-		p.mgr.Provision(cid, time.Now())
+		p.mgr.Provision(cid, p.clock.Now())
+		return nil
 	}
+	fmt.Printf("  >> [Provisioning] Payment confirmed: %s... (server: %s) - no provisioning needed\n",
+		cid[:12], state)
+	return nil
+}
+
+// OnPaymentFailedHook - alert on payment failure (fired automatically by
+// PaymentService.ProcessPayment when the gateway declines; non-fatal).
+func (p *serverProvisioningPlugin) OnPaymentFailed(_ *plugin.PaymentContext, cause error) error {
+	fmt.Printf("  >> [Provisioning] ALERT: payment failed for contract %s...: %v\n",
+		string(p.activeContractID)[:12], cause)
 	return nil
 }
 
@@ -547,6 +605,19 @@ func moneyJPY(amount int64) shared.Money {
 func must(action string, err error) {
 	if err != nil {
 		fatal(action, err)
+	}
+}
+
+// fireNonFatal invokes one integrator-fired lifecycle hook with the same
+// panic isolation and fatality policy the core applies to its own hook sites
+// (docs/internals/plugin-system.md §5.4): plugin.SafeInvoke converts a plugin
+// panic into a *PluginPanicError, and both errors and panics are non-fatal —
+// logged via plugin.LogNonFatalHookError (nil logger = slog.Default()) so one
+// misbehaving plugin cannot abort the integration flow or starve later hooks.
+func fireNonFatal(hookType, pluginName string, fn func() error) {
+	if err := plugin.SafeInvoke(hookType, pluginName, fn); err != nil {
+		plugin.LogNonFatalHookError(nil, "lifecycle hook failed", err,
+			"hook", hookType, "plugin", pluginName)
 	}
 }
 

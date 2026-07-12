@@ -48,7 +48,7 @@ infrastructure/  ドメイン IF の実装（現在は inmemory/ のみ。DB 実
 |---|---|---|
 | Contract | Event Sourced Aggregate | 状態遷移: Draft→Trialing→Active→PastDue/Suspended→Cancelled/Expired |
 | Invoice | Entity | 改訂チェーン（void-and-recreate）対応、2 レベルリンク（original / revisionOf） |
-| CreditNote | Entity | 行項目レベルの調整。draft→issued→applied→refunded/voided |
+| CreditNote | Entity | 行項目レベルの調整。draft→issued→applied/refunded/voided（Apply・Refund・Void は issued からの分岐で各終端。void のみ draft からも可） |
 | Payment | Entity | 冪等性キー必須、状態遷移あり |
 | Price | Immutable Entity | Flat / Tiered(Graduated, Volume) / Usage の価格モデル |
 | Product | Entity | 「何を売るか」を定義。Price（「どう課金するか」）と分離 |
@@ -111,7 +111,7 @@ Hook の完全な一覧と設計意図は @docs/internals/plugin-system.md を�
 
 ### Lint
 
-golangci-lint の設定は `.golangci.yml`。`exhaustive` で switch の網羅性を強制し、`nolintlint` で `//nolint` に理由を要求している。Claude 側で style を気にする必要はない（lint に任せる）。`examples/` は lint 除外。
+golangci-lint の設定は `.golangci.yml`。`exhaustive` で switch の網羅性を強制し、`nolintlint` で `//nolint` に理由を要求している。Claude 側で style を気にする必要はない（lint に任せる）。lint は `examples/` を含む全パッケージに走る（ディレクトリ単位の除外はなく、パススコープの除外は下記 forbidigo のみ）。
 - `forbidigo` リンター有効: `ToSnapshot` / `FromSnapshot` / `InvoiceFromSnapshot` / `CreditNoteFromSnapshot` は persistence adapter 専用。`domain/*/snapshot*.go`, `infrastructure/`, `tests/integration/` 以外から呼び出すと CI が落ちる（issue #100）。`ContractAggregate.MarshalSnapshot` / `LoadFromSnapshot` は event-sourced 用の別 API なので対象外（word-boundary `\b` で除外済み）。
 - 新規 lint ルール追加時は `tests/lintcheck/` に enforcement 検証テストを置く（`make test-lint-rules`）
 

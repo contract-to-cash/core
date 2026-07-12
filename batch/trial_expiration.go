@@ -2,6 +2,7 @@ package batch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -99,6 +100,10 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Errorf("contract %s: %w", agg.ContractID(), err))
 				if !opts.ContinueOnError {
+					// Items never attempted because of the early stop are
+					// skipped, not failed, so Total == Succeeded+Failed+Skipped
+					// (issue #242).
+					result.Skipped = result.Total - result.Succeeded - result.Failed
 					return result, nil
 				}
 			} else {
@@ -114,6 +119,7 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 
 	sem := make(chan struct{}, concurrency)
 	var mu sync.Mutex
+	launched := 0
 
 	for _, agg := range contracts {
 		// Check if we should stop early (ContinueOnError=false and an error occurred)
@@ -125,6 +131,7 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 				break
 			}
 		}
+		launched++
 
 		sem <- struct{}{}
 		go func(a *contract.ContractAggregate) {
@@ -132,8 +139,15 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 
 			if err := p.processOne(cctx, a, opts.DryRun); err != nil {
 				mu.Lock()
-				result.Failed++
-				result.Errors = append(result.Errors, fmt.Errorf("contract %s: %w", a.ContractID(), err))
+				if cctx.Err() != nil && errors.Is(err, context.Canceled) {
+					// The run was already aborted (early stop cancelled the
+					// shared context); an in-flight cancellation is not a
+					// genuine per-item failure (issue #242).
+					result.Skipped++
+				} else {
+					result.Failed++
+					result.Errors = append(result.Errors, fmt.Errorf("contract %s: %w", a.ContractID(), err))
+				}
 				mu.Unlock()
 				if !opts.ContinueOnError {
 					cancel()
@@ -151,7 +165,57 @@ func (p *TrialExpirationProcessor) Process(ctx context.Context, opts BatchOption
 		sem <- struct{}{}
 	}
 
+	// Items never launched because of the early stop are skipped, not failed
+	// (issue #242).
+	result.Skipped += result.Total - launched
+
 	return result, nil
+}
+
+// evaluateTrialEnd validates the trial-end guards against the given aggregate
+// and returns the conversion decision.
+//
+// Guards:
+//   - the contract must be Trialing with a trial configuration;
+//   - the trial must have ended (TrialEndDate not after clock.Now());
+//   - RequirePaymentMethod gate (design-decisions 2.1: 支払い方法事前登録必須):
+//     auto-conversion without a registered payment method is BLOCKED — the
+//     contract stays Trialing, no hooks fire, and the batch records this
+//     contract as a failure (subject to ContinueOnError). The contract will
+//     keep failing on subsequent runs until the operator either registers a
+//     payment method or clears RequirePaymentMethod.
+//
+// Conversion follows TrialConfiguration.AutoConvert (design-decisions 2.1):
+// AutoConvert=true converts to a paid contract; otherwise the trial ends
+// without conversion and the contract is cancelled.
+//
+// processOne evaluates this once against the scan-time aggregate (a cheap
+// pre-filter that also serves as the dry-run validation) and AGAIN inside the
+// transaction against the freshly loaded aggregate, so a state change between
+// scan and tx — e.g. a payment method detached, the trial extended, or the
+// contract cancelled — can never leak a stale decision into EndTrial
+// (issue #242).
+func (p *TrialExpirationProcessor) evaluateTrialEnd(agg *contract.ContractAggregate) (bool, error) {
+	if agg.Status() != contract.ContractStatusTrialing {
+		return false, shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
+			fmt.Sprintf("cannot end trial: status is %s", agg.Status()))
+	}
+	cfg := agg.TrialConfig()
+	if cfg == nil {
+		return false, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"trialing contract has no trial configuration")
+	}
+	if cfg.TrialEndDate.After(p.clock.Now()) {
+		return false, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("trial has not ended yet (ends at %s)", cfg.TrialEndDate.Format("2006-01-02T15:04:05Z07:00")))
+	}
+
+	converted := cfg.AutoConvert
+	if converted && cfg.RequirePaymentMethod && agg.PaymentMethodID() == nil {
+		return false, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			"cannot auto-convert trial: RequirePaymentMethod is set but no payment method is registered")
+	}
+	return converted, nil
 }
 
 func (p *TrialExpirationProcessor) processOne(ctx context.Context, agg *contract.ContractAggregate, dryRun bool) error {
@@ -159,35 +223,12 @@ func (p *TrialExpirationProcessor) processOne(ctx context.Context, agg *contract
 		UserID: "system:batch:trial_expiration",
 	}
 
-	// Guards — validated for both dry-run and real runs.
-	if agg.Status() != contract.ContractStatusTrialing {
-		return shared.NewDomainError(shared.ErrCodeInvalidStateTransition,
-			fmt.Sprintf("cannot end trial: status is %s", agg.Status()))
-	}
-	cfg := agg.TrialConfig()
-	if cfg == nil {
-		return shared.NewDomainError(shared.ErrCodeBusinessRule,
-			"trialing contract has no trial configuration")
-	}
-	if cfg.TrialEndDate.After(p.clock.Now()) {
-		return shared.NewDomainError(shared.ErrCodeBusinessRule,
-			fmt.Sprintf("trial has not ended yet (ends at %s)", cfg.TrialEndDate.Format("2006-01-02T15:04:05Z07:00")))
-	}
-
-	// Conversion follows TrialConfiguration.AutoConvert (design-decisions 2.1):
-	// AutoConvert=true converts to a paid contract; otherwise the trial ends
-	// without conversion and the contract is cancelled.
-	converted := cfg.AutoConvert
-
-	// RequirePaymentMethod gate (design-decisions 2.1: 支払い方法事前登録必須):
-	// auto-conversion without a registered payment method is BLOCKED — the
-	// contract stays Trialing, no hooks fire, and the batch records this
-	// contract as a failure (subject to ContinueOnError). The contract will
-	// keep failing on subsequent runs until the operator either registers a
-	// payment method or clears RequirePaymentMethod.
-	if converted && cfg.RequirePaymentMethod && agg.PaymentMethodID() == nil {
-		return shared.NewDomainError(shared.ErrCodeBusinessRule,
-			"cannot auto-convert trial: RequirePaymentMethod is set but no payment method is registered")
+	// Scan-time evaluation: a cheap pre-filter for real runs and the guard
+	// validation for dry runs. The scan-time conversion decision is discarded —
+	// the authoritative decision is re-evaluated inside the transaction against
+	// fresh state (issue #242).
+	if _, err := p.evaluateTrialEnd(agg); err != nil {
+		return err
 	}
 
 	if dryRun {
@@ -207,6 +248,7 @@ func (p *TrialExpirationProcessor) processOne(ctx context.Context, agg *contract
 		ended     *contract.ContractAggregate
 		oldStatus contract.ContractStatus
 		newStatus contract.ContractStatus
+		converted bool
 	)
 	if err := p.txManager.RunInTx(ctx, func(txCtx context.Context, repos tx.Repos) error {
 		contractRepo := repos.Contracts
@@ -217,6 +259,17 @@ func (p *TrialExpirationProcessor) processOne(ctx context.Context, agg *contract
 		if findErr != nil {
 			return fmt.Errorf("failed to load contract for trial end: %w", findErr)
 		}
+
+		// Re-evaluate the conversion decision against the FRESHLY loaded
+		// aggregate (issue #242): the scan-time decision above may be stale —
+		// e.g. the payment method was detached between the scan and this tx,
+		// in which case auto-converting with the stale decision would bypass
+		// the RequirePaymentMethod gate.
+		freshConverted, evalErr := p.evaluateTrialEnd(loaded)
+		if evalErr != nil {
+			return evalErr
+		}
+		converted = freshConverted
 
 		oldStatus = loaded.Status()
 		if endErr := loaded.EndTrial(converted, metadata); endErr != nil {

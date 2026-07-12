@@ -74,6 +74,21 @@ func NewTieredPrice(tiers []PriceTier, mode TieredPricingMode) (TieredPrice, err
 			fmt.Sprintf("tiered price has unknown mode %q", mode))
 	}
 
+	if err := validateTiers(tiers); err != nil {
+		return TieredPrice{}, err
+	}
+
+	return TieredPrice{Tiers: tiers, Mode: mode}, nil
+}
+
+// validateTiers checks the tier-shape invariants CalculatePrice depends on:
+// tiers sorted strictly ascending by UpTo, the UpTo==0 "unlimited" sentinel
+// only on the final tier, no negative UpTo, and a single currency across every
+// tier's UnitPrice and FlatFee. It is shared by NewTieredPrice (which surfaces
+// a violation as a construction error, issue #156) and CalculatePrice (which
+// panics on a violation, issue #238 — see the note on CalculatePrice).
+// tiers must be non-empty.
+func validateTiers(tiers []PriceTier) error {
 	currency := tiers[0].UnitPrice.Currency()
 	lastIdx := len(tiers) - 1
 	var prevUpTo int64
@@ -83,19 +98,19 @@ func NewTieredPrice(tiers []PriceTier, mode TieredPricingMode) (TieredPrice, err
 		// UpTo == 0 means unlimited and is only valid on the final tier.
 		if tier.UpTo == 0 {
 			if !isLast {
-				return TieredPrice{}, shared.NewDomainError(shared.ErrCodeValidation,
+				return shared.NewDomainError(shared.ErrCodeValidation,
 					fmt.Sprintf("tiered price: unlimited tier (UpTo=0) is only allowed as the last tier, found at index %d of %d", i, len(tiers)))
 			}
 		} else {
 			if tier.UpTo < 0 {
-				return TieredPrice{}, shared.NewDomainError(shared.ErrCodeValidation,
+				return shared.NewDomainError(shared.ErrCodeValidation,
 					fmt.Sprintf("tiered price: tier at index %d has negative UpTo %d", i, tier.UpTo))
 			}
 			// Strictly ascending among finite tiers. A finite tier after the
 			// first must exceed its predecessor's UpTo (a non-final UpTo=0 is
 			// already rejected above, so prevUpTo is always a finite bound here).
 			if i > 0 && tier.UpTo <= prevUpTo {
-				return TieredPrice{}, shared.NewDomainError(shared.ErrCodeValidation,
+				return shared.NewDomainError(shared.ErrCodeValidation,
 					fmt.Sprintf("tiered price: tiers must be sorted strictly ascending by UpTo, tier at index %d has UpTo %d <= previous %d", i, tier.UpTo, prevUpTo))
 			}
 			prevUpTo = tier.UpTo
@@ -103,16 +118,15 @@ func NewTieredPrice(tiers []PriceTier, mode TieredPricingMode) (TieredPrice, err
 
 		// All tier currencies must match each other.
 		if tier.UnitPrice.Currency() != currency {
-			return TieredPrice{}, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+			return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
 				fmt.Sprintf("tiered price: tier at index %d has UnitPrice currency %s, expected %s", i, tier.UnitPrice.Currency(), currency))
 		}
 		if tier.FlatFee.Currency() != currency {
-			return TieredPrice{}, shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
+			return shared.NewDomainError(shared.ErrCodeCurrencyMismatch,
 				fmt.Sprintf("tiered price: tier at index %d has FlatFee currency %s, expected %s", i, tier.FlatFee.Currency(), currency))
 		}
 	}
-
-	return TieredPrice{Tiers: tiers, Mode: mode}, nil
+	return nil
 }
 
 // Clone returns a deep copy of the TieredPrice with an independent Tiers
@@ -166,6 +180,15 @@ func mustAddTier(a, b shared.Money) shared.Money {
 // CalculatePrice calculates the price based on the tiered pricing mode.
 // Zero usage (or no configured tiers) returns zero money; negative usage
 // panics (see the PricingModel contract and assertNonNegativeUsage).
+//
+// Before computing a non-zero charge it re-validates the tier invariants
+// (sorted strictly ascending, unlimited sentinel only on the last tier, single
+// currency — see validateTiers) and PANICS on a violation (issue #238). A
+// TieredPrice built by bypassing NewTieredPrice with unsorted or overlapping
+// tiers would otherwise produce a silently wrong (even negative) charge —
+// a caller bug that must surface loudly rather than mis-bill. This is the same
+// policy as mustAddTier and assertNonNegativeUsage; the signature returns no
+// error, so a panic is the only loud channel.
 func (p TieredPrice) CalculatePrice(usage int64) shared.Money {
 	assertNonNegativeUsage("TieredPrice", usage)
 	if len(p.Tiers) == 0 || usage == 0 {
@@ -174,6 +197,13 @@ func (p TieredPrice) CalculatePrice(usage int64) shared.Money {
 			return shared.Zero(p.Tiers[0].UnitPrice.Currency())
 		}
 		return shared.Money{}
+	}
+
+	// Invariant re-check for constructor bypass (issue #238): a struct-literal
+	// TieredPrice with unsorted/overlapping or mixed-currency tiers must not
+	// silently bill a wrong amount.
+	if err := validateTiers(p.Tiers); err != nil {
+		panic(fmt.Sprintf("TieredPrice.CalculatePrice: invalid tiers (construct via NewTieredPrice): %v", err))
 	}
 
 	switch p.Mode {

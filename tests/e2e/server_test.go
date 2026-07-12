@@ -709,16 +709,26 @@ func handleProcessPayment(env *testEnv) http.HandlerFunc {
 		var req struct {
 			Amount          int64  `json:"amount"`
 			PaymentMethodID string `json:"payment_method_id"`
+			IdempotencyKey  string `json:"idempotency_key"`
 		}
 		if err := decodeJSON(r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
+		// ProcessPayment requires a non-empty idempotency key (issue #241).
+		// Runbooks that do not model an end-to-end token get a fresh unique key
+		// per request, which is what such a client edge would generate itself.
+		idempotencyKey := req.IdempotencyKey
+		if idempotencyKey == "" {
+			idempotencyKey = "e2e-pay-" + string(shared.NewPaymentID())
+		}
+
 		input := service.ProcessPaymentInput{
 			PaymentMethodID: req.PaymentMethodID,
 			Amount:          moneyJPY(req.Amount),
 			Currency:        shared.CurrencyJPY,
+			IdempotencyKey:  idempotencyKey,
 		}
 
 		p, err := env.paymentSvc.ProcessPayment(r.Context(), invoiceID, input)
@@ -1289,7 +1299,7 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 			for i, p := range c.Products {
 				productIDs[i] = shared.ProductID(p)
 			}
-			coupon := couponplugin.NewCoupon(
+			coupon, err := couponplugin.NewCoupon(
 				couponplugin.CouponID(shared.GenerateID()),
 				c.Code,
 				couponplugin.CouponType(c.Type),
@@ -1301,6 +1311,10 @@ func handleRegisterCouponPlugin(env *testEnv) http.HandlerFunc {
 				0,
 				productIDs,
 			)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			if err := repo.Save(r.Context(), coupon); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return

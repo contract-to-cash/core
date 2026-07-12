@@ -55,3 +55,48 @@ func TestNewUsagePrice_ClampCurrencyGuards(t *testing.T) {
 		})
 	}
 }
+
+// --- CalculatePrice invariant re-check on constructor bypass (issue #238) ---
+
+// A struct-literal UsagePrice with a wrong-currency clamp previously had the
+// clamp silently ignored (Money.GreaterThan no-ops on a currency mismatch) —
+// e.g. a USD Maximum on a JPY unit price silently failed to cap the charge.
+// CalculatePrice must panic instead, mirroring the mustAddTier policy.
+
+func TestUsagePrice_CalculatePrice_MismatchedMinimumPanics(t *testing.T) {
+	unitPrice := shared.NewMoney(new(big.Rat).SetInt64(10), shared.CurrencyJPY)
+	min := shared.NewMoney(new(big.Rat).SetInt64(100), shared.CurrencyUSD)
+	up := UsagePrice{UnitPrice: unitPrice, Minimum: &min}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for wrong-currency minimum clamp, got none")
+		}
+	}()
+	up.CalculatePrice(5)
+}
+
+func TestUsagePrice_CalculatePrice_MismatchedMaximumPanics(t *testing.T) {
+	unitPrice := shared.NewMoney(new(big.Rat).SetInt64(10), shared.CurrencyJPY)
+	max := shared.NewMoney(new(big.Rat).SetInt64(200), shared.CurrencyUSD)
+	up := UsagePrice{UnitPrice: unitPrice, Maximum: &max}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for wrong-currency maximum clamp, got none")
+		}
+	}()
+	up.CalculatePrice(50)
+}
+
+// Zero usage takes the early return and never consults the clamps, so it stays
+// panic-free even for an invalid literal — no wrong amount can be produced.
+func TestUsagePrice_CalculatePrice_ZeroUsageDoesNotValidateClamps(t *testing.T) {
+	unitPrice := shared.NewMoney(new(big.Rat).SetInt64(10), shared.CurrencyJPY)
+	max := shared.NewMoney(new(big.Rat).SetInt64(200), shared.CurrencyUSD)
+	up := UsagePrice{UnitPrice: unitPrice, Maximum: &max}
+
+	if got := up.CalculatePrice(0); !got.IsZero() {
+		t.Errorf("expected zero for zero usage, got %s", got.Amount().RatString())
+	}
+}

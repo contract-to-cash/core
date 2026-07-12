@@ -607,6 +607,11 @@ func (a *ContractAggregate) Resume(metadata eventstore.EventMetadata) error
 // HasPendingChange()==true を報告したり trialing からの解約後に trialConfig を残さないため。
 // Apply でのクリアは決定的・冪等なのでリプレイ安全。
 func (a *ContractAggregate) Cancel(reason string, metadata eventstore.EventMetadata) error
+// MarkPastDue は active な契約を past_due へ遷移させる（支払い失敗による Dunning 開始等）。
+// past_due からは回復（RecoverFromPastDue）・一時停止（リトライ上限到達）・解約が可能。
+func (a *ContractAggregate) MarkPastDue(reason string, metadata eventstore.EventMetadata) error
+// RecoverFromPastDue は past_due の契約を active へ戻す（支払い成功で未収が解消したとき等）。
+func (a *ContractAggregate) RecoverFromPastDue(metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) ChangePrice(newPriceID shared.PriceID, policy ChangePolicy, proration *PlanChangeProration, metadata eventstore.EventMetadata) error
 // UnscheduleChange は終端契約（cancelled/expired）では invalid_state_transition を返す（issue #196）。
 func (a *ContractAggregate) UnscheduleChange(reason string, metadata eventstore.EventMetadata) error
@@ -657,7 +662,7 @@ func (a *ContractAggregate) UpdatedAt() time.Time
 // domain/contract/events.go
 package contract
 
-// 全15種のドメインイベント
+// 全17種のドメインイベント
 const (
     EventTypeContractCreated         eventstore.EventType = "contract.created"
     EventTypeContractActivated       eventstore.EventType = "contract.activated"
@@ -674,6 +679,8 @@ const (
     EventTypeCancellationUnscheduled eventstore.EventType = "contract.cancellation_unscheduled"
     EventTypePriceChangeScheduled    eventstore.EventType = "contract.price_change_scheduled"
     EventTypePriceChangeUnscheduled  eventstore.EventType = "contract.price_change_unscheduled"
+    EventTypeContractPastDue         eventstore.EventType = "contract.past_due"
+    EventTypeContractRecovered       eventstore.EventType = "contract.recovered"
 )
 
 type ContractCreatedEvent struct {
@@ -791,6 +798,21 @@ type CancellationScheduledEvent struct {
 type CancellationUnscheduledEvent struct {
     ContractID    shared.ContractID
     UnscheduledAt time.Time
+}
+
+// ContractPastDueEvent は active な契約が past_due 状態に入ったとき（典型的には
+// 支払い失敗による Dunning 開始時）に発生する
+type ContractPastDueEvent struct {
+    ContractID shared.ContractID
+    Reason     string
+    MarkedAt   time.Time
+}
+
+// ContractRecoveredEvent は past_due の契約が active に復帰したとき（典型的には
+// 支払い成功時）に発生する
+type ContractRecoveredEvent struct {
+    ContractID  shared.ContractID
+    RecoveredAt time.Time
 }
 ```
 
@@ -1898,8 +1920,15 @@ type Repository interface {
 
 ### 9.1 請求計算サービス
 
+> **⚠️ 未実装の設計案**: `domain/billing` パッケージは現在のコードベースに**存在しない**。
+> 以下の `Calculator` / `ProrationResult` は将来ドメインサービスとして切り出す場合の
+> 設計スケッチである。現実装では、請求書生成は `application/service/billing_service.go`
+> （`GenerateInvoice` → `executeBillingPipeline`）が担い、日割り計算は**統合者側の計算機**が
+> 行って結果を `contract.PlanChangeProration` として `ContractAggregate.ChangePrice` /
+> `BillingService.GenerateProrationInvoice` に渡す（3.7 参照）。
+
 ```go
-// domain/billing/service.go
+// 設計スケッチ（未実装）— 仮に domain/billing/service.go として切り出す場合の形
 package billing
 
 import (

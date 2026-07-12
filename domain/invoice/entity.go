@@ -802,15 +802,40 @@ func WithPaymentMethodID(id *string) InvoiceOption {
 }
 
 // WithOriginalInvoiceID sets the original invoice ID (for reissued invoices).
+//
+// A self-reference (id == the invoice's own ID) makes NewInvoice fail with a
+// validation DomainError — the same guard SetOriginalInvoiceID applies (issue
+// #162 L-9, closed for the option path in #238): the chain root is by
+// definition an EARLIER invoice, and a self-link would corrupt revision-chain
+// traversal.
 func WithOriginalInvoiceID(id shared.InvoiceID) InvoiceOption {
 	return func(inv *Invoice) {
+		if id == inv.id {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("original invoice ID must not reference the invoice itself: %s", id))
+			}
+			return
+		}
 		inv.originalInvoiceID = &id
 	}
 }
 
 // WithRevisionOf sets the revision link to the original invoice.
+//
+// A self-reference (id == the invoice's own ID) makes NewInvoice fail with a
+// validation DomainError — the same guard SetRevisionOf applies (issue #162
+// L-9, closed for the option path in #238): an invoice cannot be a revision of
+// itself, and linking one would create a cycle that breaks chain traversal.
 func WithRevisionOf(id shared.InvoiceID) InvoiceOption {
 	return func(inv *Invoice) {
+		if id == inv.id {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("revision link must not reference the invoice itself: %s", id))
+			}
+			return
+		}
 		inv.revisionOf = &id
 	}
 }

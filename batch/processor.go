@@ -28,10 +28,33 @@ type BatchOptions struct {
 	Limit int
 }
 
+// DryRunAction records, for a dry run (BatchOptions.DryRun=true), the action a
+// real run would take for a single would-succeed item (issue #242). Processors
+// define their own action labels (e.g. RenewalActionRenew / RenewalActionExpire
+// / RenewalActionCancel for ContractRenewalProcessor).
+type DryRunAction struct {
+	// ItemID identifies the item (e.g. contract ID).
+	ItemID string
+	// Action is the processor-specific action label.
+	Action string
+}
+
 // BatchResult summarizes the outcome of a batch operation.
+//
+// Accounting invariant: Total == Succeeded + Failed + Skipped (issue #242).
 type BatchResult struct {
 	Total     int
 	Succeeded int
 	Failed    int
-	Errors    []error
+	// Skipped counts items that were not attempted because the run stopped
+	// early after a failure with ContinueOnError=false, including in-flight
+	// concurrent items that were aborted by the early-stop context
+	// cancellation (a cancellation is not a genuine per-item failure and is
+	// not recorded in Errors).
+	Skipped int
+	Errors  []error
+	// DryRunActions lists, for dry runs only, the action a real run would
+	// take for each would-succeed item (one entry per Succeeded item, in
+	// processing order). Real runs leave it empty.
+	DryRunActions []DryRunAction
 }

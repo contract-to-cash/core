@@ -385,14 +385,18 @@ func (s *BillingService) RegenerateInvoice(ctx context.Context, contractID share
 			"cannot regenerate invoice: no voided invoice found for this period")
 	}
 
-	// Inline duplicate check: reject if a non-voided invoice already exists for
-	// this period (same logic as checkDuplicateInvoice for subscription/usage-based,
-	// but using the already-fetched existing slice).
+	// Inline duplicate check: reject if a non-voided, non-proration invoice
+	// already exists for this period (same logic as checkDuplicateInvoice for
+	// subscription/usage-based, but using the already-fetched existing slice).
+	// Proration invoices are exempt (issue #232): they intentionally coexist
+	// with the period's regular invoice, matching the per-period uniqueness
+	// contract in invoice.Repository.Save and its adapter implementations.
 	for _, inv := range existing {
-		if inv.Status() != invoice.InvoiceStatusVoided {
-			return nil, shared.NewDomainError(shared.ErrCodeConflict,
-				"invoice already exists for this billing period")
+		if inv.Status() == invoice.InvoiceStatusVoided || inv.IsProration() {
+			continue
 		}
+		return nil, shared.NewDomainError(shared.ErrCodeConflict,
+			"invoice already exists for this billing period")
 	}
 
 	// Calculate subtotal based on contract type
@@ -676,6 +680,23 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 			}
 		}
 
+		// Configuration guard (issue #241): when the service was constructed with
+		// a balance repository (WithBalanceRepo) but the transaction manager's
+		// Repos omits Balances, fail loudly instead of silently skipping credit
+		// application below — a silent skip over-bills every customer whose
+		// ledger credit should have been applied, and silently skips restoring
+		// credit consumed by a voided invoice. tx.Run fills missing repos from a
+		// reposProvider (e.g. the in-memory NoopTxManager) when joining an outer
+		// transaction, and the default NoopTxManager carries the wired balance
+		// repo, so demos/tests are unaffected; this fires only for a real
+		// TxManager whose Repos wiring forgot Balances. When no balance repo was
+		// ever wired, credit application is intentionally disabled and the skip
+		// below is the documented behavior.
+		if s.balanceRepo != nil && repos.Balances == nil {
+			return shared.NewDomainError(shared.ErrCodeValidation,
+				"billing misconfiguration: a balance repository is wired (WithBalanceRepo) but the TxManager's Repos does not provide Balances; credit application would be silently skipped — include the balance repository in the transaction-scoped Repos")
+		}
+
 		// Restore credit consumed by a voided invoice (issue #184) BEFORE applying
 		// credit to the new invoice, so the restored balance is available for
 		// FIFO re-application below. This is what makes void-and-recreate
@@ -868,10 +889,9 @@ func (s *BillingService) calculateSubtotal(ctx context.Context, agg *contract.Co
 	// 1. Validate billing period matches contract's current period
 	//    Skip validation for draft contracts (currentPeriod is zero).
 	if !agg.CurrentPeriod().IsZero() && !billingPeriod.Equals(agg.CurrentPeriod()) {
-		return shared.Money{}, nil, fmt.Errorf(
-			"billing period mismatch: requested %s but contract current period is %s",
-			billingPeriod, agg.CurrentPeriod(),
-		)
+		return shared.Money{}, nil, shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("billing period mismatch: requested %s but contract current period is %s",
+				billingPeriod, agg.CurrentPeriod()))
 	}
 
 	// 2. Validate PriceID is set
@@ -1095,7 +1115,11 @@ func (s *BillingService) applyBalances(ctx context.Context, balanceRepo balance.
 // credit restoration commit or roll back together. It joins an active
 // transaction stamped on ctx (via tx.Run) and uses the transaction-scoped
 // repositories; when no balance repository is wired the restoration is a no-op
-// (the voided-status guard still runs). The operation is idempotent — a double
+// (the voided-status guard still runs). When a balance repository IS wired but
+// the TxManager's Repos omits Balances, the call fails with a configuration
+// DomainError instead of silently skipping the restoration (issue #241 — same
+// misbilling class as silently skipping credit application in the billing
+// pipeline). The operation is idempotent — a double
 // void / retry restores each application at most once (see restoreBalances).
 //
 // This is the reversal used by void paths that do NOT go through
@@ -1121,7 +1145,18 @@ func (s *BillingService) RestoreBalancesForVoidedInvoice(ctx context.Context, in
 			return shared.NewDomainError(shared.ErrCodeBusinessRule,
 				fmt.Sprintf("cannot restore balances: invoice %s is %s, not voided", invoiceID, inv.Status()))
 		}
+		// Configuration guard (issue #241): when a balance repository is wired
+		// (WithBalanceRepo) but the TxManager's Repos omits Balances, fail loudly —
+		// a reissue that silently skips restoring the voided invoice's consumed
+		// credit is the same misbilling class as silently skipping credit
+		// application in the billing pipeline. When no balance repo was ever
+		// wired, there is no credit ledger to restore and the no-op below is the
+		// documented behavior.
 		if repos.Balances == nil {
+			if s.balanceRepo != nil {
+				return shared.NewDomainError(shared.ErrCodeValidation,
+					"billing misconfiguration: a balance repository is wired (WithBalanceRepo) but the TxManager's Repos does not provide Balances; balance restoration would be silently skipped — include the balance repository in the transaction-scoped Repos")
+			}
 			return nil
 		}
 		_, err = s.restoreBalances(txCtx, repos.Balances, invoiceID)
@@ -1206,22 +1241,26 @@ func (s *BillingService) restoreBalances(ctx context.Context, balanceRepo balanc
 	return totalRestored, nil
 }
 
-// rejectIfActivePeriodInvoice returns a conflict DomainError when a non-voided
-// invoice already exists for the given contract and billing period. It reads
-// through the transaction-scoped repo (when active) so it observes writes made
-// earlier in the same transaction. RegenerateInvoice uses it as its in-tx
-// duplicate re-check (issue #149): the voided original is excluded, so
-// void-and-recreate for the same period still succeeds.
+// rejectIfActivePeriodInvoice returns a conflict DomainError when a non-voided,
+// non-proration invoice already exists for the given contract and billing
+// period. It reads through the transaction-scoped repo (when active) so it
+// observes writes made earlier in the same transaction. RegenerateInvoice uses
+// it as its in-tx duplicate re-check (issue #149): the voided original is
+// excluded, so void-and-recreate for the same period still succeeds. Proration
+// invoices are likewise excluded (issue #232): they intentionally coexist with
+// the period's regular invoice, mirroring the per-period uniqueness contract in
+// invoice.Repository.Save (voided and proration invoices are exempt).
 func (s *BillingService) rejectIfActivePeriodInvoice(ctx context.Context, contractID shared.ContractID, billingPeriod shared.DateRange) error {
 	existing, err := s.invoiceRepoFor(ctx).FindByContractAndPeriod(ctx, contractID, billingPeriod)
 	if err != nil {
 		return fmt.Errorf("failed to check existing invoices for period: %w", err)
 	}
 	for _, inv := range existing {
-		if inv.Status() != invoice.InvoiceStatusVoided {
-			return shared.NewDomainError(shared.ErrCodeConflict,
-				"invoice already exists for this billing period")
+		if inv.Status() == invoice.InvoiceStatusVoided || inv.IsProration() {
+			continue
 		}
+		return shared.NewDomainError(shared.ErrCodeConflict,
+			"invoice already exists for this billing period")
 	}
 	return nil
 }
@@ -1230,11 +1269,24 @@ func (s *BillingService) rejectIfActivePeriodInvoice(ctx context.Context, contra
 // Reads go through the transaction-scoped invoice repo (when a transaction is
 // active) so a void written earlier in the same transaction is visible — see
 // invoiceRepoFor.
+//
+// Proration invoices are exempt from the duplicate guards (issue #232): they
+// intentionally coexist with the period's regular invoice, matching the
+// per-period uniqueness contract in invoice.Repository.Save (its partial unique
+// index ranges over non-voided, non-proration invoices only). Without the
+// exemption, a mid-period upgrade proration would permanently block the
+// period's regular invoice. The one-time branch gets the same exemption:
+// GenerateProrationInvoice guards contract STATUS (active) but not contract
+// TYPE, so a proration adjustment can exist for an active one-time contract,
+// and "only one invoice ever" means one regular invoice.
 func (s *BillingService) checkDuplicateInvoice(ctx context.Context, agg *contract.ContractAggregate, billingPeriod shared.DateRange) error {
 	invoiceRepo := s.invoiceRepoFor(ctx)
 	switch {
 	case agg.Status() == contract.ContractStatusDraft:
-		// Draft contracts: only one draft invoice allowed
+		// Draft contracts: only one draft invoice allowed. No proration
+		// exemption needed here: GenerateProrationInvoice requires an ACTIVE
+		// contract and there is no active→draft transition, so a draft
+		// contract cannot have proration invoices.
 		existing, err := invoiceRepo.FindByContractAndStatus(ctx, agg.ContractID(), invoice.InvoiceStatusDraft)
 		if err != nil {
 			return fmt.Errorf("failed to check existing draft invoices: %w", err)
@@ -1245,29 +1297,33 @@ func (s *BillingService) checkDuplicateInvoice(ctx context.Context, agg *contrac
 		}
 
 	case agg.GetContractType() == contract.ContractTypeOneTime:
-		// One-time contracts: only one invoice ever
+		// One-time contracts: only one regular invoice ever (voided and
+		// proration invoices are exempt)
 		existing, err := invoiceRepo.FindByContractID(ctx, agg.ContractID())
 		if err != nil {
 			return fmt.Errorf("failed to check existing invoices: %w", err)
 		}
 		for _, inv := range existing {
-			if inv.Status() != invoice.InvoiceStatusVoided {
-				return shared.NewDomainError(shared.ErrCodeConflict,
-					"invoice already exists for one-time contract")
+			if inv.Status() == invoice.InvoiceStatusVoided || inv.IsProration() {
+				continue
 			}
+			return shared.NewDomainError(shared.ErrCodeConflict,
+				"invoice already exists for one-time contract")
 		}
 
 	default:
-		// Subscription/usage-based: one invoice per billing period
+		// Subscription/usage-based: one regular invoice per billing period
+		// (voided and proration invoices are exempt)
 		existing, err := invoiceRepo.FindByContractAndPeriod(ctx, agg.ContractID(), billingPeriod)
 		if err != nil {
 			return fmt.Errorf("failed to check existing invoices for period: %w", err)
 		}
 		for _, inv := range existing {
-			if inv.Status() != invoice.InvoiceStatusVoided {
-				return shared.NewDomainError(shared.ErrCodeConflict,
-					"invoice already exists for this billing period")
+			if inv.Status() == invoice.InvoiceStatusVoided || inv.IsProration() {
+				continue
 			}
+			return shared.NewDomainError(shared.ErrCodeConflict,
+				"invoice already exists for this billing period")
 		}
 	}
 

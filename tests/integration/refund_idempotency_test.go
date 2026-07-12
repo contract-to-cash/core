@@ -200,7 +200,9 @@ func TestRefund_RetryAfterGatewayTimeout_ReusesIdempotencyKey(t *testing.T) {
 	paymentID := pmts[0].ID()
 
 	// Make the first Refund call for the derived key fail (gateway timeout).
-	expectedKey := "refund-" + string(paymentID) + "-JPY-0"
+	// The derived key binds the payment, the prior cumulative refunded total
+	// (0), and the refund amount (10000) — issue #235.
+	expectedKey := "refund-" + string(paymentID) + "-JPY-0-10000"
 	gw.failKeys[expectedKey] = 1
 
 	// First refund attempt: gateway "times out" → error, nothing recorded.
@@ -400,8 +402,9 @@ func TestRefund_SequentialPartialRefunds_UseDistinctKeys(t *testing.T) {
 	if keys[0] == keys[1] {
 		t.Errorf("distinct partial refunds must use DIFFERENT idempotency keys; both were %q", keys[0])
 	}
-	wantFirst := "refund-" + string(paymentID) + "-JPY-0"
-	wantSecond := "refund-" + string(paymentID) + "-JPY-3000"
+	// Keys bind (prior cumulative total, amount) — issue #235.
+	wantFirst := "refund-" + string(paymentID) + "-JPY-0-3000"
+	wantSecond := "refund-" + string(paymentID) + "-JPY-3000-2000"
 	if keys[0] != wantFirst {
 		t.Errorf("first key: want %q, got %q", wantFirst, keys[0])
 	}

@@ -743,6 +743,12 @@ func TestCalculateSubtotal_BillingPeriodMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for billing period mismatch")
 	}
+	// The mismatch must surface as a structured business-rule DomainError,
+	// not a bare fmt.Errorf.
+	assertDomainError(t, err, shared.ErrCodeBusinessRule)
+	if !strings.Contains(err.Error(), "billing period mismatch") {
+		t.Errorf("expected message to mention the billing period mismatch, got %q", err.Error())
+	}
 }
 
 func TestCalculateSubtotal_SubscriptionUsesPriceEntity(t *testing.T) {

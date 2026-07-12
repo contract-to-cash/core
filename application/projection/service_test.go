@@ -3,6 +3,7 @@ package projection
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -99,10 +100,11 @@ func TestProjectionService_AsyncMode_LogsError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start processes events from the channel; channel is closed so Start will return nil
+	// Start processes events from the channel; the mock closes the channel with
+	// the context still active, so Start reports ErrSubscriptionClosed (#246).
 	err := svc.Start(ctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrSubscriptionClosed) {
+		t.Fatalf("expected ErrSubscriptionClosed, got: %v", err)
 	}
 
 	logOutput := buf.String()
@@ -353,8 +355,10 @@ func TestProjectionService_CheckpointResumeAfterRestart(t *testing.T) {
 	proj1 := &positionRecordingProjector{}
 	svc1 := NewProjectionService(es, ProjectionOptions{SyncMode: true, MaxRetries: 0, CheckpointStore: cp, ProjectionName: "p"})
 	svc1.RegisterProjector(proj1)
-	if err := svc1.Start(context.Background()); err != nil {
-		t.Fatalf("first Start failed: %v", err)
+	// The mock feed closes the channel after draining with the context still
+	// active, so Start reports ErrSubscriptionClosed (#246).
+	if err := svc1.Start(context.Background()); !errors.Is(err, ErrSubscriptionClosed) {
+		t.Fatalf("first Start: expected ErrSubscriptionClosed, got: %v", err)
 	}
 	if got := cp.positions["p"]; got != 3 {
 		t.Fatalf("expected checkpoint 3 after first run, got %d", got)
@@ -373,8 +377,8 @@ func TestProjectionService_CheckpointResumeAfterRestart(t *testing.T) {
 	proj2 := &positionRecordingProjector{}
 	svc2 := NewProjectionService(es, ProjectionOptions{SyncMode: true, MaxRetries: 0, CheckpointStore: cp, ProjectionName: "p"})
 	svc2.RegisterProjector(proj2)
-	if err := svc2.Start(context.Background()); err != nil {
-		t.Fatalf("second Start failed: %v", err)
+	if err := svc2.Start(context.Background()); !errors.Is(err, ErrSubscriptionClosed) {
+		t.Fatalf("second Start: expected ErrSubscriptionClosed, got: %v", err)
 	}
 	if len(proj2.seen) != 2 || proj2.seen[0] != 4 || proj2.seen[1] != 5 {
 		t.Fatalf("expected exactly missed events [4 5], got %v", proj2.seen)
@@ -401,8 +405,8 @@ func TestProjectionService_CheckpointNotAdvancedPastAsyncFailure(t *testing.T) {
 	})
 	svc.RegisterProjector(proj)
 
-	if err := svc.Start(context.Background()); err != nil {
-		t.Fatalf("Start failed: %v", err)
+	if err := svc.Start(context.Background()); !errors.Is(err, ErrSubscriptionClosed) {
+		t.Fatalf("expected ErrSubscriptionClosed, got: %v", err)
 	}
 
 	// Event 1 succeeded (checkpoint 1). Event 2 failed → checkpoint frozen.
@@ -477,9 +481,95 @@ func TestProjectionService_NoLogger_NoPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Should not panic even without a logger
+	// Should not panic even without a logger. The mock closes the channel with
+	// the context still active, so the sentinel (not a panic) is expected.
 	err := svc.Start(ctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if !errors.Is(err, ErrSubscriptionClosed) {
+		t.Fatalf("expected ErrSubscriptionClosed, got: %v", err)
+	}
+}
+
+// --- Start return-value classification (issue #246) ---
+
+// cancelClosingMockStore mirrors the in-memory reference store's lifecycle:
+// the subscription channel stays open until the context is cancelled, at which
+// point it is closed. This lets tests exercise the race where Start observes
+// the closed channel (!ok) instead of <-ctx.Done().
+type cancelClosingMockStore struct {
+	mockEventStore
+}
+
+func (m *cancelClosingMockStore) Subscribe(ctx context.Context, _ int64) (<-chan eventstore.Event, error) {
+	ch := make(chan eventstore.Event)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func TestProjectionService_Start_SubscriptionClosedWithLiveContext(t *testing.T) {
+	// Channel closes while the context is still active → abnormal termination.
+	es := &mockEventStore{events: []eventstore.Event{
+		{StreamID: "s", Type: "e", Version: 1, GlobalPosition: 1},
+	}}
+	proj := &recordingProjector{}
+	svc := NewProjectionService(es, ProjectionOptions{SyncMode: true})
+	svc.RegisterProjector(proj)
+
+	err := svc.Start(context.Background())
+	if !errors.Is(err, ErrSubscriptionClosed) {
+		t.Fatalf("expected ErrSubscriptionClosed for a close with a live context, got: %v", err)
+	}
+	// The events delivered before the close were still processed.
+	if len(proj.projected) != 1 {
+		t.Errorf("expected 1 event processed before the close, got %d", len(proj.projected))
+	}
+}
+
+func TestProjectionService_Start_GracefulShutdownOnContextCancel(t *testing.T) {
+	// The store closes the channel in response to ctx cancellation (like the
+	// in-memory reference store). Whichever select branch Start observes first
+	// (ctx.Done or the closed channel), cancellation must be classified as a
+	// graceful shutdown: ctx.Err(), never ErrSubscriptionClosed.
+	es := &cancelClosingMockStore{}
+	svc := NewProjectionService(es, ProjectionOptions{SyncMode: true})
+	svc.RegisterProjector(&recordingProjector{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- svc.Start(ctx) }()
+	cancel()
+
+	select {
+	case err := <-done:
+		if errors.Is(err, ErrSubscriptionClosed) {
+			t.Fatalf("context cancellation must not be classified as ErrSubscriptionClosed, got: %v", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled on graceful shutdown, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after context cancellation")
+	}
+}
+
+func TestProjectionService_Start_ClosedChannelWithCancelledContext(t *testing.T) {
+	// Deterministically exercise the !ok branch with an already-done context:
+	// the mock's channel is already closed AND the context is already cancelled,
+	// so whichever branch the select picks must classify this as cancellation.
+	es := &mockEventStore{} // Subscribe returns an immediately-closed channel
+	svc := NewProjectionService(es, ProjectionOptions{SyncMode: true})
+	svc.RegisterProjector(&recordingProjector{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := svc.Start(ctx)
+	if errors.Is(err, ErrSubscriptionClosed) {
+		t.Fatalf("cancelled context must win over the closed channel, got: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
 	}
 }

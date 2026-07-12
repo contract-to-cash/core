@@ -6,15 +6,21 @@ to respond quickly.
 
 ## Supported Versions
 
-This project is **pre-v1.0** and has not yet cut a tagged release. During this phase:
+This project is **pre-v1.0**. Tagged releases exist and start at
+[v0.2.0](https://github.com/contract-to-cash/core/releases), the first curated
+release (a `v0.1.0` tag predates the curated changelog and carries no release
+notes). During this phase:
 
-- Security fixes are applied to the **latest `main`** only.
-- There are no backported patches to older commits or pre-release tags.
+- Security fixes land on **`main`** and ship in the **next release tag**; only the
+  **latest release tag** (plus `main`) is supported.
+- There are no backported patches to older release tags.
 - Once v1.0 is tagged, this policy will be updated with a concrete supported-version
   window.
 
-Pin to a specific commit if you need reproducible builds, and track `main` for
-security fixes.
+Pin the [latest release tag](https://github.com/contract-to-cash/core/releases) if
+you need reproducible builds, and upgrade to each new release for security fixes.
+Please report vulnerabilities against a supported version — the latest release tag
+or `main`.
 
 ## Reporting a Vulnerability
 

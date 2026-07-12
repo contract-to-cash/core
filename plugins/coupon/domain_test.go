@@ -1,6 +1,7 @@
 package coupon
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -9,15 +10,85 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
+// mustCoupon unwraps NewCoupon's (coupon, error) in tests whose inputs are
+// known-valid. The nil-value rejection itself is exercised explicitly in
+// TestNewCoupon_NilValueRejected.
+func mustCoupon(c *Coupon, err error) *Coupon {
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
+// TestNewCoupon_NilValueRejected verifies a nil *big.Rat value is rejected at
+// construction with a validation DomainError, instead of surfacing later as a
+// Money.Multiply(nil) / NewMoney(nil, ...) panic inside the billing pipeline.
+func TestNewCoupon_NilValueRejected(t *testing.T) {
+	c, err := NewCoupon(
+		"c-nil", "NILVALUE", CouponTypePercentage,
+		nil, shared.CurrencyJPY,
+		nil, nil,
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+		nil, 0, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error for nil value, got nil")
+	}
+	if c != nil {
+		t.Errorf("expected nil coupon on error, got %v", c)
+	}
+	var de *shared.DomainError
+	if !errors.As(err, &de) {
+		t.Fatalf("expected *shared.DomainError, got %T: %v", err, err)
+	}
+	if de.Code != shared.ErrCodeValidation {
+		t.Errorf("expected code %s, got %s", shared.ErrCodeValidation, de.Code)
+	}
+}
+
+// TestNewCoupon_ValidValuesConstruct verifies the guard does not reject valid
+// percentage and fixed coupons.
+func TestNewCoupon_ValidValuesConstruct(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		couponType CouponType
+		value      *big.Rat
+	}{
+		{"percentage", CouponTypePercentage, big.NewRat(10, 100)},
+		{"fixed", CouponTypeFixed, big.NewRat(500, 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := NewCoupon(
+				"c-ok", "OK", tc.couponType,
+				tc.value, shared.CurrencyJPY,
+				nil, nil,
+				time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+				nil, 0, nil,
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if c == nil {
+				t.Fatal("expected coupon, got nil")
+			}
+			if c.Value().Cmp(tc.value) != 0 {
+				t.Errorf("expected value %s, got %s", tc.value.RatString(), c.Value().RatString())
+			}
+		})
+	}
+}
+
 func TestCoupon_IsValid_WithinPeriod(t *testing.T) {
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c1", "CODE10", CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 
 	at := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	if !c.IsValid(at) {
@@ -26,14 +97,14 @@ func TestCoupon_IsValid_WithinPeriod(t *testing.T) {
 }
 
 func TestCoupon_IsValid_OutsidePeriod(t *testing.T) {
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c1", "CODE10", CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 
 	// Before validFrom
 	before := time.Date(2025, 12, 31, 23, 59, 59, 0, time.UTC)
@@ -50,14 +121,14 @@ func TestCoupon_IsValid_OutsidePeriod(t *testing.T) {
 
 func TestCoupon_IsValid_UsageLimitReached(t *testing.T) {
 	limit := 5
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c1", "CODE10", CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		&limit, 5, nil,
-	)
+	))
 
 	at := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	if c.IsValid(at) {
@@ -66,14 +137,14 @@ func TestCoupon_IsValid_UsageLimitReached(t *testing.T) {
 }
 
 func TestCoupon_CalculateDiscount_Percentage(t *testing.T) {
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c1", "CODE10", CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	discount, _ := c.CalculateDiscount(subtotal)
@@ -85,14 +156,14 @@ func TestCoupon_CalculateDiscount_Percentage(t *testing.T) {
 }
 
 func TestCoupon_CalculateDiscount_Fixed(t *testing.T) {
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c1", "FIX500", CouponTypeFixed,
 		big.NewRat(500, 1), shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	discount, _ := c.CalculateDiscount(subtotal)
@@ -105,14 +176,14 @@ func TestCoupon_CalculateDiscount_Fixed(t *testing.T) {
 
 func TestCoupon_CalculateDiscount_MaxDiscountCap(t *testing.T) {
 	maxDiscount := shared.NewMoney(big.NewRat(500, 1), shared.CurrencyJPY)
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c1", "CODE50", CouponTypePercentage,
 		big.NewRat(50, 100), shared.CurrencyJPY,
 		nil, &maxDiscount,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 
 	// 50% of 10000 = 5000, but maxDiscount caps at 500
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
@@ -153,14 +224,14 @@ func TestCoupon_IsApplicableToProduct(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := NewCoupon(
+			c := mustCoupon(NewCoupon(
 				"c1", "CODE", CouponTypePercentage,
 				big.NewRat(10, 100), shared.CurrencyJPY,
 				nil, nil,
 				time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 				time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 				nil, 0, tt.applicableTo,
-			)
+			))
 			if got := c.IsApplicableToProduct(tt.productID); got != tt.want {
 				t.Errorf("IsApplicableToProduct(%q) = %v, want %v", tt.productID, got, tt.want)
 			}
@@ -216,14 +287,14 @@ func TestCoupon_IsAccountAllowed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := NewCoupon(
+			c := mustCoupon(NewCoupon(
 				"c1", "CODE", CouponTypePercentage,
 				big.NewRat(10, 100), shared.CurrencyJPY,
 				nil, nil,
 				time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 				time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 				nil, 0, nil,
-			)
+			))
 			if len(tt.allowed) > 0 {
 				c.WithAllowedAccountIDs(tt.allowed)
 			}
@@ -238,14 +309,14 @@ func TestCoupon_IsAccountAllowed(t *testing.T) {
 }
 
 func TestCoupon_CodeType(t *testing.T) {
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c1", "PROMO", CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 
 	// Default is shared
 	if c.CodeType() != CodeTypeShared {
@@ -266,13 +337,13 @@ func TestCoupon_Getters(t *testing.T) {
 	validFrom := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	validUntil := time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC)
 
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c1", "CODE15", CouponTypePercentage,
 		value, shared.CurrencyJPY,
 		&minAmount, &maxDiscount,
 		validFrom, validUntil,
 		&usageLimit, 3, []shared.ProductID{"plan-a"},
-	)
+	))
 
 	t.Run("CouponType", func(t *testing.T) {
 		if got := c.CouponType(); got != CouponTypePercentage {
@@ -346,14 +417,14 @@ func TestCoupon_Getters(t *testing.T) {
 }
 
 func TestCoupon_Getters_NilOptionalFields(t *testing.T) {
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c2", "CODE20", CouponTypeFixed,
 		big.NewRat(500, 1), shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 
 	t.Run("MinAmount nil", func(t *testing.T) {
 		if got := c.MinAmount(); got != nil {
@@ -390,14 +461,14 @@ func TestCoupon_Getters_SliceAndCurrencyFields(t *testing.T) {
 	allowed := []shared.AccountID{"acct-1", "acct-2"}
 	blocked := []shared.AccountID{"acct-3"}
 
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c1", "FIX500", CouponTypeFixed,
 		big.NewRat(500, 1), shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, products,
-	).
+	)).
 		WithApplicableContractTypes(contractTypes).
 		WithAllowedAccountIDs(allowed).
 		WithBlockedAccountIDs(blocked)
@@ -481,14 +552,14 @@ func TestCoupon_Getters_SliceAndCurrencyFields(t *testing.T) {
 	})
 
 	t.Run("empty slices stay empty", func(t *testing.T) {
-		plain := NewCoupon(
+		plain := mustCoupon(NewCoupon(
 			"c2", "PLAIN", CouponTypePercentage,
 			big.NewRat(10, 100), shared.CurrencyJPY,
 			nil, nil,
 			time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 			nil, 0, nil,
-		)
+		))
 		if got := plain.ApplicableTo(); len(got) != 0 {
 			t.Errorf("ApplicableTo() = %v, want empty", got)
 		}
@@ -512,14 +583,14 @@ func TestCoupon_GetterRoundTrip(t *testing.T) {
 	maxDiscount := shared.NewMoney(big.NewRat(300, 1), shared.CurrencyJPY)
 	usageLimit := 100
 
-	original := NewCoupon(
+	original := mustCoupon(NewCoupon(
 		"c1", "FIX500", CouponTypeFixed,
 		big.NewRat(500, 1), shared.CurrencyJPY,
 		&minAmount, &maxDiscount,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		&usageLimit, 7, []shared.ProductID{"prod-a"},
-	).
+	)).
 		WithCodeType(CodeTypeUnique).
 		WithPerAccountUsageLimit(2).
 		WithApplicableContractTypes([]contract.ContractType{contract.ContractTypeSubscription}).
@@ -528,14 +599,14 @@ func TestCoupon_GetterRoundTrip(t *testing.T) {
 
 	// Rebuild exclusively from public getters (what Save/FindByCode round-trip
 	// through a repository does).
-	rebuilt := NewCoupon(
+	rebuilt := mustCoupon(NewCoupon(
 		original.ID(), original.Code(), original.CouponType(),
 		original.Value(), original.Currency(),
 		original.MinAmount(), original.MaxDiscount(),
 		original.ValidFrom(), original.ValidUntil(),
 		original.UsageLimit(), original.UsedCount(),
 		original.ApplicableTo(),
-	).
+	)).
 		WithCodeType(original.CodeType()).
 		WithApplicableContractTypes(original.ApplicableContractTypes()).
 		WithAllowedAccountIDs(original.AllowedAccountIDs()).
@@ -661,14 +732,14 @@ func TestCoupon_IsApplicableToContractType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := NewCoupon(
+			c := mustCoupon(NewCoupon(
 				"c1", "CODE", CouponTypePercentage,
 				big.NewRat(10, 100), shared.CurrencyJPY,
 				nil, nil,
 				time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 				time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 				nil, 0, nil,
-			)
+			))
 			if len(tt.contractTypes) > 0 {
 				c.WithApplicableContractTypes(tt.contractTypes)
 			}

@@ -323,16 +323,34 @@ type BatchProcessor interface {
 }
 
 type BatchOptions struct {
-    DryRun          bool
+    DryRun          bool // report what would be done, without side effects
     ContinueOnError bool
     Concurrency     int
+    Limit           int  // cap on due items loaded per run (0 = unlimited, issue #197)
 }
 
+// Accounting invariant: Total == Succeeded + Failed + Skipped (issue #242).
 type BatchResult struct {
     Total     int
     Succeeded int
     Failed    int
+    // Skipped counts items not attempted because the run stopped early after a
+    // failure with ContinueOnError=false — including in-flight concurrent items
+    // aborted by the early-stop context cancellation (not recorded in Errors)
+    // and items never launched.
+    Skipped   int
     Errors    []error
+    // DryRunActions (dry runs only): the action a real run would take for each
+    // would-succeed item, one entry per Succeeded item in processing order.
+    // ContractRenewalProcessor labels: "renew" / "expire" (autoRenew=false) /
+    // "cancel" (scheduled cancelAtPeriodEnd) — a dry run mirrors the real run's
+    // classification instead of reporting these as failures (issue #242).
+    DryRunActions []DryRunAction
+}
+
+type DryRunAction struct {
+    ItemID string // e.g. contract ID
+    Action string // processor-specific label
 }
 ```
 

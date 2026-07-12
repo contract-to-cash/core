@@ -17,6 +17,15 @@ import (
 	"github.com/contract-to-cash/core/plugins/coupon"
 )
 
+// mustCoupon unwraps NewCoupon's (coupon, error) for fixtures whose inputs are
+// known-valid (the nil-value guard is unit-tested in plugins/coupon).
+func mustCoupon(c *coupon.Coupon, err error) *coupon.Coupon {
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
 // These tests exercise issue #185: coupon redemption must not be persisted as a
 // side effect of the discount CALCULATION hook (which runs before the billing
 // transaction). Redemptions are confirmed idempotently in AfterCalculation,
@@ -182,13 +191,13 @@ func newCouponBillingService(
 func tenPercentCoupon(clock shared.Clock) *coupon.Coupon {
 	usageLimit := 5
 	now := clock.Now()
-	return coupon.NewCoupon(
+	return mustCoupon(coupon.NewCoupon(
 		"cpn-185", "SAVE10", coupon.CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		now.AddDate(-1, 0, 0), now.AddDate(1, 0, 0),
 		&usageLimit, 0, nil,
-	).WithPerAccountUsageLimit(1)
+	)).WithPerAccountUsageLimit(1)
 }
 
 // Invariant (i) + (ii): a billing pipeline that fails after the discount hook
@@ -277,13 +286,13 @@ func TestCouponRedemption_RegenerateSamePeriod_NoDoubleRedeem(t *testing.T) {
 func globalLimitOneCoupon(clock shared.Clock) *coupon.Coupon {
 	usageLimit := 1
 	now := clock.Now()
-	return coupon.NewCoupon(
+	return mustCoupon(coupon.NewCoupon(
 		"cpn-195", "SAVE10", coupon.CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		now.AddDate(-1, 0, 0), now.AddDate(1, 0, 0),
 		&usageLimit, 0, nil,
-	)
+	))
 }
 
 // Issue #195: two concurrent GenerateInvoice runs for DIFFERENT contracts against

@@ -858,6 +858,10 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 `Stack` を保持）へ変換する。これにより、暴走したプラグイン 1 つが進行中の請求・支払い
 トランザクションを破壊すること（例: 課金成功後に `AfterCharge` がパニックし、
 `ProcessPayment` のローカル永続化を突き抜けて「課金済みだが未記録」状態を生む）を防ぐ。
+なお `SafeInvoke` が隔離するのはフック本体の呼び出しのみである: `Name()` / `Priority()` は
+`SafeInvoke` の**外**で呼ばれる（`SafeInvoke` の引数として、および Priority ソート中）ため、
+これらのゲッターがパニックすると隔離されない — プラグイン作者は `Name()` / `Priority()` を
+自明な実装（フィールド/定数を返すだけ）に保つこと。
 
 **捕捉したパニックは、フックがエラーを返したのと同じフェイタリティ・ポリシーで扱う。**
 フックが「拒否権を持つ（veto-capable）」か「非致命（non-fatal）」かは §5.3 の発火箇所と
@@ -901,7 +905,8 @@ type PluginPanicError struct {
 > **⚠️ この例は要点の抜粋**: 完全な実装（フィルタリング・使用上限のアドバイザリ判定・
 > 引換確定）は `plugins/coupon/plugin.go` を参照。クーポンは「計算（`CalculateDiscount`）」と
 > 「引換確定（`AfterCalculation`）」を分離しており、その設計根拠とトランザクション整合性は
-> §6.3 にある。
+> §6.3 にある。リポジトリ側（原子的 `SaveRedemption` 契約）のリファレンス実装は
+> `infrastructure/inmemory` の `CouponRepository`（issue #240）。
 
 ```go
 // plugins/coupon/plugin.go
@@ -1254,7 +1259,9 @@ type CouponRepository interface {
 > `(coupon_id, contract_id, period_start, period_end)` の UNIQUE 制約で冪等性を、
 > **クーポン ID をキーにした直列化（advisory lock / SERIALIZABLE tx /
 > `INSERT ... ON CONFLICT DO NOTHING` + 同一ロック下でのカウント再チェック）** で上限強制の
-> 原子性を担保する。インメモリ実装は (a)〜(c) 全体を1つの mutex で囲む。`AfterCalculation` からの
+> 原子性を担保する。インメモリ実装は (a)〜(c) 全体を1つの mutex で囲む —
+> 出荷済みのリファレンス実装は `infrastructure/inmemory` の `CouponRepository`（issue #240）。
+> `AfterCalculation` からの
 > 引換確定エラーは致命（tx をロールバック）— 「請求書は保存されたのにクーポン使用が記録されない」
 > 状態、および上限超過での過剰引換を防ぐ。抽象的な発火順序・可観測性は §5.1 を参照。
 > 実装リファレンスは `plugins/coupon/plugin.go`（`AfterCalculation` が `RedemptionLimits` を
@@ -1561,6 +1568,12 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 ## 10. API互換性とバージョニング戦略
 
 ### 10.1 Semantic Versioning
+
+> **📌 pre-1.0 注記**: 本ライブラリは現在 **v0.x** である。v1.0.0 までは
+> **MINOR バージョン（v0.x.0）に破壊的変更が含まれ得る**。破壊的変更は
+> CHANGELOG の該当エントリに **BREAKING** と明記される（pre-v1.0 の運用規約。
+> 例: v0.3.0 の `OnPaymentProcessedHook` シグネチャ変更）。
+> 以下の表は v1.0.0 以降のバージョニング整理である。
 
 本ライブラリはSemantic Versioning 2.0.0に従う。
 

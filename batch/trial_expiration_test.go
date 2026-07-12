@@ -491,6 +491,73 @@ func TestTrialExpirationProcessor_RequirePaymentMethod_WithPM_Converts(t *testin
 	}
 }
 
+// divergingTrialRepo simulates state changing between the scan and the
+// transaction: FindTrialsEndingBefore returns the scan-time aggregates
+// (embedded mockTrialRepo), while FindByID returns a DIFFERENT, fresh
+// aggregate — the state as it exists when the tx re-loads it.
+type divergingTrialRepo struct {
+	mockTrialRepo
+	fresh map[shared.ContractID]*contract.ContractAggregate
+}
+
+func (m *divergingTrialRepo) FindByID(_ context.Context, id shared.ContractID) (*contract.ContractAggregate, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if agg, ok := m.fresh[id]; ok {
+		return agg, nil
+	}
+	return nil, fmt.Errorf("contract %s not found", id)
+}
+
+// TestTrialExpirationProcessor_PaymentMethodDetachedBetweenScanAndTx is the
+// issue #242 regression: the conversion decision (including the
+// RequirePaymentMethod gate) must be re-evaluated inside the transaction
+// against the freshly loaded aggregate. If the payment method is detached
+// between the scan and the tx, the stale scan-time decision would auto-convert
+// a trial that no longer satisfies the gate.
+func TestTrialExpirationProcessor_PaymentMethodDetachedBetweenScanAndTx(t *testing.T) {
+	// Scan-time state: payment method registered — the pre-filter passes.
+	scan := newTrialingContractRequiringPM("c-detach", "pm-visa-1234")
+	// Fresh state loaded inside the tx: the payment method has been detached.
+	fresh := newTrialingContractRequiringPM("c-detach", "")
+
+	repo := &divergingTrialRepo{
+		mockTrialRepo: mockTrialRepo{contracts: []*contract.ContractAggregate{scan}},
+		fresh:         map[shared.ContractID]*contract.ContractAggregate{fresh.ContractID(): fresh},
+	}
+	spy := &trialEndSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("failed to register spy plugin: %v", err)
+	}
+
+	processor := NewTrialExpirationProcessor(repo, registry, trialProcessorClock(), nil, nil)
+
+	result, err := processor.Process(context.Background(), BatchOptions{ContinueOnError: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Total != 1 || result.Succeeded != 0 || result.Failed != 1 {
+		t.Errorf("result: got %+v, want Total=1 Succeeded=0 Failed=1", result)
+	}
+	var domainErr *shared.DomainError
+	if len(result.Errors) != 1 || !errors.As(result.Errors[0], &domainErr) ||
+		domainErr.Code != shared.ErrCodeBusinessRule {
+		t.Errorf("expected business_rule error from the in-tx re-evaluation, got: %v", result.Errors)
+	}
+	// The trial must NOT have auto-converted.
+	if fresh.Status() != contract.ContractStatusTrialing {
+		t.Errorf("status: got %s, want trialing (stale decision must not convert)", fresh.Status())
+	}
+	if len(repo.saved) != 0 {
+		t.Errorf("saved count: got %d, want 0", len(repo.saved))
+	}
+	if spy.trialEndCalls != 0 || spy.changeCalls != 0 {
+		t.Errorf("hooks must not fire when the in-tx re-evaluation blocks conversion: trialEnd=%d change=%d",
+			spy.trialEndCalls, spy.changeCalls)
+	}
+}
+
 // newTrialingContractWithEnd creates a trialing contract with a custom trial end date.
 func newTrialingContractWithEnd(id string, autoConvert bool, trialEnd time.Time) *contract.ContractAggregate {
 	clock := shared.FixedClock{FixedTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}

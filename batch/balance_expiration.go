@@ -2,6 +2,7 @@ package batch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -92,6 +93,10 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Errorf("balance entry %s: %w", entry.ID(), err))
 				if !opts.ContinueOnError {
+					// Items never attempted because of the early stop are
+					// skipped, not failed, so Total == Succeeded+Failed+Skipped
+					// (issue #242).
+					result.Skipped = result.Total - result.Succeeded - result.Failed
 					return result, nil
 				}
 			} else {
@@ -107,6 +112,7 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 
 	sem := make(chan struct{}, concurrency)
 	var mu sync.Mutex
+	launched := 0
 
 	for _, entry := range entries {
 		// Check if we should stop early (ContinueOnError=false and an error occurred)
@@ -118,6 +124,7 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 				break
 			}
 		}
+		launched++
 
 		sem <- struct{}{}
 		go func(e *balance.BalanceEntry) {
@@ -125,8 +132,15 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 
 			if err := p.processOne(cctx, e, opts.DryRun); err != nil {
 				mu.Lock()
-				result.Failed++
-				result.Errors = append(result.Errors, fmt.Errorf("balance entry %s: %w", e.ID(), err))
+				if cctx.Err() != nil && errors.Is(err, context.Canceled) {
+					// The run was already aborted (early stop cancelled the
+					// shared context); an in-flight cancellation is not a
+					// genuine per-item failure (issue #242).
+					result.Skipped++
+				} else {
+					result.Failed++
+					result.Errors = append(result.Errors, fmt.Errorf("balance entry %s: %w", e.ID(), err))
+				}
 				mu.Unlock()
 				if !opts.ContinueOnError {
 					cancel()
@@ -143,6 +157,10 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 	for i := 0; i < concurrency; i++ {
 		sem <- struct{}{}
 	}
+
+	// Items never launched because of the early stop are skipped, not failed
+	// (issue #242).
+	result.Skipped += result.Total - launched
 
 	return result, nil
 }

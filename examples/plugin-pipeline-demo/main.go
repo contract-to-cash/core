@@ -224,10 +224,19 @@ type inMemoryCouponRepo struct {
 	redemptions map[string]*coupon.Redemption
 }
 
+// mustCoupon unwraps NewCoupon's (coupon, error) for this demo's known-valid
+// fixture (NewCoupon rejects a nil *big.Rat value at construction).
+func mustCoupon(c *coupon.Coupon, err error) *coupon.Coupon {
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
 func newInMemoryCouponRepo(clock shared.Clock) *inMemoryCouponRepo {
 	now := clock.Now()
 	limit := 100
-	c := coupon.NewCoupon(
+	c := mustCoupon(coupon.NewCoupon(
 		coupon.CouponID("coupon-001"),
 		"SAVE10",
 		coupon.CouponTypePercentage,
@@ -237,7 +246,7 @@ func newInMemoryCouponRepo(clock shared.Clock) *inMemoryCouponRepo {
 		now.Add(-24*time.Hour), now.Add(365*24*time.Hour), // valid for 1 year
 		&limit, 0, // usage limit 100, used 0
 		nil,
-	)
+	))
 	return &inMemoryCouponRepo{
 		coupons:     []*coupon.Coupon{c},
 		redemptions: make(map[string]*coupon.Redemption),

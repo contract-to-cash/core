@@ -32,14 +32,48 @@ func TestTaxPlugin_Initialize_PriorityOverride(t *testing.T) {
 	}
 }
 
-func TestTaxPlugin_Initialize_IgnoresNonIntPriority(t *testing.T) {
+func TestTaxPlugin_Initialize_RejectsNonIntPriority(t *testing.T) {
 	p := NewTaxPlugin(&JapaneseTaxCalculator{})
-	// Non-int value must be ignored, leaving the default priority intact.
-	if err := p.Initialize(context.Background(), plugin.Config{"priority": "high"}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// A present-but-mistyped value is a configuration error (issue #239),
+	// not silently ignored.
+	if err := p.Initialize(context.Background(), plugin.Config{"priority": "high"}); err == nil {
+		t.Fatal("expected error for string priority, got nil")
 	}
 	if p.Priority() != plugin.PriorityLow {
-		t.Errorf("expected default priority %d, got %d", plugin.PriorityLow, p.Priority())
+		t.Errorf("expected default priority %d to be untouched, got %d", plugin.PriorityLow, p.Priority())
+	}
+}
+
+// TestTaxPlugin_Initialize_AcceptsJSONFloat64 verifies a JSON-decoded config
+// (encoding/json turns all numbers into float64) works (issue #239).
+func TestTaxPlugin_Initialize_AcceptsJSONFloat64(t *testing.T) {
+	p := NewTaxPlugin(&JapaneseTaxCalculator{})
+	if err := p.Initialize(context.Background(), plugin.Config{"priority": float64(42)}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Priority() != 42 {
+		t.Errorf("expected priority 42 after float64 Initialize, got %d", p.Priority())
+	}
+}
+
+// TestTaxPlugin_Initialize_RejectsNonIntegralFloat verifies a fractional float
+// is rejected rather than silently truncated (issue #239).
+func TestTaxPlugin_Initialize_RejectsNonIntegralFloat(t *testing.T) {
+	p := NewTaxPlugin(&JapaneseTaxCalculator{})
+	if err := p.Initialize(context.Background(), plugin.Config{"priority": 42.5}); err == nil {
+		t.Fatal("expected error for non-integral float priority, got nil")
+	}
+	if p.Priority() != plugin.PriorityLow {
+		t.Errorf("expected default priority %d to be untouched, got %d", plugin.PriorityLow, p.Priority())
+	}
+}
+
+// TestTaxPlugin_Initialize_IgnoresUnknownKeys verifies unknown keys are still
+// ignored (issue #239 only rejects known keys with wrong types).
+func TestTaxPlugin_Initialize_IgnoresUnknownKeys(t *testing.T) {
+	p := NewTaxPlugin(&JapaneseTaxCalculator{})
+	if err := p.Initialize(context.Background(), plugin.Config{"unknownKey": "whatever"}); err != nil {
+		t.Fatalf("unexpected error for unknown key: %v", err)
 	}
 }
 

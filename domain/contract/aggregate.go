@@ -228,6 +228,19 @@ func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstor
 		return shared.NewDomainError(shared.ErrCodeValidation,
 			"AccountID must be set")
 	}
+	// ContractType drives billing branching downstream (subscription vs
+	// usage-based vs one-time); an unknown or empty type persisted on the
+	// immutable ContractCreatedEvent would be uncorrectable (issue #243). Only
+	// validated at command intake — Apply/replay accepts historical events
+	// verbatim.
+	switch cmd.ContractType {
+	case ContractTypeOneTime, ContractTypeSubscription, ContractTypeUsageBased:
+		// known type
+	default:
+		return shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("unknown contract type %q (expected %s, %s, or %s)",
+				cmd.ContractType, ContractTypeOneTime, ContractTypeSubscription, ContractTypeUsageBased))
+	}
 	if cmd.Interval.IsZero() {
 		return shared.NewDomainError(shared.ErrCodeValidation,
 			"Interval must be set")
@@ -881,6 +894,16 @@ func (a *ContractAggregate) Apply(event eventstore.DomainEvent) error {
 
 	case *ContractExpiredEvent:
 		a.status = ContractStatusExpired
+		a.cancelAtPeriodEnd = false
+		// Clear pending/trial state on expiry the same way ContractCancelledEvent
+		// does (issue #243, mirroring the #196 fix for cancellation): expiry is
+		// reached from RenewWithInterval when autoRenew=false, which does NOT
+		// consume a scheduled end-of-term price change, so without this an
+		// expired (terminal) contract kept reporting HasPendingChange()==true.
+		// Clearing here is replay-safe: it is deterministic from the event and
+		// idempotent across re-applies.
+		a.pendingPriceID = nil
+		a.trialConfig = nil
 		a.updatedAt = e.ExpiredAt
 
 	case *CancellationScheduledEvent:

@@ -1908,10 +1908,12 @@ func TestProcessPayment_CompensationFires_MarksKey(t *testing.T) {
 
 // --- Empty IdempotencyKey must not attempt any store interaction ---
 
-func TestProcessPayment_EmptyKey_StoreNotConsulted(t *testing.T) {
-	// An empty IdempotencyKey cannot be meaningfully tracked by the store
-	// (the gateway has no way to replay an empty key either), so the service
-	// must skip ResolveEffectiveKey / MarkCompensated entirely and proceed.
+func TestProcessPayment_EmptyKey_RejectedAtBoundary(t *testing.T) {
+	// Issue #241: an empty IdempotencyKey disables every duplicate-charge
+	// defence in ProcessPayment (pre-charge/in-tx lookups skipped, storage
+	// uniqueness cannot fire, gateway cannot dedupe retries). The service must
+	// reject it at the boundary with ErrCodeValidation — before consulting the
+	// idempotency store and before any gateway call.
 	clock := newPaymentTestClock()
 	inv := newSimpleFinalizedInvoice()
 	store := newFakeIdempotencyStore()
@@ -1935,8 +1937,12 @@ func TestProcessPayment_EmptyKey_StoreNotConsulted(t *testing.T) {
 		Currency:        shared.CurrencyJPY,
 		IdempotencyKey:  "", // empty
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected validation error for empty IdempotencyKey")
+	}
+	assertDomainError(t, err, shared.ErrCodeValidation)
+	if pmt != nil {
+		t.Errorf("expected nil payment on validation rejection, got %+v", pmt)
 	}
 	if store.resolveCalls != 0 {
 		t.Errorf("ResolveEffectiveKey must not be called for empty key, got %d calls", store.resolveCalls)
@@ -1944,22 +1950,12 @@ func TestProcessPayment_EmptyKey_StoreNotConsulted(t *testing.T) {
 	if store.markCalls != 0 {
 		t.Errorf("MarkCompensated must not be called for empty key, got %d calls", store.markCalls)
 	}
-
-	// The charge must have gone through normally with an empty key and no
-	// derivation (i.e. no "-"+ULID suffix leaking from the retry helper).
-	if len(gw.chargeKeys) != 1 {
-		t.Fatalf("expected exactly 1 Charge call, got %d", len(gw.chargeKeys))
+	// Money-safety: the gateway must never be touched.
+	if len(gw.chargeKeys) != 0 {
+		t.Errorf("gateway must not be charged for an empty key, got %d calls", len(gw.chargeKeys))
 	}
-	if gw.chargeKeys[0] != "" {
-		t.Errorf("Charge must receive the empty key verbatim, got %q", gw.chargeKeys[0])
-	}
-
-	// The saved Payment must not have a spurious IdempotencyKey.
-	if pmt == nil {
-		t.Fatal("expected payment")
-	}
-	if pmt.IdempotencyKey() != "" {
-		t.Errorf("payment IdempotencyKey must remain empty, got %q", pmt.IdempotencyKey())
+	if paymentRepo.saved != nil {
+		t.Error("no payment record may be persisted for a rejected empty key")
 	}
 }
 
@@ -2988,13 +2984,19 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 				t.Errorf("expected 1 Charge call (pre-charge lookup missed), got %d", len(gw.chargeKeys))
 			}
 
-			// Compensation MUST have fired to refund the captured txn,
-			// because the in-tx rejection returns a non-nil error from
-			// the closure. This is the correct saga behavior for the
-			// race case: the gateway actually charged, so we must
-			// actually refund.
-			if len(gw.refundTxnIDs) != 1 {
-				t.Errorf("expected 1 compensation Refund after in-tx race rejection, got %d", len(gw.refundTxnIDs))
+			// Compensation MUST NOT fire (issue #234): the Charge above
+			// was an idempotent replay of the transaction that already
+			// backs the terminal record — the gateway moved no new money.
+			// A compensation Void/Refund here would be a SECOND real
+			// reversal of the original transaction (worst on ChargedBack,
+			// where the network already pulled the funds back).
+			if len(gw.refundTxnIDs) != 0 {
+				t.Errorf("compensation must NOT fire on in-tx terminal-state conflict (issue #234), got refunds: %v", gw.refundTxnIDs)
+			}
+			for _, k := range gw.refundKeys {
+				if strings.HasPrefix(k, "comp-") {
+					t.Errorf("no comp- refund key may reach the gateway on terminal-state replay, got %q", k)
+				}
 			}
 		})
 	}

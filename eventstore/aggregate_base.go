@@ -35,8 +35,20 @@ func (a *BaseAggregate) Version() int {
 }
 
 // UncommittedEvents returns events not yet persisted.
+//
+// It returns a (shallow) COPY of the internal slice: appending to or
+// reordering the returned slice cannot corrupt the aggregate's pending-event
+// state (stores already copy on their side before stamping RecordedAt /
+// GlobalPosition; this closes the caller-mutation direction). The Event
+// structs themselves are value copies, but reference fields (Data,
+// Metadata contents) are shared — treat them as immutable.
 func (a *BaseAggregate) UncommittedEvents() []Event {
-	return a.uncommittedEvents
+	if len(a.uncommittedEvents) == 0 {
+		return nil
+	}
+	cp := make([]Event, len(a.uncommittedEvents))
+	copy(cp, a.uncommittedEvents)
+	return cp
 }
 
 // ClearUncommittedEvents clears uncommitted events after persistence.
