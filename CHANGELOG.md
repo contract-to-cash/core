@@ -6,7 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Integrator-defined `metadata` on Price and ContractAggregate (#219)** — Stripe-style
+  `map[string]string` metadata so integrators can attach their own keys (`creator_id`,
+  external refs) instead of overloading display names. `pricing.NewPrice` /
+  `NewPriceWithInterval` accept a new variadic `PriceOption` (`pricing.WithMetadata`,
+  additive — existing call sites compile unchanged) and expose `Price.Metadata()`;
+  `CreateContractCommand.Metadata` is recorded on `ContractCreatedEvent` (schema v4,
+  with a v3→v4 upcaster; replay of historical events and legacy snapshots is unaffected)
+  and exposed via `ContractAggregate.Metadata()`. All maps are defensively copied at
+  every boundary. `Product` already supported metadata; it is unchanged.
+- **Coupon getters for persistence round-trips (#221)** — `Coupon.Currency()`,
+  `ApplicableContractTypes()`, `AllowedAccountIDs()`, `BlockedAccountIDs()`, so a
+  `CouponRepository.Save` implementation can persist and faithfully reconstruct a coupon
+  via `NewCoupon` + `With*` builders without a side table. Slice-returning getters
+  (including the existing `ApplicableTo()`) now return defensive copies.
+
+### Changed
+
+- **BREAKING — `OnPaymentProcessedHook` now receives `*plugin.PaymentContext` (#223)** —
+  the signature changed from `OnPaymentProcessed(ctx *Context, payment *payment.Payment)`
+  to `OnPaymentProcessed(ctx *PaymentContext)`, aligning it with the other payment hooks.
+  `ctx.Payment()` is the processed payment; `ctx.Invoice()` / `ctx.ContractID()` /
+  `ctx.AccountID()` let metrics plugins attribute `payment.processed` events to a
+  contract/account without an extra invoice lookup per event.
+
+### Docs
+
+- **`ContractChangeExpired` semantics reconciled with code (#220)** — the hook-constant
+  comment, `docs/internals/plugin-system.md` §3.8/§5.3, and a `batch/contract_renewal.go`
+  comment claimed a scheduled cancellation (`cancelAtPeriodEnd`) ends in `Expired`; the
+  actual (and intended) behaviour is that `RenewWithInterval` resolves it to `Cancelled`
+  at the period boundary and it is reported as `ContractChangeCancelled` (user-initiated
+  churn), while `Expired` is reserved for `autoRenew=false` natural term end. No behaviour
+  change.
 
 ## [0.2.0] - 2026-07-11
 
