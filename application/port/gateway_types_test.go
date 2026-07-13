@@ -165,10 +165,14 @@ func TestChargeRequest_PaymentMethodTypeEmpty_MeansUnknown(t *testing.T) {
 	if req.PaymentMethodType != "" {
 		t.Errorf("expected empty PaymentMethodType by default, got %q", req.PaymentMethodType)
 	}
+}
 
-	authReq := AuthorizeRequest{CustomerID: "cust-003"}
-	if authReq.PaymentMethodType != "" {
-		t.Errorf("expected empty PaymentMethodType by default, got %q", authReq.PaymentMethodType)
+func TestAuthorizeRequest_PaymentMethodTypeEmpty_MeansUnknown(t *testing.T) {
+	// The zero value must mean "unknown" so existing callers that never set
+	// the field keep the pre-#253 behavior (gateway resolves the method itself).
+	req := AuthorizeRequest{CustomerID: "cust-003"}
+	if req.PaymentMethodType != "" {
+		t.Errorf("expected empty PaymentMethodType by default, got %q", req.PaymentMethodType)
 	}
 }
 

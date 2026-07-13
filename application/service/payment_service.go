@@ -1795,6 +1795,9 @@ func paymentMethodToPortType(m payment.PaymentMethod) port.PaymentMethodType {
 	case payment.PaymentMethodPostpay:
 		return port.PaymentMethodTypePostpay
 	default:
+		// Unknown or empty payment methods map to "" (unknown hint).
+		// If a new payment.PaymentMethod is added, add a case here
+		// (and to portMethodToPaymentMethod above).
 		return ""
 	}
 }
