@@ -1058,6 +1058,72 @@ func TestProcessPayment_DefaultsToCreditCard_WhenNoPaymentMethodInfo(t *testing.
 	}
 }
 
+// --- Issue #253: forward the caller's method-type hint to the gateway ---
+
+func TestProcessPayment_ForwardsPaymentMethodTypeHint_WhenPaymentMethodIDExplicit(t *testing.T) {
+	// When the caller pins both PaymentMethodID and PaymentMethod, the declared
+	// type is forwarded as ChargeRequest.PaymentMethodType so multi-method
+	// adapters can skip a per-charge PaymentMethod lookup (issue #253).
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	paymentRepo := &mockPaymentRepo{}
+	gw := &mockGateway{}
+
+	svc := NewPaymentService(gw, paymentRepo, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		PaymentMethod:   payment.PaymentMethodConvenience,
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-hint",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gw.lastChargeReq == nil {
+		t.Fatal("expected gateway Charge to be called")
+	}
+	if got := gw.lastChargeReq.PaymentMethodType; got != port.PaymentMethodTypeConvenienceStore {
+		t.Errorf("expected ChargeRequest.PaymentMethodType %q, got %q",
+			port.PaymentMethodTypeConvenienceStore, got)
+	}
+}
+
+func TestProcessPayment_NoPaymentMethodTypeHint_WhenMethodIDResolvedViaFallback(t *testing.T) {
+	// When PaymentMethodID is NOT pinned by the caller (resolved via the
+	// Invoice→Contract→Customer fallback chain), the caller's PaymentMethod may
+	// not describe the resolved method, so no hint is forwarded — the zero
+	// value means "unknown" and the gateway resolves the method itself.
+	clock := newPaymentTestClock()
+	inv := newFinalizedInvoice(shared.NewAccountID(), shared.NewContractID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY), strPtr("pm-from-invoice"))
+	paymentRepo := &mockPaymentRepo{}
+	gw := &mockGateway{}
+
+	svc := NewPaymentService(gw, paymentRepo, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{}, plugin.NewRegistry(), clock)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		// PaymentMethodID intentionally empty → resolved from the invoice.
+		PaymentMethod:  payment.PaymentMethodConvenience,
+		Amount:         shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:       shared.CurrencyJPY,
+		IdempotencyKey: "key-no-hint",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gw.lastChargeReq == nil {
+		t.Fatal("expected gateway Charge to be called")
+	}
+	if gw.lastChargeReq.PaymentMethodID == nil || *gw.lastChargeReq.PaymentMethodID != "pm-from-invoice" {
+		t.Fatalf("expected resolved PaymentMethodID %q, got %v", "pm-from-invoice", gw.lastChargeReq.PaymentMethodID)
+	}
+	if got := gw.lastChargeReq.PaymentMethodType; got != "" {
+		t.Errorf("expected empty ChargeRequest.PaymentMethodType (unknown), got %q", got)
+	}
+}
+
 func TestProcessPayment_FailedPayment_UsesCorrectPaymentMethod(t *testing.T) {
 	// When the gateway charge fails, the failed payment record should still
 	// use the correct payment method, not hardcoded credit_card.
