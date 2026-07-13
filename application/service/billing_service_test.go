@@ -18,6 +18,7 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 	"github.com/contract-to-cash/core/domain/usage"
 	"github.com/contract-to-cash/core/eventstore"
+	"github.com/contract-to-cash/core/infrastructure/inmemory"
 	"github.com/contract-to-cash/core/plugin"
 )
 
@@ -2452,5 +2453,103 @@ func TestGenerateInvoice_ZeroIntervalOneTime_DuplicateBlocked(t *testing.T) {
 	_, err = svc.GenerateInvoice(context.Background(), agg.ContractID(), agg.CurrentPeriod())
 	if err == nil {
 		t.Fatal("expected duplicate guard to block second invoice for zero-interval one_time contract")
+	}
+}
+
+// --- Transactional outbox writer (issue #248) ---
+
+// newFinalizeTestServiceWithOutbox mirrors newFinalizeTestService but wires an
+// InvoiceOutboxWriter.
+func newFinalizeTestServiceWithOutbox(invRepo *mockInvoiceRepo, registry *plugin.Registry, writer *inmemory.InMemoryOutboxWriter) *BillingService {
+	return NewBillingService(
+		&mockContractRepo{}, invRepo, &mockUsageRepo{},
+		balance.BalanceConfig{}, &mockPriceRepo{}, &mockProductRepo{},
+		registry, BillingConfig{DaysUntilDue: 30}, newTestClock(),
+		WithInvoiceOutboxWriter(writer),
+	)
+}
+
+// TestFinalizeInvoice_OutboxWriter_FiresOnSuccess verifies OnInvoiceFinalized is
+// invoked with the finalized invoice on the finalize success path.
+func TestFinalizeInvoice_OutboxWriter_FiresOnSuccess(t *testing.T) {
+	inv := newDraftInvoiceForFinalize(t)
+	invRepo := &mockInvoiceRepo{byID: inv}
+	writer := inmemory.NewInMemoryOutboxWriter()
+
+	svc := newFinalizeTestServiceWithOutbox(invRepo, plugin.NewRegistry(), writer)
+
+	got, err := svc.FinalizeInvoice(context.Background(), inv.ID())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Status() != invoice.InvoiceStatusFinalized {
+		t.Errorf("status: got %s, want finalized", got.Status())
+	}
+	if writer.InvoiceCount() != 1 {
+		t.Fatalf("expected OnInvoiceFinalized to fire once, got %d", writer.InvoiceCount())
+	}
+	entry := writer.InvoiceEntries()[0]
+	if entry.Invoice == nil || entry.Invoice.ID() != inv.ID() {
+		t.Errorf("outbox entry has wrong invoice: %+v", entry.Invoice)
+	}
+	// The writer fires after finalize, so it observes the finalized invoice.
+	if entry.Invoice.Status() != invoice.InvoiceStatusFinalized {
+		t.Errorf("outbox entry saw invoice status %s, want finalized", entry.Invoice.Status())
+	}
+}
+
+// TestFinalizeInvoice_OutboxWriter_ErrorRollsBack verifies the veto semantics:
+// an OnInvoiceFinalized error fails FinalizeInvoice (the invoice is rolled back /
+// not finalized). Unlike the payment path, no money moves.
+func TestFinalizeInvoice_OutboxWriter_ErrorRollsBack(t *testing.T) {
+	inv := newDraftInvoiceForFinalize(t)
+	invRepo := &mockInvoiceRepo{byID: inv}
+	writer := inmemory.NewInMemoryOutboxWriter()
+	writer.FailWith(errors.New("outbox insert failed"))
+
+	svc := newFinalizeTestServiceWithOutbox(invRepo, plugin.NewRegistry(), writer)
+
+	_, err := svc.FinalizeInvoice(context.Background(), inv.ID())
+	if err == nil {
+		t.Fatal("expected FinalizeInvoice to fail when the outbox writer vetoes")
+	}
+	if writer.InvoiceCount() != 0 {
+		t.Errorf("failed writer must not record an entry, got %d", writer.InvoiceCount())
+	}
+}
+
+// TestFinalizeInvoice_OutboxWriter_PanicIsolated verifies a panicking writer is
+// converted into an error rather than propagating a raw panic through tx.Run.
+func TestFinalizeInvoice_OutboxWriter_PanicIsolated(t *testing.T) {
+	inv := newDraftInvoiceForFinalize(t)
+	invRepo := &mockInvoiceRepo{byID: inv}
+	writer := inmemory.NewInMemoryOutboxWriter()
+	writer.PanicNext("invoice outbox boom")
+
+	svc := newFinalizeTestServiceWithOutbox(invRepo, plugin.NewRegistry(), writer)
+
+	_, err := svc.FinalizeInvoice(context.Background(), inv.ID())
+	if err == nil {
+		t.Fatal("expected a panicking outbox writer to abort FinalizeInvoice with an error")
+	}
+	if _, ok := plugin.AsPanic(err); !ok {
+		t.Errorf("expected a *plugin.PluginPanicError, got: %v", err)
+	}
+}
+
+// TestFinalizeInvoice_NoOutboxWriter_Unchanged is a regression guard: without a
+// wired writer, finalize behaves exactly as before.
+func TestFinalizeInvoice_NoOutboxWriter_Unchanged(t *testing.T) {
+	inv := newDraftInvoiceForFinalize(t)
+	invRepo := &mockInvoiceRepo{byID: inv}
+
+	svc := newFinalizeTestService(invRepo, plugin.NewRegistry())
+
+	got, err := svc.FinalizeInvoice(context.Background(), inv.ID())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Status() != invoice.InvoiceStatusFinalized {
+		t.Errorf("status: got %s, want finalized", got.Status())
 	}
 }

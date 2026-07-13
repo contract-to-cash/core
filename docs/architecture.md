@@ -259,6 +259,17 @@ for the per-hook detail):
 | **Integrator** (7) | `OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled Hook` | Contract lifecycle operations (including `ScheduleCancellation`/`UnscheduleCancellation`) call aggregate methods directly (no core application service), so the integrator fires the matching hooks. Reference: `examples/hosting-integration-demo/main.go` |
 | **Adapter** (1) | `InvoiceGenerationHook` | Invoice rendering/delivery is out of core scope; the consumer's invoice-generation adapter fires BuildDocument/AfterRender/AfterDelivery |
 
+**Transactional outbox extension (issue #248).** Separately from the 22 hooks
+(the hook count is unchanged), the core also calls two *integrator ports* —
+`PaymentOutboxWriter` and `InvoiceOutboxWriter` (in `application/port`) — *inside*
+the bookkeeping transaction, immediately after the payment/invoice row is saved
+and before commit. Wired via `WithPaymentOutboxWriter` / `WithInvoiceOutboxWriter`
+(nil = skipped), they let an integrator write a durable notification row in the
+SAME transaction as the write, closing the event-loss window that the post-commit
+hooks cannot. A writer error vetoes (rolls back) the transaction; on the payment
+path that reverses the gateway charge via saga compensation. See
+`docs/internals/plugin-system.md` §11.
+
 ### 6.3 Billing Pipeline
 
 The core structurally guarantees the accounting-correct calculation order. Plugin `Priority` values only control execution order *within* the same hook type.

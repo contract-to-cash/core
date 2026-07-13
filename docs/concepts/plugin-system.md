@@ -99,6 +99,13 @@ discountHooks := registry.GetDiscountHooks()
 
 A single plugin can implement multiple hook interfaces. For example, a billing plugin implementing both `DiscountHook` and `TaxHook` will be registered in both categories.
 
+## Transactional Outbox
+
+Separately from the 22 hooks, the core can call two *integrator ports* —
+`PaymentOutboxWriter` and `InvoiceOutboxWriter` — *inside* the payment/invoice
+transaction so you can write a durable notification row atomically with the
+write (issue #248). See [`docs/internals/plugin-system.md`](../internals/plugin-system.md) §11 for the full design.
+
 ## Official Plugins
 
 ### Tax Plugin

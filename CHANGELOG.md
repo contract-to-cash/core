@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Transactional outbox writer ports (#248)** — two new integrator ports,
+  `port.PaymentOutboxWriter` and `port.InvoiceOutboxWriter`, that the core calls
+  *inside* the bookkeeping transaction (immediately after the payment/invoice row is
+  saved, before commit) so an integrator can write a durable notification row in the
+  SAME transaction as the write — closing the event-loss window that the post-commit
+  hooks (`AfterCharge` / `OnPaymentProcessed` / `OnInvoiceIssued`) cannot. Wire them via
+  `service.WithPaymentOutboxWriter(...)` (fires on `ProcessPayment`'s Pending→Completed
+  promotion and normal success paths, including zero-amount settlement — but NOT on
+  idempotent-replay / race-convergence paths) and `service.WithInvoiceOutboxWriter(...)`
+  (fires on `FinalizeInvoice`'s save). A writer error vetoes (rolls back) the transaction;
+  on the payment path that reverses the successful gateway charge via saga compensation
+  (`OnInvoiceFinalized` moves no money, so its rollback is a harmless re-finalize). Writer
+  panics are isolated via `plugin.SafeInvoke` (converted to `*plugin.PluginPanicError`,
+  never propagated through `tx.Run`); a wired writer under a default `NoopTxManager` logs a
+  dedicated non-atomicity warning. Additive and non-breaking: unset writers skip the outbox
+  stage entirely (existing behaviour unchanged), the `plugin` package and registry are
+  unchanged, and the hook count stays at 22. Design and per-path firing table:
+  `docs/internals/plugin-system.md` §11; how-to: `docs/guides/integration.md`.
+
 - **Zero-interval `one_time` contracts + `pricing.NewOneTimePrice` (#218)** — first-class
   one-time modeling: `CreateContractCommand.Interval` may now be omitted (zero) when
   `ContractType == ContractTypeOneTime`; the contract activates (or converts from trial)

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/contract-to-cash/core/application/port"
 	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/balance"
 	"github.com/contract-to-cash/core/domain/contract"
@@ -95,6 +96,31 @@ func WithBillingTxManager(tm tx.TxManager) BillingServiceOption {
 	}
 }
 
+// WithInvoiceOutboxWriter wires a [port.InvoiceOutboxWriter] into the
+// BillingService (issue #248, transactional outbox).
+//
+// When provided, FinalizeInvoice calls OnInvoiceFinalized INSIDE the finalize
+// transaction, immediately after the finalized invoice row is saved and before
+// the transaction commits. This lets an integrator write a durable notification
+// row in the SAME transaction as the finalize, closing the event-loss window
+// that the post-commit OnInvoiceIssuedHook cannot.
+//
+// The writer has VETO power: a returned error (or a recovered panic) rolls the
+// finalize back. Unlike the payment outbox, FinalizeInvoice moves no money, so a
+// rollback is a harmless "re-finalize next attempt" rather than a charge
+// reversal. Keep OnInvoiceFinalized a lightweight, idempotent, transaction-
+// scoped INSERT (see [port.InvoiceOutboxWriter]).
+//
+// When omitted (nil), the outbox stage is skipped entirely and FinalizeInvoice
+// behaves exactly as before (existing behaviour unchanged). The option is named
+// WithInvoiceOutboxWriter (not WithBilling*) because it targets invoice
+// notifications specifically.
+func WithInvoiceOutboxWriter(w port.InvoiceOutboxWriter) BillingServiceOption {
+	return func(s *BillingService) {
+		s.invoiceOutboxWriter = w
+	}
+}
+
 // WithoutTransactions explicitly opts the BillingService into running without a
 // transaction manager (the multi-write billing pipeline will NOT be atomic).
 // Use it for in-memory demos and tests where that trade-off is intentional; it
@@ -120,6 +146,11 @@ type BillingService struct {
 	clock         shared.Clock
 	logger        *slog.Logger
 	txManager     tx.TxManager
+	// invoiceOutboxWriter, when non-nil, is called inside the finalize
+	// transaction (post-save, pre-commit) so an integrator can write a durable
+	// notification row atomically with the invoice finalization (issue #248).
+	// nil skips the outbox stage entirely.
+	invoiceOutboxWriter port.InvoiceOutboxWriter
 	// suppressTxWarning records an explicit WithoutTransactions() opt-in so the
 	// default-NoopTxManager warning is not emitted for intentional non-atomic use.
 	suppressTxWarning bool
@@ -170,7 +201,39 @@ func NewBillingService(
 		}
 	}
 	tx.WarnIfDefaultNoop(s.logger, s.txManager, "BillingService", "wire WithBillingTxManager(...) (or WithoutTransactions() to acknowledge non-atomic in-memory use)")
+	// Issue #248: a wired invoice outbox writer relies on the finalize
+	// transaction for atomicity. Under a default (silently-fallen-back)
+	// NoopTxManager the invoice save and the outbox INSERT are NOT atomic,
+	// defeating the transactional-outbox guarantee. Emit a dedicated Warn once so
+	// this specific misconfiguration is loud. An explicit noop opt-in
+	// (WithoutTransactions) stays silent.
+	if s.invoiceOutboxWriter != nil && tx.IsNoop(s.txManager) && !tx.IsExplicitNoop(s.txManager) {
+		s.logger.Warn(
+			"in addition to the multi-write warning above, an invoice outbox writer is wired without a transaction manager: the invoice save and the outbox INSERT are NOT atomic, so the transactional-outbox guarantee does not hold",
+			"component", "BillingService",
+			"remedy", "wire WithBillingTxManager(...) (or WithoutTransactions() to acknowledge non-atomic in-memory use)",
+		)
+	}
 	return s
+}
+
+// fireInvoiceOutbox invokes the wired [port.InvoiceOutboxWriter] inside the
+// finalize transaction, immediately after the finalized invoice row is saved and
+// before commit (issue #248). It is a no-op when no writer is wired.
+//
+// The call is wrapped in plugin.SafeInvoke so a panicking writer is converted
+// into a *plugin.PluginPanicError and returned to the tx.Run closure rather than
+// unwinding through it (plugin panic policy, docs/internals/plugin-system.md
+// §5.4). The returned error is propagated so the finalize transaction rolls
+// back; because it is not a version conflict it is not retried by
+// RetryOnConflict and propagates as-is.
+func (s *BillingService) fireInvoiceOutbox(ctx context.Context, inv *invoice.Invoice) error {
+	if s.invoiceOutboxWriter == nil {
+		return nil
+	}
+	return plugin.SafeInvoke("InvoiceOutboxWriter.OnInvoiceFinalized", "InvoiceOutboxWriter", func() error {
+		return s.invoiceOutboxWriter.OnInvoiceFinalized(ctx, inv)
+	})
 }
 
 // finalizeMaxRetries bounds how many times FinalizeInvoice re-runs its
@@ -830,6 +893,13 @@ func (s *BillingService) FinalizeInvoice(ctx context.Context, invoiceID shared.I
 			// finalization; RetryOnConflict handles it.
 			if saveErr := repos.Invoices.Save(txCtx, loaded); saveErr != nil {
 				return saveErr
+			}
+			// Issue #248: write the durable outbox row in this same transaction,
+			// after the finalized invoice is saved and before the closure returns
+			// nil (commit). A writer error rolls the finalize back (no money moves,
+			// so this is a harmless re-finalize on the next attempt).
+			if outboxErr := s.fireInvoiceOutbox(txCtx, loaded); outboxErr != nil {
+				return outboxErr
 			}
 			finalized = loaded
 			return nil
