@@ -6,6 +6,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-13
+
+### Added
+
+- **First-class asynchronous settlement for pay-later payment methods (#252)** —
+  bank transfer, convenience-store (konbini), carrier billing, and similar methods
+  where the gateway accepts the charge but the customer pays out-of-band later.
+  `PaymentService.ProcessPayment` now treats a gateway `TransactionStatusPending`
+  charge response as a first-class outcome instead of an unexpected-status error:
+  it persists a **Pending** payment (idempotency key, gateway transaction ID,
+  resolved method type), leaves the invoice untouched, and returns the new exported
+  sentinel **`service.ErrPaymentPending`** (check with `errors.Is`; the mirror of the
+  existing 3DS `ErrRequiresAction`). No saga compensation fires — nothing was
+  captured, so there is nothing to reverse. The existing in-transaction
+  Pending→Completed promotion and idempotent-replay convergence apply unchanged, so
+  a retry whose charge now replays as Captured/Succeeded upgrades the same record.
+
+- **Settlement APIs `SettlePayment` / `MarkPaymentFailed` (#252)** — integrator
+  entry points for the async funds lifecycle, called from webhook handling
+  (`payment.received` / instruction-expired events):
+  - `SettlePayment(ctx, paymentID)`: Pending→Completed — records the amount on the
+    invoice and saves both in one transaction (`tx.RetryOnConflict` + `tx.Run`, the
+    same optimistic-locking pattern as `Refund` / `FinalizeInvoice`), fires the
+    `PaymentOutboxWriter` in-tx after both saves and before commit (plugin-system.md
+    §11 contract), and fires `AfterCharge` + `OnPaymentProcessed` hooks post-commit
+    non-fatally on an actual transition only. Idempotent: settling an
+    already-Completed payment is a no-op success (safe under at-least-once webhook
+    redelivery); terminal states are rejected with `invalid_state_transition`.
+  - `MarkPaymentFailed(ctx, paymentID, reason)`: Pending→Failed (voucher lapsed,
+    transfer never arrived); the invoice is untouched, `OnPaymentFailed` hooks fire
+    post-commit non-fatally on an actual transition. Already-Failed is a no-op;
+    a Completed payment is never knocked back by a late expiry notification.
+
+  A `SettlePayment` outbox veto moves no gateway money (the funds already arrived
+  out-of-band), so its rollback is harmless and converges via webhook redelivery —
+  documented in the `PaymentOutboxWriter` contract and plugin-system.md §11.4/§11.5.
+
+### Documentation
+
+- `docs/internals/payment-gateway.md`: refreshed the stale §6 service summary to the
+  current source, added §6.4 documenting the previously undocumented
+  Invoice→Contract→Customer `ResolvePaymentMethod` fallback chain (including the
+  zero-amount skip and the separate method-*type* resolution order), and added §6.5
+  for the pending outcome and settlement APIs. `docs/internals/plugin-system.md`
+  §5.3 hook-firing and §11.4 outbox firing-path tables now include the settlement
+  APIs; `docs/concepts/payment-gateway.md` gained the matching EN summary section.
+
+Additive only — no plugin hook signature changes, no `payment.Repository` interface
+changes, and the synchronous card path is behaviourally unchanged. Minor bump.
+
 ## [0.4.0] - 2026-07-13
 
 ### Added
