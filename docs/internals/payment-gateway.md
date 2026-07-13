@@ -1428,6 +1428,9 @@ type ProcessPaymentInput struct {
 > ゲートウェイへ伝播する。空なら `ThreeDSecure` は従来どおり nil（後方互換）。
 > `ThreeDSecureRequest.Required` はこの経路では設定しない — 3DS の強制は別関心であり、
 > ReturnURL の伝播はあくまで「戻り先の器」の受け渡しに限る。
+> **同一 `IdempotencyKey` でのリトライでは同じ `ReturnURL` を渡すこと** — Pending
+> fall-through では同一キーで再 `Charge` されるため、リクエストボディが前回と異なると
+> `idempotency_error` で拒否するゲートウェイ（Stripe 等）がある。
 
 **`ProcessPayment(ctx, invoiceID, input)` のチャージ結果分岐**
 
