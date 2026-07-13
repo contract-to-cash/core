@@ -42,13 +42,17 @@ import (
 //     webhook delivery here: holding the transaction open for network I/O
 //     exhausts locks and connections. Actual delivery is done by a separate
 //     relay/poller that reads the outbox table out of band.
-//   - VETO SEMANTICS (IMPORTANT). Returning an error rolls back
-//     ProcessPayment's transaction, and a SUCCESSFUL gateway charge is then
-//     UNWOUND by saga compensation (Void, falling back to Refund). This is the
-//     price of atomicity and is the exact same path as the existing
+//   - VETO SEMANTICS (IMPORTANT). Returning an error rolls back the calling
+//     transaction. On the ProcessPayment path a SUCCESSFUL gateway charge is
+//     then UNWOUND by saga compensation (Void, falling back to Refund). This
+//     is the price of atomicity and is the exact same path as the existing
 //     "payment save failed → charge reversed" behaviour. Because a transient
 //     error triggers a real reversal, Append must be an idempotent, robust,
-//     lightweight INSERT — never fail it for a recoverable reason.
+//     lightweight INSERT — never fail it for a recoverable reason. On the
+//     SettlePayment path a veto involves NO gateway money movement (the funds
+//     already arrived out-of-band); the rollback is harmless and the next
+//     webhook redelivery retries — the same risk class as OnInvoiceFinalized
+//     (see docs/internals/plugin-system.md §11.4/§11.5).
 //   - AT-LEAST-ONCE / DEDUP. Idempotent-replay convergence and retries can call
 //     this more than once for the same payment/invoice. Key your outbox row on
 //     an idempotency discriminator (e.g. the payment ID) so duplicates collapse.
@@ -57,14 +61,18 @@ import (
 //     service.WithPaymentTxManager; see the transactional-outbox section of
 //     docs/internals/plugin-system.md.
 type PaymentOutboxWriter interface {
-	// OnPaymentRecorded is called by PaymentService.ProcessPayment inside the
-	// bookkeeping transaction, immediately after the payment and invoice rows
-	// are saved and before the transaction commits. It is invoked only on the
-	// paths that actually persist a new payment state — the Pending→Completed
-	// promotion path and the normal success path (including a zero-amount
-	// settlement) — and NOT on idempotent-replay / race-convergence paths that
-	// write nothing new. A returned error rolls the transaction back (and, on
-	// the gateway path, triggers saga compensation of the charge).
+	// OnPaymentRecorded is called by PaymentService.ProcessPayment and
+	// PaymentService.SettlePayment inside the bookkeeping transaction,
+	// immediately after the payment and invoice rows are saved and before the
+	// transaction commits. It is invoked only on the paths that actually
+	// persist a new payment state — the Pending→Completed promotion path and
+	// the normal success path (including a zero-amount settlement) in
+	// ProcessPayment, and the Pending→Completed settlement in SettlePayment —
+	// and NOT on idempotent-replay / race-convergence paths that write nothing
+	// new. A returned error rolls the transaction back (and, on the
+	// ProcessPayment gateway path, triggers saga compensation of the charge;
+	// a SettlePayment veto moves no money and is retried by the next webhook
+	// redelivery).
 	//
 	// p is the persisted payment (Completed); inv is the invoice the payment
 	// was recorded against. Neither is nil on this call.
