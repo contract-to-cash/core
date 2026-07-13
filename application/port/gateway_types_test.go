@@ -125,6 +125,53 @@ func TestTransaction_HasThreeDSecureField(t *testing.T) {
 	}
 }
 
+func TestChargeRequest_HasPaymentMethodTypeHint(t *testing.T) {
+	// ChargeRequest should carry an optional payment-method-type hint so that
+	// multi-method gateway adapters can skip a per-charge PaymentMethod lookup
+	// (issue #253).
+	pmID := "pm-001"
+	req := ChargeRequest{
+		CustomerID:        "cust-001",
+		PaymentMethodID:   &pmID,
+		PaymentMethodType: PaymentMethodTypeConvenienceStore,
+	}
+
+	if req.PaymentMethodType != PaymentMethodTypeConvenienceStore {
+		t.Errorf("expected PaymentMethodType %q, got %q",
+			PaymentMethodTypeConvenienceStore, req.PaymentMethodType)
+	}
+}
+
+func TestAuthorizeRequest_HasPaymentMethodTypeHint(t *testing.T) {
+	// AuthorizeRequest should carry the same optional hint as ChargeRequest
+	// (issue #253).
+	pmID := "pm-002"
+	req := AuthorizeRequest{
+		CustomerID:        "cust-002",
+		PaymentMethodID:   &pmID,
+		PaymentMethodType: PaymentMethodTypeBankTransfer,
+	}
+
+	if req.PaymentMethodType != PaymentMethodTypeBankTransfer {
+		t.Errorf("expected PaymentMethodType %q, got %q",
+			PaymentMethodTypeBankTransfer, req.PaymentMethodType)
+	}
+}
+
+func TestChargeRequest_PaymentMethodTypeEmpty_MeansUnknown(t *testing.T) {
+	// The zero value must mean "unknown" so existing callers that never set
+	// the field keep the pre-#253 behavior (gateway resolves the method itself).
+	req := ChargeRequest{CustomerID: "cust-003"}
+	if req.PaymentMethodType != "" {
+		t.Errorf("expected empty PaymentMethodType by default, got %q", req.PaymentMethodType)
+	}
+
+	authReq := AuthorizeRequest{CustomerID: "cust-003"}
+	if authReq.PaymentMethodType != "" {
+		t.Errorf("expected empty PaymentMethodType by default, got %q", authReq.PaymentMethodType)
+	}
+}
+
 func TestThreeDSecureResult_RedirectURLNil_WhenCompleted(t *testing.T) {
 	// When 3DS authentication is completed, RedirectURL should be nil.
 	result := ThreeDSecureResult{
