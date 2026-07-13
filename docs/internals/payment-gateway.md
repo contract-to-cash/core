@@ -1380,208 +1380,64 @@ func (r *DefaultGatewayRouter) matches(rule port.RoutingRule, criteria port.Rout
 
 ## 6. 決済サービス（アプリケーション層）
 
+> **正準はソース**: 完全な実装は `application/service/payment_service.go`（および
+> セトルメント API の `application/service/payment_settlement.go`）を参照。
+> 以下は構築・入出力・チャージ結果の分岐の**要点の抜粋**である。フルコピーは
+> 陳腐化しやすいため掲載しない。
+
+**構築（要点）**
+
 ```go
-// application/service/payment_service.go
-package service
-
-import (
-    "context"
-    "time"
-
-    "github.com/contract-to-cash/core/application/port"
-    "github.com/contract-to-cash/core/domain/invoice"
-    "github.com/contract-to-cash/core/domain/payment"
-    "github.com/contract-to-cash/core/domain/shared"
-    "github.com/contract-to-cash/core/eventstore"
-    "github.com/contract-to-cash/core/plugin"
-)
-
-// PaymentService 決済サービス
-type PaymentService struct {
-    gateway         port.PaymentGateway
-    paymentRepo     payment.Repository
-    invoiceRepo     invoice.Repository
-    contractRepo    contract.Repository    // 支払い方法フォールバック解決用
-    customerGateway port.CustomerGateway   // オプション: 顧客デフォルト支払い方法の参照用
-    eventStore      eventstore.Store
-    pluginRegistry  *plugin.Registry
-    clock           shared.Clock
-}
-
-// PaymentServiceOption NewPaymentServiceのオプション引数
-type PaymentServiceOption func(*PaymentService)
-
-// WithCustomerGateway 顧客ゲートウェイを設定するオプション
-func WithCustomerGateway(gw port.CustomerGateway) PaymentServiceOption {
-    return func(s *PaymentService) { s.customerGateway = gw }
-}
-
+// application/service/payment_service.go（現行シグネチャ）
 func NewPaymentService(
     gateway port.PaymentGateway,
     paymentRepo payment.Repository,
     invoiceRepo invoice.Repository,
-    contractRepo contract.Repository,
+    contractRepo contract.Repository,   // 支払い方法フォールバック解決用（§6.4）
     eventStore eventstore.Store,
-    pluginRegistry *plugin.Registry,
+    registry *plugin.Registry,
     clock shared.Clock,
     opts ...PaymentServiceOption,
-) *PaymentService {
-    s := &PaymentService{
-        gateway:        gateway,
-        paymentRepo:    paymentRepo,
-        invoiceRepo:    invoiceRepo,
-        contractRepo:   contractRepo,
-        eventStore:     eventStore,
-        pluginRegistry: pluginRegistry,
-        clock:          clock,
-    }
-    for _, opt := range opts {
-        opt(s)
-    }
-    return s
-}
+) *PaymentService
+```
 
-// ProcessPayment 請求書の支払いを処理
-func (s *PaymentService) ProcessPayment(
-    ctx context.Context,
-    invoiceID shared.InvoiceID,
-    input ProcessPaymentInput,
-) (*payment.Payment, error) {
-    // 1. 請求書取得
-    inv, err := s.invoiceRepo.FindByID(ctx, invoiceID)
-    if err != nil {
-        return nil, err
-    }
+オプション: `WithPaymentLogger` / `WithCustomerGateway`（顧客デフォルト支払い方法の参照、§6.4）/
+`WithPaymentTxManager`（**本番必須**。省略時は Noop へフォールバックし Warn ログ、
+意図的な場合は `WithoutPaymentTransactions()` で明示）/ `WithIdempotencyStore`（§6.1）/
+`WithPaymentOutboxWriter`（トランザクショナル・アウトボックス、plugin-system.md §11）。
 
-    // 2. 支払い金額決定
-    amount := inv.Total()
-    if input.Amount != nil {
-        amount = *input.Amount  // 一部支払い
-    }
+**入力型（現行）**
 
-    // 3. プラグインフック: BeforeCharge（ISP分離後のIF）
-    pluginCtx := plugin.NewContext(ctx)
-    for _, hook := range s.pluginRegistry.GetBeforeChargeHooks() {
-        if err := hook.BeforeCharge(pluginCtx, amount); err != nil {
-            return nil, err
-        }
-    }
-
-    // 4. 決済実行
-    chargeReq := &payment.ChargeRequest{
-        Amount:          amount,
-        CustomerID:      input.CustomerID,
-        PaymentMethodID: &input.PaymentMethodID,
-        IdempotencyKey:  input.IdempotencyKey,
-        Description:     "Invoice: " + invoiceID.String(),
-        Metadata: map[string]string{
-            "invoice_id": invoiceID.String(),
-        },
-    }
-
-    chargeResp, err := s.gateway.Charge(ctx, chargeReq)
-    if err != nil {
-        // 失敗時のプラグインフック（ISP分離後のIF）
-        for _, hook := range s.pluginRegistry.GetOnPaymentFailedHooks() {
-            hook.OnPaymentFailed(pluginCtx, nil, err) // Payment未生成のためnil
-        }
-        return nil, err
-    }
-
-    // 5. 支払い記録作成
-    p := payment.NewPayment(
-        invoiceID,
-        amount,
-        input.PaymentMethodID,
-        chargeResp.TransactionID,
-    )
-    p.MarkCompleted(chargeResp.TransactionID)
-
-    if err := s.paymentRepo.Save(ctx, p); err != nil {
-        return nil, err
-    }
-
-    // 6. 請求書に支払い反映
-    if err := inv.RecordPayment(amount); err != nil {
-        return nil, err
-    }
-    if err := s.invoiceRepo.Save(ctx, inv); err != nil {
-        return nil, err
-    }
-
-    // 7. イベント発行（event-sourcing.md の Event 構造体に準拠）
-    eventData, _ := json.Marshal(p)
-    event := eventstore.Event{
-        ID:            shared.NewID(),
-        StreamID:      p.ID().String(),
-        Type:          string(payment.EventTypePaymentCompleted),
-        Version:       1,
-        SchemaVersion: 1,
-        Data:          eventData,
-        Metadata:      eventstore.EventMetadata{},
-        OccurredAt:    s.clock.Now(),
-    }
-    s.eventStore.Append(ctx, p.ID().String(), []eventstore.Event{event}, 0)
-
-    // 8. プラグインフック: AfterCharge（ISP分離後のIF）
-    for _, hook := range s.pluginRegistry.GetAfterChargeHooks() {
-        hook.AfterCharge(pluginCtx, p)
-    }
-
-    return p, nil
-}
-
+```go
 type ProcessPaymentInput struct {
-    CustomerID      string
-    PaymentMethodID string
-    Amount          *shared.Money  // nil = 全額
+    PaymentMethodID string                // 省略時は §6.4 のフォールバックチェーンで解決
+    PaymentMethod   payment.PaymentMethod // 支払い方法種別（省略時は ChargeResponse → credit_card）
+    Amount          shared.Money          // ゼロ値なら invoice.AmountDue()
+    Currency        shared.Currency
     IdempotencyKey  string
     Metadata        map[string]string
 }
-
-// Refund 返金処理
-func (s *PaymentService) Refund(
-    ctx context.Context,
-    paymentID shared.PaymentID,
-    input RefundInput,
-) (*payment.RefundResponse, error) {
-    // 1. 支払い記録取得
-    p, err := s.paymentRepo.FindByID(ctx, paymentID)
-    if err != nil {
-        return nil, err
-    }
-
-    // 2. 返金リクエスト
-    refundReq := &payment.RefundRequest{
-        TransactionID:  p.ExternalTransactionID(),
-        Amount:         input.Amount,
-        Reason:         input.Reason,
-        IdempotencyKey: input.IdempotencyKey,
-    }
-
-    refundResp, err := s.gateway.Refund(ctx, refundReq)
-    if err != nil {
-        return nil, err
-    }
-
-    // 3. 状態更新
-    p.MarkRefunded(refundResp.Amount)
-    if err := s.paymentRepo.Save(ctx, p); err != nil {
-        return nil, err
-    }
-
-    // 4. イベント発行
-    // ...
-
-    return refundResp, nil
-}
-
-type RefundInput struct {
-    Amount         *shared.Money
-    Reason         payment.RefundReason
-    IdempotencyKey string
-}
 ```
+
+**`ProcessPayment(ctx, invoiceID, input)` のチャージ結果分岐**
+
+ゲートウェイの `Charge` が返す `ChargeResponse.Status` に応じて 4 系統に分岐する:
+
+| ChargeResponse.Status | 挙動 | 戻り値 |
+|---|---|---|
+| `captured` / `succeeded` | 成功パス: tx 内で Payment 完了 + `inv.RecordPayment` + 両 Save + outbox（§11）。保存失敗は saga 補償（Void→Refund、§6.2）で課金を巻き戻す | `(payment, nil)` |
+| `requires_action` | 3DS 認証待ち: **Pending** の Payment を保存し、請求書は未変更。saga なし（未キャプチャ） | `(pendingPayment, ErrRequiresAction)` |
+| `pending` | **非同期決済**（銀行振込・コンビニ・キャリア等、§6.5）: **Pending** の Payment（冪等キー + ゲートウェイ取引 ID + 解決済み支払い方法）を保存し、請求書は未変更。saga なし（入金前なので補償対象が存在しない） | `(pendingPayment, ErrPaymentPending)` |
+| その他（`failed` / `canceled` / `authorized` 等） | 予期しないステータスとしてエラー（成功パスへ進まない） | `(nil, error)` |
+
+ゲートウェイ呼び出し自体がエラーを返した場合は Failed の Payment 記録を best-effort 保存し、
+`OnPaymentFailedHook`（非致命）を発火してエラーを返す。`ErrRequiresAction` / `ErrPaymentPending`
+はいずれも公開センチネルで、`errors.Is()` で判定する。同一冪等キーでの再試行はプリチャージ
+チェックと tx 内チェックで収束する（Completed は冪等リプレイ、Pending は
+Pending→Completed 昇格、terminal は `ErrCodeConflict`）。
+
+フック発火・パニック隔離・アウトボックスの正確なタイミングは
+`docs/internals/plugin-system.md` §5.3〜§5.4 / §11 を参照。
 
 ---
 
@@ -1864,6 +1720,114 @@ Error ログを出す。
   敗者はドメインエラー（`-race`）
 - `TestRefund_SequentialPartialRefunds_UseDistinctKeys` — 逐次の部分返金 2 回が異なるキーを使う
 - `TestRefund_ExplicitIdempotencyKey_IsHonored` — 明示キーがゲートウェイへそのまま伝播する
+
+---
+
+## 6.4 支払い方法の解決チェーン（Invoice → Contract → Customer）
+
+`ProcessPaymentInput.PaymentMethodID` が空の場合、`PaymentService.ResolvePaymentMethod`
+（公開メソッド）が以下の 3 レベルのフォールバックチェーンで課金対象の支払い方法 ID を解決する:
+
+1. **Invoice レベル** — `invoice.PaymentMethodID()`（請求書ごとの上書き。非 nil かつ非空なら採用）
+2. **Contract レベル** — `contractRepo.FindByID(inv.ContractID())` → 集約の `PaymentMethodID()`
+   （契約のデフォルト）
+3. **Customer レベル** — `customerGateway.GetCustomer(accountID)` →
+   `Customer.DefaultPaymentMethodID`（顧客デフォルト。`WithCustomerGateway` が配線されている
+   場合のみ参照される）
+
+3 レベルすべてで見つからない場合は `ErrCodeBusinessRule` の DomainError を返す
+（どのレベルを調べたかをメッセージに含む）。
+
+補足:
+
+- **ゼロ額決済（issue #197）では解決をスキップする**。全額割引/全額クレジット充当の請求書は
+  ゲートウェイに触れないため、支払い方法が未登録でも決済（ゼロ額 settle）を妨げない。
+- Payment エンティティへ記録する**支払い方法種別**（`payment.PaymentMethod`）の解決は別系統:
+  ① `ChargeResponse.PaymentMethodType`（ゲートウェイが実際に使った方法）→
+  ② `ProcessPaymentInput.PaymentMethod`（呼び出し側指定）→ ③ 既定 `credit_card`
+  （後方互換）。未知のゲートウェイ種別は Warn ログ付きで `credit_card` にフォールバックする。
+
+---
+
+## 6.5 非同期決済のセトルメント（Pending → SettlePayment / MarkPaymentFailed）
+
+### 6.5.1 解決する課題
+
+銀行振込・コンビニ払い・キャリア決済等の**非同期決済**は、`Charge` の時点では
+「支払い指示（payment instruction）の発行」しか行われず、入金は後日（顧客の払込後）に
+webhook（`port.WebhookEventPaymentInstructionCreated` / `port.WebhookEventPaymentReceived`）で
+通知される。従来はこの結果に一級の出口がなく、`ProcessPayment` の成功ガード
+（Captured/Succeeded のみ）が pending 応答を「予期しないステータス」として拒否していた。
+
+### 6.5.2 ProcessPayment の pending 出口
+
+ゲートウェイが `ChargeResponse.Status == TransactionStatusPending` を返した場合、
+`ProcessPayment` は:
+
+1. **Pending の Payment を保存**する（冪等キー・ゲートウェイ取引 ID・解決済み支払い方法種別つき。
+   3DS の requires_action と同じ永続化ヘルパーを共有）。請求書は**変更しない**。
+2. `(pendingPayment, ErrPaymentPending)` を返す。`errors.Is(err, service.ErrPaymentPending)` で
+   判定し、統合者は払込票 URL 等の支払い指示を顧客へ提示する。
+3. **saga 補償は発火しない**（何もキャプチャされていないので巻き戻す対象がない。
+   requires_action と同じ扱い）。
+4. 同一冪等キーの `ProcessPayment` リトライは: ゲートウェイが依然 pending を返せば既存の
+   Pending レコードを返し（重複保存しない）、Captured/Succeeded を返すようになれば tx 内の
+   **Pending→Completed 昇格**パスで同一レコードを完了させる（従来からの 3DS 昇格と同一機構）。
+
+### 6.5.3 SettlePayment（入金確定）
+
+```go
+func (s *PaymentService) SettlePayment(ctx context.Context, paymentID shared.PaymentID) (*payment.Payment, error)
+```
+
+統合者が webhook 処理（`payment.received`）から呼ぶ。実装は
+`application/service/payment_settlement.go`。
+
+- **Pending → Completed**: `Complete()` → `inv.RecordPayment` → 両 Save を**単一 tx**
+  （`tx.RetryOnConflict(paymentMaxRetries)` + `tx.Run`、FinalizeInvoice / Refund と同じ
+  楽観ロック・リトライパターン）で行う。**`PaymentOutboxWriter` は tx 内・両 Save 直後・
+  コミット前に発火**（plugin-system.md §11 と同一契約）。writer の error/panic は tx を
+  ロールバックさせるが、ここでは金銭移動を伴わないため無害（webhook 再配送が再試行する）。
+- **冪等**: 既に Completed の支払いに対する再呼び出しは **no-op 成功**（保存・outbox・フック
+  いずれも発火しない）。at-least-once の webhook 再配送に安全。並行セトルメントは楽観ロックの
+  version conflict → リトライ → no-op パスに収束する。
+- **terminal 拒否**: Failed / Refunded / PartiallyRefunded / ChargedBack に対しては
+  `ErrCodeInvalidStateTransition` の DomainError を返す（terminal な支払いを黙って
+  「支払済み」に復活させない）。
+- **フック**: 実際に遷移した場合のみ、コミット後に `AfterChargeHook` と
+  `OnPaymentProcessedHook` を非致命（SafeInvoke + LogNonFatalHookError）で発火する —
+  `ProcessPayment` 成功パスと同じフェイタリティ・ポリシー。`BeforeChargeHook` は発火しない
+  （ゲートウェイ課金を行わないため）。
+
+### 6.5.4 MarkPaymentFailed（支払い指示の失効）
+
+```go
+func (s *PaymentService) MarkPaymentFailed(ctx context.Context, paymentID shared.PaymentID, reason string) (*payment.Payment, error)
+```
+
+払込期限切れ等で支払い指示が失効した場合に統合者が呼ぶ。
+
+- **Pending → Failed**: `Fail(reason)` → Save（同じ RetryOnConflict + tx.Run パターン）。
+  **請求書には触れない**（Pending の支払いは請求書に何も記録していないので巻き戻し不要）。
+- **冪等**: 既に Failed の支払いへの再呼び出しは no-op 成功（保存済みの failure reason は
+  上書きしない）。
+- **terminal 拒否**: Completed / Refunded / PartiallyRefunded / ChargedBack に対しては
+  `ErrCodeInvalidStateTransition`。特に、**入金確定済みの支払いを遅延した失効通知が
+  Failed に戻すことはできない**。
+- **フック**: 実際に遷移した場合のみ、コミット後に `OnPaymentFailedHook` を非致命で発火する
+  （請求書はフックコンテキスト用に best-effort でロードし、失敗時は nil）。
+
+### 6.5.5 設計ポイント
+
+- **ID の対応付けは統合者の責務**: webhook ペイロードのゲートウェイ取引 ID から
+  `shared.PaymentID` への解決は統合者側で行う（自前の対応表、または `ProcessPayment` が返した
+  pending payment の `GatewayTransactionID()` を保存しておく）。`payment.Repository` に
+  ゲートウェイ取引 ID のファインダーを**追加しない**のは意図的 — 利用者実装のインターフェースへの
+  メソッド追加は破壊的変更であり（§10.2 の同型ルール）、本機能は additive（SemVer minor）に
+  留める。
+- **フック数は 22 のまま**（plugin-system.md §10.3）。新フックは追加せず、既存の
+  `AfterCharge` / `OnPaymentProcessed` / `OnPaymentFailed` と `PaymentOutboxWriter` ポートを
+  セトルメント経路でも一貫して使う。
 
 ---
 
