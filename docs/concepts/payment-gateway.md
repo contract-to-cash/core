@@ -63,6 +63,25 @@ For cases where you need to reserve funds before finalizing:
 3. Capture → finalize charge (can be partial)
 ```
 
+### Asynchronous Settlement (Bank Transfer, Konbini, Carrier)
+
+Some methods issue a payment instruction and settle later, when the customer pays
+out-of-band. When the gateway's `ChargeResponse.Status` is `pending`,
+`PaymentService.ProcessPayment` persists a **Pending** payment (idempotency key,
+gateway transaction ID, resolved method), leaves the invoice unpaid, and returns
+the sentinel `service.ErrPaymentPending` (check with `errors.Is`). From your
+webhook handling:
+
+- `payment.received` → call `PaymentService.SettlePayment(ctx, paymentID)`:
+  completes the payment and marks the invoice paid in one transaction (outbox
+  writer fires in-tx; AfterCharge/OnPaymentProcessed hooks fire post-commit).
+  Replays are idempotent no-ops; settling a terminal payment is rejected.
+- Instruction expired → call `PaymentService.MarkPaymentFailed(ctx, paymentID, reason)`:
+  Pending → Failed, invoice untouched, OnPaymentFailed hooks fire (non-fatal).
+
+See the canonical spec, §6.5 of `docs/internals/payment-gateway.md`, for the full
+semantics.
+
 ## Payment Method Fallback Resolution
 
 Payment methods are resolved hierarchically:
