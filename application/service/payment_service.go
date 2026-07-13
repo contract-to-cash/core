@@ -110,6 +110,11 @@ var errPaymentOutboxVeto = errors.New("payment outbox writer vetoed the record")
 // PaymentMethod is the type of payment method (e.g. bank_transfer, convenience_store).
 // If not set, it is resolved from ChargeResponse.PaymentMethodType, falling back
 // to credit_card for backward compatibility.
+// ReturnURL is optional — the URL the customer is sent back to after approving
+// a redirect-based payment (e.g. qr_code wallets like PayPay, or a card 3DS
+// challenge). If non-empty, it is propagated to the gateway as
+// ChargeRequest.ThreeDSecure.ReturnURL; if empty, ChargeRequest.ThreeDSecure
+// stays nil and behavior is unchanged (platform#66).
 type ProcessPaymentInput struct {
 	PaymentMethodID string
 	PaymentMethod   payment.PaymentMethod
@@ -117,6 +122,7 @@ type ProcessPaymentInput struct {
 	Currency        shared.Currency
 	IdempotencyKey  string
 	Metadata        map[string]string
+	ReturnURL       string
 }
 
 // RefundInput holds the parameters for issuing a refund.
@@ -605,14 +611,22 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// NOTE: Charge is called BEFORE the in-transaction idempotency check.
 	// This relies on the gateway honouring IdempotencyKey to prevent duplicate
 	// charges when the same request is retried (e.g. after a transient DB failure).
-	chargeResp, err := s.gateway.Charge(ctx, &port.ChargeRequest{
+	chargeReq := &port.ChargeRequest{
 		Amount:          amount,
 		CustomerID:      string(inv.AccountID()),
 		PaymentMethodID: &pmID,
 		Description:     fmt.Sprintf("Invoice %s", invoiceID),
 		Metadata:        input.Metadata,
 		IdempotencyKey:  effectiveKey,
-	})
+	}
+	// Redirect-based payments (qr_code wallets like PayPay, card 3DS) need a
+	// return URL for the customer to come back to after approval. Propagate it
+	// via the ThreeDSecure request; Required is intentionally left false —
+	// forcing a 3DS challenge is a separate concern (platform#66).
+	if input.ReturnURL != "" {
+		chargeReq.ThreeDSecure = &port.ThreeDSecureRequest{ReturnURL: input.ReturnURL}
+	}
+	chargeResp, err := s.gateway.Charge(ctx, chargeReq)
 
 	// No ChargeResponse available on failure — resolve from input only
 	inputMethodType := s.resolvePaymentMethodType("", input.PaymentMethod)

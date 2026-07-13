@@ -141,6 +141,7 @@ type ProcessPaymentInput struct {
     Currency        shared.Currency
     IdempotencyKey  string       // Required for deduplication
     Metadata        map[string]string
+    ReturnURL       string       // Optional. Where the customer returns after approving a redirect-based payment (qr_code wallets, card 3DS). Non-empty → propagated as ChargeRequest.ThreeDSecure.ReturnURL; empty → ThreeDSecure stays nil (platform#66)
 }
 
 func (s *PaymentService) ProcessPayment(

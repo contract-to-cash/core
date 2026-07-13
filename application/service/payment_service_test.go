@@ -31,11 +31,13 @@ type mockGateway struct {
 	threeDSRedirect         string
 	chargePaymentMethodType port.PaymentMethodType // if set, returned in ChargeResponse
 	chargeStatus            port.TransactionStatus // if set, overrides the default Captured status
+	lastChargeReq           *port.ChargeRequest    // spy: last ChargeRequest received by Charge
 }
 
 func (g *mockGateway) ID() string                                 { return "mock" }
 func (g *mockGateway) SupportedMethods() []port.PaymentMethodType { return nil }
 func (g *mockGateway) Charge(_ context.Context, req *port.ChargeRequest) (*port.ChargeResponse, error) {
+	g.lastChargeReq = req
 	if g.failCharge {
 		return nil, fmt.Errorf("card declined")
 	}
@@ -4037,5 +4039,76 @@ func TestProcessPayment_NoOutboxWriter_Unchanged(t *testing.T) {
 	}
 	if p.Status() != payment.PaymentStatusCompleted {
 		t.Errorf("expected completed payment, got %s", p.Status())
+	}
+}
+
+// --- ReturnURL propagation to ChargeRequest.ThreeDSecure (platform#66) ---
+
+// TestProcessPayment_ReturnURL_PropagatesToChargeRequest verifies that a
+// non-empty ProcessPaymentInput.ReturnURL reaches the gateway as
+// ChargeRequest.ThreeDSecure.ReturnURL (needed for redirect-based payments
+// such as qr_code wallets and card 3DS challenges).
+func TestProcessPayment_ReturnURL_PropagatesToChargeRequest(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &mockGateway{}
+
+	svc := NewPaymentService(
+		gw, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil,
+		&mockEventStore{}, plugin.NewRegistry(), clock,
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "return-url-1",
+		ReturnURL:       "https://example.com/payments/return",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gw.lastChargeReq == nil {
+		t.Fatal("gateway did not receive a ChargeRequest")
+	}
+	if gw.lastChargeReq.ThreeDSecure == nil {
+		t.Fatal("expected ChargeRequest.ThreeDSecure to be set when ReturnURL is provided")
+	}
+	if got := gw.lastChargeReq.ThreeDSecure.ReturnURL; got != "https://example.com/payments/return" {
+		t.Errorf("expected ReturnURL %q, got %q", "https://example.com/payments/return", got)
+	}
+	if gw.lastChargeReq.ThreeDSecure.Required {
+		t.Error("Required must not be forced by ReturnURL propagation (3DS enforcement is a separate concern)")
+	}
+}
+
+// TestProcessPayment_NoReturnURL_ThreeDSecureStaysNil verifies backward
+// compatibility: without a ReturnURL, ChargeRequest.ThreeDSecure remains nil.
+func TestProcessPayment_NoReturnURL_ThreeDSecureStaysNil(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &mockGateway{}
+
+	svc := NewPaymentService(
+		gw, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil,
+		&mockEventStore{}, plugin.NewRegistry(), clock,
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "return-url-2",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gw.lastChargeReq == nil {
+		t.Fatal("gateway did not receive a ChargeRequest")
+	}
+	if gw.lastChargeReq.ThreeDSecure != nil {
+		t.Errorf("expected ChargeRequest.ThreeDSecure to stay nil without a ReturnURL, got %+v", gw.lastChargeReq.ThreeDSecure)
 	}
 }
