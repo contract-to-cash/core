@@ -181,6 +181,32 @@ func WithoutPaymentTransactions() PaymentServiceOption {
 	}
 }
 
+// WithPaymentOutboxWriter wires a [port.PaymentOutboxWriter] into the
+// PaymentService (issue #248, transactional outbox).
+//
+// When provided, ProcessPayment calls OnPaymentRecorded INSIDE the payment
+// bookkeeping transaction, immediately after the payment and invoice rows are
+// saved and before the transaction commits, on the paths that persist a new
+// payment state (the Pending→Completed promotion path and the normal success
+// path, including a zero-amount settlement). This lets an integrator write a
+// durable notification row in the SAME transaction as the payment, closing the
+// event-loss window that the post-commit AfterCharge / OnPaymentProcessed hooks
+// cannot.
+//
+// The writer has VETO power: a returned error (or a recovered panic) rolls the
+// transaction back and, on the gateway path, triggers saga compensation of the
+// successful charge — the same reversal path as a payment-save failure. Keep
+// OnPaymentRecorded a lightweight, idempotent, transaction-scoped INSERT (see
+// [port.PaymentOutboxWriter]).
+//
+// When omitted (nil), the outbox stage is skipped entirely and ProcessPayment
+// behaves exactly as before (existing behaviour unchanged).
+func WithPaymentOutboxWriter(w port.PaymentOutboxWriter) PaymentServiceOption {
+	return func(s *PaymentService) {
+		s.outboxWriter = w
+	}
+}
+
 // WithIdempotencyStore wires an [port.IdempotencyStore] into the PaymentService.
 //
 // When provided, ProcessPayment tracks idempotency keys that have been burned
@@ -212,6 +238,11 @@ type PaymentService struct {
 	logger           *slog.Logger
 	txManager        tx.TxManager
 	idempotencyStore port.IdempotencyStore
+	// outboxWriter, when non-nil, is called inside the payment bookkeeping
+	// transaction (post-save, pre-commit) so an integrator can write a durable
+	// notification row atomically with the payment (issue #248). nil skips the
+	// outbox stage entirely.
+	outboxWriter port.PaymentOutboxWriter
 	// suppressTxWarning records an explicit WithoutPaymentTransactions() opt-in so
 	// the default-NoopTxManager warning is not emitted for intentional non-atomic use.
 	suppressTxWarning bool
@@ -257,7 +288,40 @@ func NewPaymentService(
 		}
 	}
 	tx.WarnIfDefaultNoop(s.logger, s.txManager, "PaymentService", "wire WithPaymentTxManager(...) (or WithoutPaymentTransactions() to acknowledge non-atomic in-memory use)")
+	// Issue #248: a wired outbox writer relies on the bookkeeping transaction for
+	// its atomicity guarantee. Under a default (silently-fallen-back) NoopTxManager
+	// the payment save and the outbox INSERT are NOT atomic, defeating the whole
+	// point of a transactional outbox — a crash between them still drops the event.
+	// Emit a dedicated Warn once so this specific misconfiguration is loud. An
+	// explicit noop opt-in (WithoutPaymentTransactions) stays silent.
+	if s.outboxWriter != nil && tx.IsNoop(s.txManager) && !tx.IsExplicitNoop(s.txManager) {
+		s.logger.Warn(
+			"payment outbox writer wired without a transaction manager: the payment save and the outbox INSERT are NOT atomic, so the transactional-outbox guarantee does not hold",
+			"component", "PaymentService",
+			"remedy", "wire WithPaymentTxManager(...) (or WithoutPaymentTransactions() to acknowledge non-atomic in-memory use)",
+		)
+	}
 	return s
+}
+
+// firePaymentOutbox invokes the wired [port.PaymentOutboxWriter] inside the
+// bookkeeping transaction, immediately after the payment/invoice rows are saved
+// and before commit (issue #248). It is a no-op when no writer is wired.
+//
+// The call is wrapped in plugin.SafeInvoke so a panicking writer is converted
+// into a *plugin.PluginPanicError and returned to the tx.Run closure rather than
+// unwinding through it — a panic escaping tx.Run would make rollback behaviour
+// backend-dependent and could race saga compensation (plugin panic policy,
+// docs/internals/plugin-system.md §5.4). The returned error is propagated by the
+// caller so the transaction rolls back (and, on the gateway path, saga
+// compensation reverses the charge).
+func (s *PaymentService) firePaymentOutbox(ctx context.Context, p *payment.Payment, inv *invoice.Invoice) error {
+	if s.outboxWriter == nil {
+		return nil
+	}
+	return plugin.SafeInvoke("PaymentOutboxWriter.OnPaymentRecorded", "outbox", func() error {
+		return s.outboxWriter.OnPaymentRecorded(ctx, p, inv)
+	})
 }
 
 // ProcessPayment charges an invoice and records the payment.
@@ -819,10 +883,19 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 					if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {
 						return fmt.Errorf("failed to save invoice after payment upgrade: %w", saveErr)
 					}
+					// Issue #248: write the durable outbox row in this same
+					// transaction, after both saves and before the promotion
+					// path returns nil (commit). A writer error rolls back and
+					// triggers saga compensation of the gateway charge.
+					if outboxErr := s.firePaymentOutbox(txCtx, existing, inv); outboxErr != nil {
+						return outboxErr
+					}
 					p = existing
 					return nil
 				case payment.PaymentStatusCompleted:
 					// Idempotent replay of a successfully completed payment.
+					// No new save, so NO outbox fire (issue #248): the winning
+					// call already wrote the payment (and its outbox row).
 					p = existing
 					return nil
 				case payment.PaymentStatusFailed,
@@ -887,6 +960,12 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		}
 		if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {
 			return fmt.Errorf("failed to save invoice after payment: %w", saveErr)
+		}
+		// Issue #248: normal success path — both rows saved. Write the durable
+		// outbox row in the same transaction before returning nil (commit). A
+		// writer error rolls back and triggers saga compensation of the charge.
+		if outboxErr := s.firePaymentOutbox(txCtx, p, inv); outboxErr != nil {
+			return outboxErr
 		}
 		return nil
 	})
@@ -1134,9 +1213,17 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 					if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {
 						return fmt.Errorf("failed to save invoice after payment upgrade: %w", saveErr)
 					}
+					// Issue #248: zero-amount promotion path — both rows saved.
+					// Write the outbox row in this transaction before returning
+					// nil (commit). There is no gateway charge to reverse here;
+					// a writer error simply rolls the settlement back.
+					if outboxErr := s.firePaymentOutbox(txCtx, existing, inv); outboxErr != nil {
+						return outboxErr
+					}
 					p = existing
 					return nil
 				case payment.PaymentStatusCompleted:
+					// Idempotent replay: no new save, so NO outbox fire (#248).
 					p = existing
 					return nil
 				case payment.PaymentStatusFailed,
@@ -1176,6 +1263,13 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 		}
 		if saveErr := repos.Invoices.Save(txCtx, inv); saveErr != nil {
 			return fmt.Errorf("failed to save invoice after zero-amount payment: %w", saveErr)
+		}
+		// Issue #248: zero-amount normal settlement — both rows saved. Write the
+		// outbox row in this transaction before returning nil (commit). The
+		// in-closure raced-loser convergence above returned nil earlier WITHOUT a
+		// new save, so it correctly never reaches this outbox fire.
+		if outboxErr := s.firePaymentOutbox(txCtx, p, inv); outboxErr != nil {
+			return outboxErr
 		}
 		return nil
 	})

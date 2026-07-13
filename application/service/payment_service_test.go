@@ -3831,3 +3831,205 @@ func TestRefund_RetriesOnVersionConflict(t *testing.T) {
 		t.Errorf("expected partially_refunded, got %s", stored.Status())
 	}
 }
+
+// --- Transactional outbox writer (issue #248) ---
+
+// TestProcessPayment_OutboxWriter_FiresOnNormalSuccess verifies that a wired
+// PaymentOutboxWriter is invoked exactly once, with the persisted payment and
+// invoice, on the normal gateway success path.
+func TestProcessPayment_OutboxWriter_FiresOnNormalSuccess(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+	writer := inmemory.NewInMemoryOutboxWriter()
+
+	svc := NewPaymentService(
+		&mockGateway{}, &mockPaymentRepo{}, invRepo, nil, &mockEventStore{},
+		plugin.NewRegistry(), clock,
+		WithPaymentOutboxWriter(writer),
+	)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "outbox-key-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if writer.PaymentCount() != 1 {
+		t.Fatalf("expected OnPaymentRecorded to fire exactly once, got %d", writer.PaymentCount())
+	}
+	entry := writer.PaymentEntries()[0]
+	if entry.Payment == nil || entry.Payment.ID() != p.ID() {
+		t.Errorf("outbox entry has wrong payment: %+v", entry.Payment)
+	}
+	if entry.Payment.Status() != payment.PaymentStatusCompleted {
+		t.Errorf("outbox entry payment should be completed, got %s", entry.Payment.Status())
+	}
+	if entry.Invoice == nil || entry.Invoice.ID() != inv.ID() {
+		t.Errorf("outbox entry has wrong invoice: %+v", entry.Invoice)
+	}
+}
+
+// TestProcessPayment_OutboxWriter_ErrorTriggersSagaCompensation verifies the B1
+// veto semantics: an OnPaymentRecorded error rolls the bookkeeping transaction
+// back and, because the gateway was already charged, saga compensation reverses
+// the charge (Void). ProcessPayment returns an error.
+func TestProcessPayment_OutboxWriter_ErrorTriggersSagaCompensation(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{} // Void succeeds by default
+	writer := inmemory.NewInMemoryOutboxWriter()
+	writer.FailWith(errors.New("outbox insert failed"))
+
+	svc := NewPaymentService(
+		gw, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{},
+		plugin.NewRegistry(), clock,
+		WithPaymentOutboxWriter(writer),
+		WithoutPaymentTransactions(), // explicit noop still runs the closure
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "outbox-key-veto",
+	})
+	if err == nil {
+		t.Fatal("expected ProcessPayment to fail when the outbox writer vetoes")
+	}
+	if !gw.voidCalled {
+		t.Fatal("expected saga compensation (Void) after outbox veto rolled the charge back")
+	}
+	if writer.PaymentCount() != 0 {
+		t.Errorf("failed writer must not record an entry, got %d", writer.PaymentCount())
+	}
+}
+
+// TestProcessPayment_OutboxWriter_NotCalledOnPreChargeReplay verifies that an
+// idempotent replay short-circuit (a pre-existing Completed payment) does NOT
+// fire the outbox writer: no new payment state is persisted.
+func TestProcessPayment_OutboxWriter_NotCalledOnPreChargeReplay(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	existingPayment, _ := payment.NewPayment(
+		shared.NewPaymentID(), inv.ID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard, "txn-existing", clock.Now(),
+	)
+	existingPayment.SetIdempotencyKey("outbox-key-replay")
+	_ = existingPayment.Complete()
+
+	writer := inmemory.NewInMemoryOutboxWriter()
+	svc := NewPaymentService(
+		&mockGateway{}, &mockPaymentRepo{existing: existingPayment},
+		&mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{},
+		plugin.NewRegistry(), clock,
+		WithPaymentOutboxWriter(writer),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "outbox-key-replay",
+	})
+	if err != nil {
+		t.Fatalf("idempotent replay should succeed, got: %v", err)
+	}
+	if writer.PaymentCount() != 0 {
+		t.Errorf("outbox writer must NOT fire on idempotent replay, got %d", writer.PaymentCount())
+	}
+}
+
+// TestProcessPayment_ZeroAmount_OutboxWriter_Fires verifies the outbox writer
+// fires on the zero-amount settlement success path.
+func TestProcessPayment_ZeroAmount_OutboxWriter_Fires(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newZeroAmountFinalizedInvoice()
+	writer := inmemory.NewInMemoryOutboxWriter()
+
+	svc := NewPaymentService(
+		&mockGateway{failCharge: true}, &mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{},
+		plugin.NewRegistry(), clock,
+		WithPaymentOutboxWriter(writer),
+	)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		Amount:         shared.Zero(shared.CurrencyJPY),
+		Currency:       shared.CurrencyJPY,
+		IdempotencyKey: "outbox-zero-1",
+	})
+	if err != nil {
+		t.Fatalf("zero-amount settlement should succeed, got: %v", err)
+	}
+	if writer.PaymentCount() != 1 {
+		t.Fatalf("expected outbox writer to fire once on zero settlement, got %d", writer.PaymentCount())
+	}
+	if got := writer.PaymentEntries()[0].Payment; got == nil || got.ID() != p.ID() {
+		t.Errorf("zero-amount outbox entry has wrong payment: %+v", got)
+	}
+}
+
+// TestProcessPayment_OutboxWriter_PanicIsolated verifies that a panicking outbox
+// writer is converted into an error (not propagated as a raw panic through
+// tx.Run), aborting the payment and triggering saga compensation.
+func TestProcessPayment_OutboxWriter_PanicIsolated(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{}
+	writer := inmemory.NewInMemoryOutboxWriter()
+	writer.PanicNext("outbox boom")
+
+	svc := NewPaymentService(
+		gw, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{},
+		plugin.NewRegistry(), clock,
+		WithPaymentOutboxWriter(writer),
+		WithoutPaymentTransactions(),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "outbox-panic-1",
+	})
+	if err == nil {
+		t.Fatal("expected a panicking outbox writer to abort ProcessPayment with an error")
+	}
+	if _, ok := plugin.AsPanic(err); !ok {
+		t.Errorf("expected a *plugin.PluginPanicError, got: %v", err)
+	}
+	if !gw.voidCalled {
+		t.Error("expected saga compensation after the outbox writer panicked")
+	}
+}
+
+// TestProcessPayment_NoOutboxWriter_Unchanged verifies that without a wired
+// writer the success path is unaffected (regression guard).
+func TestProcessPayment_NoOutboxWriter_Unchanged(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+
+	svc := NewPaymentService(
+		&mockGateway{}, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil,
+		&mockEventStore{}, plugin.NewRegistry(), clock,
+	)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "outbox-none-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Status() != payment.PaymentStatusCompleted {
+		t.Errorf("expected completed payment, got %s", p.Status())
+	}
+}

@@ -253,6 +253,88 @@ acknowledge that intentionally and silence the warning, opt in explicitly with
 `tx.NewNoopTxManagerExplicit(...)` (batch processors) instead of leaving the
 manager unset.
 
+## Transactional Outbox (durable notifications, issue #248)
+
+The core-fired payment/invoice hooks (`AfterCharge`, `OnPaymentProcessed`,
+`OnInvoiceIssued`) run **after** the bookkeeping transaction commits, so you
+cannot enqueue a notification in the same transaction as the payment/invoice
+write. A crash between commit and enqueue silently drops events such as
+`payment.charged` / `contract.first_payment`.
+
+To make notifications durable, implement one or both **outbox writer ports** and
+let the core call them **inside** the write transaction, immediately after the
+row is saved and before commit — so your outbox row is written in the SAME
+transaction as the payment/invoice:
+
+```go
+// PaymentOutboxWriter (and/or InvoiceOutboxWriter) — application/port.
+type myOutbox struct{}
+
+func (o *myOutbox) OnPaymentRecorded(ctx context.Context, p *payment.Payment, inv *invoice.Invoice) error {
+    // ctx is TRANSACTION-SCOPED: take the current tx off it and piggy-back
+    // a lightweight INSERT into your own outbox table. Do NOT open a new
+    // connection/transaction, or atomicity breaks silently.
+    q := QuerierFromContext(ctx) // your helper, wired by your repositories
+    _, err := q.ExecContext(ctx,
+        `INSERT INTO outbox (id, kind, payload) VALUES ($1, 'payment.charged', $2)
+         ON CONFLICT (id) DO NOTHING`, // dedup: at-least-once delivery
+        p.ID(), buildPayload(p, inv))
+    return err
+}
+
+func (o *myOutbox) OnInvoiceFinalized(ctx context.Context, inv *invoice.Invoice) error {
+    q := QuerierFromContext(ctx)
+    _, err := q.ExecContext(ctx,
+        `INSERT INTO outbox (id, kind, payload) VALUES ($1, 'invoice.finalized', $2)
+         ON CONFLICT (id) DO NOTHING`,
+        inv.ID(), buildInvoicePayload(inv))
+    return err
+}
+
+outbox := &myOutbox{}
+
+paymentService := service.NewPaymentService(
+    gateway, paymentRepo, invoiceRepo, contractRepo, eventStore, registry, clock,
+    service.WithPaymentTxManager(txManager),        // REQUIRED: no tx = no atomicity
+    service.WithPaymentOutboxWriter(outbox),
+)
+
+billingService := service.NewBillingService(
+    contractRepo, invoiceRepo, usageRepo, balanceConfig,
+    priceRepo, productRepo, registry, service.BillingConfig{DaysUntilDue: 30}, clock,
+    service.WithBillingTxManager(txManager),         // REQUIRED: no tx = no atomicity
+    service.WithInvoiceOutboxWriter(outbox),
+)
+```
+
+A **separate relay/poller** reads the `outbox` table out of band and performs the
+actual webhook delivery. Keep `OnPaymentRecorded` / `OnInvoiceFinalized` to a
+lightweight, idempotent INSERT: **no external calls or real delivery inside the
+transaction** (it holds locks/connections open).
+
+Key rules:
+
+- **Same transaction (ctx piggy-back).** The `ctx` argument carries the active
+  transaction. Insert on it. A separate connection defeats the whole point.
+- **Veto = rollback, and on the payment path = charge reversal.** Returning an
+  error rolls the transaction back. For `OnPaymentRecorded` the already-successful
+  gateway charge is then **reversed by saga compensation (Void → Refund)** — the
+  same path as a payment-save failure. A transient error triggers a real refund,
+  so the INSERT must be robust and idempotent. `OnInvoiceFinalized` moves no
+  money, so its rollback is only a harmless re-finalize.
+- **At-least-once / dedup.** Retries and idempotent-replay convergence can call a
+  writer more than once for the same payment/invoice; key the outbox row (e.g. on
+  the payment/invoice ID) so duplicates collapse.
+- **NoopTxManager gives no atomicity.** Wiring an outbox writer without a real
+  `TxManager` logs a dedicated warning at construction — the payment/invoice save
+  and the outbox INSERT are NOT atomic in that case, defeating the outbox.
+- **Coexists with post-commit hooks.** `OnInvoiceIssued` / `AfterCharge` /
+  `OnPaymentProcessed` still fire. Use the outbox writer for guaranteed delivery
+  and the post-commit hooks for best-effort work (e.g. metrics).
+
+Full design and the per-path firing table (which paths fire vs. skip) are in
+`docs/internals/plugin-system.md` §11.
+
 ## Step 5: Set Up Batch Jobs
 
 Schedule batch processors for recurring operations:

@@ -849,6 +849,10 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
   請求書のレンダリング・送付パイプラインはコアのスコープ外。
   利用者が実装する請求書生成アダプタが各フェーズで発火する。
 
+> **注（#248）**: 上表とは別に、コアは tx 内 Save 直後・コミット前で**統合者ポート
+> `PaymentOutboxWriter` / `InvoiceOutboxWriter`**（フックではない）を呼ぶ。これらは
+> トランザクショナル・アウトボックス用で、**フック数 22 は据え置き**。詳細は §11。
+
 ### 5.4 パニック隔離とフェイタリティ・ポリシー（issue #193）
 
 プラグインは第三者コードであり、`panic` する可能性がある。コアが発火する全フックは
@@ -1633,3 +1637,140 @@ func (p *MyBillingPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (sha
 func (p *MyBillingPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.Money, error) { ... }
 // Registry が型アサーションで両方のフックに自動登録する
 ```
+
+## 11. トランザクショナル・アウトボックス（#248）
+
+### 11.1 解決する問題（通知消失）
+
+コアが自動発火する支払い/請求フック（`AfterChargeHook` / `OnPaymentProcessedHook` /
+`OnInvoiceIssuedHook`）は、いずれも**書き込みトランザクションがコミットした後**（post-commit）に
+走る（§5.3）。統合者がこれらのフックから耐久通知（webhook イベント等）の enqueue を行うと、
+その enqueue を「支払い/請求レコードを書いた同じ tx」に join できない。コミットとフック実行の
+あいだにプロセスがクラッシュすると、`payment.charged` / `contract.first_payment` のような
+イベントが**恒久的に消失**する（#248 / platform#45）。
+
+トランザクショナル・アウトボックスは、通知行を**業務レコードと同一の tx で INSERT** し、
+実配信は別プロセス（relay / poller）がアウトボックス表を読んで非同期に行うことで、
+「レコードは書けたが通知は消えた」を構造的に無くす。コアはこの「同一 tx 内 INSERT」の
+発火点を一級の手段として提供する。
+
+### 11.2 採用設計（Design W）: Writer ポート（フックではない）
+
+新しいプラグインフックは**追加しない**（フック総数は §10.3 のとおり **22 のまま**）。代わりに、
+統合者が実装する **OutboxWriter ポート**をコアが tx 内 Save 直後・コミット前に呼ぶ。行の
+組み立て（自分の webhook スキーマ・イベント語彙・初回判定 I/O）は統合者側が自由に行う。
+
+**なぜプラグインフックにしないか**:
+
+1. **動機イベントが I/O を要する** — `contract.first_payment`（初回支払いか否か）の判定には
+   過去の支払い有無を調べる I/O が要る。計算パイプラインの純粋 build フック（I/O 禁止）では
+   この初回判定を実装できない。
+2. **precedent との整合** — `credit_note_service.go` は「狭いイベントのために新フックを足さない」
+   方針を採っており、それに倣う。
+3. **依存を増やさない** — フック化すると `plugin → application/port` の新依存が要る。Writer
+   ポートなら `application/port` に閉じ、`plugin` パッケージ・registry は無変更で済む。
+
+### 11.3 ポート定義
+
+```go
+// application/port/outbox.go
+type PaymentOutboxWriter interface {
+    // ProcessPayment の記録 tx 内（両 Save 成功直後・コミット前）で呼ばれる。
+    OnPaymentRecorded(ctx context.Context, p *payment.Payment, inv *invoice.Invoice) error
+}
+
+type InvoiceOutboxWriter interface {
+    // FinalizeInvoice の Save 成功直後・コミット前で呼ばれる。
+    OnInvoiceFinalized(ctx context.Context, inv *invoice.Invoice) error
+}
+```
+
+配線は `service.WithPaymentOutboxWriter(w)` / `service.WithInvoiceOutboxWriter(w)`。
+**未配線（nil）ならアウトボックス段は完全スキップ**され、既存挙動は不変（回帰なし）。
+
+**実装契約（必読）**:
+
+- **ctx は tx スコープ**。統合者はこの ctx から現在の tx を取り出し（例:
+  `QuerierFromContext(ctx)`）、自分の outbox 表へ**相乗り INSERT** する。別コネクション/別 tx を
+  使うと原子性が黙って壊れる（回帰が静か）。
+- **軽量な INSERT のみ**。外部通信・重処理・実 webhook 配信は禁止（tx を長時間握ると
+  ロック/コネクション枯渇）。実配信は別 relay/poller が outbox を読んで行う。
+- **at-least-once / dedup**: リトライ・冪等リプレイ収束で同一 (payment/invoice) に対して
+  複数回呼ばれ得る。行は冪等キー（payment ID 等）で dedup 前提にする。
+- **NoopTxManager 使用時は原子性ゼロ**（§11.6）。本番は実 TxManager 必須。
+
+### 11.4 発火パス（発火 / スキップ）
+
+コアは「**新しい payment/invoice 状態を実際に永続化するパス**」でだけ Writer を呼ぶ。
+`return nil` すべてではなく、Save 直後の該当パスに限定する（下表）。
+
+**`PaymentService.ProcessPayment`（ゲートウェイ経路）**
+
+| パス | Writer |
+|------|--------|
+| Pending→Completed 昇格（両 Save 成功直後） | **発火** `OnPaymentRecorded(existing, inv)` |
+| 通常成功（両 Save 成功直後） | **発火** `OnPaymentRecorded(p, inv)` |
+| in-tx Completed 冪等リプレイ（新規 Save なし） | スキップ |
+| terminal state → error / `errDuplicateKeyRaceSignal` | スキップ |
+| pre-charge Completed short-circuit（tx に入る前に return） | スキップ |
+| post-RunInTx の raced-loser 収束（tx 外・勝者が既に書いた） | スキップ |
+
+**`PaymentService.settleZeroAmountPayment`（zero-amount 経路）**
+
+| パス | Writer |
+|------|--------|
+| 昇格（両 Save 成功直後） | **発火** `OnPaymentRecorded(existing, inv)` |
+| 通常成功（両 Save 成功直後） | **発火** `OnPaymentRecorded(p, inv)` |
+| Completed 冪等リプレイ | スキップ |
+| in-closure raced-loser 収束（`return nil` だが新規 Save なし） | スキップ |
+
+**`BillingService.FinalizeInvoice`**
+
+| パス | Writer |
+|------|--------|
+| `Invoices.Save(loaded)` 成功直後・コミット前 | **発火** `OnInvoiceFinalized(loaded)` |
+| load 失敗 / not-found / `Finalize()` 拒否（invalid_state_transition） | スキップ |
+
+正準はソース（`application/service/payment_service.go` の `firePaymentOutbox`、
+`billing_service.go` の `fireInvoiceOutbox`）。
+
+### 11.5 B1: veto と課金取消のトレードオフ（2 経路のリスク非対称）
+
+Writer が返す **error（および recover したパニック）は tx をロールバックさせる**（veto）。
+2 経路でリスクの重みが異なる:
+
+- **`OnPaymentRecorded` の veto は「成功済みゲートウェイ課金の取消」を伴う**。tx が
+  ロールバックすると saga 補償が発火し、課金が **Void（不成立なら Refund）で巻き戻る**。
+  これは「原子性の代償」であり、既存の「payment 保存失敗 → 課金取消」と**同じ経路**。
+  一過性エラーで実返金が走るため、`OnPaymentRecorded` は**冪等で堅牢な軽量 INSERT** に限る。
+  リカバリ可能な理由で失敗させてはならない。
+- **`OnInvoiceFinalized` の veto は金銭移動を伴わない**。`FinalizeInvoice` は
+  `RetryOnConflict` 内で走るが、Writer の error は version-conflict ではないので再試行されず
+  そのまま伝播する。ロールバックは無害な「次回の再 finalize」で済む（ProcessPayment と非対称）。
+
+### 11.6 パニック隔離・Noop 警告・OnInvoiceIssued との住み分け
+
+- **パニック隔離**: Writer 呼び出しは `plugin.SafeInvoke("PaymentOutboxWriter.OnPaymentRecorded",
+  "outbox", ...)`（invoice 側も同様）でラップされ、パニックは `*plugin.PluginPanicError` に
+  変換されて tx.Run クロージャから **error として返る**（tx を突き抜けない）。§5.4 の
+  「tx 内・保存前」カテゴリと同じ扱い。
+- **NoopTxManager 警告**: Writer が配線されているのに txManager が既定 Noop（暗黙フォールバック）
+  の場合、構築時に専用の `Warn` を 1 回出す（payment 保存と outbox INSERT が非原子である旨）。
+  既存の `tx.WarnIfDefaultNoop`（multi-write 非原子）に加えた追加警告。明示的 Noop
+  （`WithoutPaymentTransactions` / `WithoutTransactions`）は抑止される。
+- **`OnInvoiceIssuedHook` との住み分け**: outbox writer（in-tx・確実配信）と post-commit の
+  `OnInvoiceIssuedHook`（非致命・メトリクス等）は**併用可能**で、両方配線した統合者は
+  同一 finalize で 2 系統が発火し得る。**確実配信は outbox、best-effort な集計は
+  OnInvoiceIssued** と役割を分ける。`AfterChargeHook` / `OnPaymentProcessedHook` も同様に残る。
+
+### 11.7 スコープ外（follow-up）
+
+`Refund`（`OnRefund`）と支払い失敗（`OnPaymentFailed`）の in-tx outbox は今回対象外。
+#248 が名指しするのは **ProcessPayment 成功 + FinalizeInvoice の 2 経路**であり、これらは
+follow-up issue とする。
+
+### 11.8 SemVer
+
+新ポート（`PaymentOutboxWriter` / `InvoiceOutboxWriter`）と新オプション
+（`WithPaymentOutboxWriter` / `WithInvoiceOutboxWriter`）の**追加のみ**。既存挙動は writer
+未配線で不変。フック総数は 22 で不変（§10.3）。よって **Minor**。
