@@ -64,6 +64,20 @@ func (s *PaymentService) newRetryEffectiveKey(originalKey string) string {
 // and redirect the customer to complete authentication.
 var ErrRequiresAction = errors.New("payment requires action")
 
+// ErrPaymentPending is returned when the payment gateway accepted the charge
+// but settlement is asynchronous — bank transfer, convenience-store (konbini)
+// payment, carrier billing, and similar methods where the customer pays later
+// and the gateway notifies the integrator (e.g. via a `payment.received`
+// webhook) once the funds arrive.
+//
+// The returned *payment.Payment is in Pending status with the gateway
+// transaction ID and idempotency key set; the invoice is NOT marked paid.
+// Callers should check for this error with errors.Is(), surface the payment
+// instruction to the customer, and later settle the payment from their
+// webhook handling via [PaymentService.SettlePayment] (funds arrived) or
+// [PaymentService.MarkPaymentFailed] (instruction expired / payment failed).
+var ErrPaymentPending = errors.New("payment pending asynchronous settlement")
+
 // errDuplicateKeyRaceSignal is an internal sentinel returned from the
 // ProcessPayment RunInTx closure when [payment.Repository.Save] reports
 // a duplicate idempotency-key collision. It instructs the outer code to
@@ -664,45 +678,44 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// key while the gateway charge landed under the effective key, causing
 	// subsequent success-path retries to miss the pending record.
 	if chargeResp.Status == port.TransactionStatusRequiresAction {
-		// Idempotency check: if a pending payment already exists for this key,
-		// return it instead of creating a duplicate authorization.
-		if effectiveKey != "" {
-			existing, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, effectiveKey)
-			if findErr != nil {
-				return nil, fmt.Errorf("idempotency check failed for requires_action: %w", findErr)
-			}
-			if existing != nil {
-				return existing, fmt.Errorf("%w: 3D Secure authentication required (transaction %s)", ErrRequiresAction, existing.GatewayTransactionID())
-			}
-		}
+		return s.persistUnsettledCharge(ctx, invoiceID, amount, effectiveKey, input, chargeResp, unsettledChargeSpec{
+			sentinel:   ErrRequiresAction,
+			detail:     "3D Secure authentication required",
+			checkLabel: "requires_action",
+			saveLabel:  "3DS",
+			saveLogMsg: "failed to save pending payment for 3DS (gateway authorization exists without internal record)",
+		})
+	}
 
-		pendingPayment, npErr := payment.NewPayment(
-			shared.NewPaymentID(),
-			invoiceID,
-			amount,
-			s.resolvePaymentMethodType(chargeResp.PaymentMethodType, input.PaymentMethod),
-			chargeResp.TransactionID,
-			s.clock.Now(),
-		)
-		if npErr != nil {
-			return nil, fmt.Errorf("failed to construct pending payment record: %w", npErr)
-		}
-		if effectiveKey != "" {
-			pendingPayment.SetIdempotencyKey(effectiveKey)
-		}
-		if err := s.paymentRepo.Save(ctx, pendingPayment); err != nil {
-			s.logger.Error("failed to save pending payment for 3DS (gateway authorization exists without internal record)",
-				"transactionID", chargeResp.TransactionID,
-				"invoiceID", invoiceID,
-				"error", err,
-			)
-			return nil, fmt.Errorf("failed to save pending payment for 3DS (transaction %s): %w", chargeResp.TransactionID, err)
-		}
-		return pendingPayment, fmt.Errorf("%w: 3D Secure authentication required (transaction %s)", ErrRequiresAction, chargeResp.TransactionID)
+	// Handle asynchronous settlement (bank transfer, convenience store, carrier
+	// billing, and similar pay-later methods). The gateway accepted the charge
+	// and issued a payment instruction, but no funds have moved yet — the
+	// customer pays out-of-band and the gateway notifies the integrator (e.g. a
+	// `payment.received` webhook) when the money arrives. Persist a Pending
+	// payment (idempotency key + gateway transaction ID + resolved method) so
+	// the later settlement has a record to complete, WITHOUT marking the
+	// invoice paid, and return ErrPaymentPending so the caller can surface the
+	// payment instruction to the customer.
+	//
+	// Like the requires_action branch above, this runs BEFORE the saga is set
+	// up: nothing was captured, so there must be no compensation (a Void/Refund
+	// against an unfunded instruction would be spurious). The in-tx
+	// Pending→Completed upgrade path still applies: a ProcessPayment retry with
+	// the same key whose Charge now replays as Captured/Succeeded upgrades this
+	// record, and PaymentService.SettlePayment settles it from webhook handling.
+	if chargeResp.Status == port.TransactionStatusPending {
+		return s.persistUnsettledCharge(ctx, invoiceID, amount, effectiveKey, input, chargeResp, unsettledChargeSpec{
+			sentinel:   ErrPaymentPending,
+			detail:     "asynchronous payment method awaiting settlement",
+			checkLabel: "pending charge",
+			saveLabel:  "async settlement",
+			saveLogMsg: "failed to save pending payment for async settlement (gateway has an in-flight transaction without internal record)",
+		})
 	}
 
 	// Guard: only Captured and Succeeded are valid success statuses.
-	// Any other status (Pending, Failed, Canceled, Authorized, etc.) without an
+	// RequiresAction and Pending were handled above as first-class non-terminal
+	// outcomes; any other status (Failed, Canceled, Authorized, etc.) without an
 	// error from the gateway is unexpected and must not proceed to the success path.
 	switch chargeResp.Status {
 	case port.TransactionStatusCaptured, port.TransactionStatusSucceeded:
@@ -1169,6 +1182,80 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	}
 
 	return p, nil
+}
+
+// unsettledChargeSpec parameterizes persistUnsettledCharge for the two
+// non-terminal charge outcomes that share the same persistence shape:
+// requires_action (3D Secure) and pending (asynchronous settlement).
+type unsettledChargeSpec struct {
+	sentinel   error  // exported sentinel wrapped into the returned error (ErrRequiresAction / ErrPaymentPending)
+	detail     string // human-readable detail appended after the sentinel
+	checkLabel string // label used in the idempotency-check error wording
+	saveLabel  string // label used in the save-failure error wording
+	saveLogMsg string // Error-level log message when the pending save fails
+}
+
+// persistUnsettledCharge records a Pending payment for a gateway charge that
+// has not settled yet (3DS requires_action or an async-settling payment
+// method) and returns it together with the spec's sentinel error.
+//
+// The payment is not yet captured, so this deliberately runs OUTSIDE any saga:
+// there is nothing to compensate. Unlike the failed-payment best-effort save,
+// this save is critical — the gateway holds an active authorization /
+// in-flight transaction, and the later completion (3DS callback retry of
+// ProcessPayment, or SettlePayment from `payment.received` webhook handling)
+// needs this record to finish the flow.
+//
+// The pending payment and its idempotency lookup both key off the EFFECTIVE
+// key, not the original input key. Otherwise a retry after a prior
+// compensation (which has rewritten the effective key via the
+// IdempotencyStore) would save the pending record under the original key
+// while the gateway charge landed under the effective key, causing subsequent
+// success-path retries to miss the pending record.
+func (s *PaymentService) persistUnsettledCharge(
+	ctx context.Context,
+	invoiceID shared.InvoiceID,
+	amount shared.Money,
+	effectiveKey string,
+	input ProcessPaymentInput,
+	chargeResp *port.ChargeResponse,
+	spec unsettledChargeSpec,
+) (*payment.Payment, error) {
+	// Idempotency check: if a pending payment already exists for this key,
+	// return it instead of creating a duplicate record.
+	if effectiveKey != "" {
+		existing, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, effectiveKey)
+		if findErr != nil {
+			return nil, fmt.Errorf("idempotency check failed for %s: %w", spec.checkLabel, findErr)
+		}
+		if existing != nil {
+			return existing, fmt.Errorf("%w: %s (transaction %s)", spec.sentinel, spec.detail, existing.GatewayTransactionID())
+		}
+	}
+
+	pendingPayment, npErr := payment.NewPayment(
+		shared.NewPaymentID(),
+		invoiceID,
+		amount,
+		s.resolvePaymentMethodType(chargeResp.PaymentMethodType, input.PaymentMethod),
+		chargeResp.TransactionID,
+		s.clock.Now(),
+	)
+	if npErr != nil {
+		return nil, fmt.Errorf("failed to construct pending payment record: %w", npErr)
+	}
+	if effectiveKey != "" {
+		pendingPayment.SetIdempotencyKey(effectiveKey)
+	}
+	if err := s.paymentRepo.Save(ctx, pendingPayment); err != nil {
+		s.logger.Error(spec.saveLogMsg,
+			"transactionID", chargeResp.TransactionID,
+			"invoiceID", invoiceID,
+			"error", err,
+		)
+		return nil, fmt.Errorf("failed to save pending payment for %s (transaction %s): %w", spec.saveLabel, chargeResp.TransactionID, err)
+	}
+	return pendingPayment, fmt.Errorf("%w: %s (transaction %s)", spec.sentinel, spec.detail, chargeResp.TransactionID)
 }
 
 // settleZeroAmountPayment settles a zero-amount invoice without calling the

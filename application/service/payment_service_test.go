@@ -1302,8 +1302,9 @@ func Test_resolvePaymentMethodType(t *testing.T) {
 func TestProcessPayment_UnexpectedChargeStatus_ReturnsError(t *testing.T) {
 	// When the gateway returns err==nil but a non-success status (not Captured/Succeeded),
 	// ProcessPayment must NOT proceed to the success path and record a completed payment.
+	// TransactionStatusPending is intentionally absent: it is now a first-class
+	// async-settlement outcome (ErrPaymentPending) — see payment_settlement_test.go.
 	unexpectedStatuses := []port.TransactionStatus{
-		port.TransactionStatusPending,
 		port.TransactionStatusFailed,
 		port.TransactionStatusCanceled,
 		port.TransactionStatusAuthorized,
