@@ -3900,6 +3900,11 @@ func TestProcessPayment_OutboxWriter_ErrorTriggersSagaCompensation(t *testing.T)
 	if err == nil {
 		t.Fatal("expected ProcessPayment to fail when the outbox writer vetoes")
 	}
+	// The returned error must be tagged as an outbox veto (not a local save
+	// failure) so operators can tell the two apart (issue #248 review fix 1).
+	if !errors.Is(err, errPaymentOutboxVeto) {
+		t.Errorf("expected error to wrap errPaymentOutboxVeto, got: %v", err)
+	}
 	if !gw.voidCalled {
 		t.Fatal("expected saga compensation (Void) after outbox veto rolled the charge back")
 	}

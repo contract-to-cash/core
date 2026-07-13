@@ -77,6 +77,19 @@ var ErrRequiresAction = errors.New("payment requires action")
 // This sentinel is package-private; consumers cannot observe it.
 var errDuplicateKeyRaceSignal = errors.New("duplicate idempotency key race; converge on winner via fresh tx")
 
+// errPaymentOutboxVeto marks an error that originated from the
+// [port.PaymentOutboxWriter] vetoing the record inside the ProcessPayment
+// bookkeeping transaction (issue #248), as opposed to a payment/invoice Save
+// failure. Both roll the transaction back and both trigger saga compensation of
+// the gateway charge, but the post-tx logging/error wording branches on
+// errors.Is(err, errPaymentOutboxVeto) so operators can tell "the outbox writer
+// rejected the record (and the charge was reversed)" apart from "the local save
+// failed". firePaymentOutbox wraps the writer's non-nil error (and recovered
+// panics, which SafeInvoke has already converted to an error) with this sentinel.
+//
+// This sentinel is package-private; consumers cannot observe it.
+var errPaymentOutboxVeto = errors.New("payment outbox writer vetoed the record")
+
 // ProcessPaymentInput holds the parameters for processing a payment.
 // PaymentMethodID is optional — if empty, the service resolves it via the
 // hierarchical fallback chain: Invoice → Contract → Customer.
@@ -296,7 +309,7 @@ func NewPaymentService(
 	// explicit noop opt-in (WithoutPaymentTransactions) stays silent.
 	if s.outboxWriter != nil && tx.IsNoop(s.txManager) && !tx.IsExplicitNoop(s.txManager) {
 		s.logger.Warn(
-			"payment outbox writer wired without a transaction manager: the payment save and the outbox INSERT are NOT atomic, so the transactional-outbox guarantee does not hold",
+			"in addition to the multi-write warning above, a payment outbox writer is wired without a transaction manager: the payment save and the outbox INSERT are NOT atomic, so the transactional-outbox guarantee does not hold",
 			"component", "PaymentService",
 			"remedy", "wire WithPaymentTxManager(...) (or WithoutPaymentTransactions() to acknowledge non-atomic in-memory use)",
 		)
@@ -312,16 +325,21 @@ func NewPaymentService(
 // into a *plugin.PluginPanicError and returned to the tx.Run closure rather than
 // unwinding through it — a panic escaping tx.Run would make rollback behaviour
 // backend-dependent and could race saga compensation (plugin panic policy,
-// docs/internals/plugin-system.md §5.4). The returned error is propagated by the
-// caller so the transaction rolls back (and, on the gateway path, saga
-// compensation reverses the charge).
+// docs/internals/plugin-system.md §5.4). A non-nil result (writer error or
+// converted panic) is wrapped with errPaymentOutboxVeto so the caller can
+// distinguish an outbox veto from a local save failure; the caller propagates it
+// so the transaction rolls back (and, on the gateway path, saga compensation
+// reverses the charge).
 func (s *PaymentService) firePaymentOutbox(ctx context.Context, p *payment.Payment, inv *invoice.Invoice) error {
 	if s.outboxWriter == nil {
 		return nil
 	}
-	return plugin.SafeInvoke("PaymentOutboxWriter.OnPaymentRecorded", "outbox", func() error {
+	if err := plugin.SafeInvoke("PaymentOutboxWriter.OnPaymentRecorded", "PaymentOutboxWriter", func() error {
 		return s.outboxWriter.OnPaymentRecorded(ctx, p, inv)
-	})
+	}); err != nil {
+		return fmt.Errorf("%w: %w", errPaymentOutboxVeto, err)
+	}
+	return nil
 }
 
 // ProcessPayment charges an invoice and records the payment.
@@ -1020,14 +1038,27 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	}
 
 	if err != nil {
-		// Local save failed — compensate by refunding the gateway charge
+		// Distinguish an outbox-writer veto (issue #248) from a local save
+		// failure: both roll the tx back and both compensate the gateway charge,
+		// but the wording below tells operators which one reversed the charge.
+		outboxVeto := errors.Is(err, errPaymentOutboxVeto)
+		// Local save failed (or the outbox writer vetoed) — compensate by
+		// refunding the gateway charge
 		if compErr := saga.Compensate(ctx); compErr != nil {
-			s.logger.Error("local save failed and compensation also failed (MANUAL RECONCILIATION REQUIRED)",
+			reason := "local save failed and compensation also failed (MANUAL RECONCILIATION REQUIRED)"
+			if outboxVeto {
+				reason = "outbox writer vetoed the payment record and compensation also failed (MANUAL RECONCILIATION REQUIRED)"
+			}
+			s.logger.Error(reason,
 				"paymentID", p.ID(),
 				"invoiceID", invoiceID,
+				"outboxVeto", outboxVeto,
 				"saveError", err,
 				"compensationError", compErr,
 			)
+			if outboxVeto {
+				return nil, fmt.Errorf("outbox writer vetoed the payment record: %w; compensation also failed: %v", err, compErr)
+			}
 			return nil, fmt.Errorf("local save failed: %w; compensation also failed: %v", err, compErr)
 		}
 
@@ -1064,6 +1095,9 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			}
 		}
 
+		if outboxVeto {
+			return nil, fmt.Errorf("outbox writer vetoed the payment record (gateway charge reversed): %w", err)
+		}
 		return nil, fmt.Errorf("local save failed (gateway charge refunded): %w", err)
 	}
 

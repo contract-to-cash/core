@@ -209,7 +209,7 @@ func NewBillingService(
 	// (WithoutTransactions) stays silent.
 	if s.invoiceOutboxWriter != nil && tx.IsNoop(s.txManager) && !tx.IsExplicitNoop(s.txManager) {
 		s.logger.Warn(
-			"invoice outbox writer wired without a transaction manager: the invoice save and the outbox INSERT are NOT atomic, so the transactional-outbox guarantee does not hold",
+			"in addition to the multi-write warning above, an invoice outbox writer is wired without a transaction manager: the invoice save and the outbox INSERT are NOT atomic, so the transactional-outbox guarantee does not hold",
 			"component", "BillingService",
 			"remedy", "wire WithBillingTxManager(...) (or WithoutTransactions() to acknowledge non-atomic in-memory use)",
 		)
@@ -231,7 +231,7 @@ func (s *BillingService) fireInvoiceOutbox(ctx context.Context, inv *invoice.Inv
 	if s.invoiceOutboxWriter == nil {
 		return nil
 	}
-	return plugin.SafeInvoke("InvoiceOutboxWriter.OnInvoiceFinalized", "outbox", func() error {
+	return plugin.SafeInvoke("InvoiceOutboxWriter.OnInvoiceFinalized", "InvoiceOutboxWriter", func() error {
 		return s.invoiceOutboxWriter.OnInvoiceFinalized(ctx, inv)
 	})
 }
