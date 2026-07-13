@@ -810,9 +810,9 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 | `InvoiceLifecycleHook` | 同上（BeforeCalculation / AfterCalculation） |
 | `OnInvoiceIssuedHook` | `BillingService.FinalizeInvoice`（確定保存後、非致命） |
 | `BeforeChargeHook` | `PaymentService.ProcessPayment`（ゲートウェイ課金前） |
-| `AfterChargeHook` | `PaymentService.ProcessPayment`（成功パス、非致命） |
-| `OnPaymentProcessedHook` | `PaymentService.ProcessPayment`（成功パス、非致命） |
-| `OnPaymentFailedHook` | `PaymentService.ProcessPayment`（ゲートウェイ失敗時、非致命） |
+| `AfterChargeHook` | `PaymentService.ProcessPayment`（成功パス、非致命）、`PaymentService.SettlePayment`（Pending→Completed の実遷移時のみ・コミット後、非致命。冪等 no-op リプレイでは発火しない） |
+| `OnPaymentProcessedHook` | `PaymentService.ProcessPayment`（成功パス、非致命）、`PaymentService.SettlePayment`（同上） |
+| `OnPaymentFailedHook` | `PaymentService.ProcessPayment`（ゲートウェイ失敗時、非致命）、`PaymentService.MarkPaymentFailed`（Pending→Failed の実遷移時のみ・コミット後、非致命。冪等 no-op リプレイでは発火しない） |
 | `OnRefundHook` | `PaymentService.Refund`（非致命） |
 | `OnCreditNoteIssuedHook` | `CreditNoteService`（発行後、非致命） |
 | `OnInvoiceRevisedHook` | `CreditNoteService.ReissueInvoice`（非致命） |
@@ -1724,6 +1724,19 @@ type InvoiceOutboxWriter interface {
 | Completed 冪等リプレイ | スキップ |
 | in-closure raced-loser 収束（`return nil` だが新規 Save なし） | スキップ |
 
+**`PaymentService.SettlePayment`（非同期決済のセトルメント経路、payment-gateway.md §6.5）**
+
+| パス | Writer |
+|------|--------|
+| Pending→Completed セトルメント（両 Save 成功直後・コミット前） | **発火** `OnPaymentRecorded(loaded, inv)` |
+| Completed 冪等リプレイ（新規 Save なし） | スキップ |
+| terminal state 拒否（invalid_state_transition でエラー） | スキップ |
+
+> **veto のリスク級**: `SettlePayment` での Writer veto は**ゲートウェイの金銭移動を伴わない**
+> （入金は既に顧客の払込で完了しており、コアが取り消すべき課金が存在しない）。ロールバックは
+> webhook の再配送（at-least-once）による再試行で無害に収束する — リスク級は
+> `OnInvoiceFinalized` と同じであり、ProcessPayment の「課金取消」級ではない（§11.5）。
+
 **`BillingService.FinalizeInvoice`**
 
 | パス | Writer |
@@ -1732,7 +1745,7 @@ type InvoiceOutboxWriter interface {
 | load 失敗 / not-found / `Finalize()` 拒否（invalid_state_transition） | スキップ |
 
 正準はソース（`application/service/payment_service.go` の `firePaymentOutbox`、
-`billing_service.go` の `fireInvoiceOutbox`）。
+`payment_settlement.go` の `SettlePayment`、`billing_service.go` の `fireInvoiceOutbox`）。
 
 ### 11.5 B1: veto と課金取消のトレードオフ（2 経路のリスク非対称）
 
