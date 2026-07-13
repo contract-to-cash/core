@@ -222,6 +222,12 @@ type ChargeRequest struct {
     PaymentMethodID *string      // 登録済みの支払い方法ID
     Token           *string      // ワンタイムトークン（決済GWのJS SDKで取得）
 
+    // 支払い方法種別のヒント（任意、issue #253）。呼び出し側が把握している種別
+    // （例: 登録済み PaymentMethodDetail.Type）を渡す。マルチ決済手段アダプタは
+    // これを使って課金ごとの PaymentMethod 取得（GET）をスキップして**よい**（MAY）。
+    // ゼロ値（空）は「不明」を意味し、従来どおりアダプタが自力で解決する。
+    PaymentMethodType PaymentMethodType
+
     // オプション
     IdempotencyKey  string       // 冪等性キー
     Metadata        map[string]string
@@ -252,6 +258,11 @@ type AuthorizeRequest struct {
     CustomerID      string
     PaymentMethodID *string
     Token           *string      // ワンタイムトークン
+
+    // 支払い方法種別のヒント（任意、issue #253）。ChargeRequest と同じ契約:
+    // ゲートウェイは lookup のスキップに使ってよく、空は「不明」（従来挙動）。
+    PaymentMethodType PaymentMethodType
+
     IdempotencyKey  string
     Metadata        map[string]string
 
@@ -1746,6 +1757,13 @@ Error ログを出す。
   ① `ChargeResponse.PaymentMethodType`（ゲートウェイが実際に使った方法）→
   ② `ProcessPaymentInput.PaymentMethod`（呼び出し側指定）→ ③ 既定 `credit_card`
   （後方互換）。未知のゲートウェイ種別は Warn ログ付きで `credit_card` にフォールバックする。
+- **ゲートウェイへの種別ヒント（issue #253）**: `ProcessPaymentInput.PaymentMethodID` と
+  `PaymentMethod` の**両方**を呼び出し側が明示した場合のみ、`ProcessPayment` は宣言された
+  種別を `ChargeRequest.PaymentMethodType` としてゲートウェイへ転送する（マルチ決済手段
+  アダプタが課金ごとの PaymentMethod 取得をスキップできる）。`PaymentMethodID` が空で
+  上記フォールバックチェーンにより解決された場合は**転送しない**（呼び出し側の
+  `PaymentMethod` が解決された方法を表すとは限らず、誤ったヒントはヒント無しより有害な
+  ため）。空 = 「不明」で、アダプタは従来どおり自力で解決する。
 
 ---
 

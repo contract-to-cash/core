@@ -109,7 +109,10 @@ var errPaymentOutboxVeto = errors.New("payment outbox writer vetoed the record")
 // hierarchical fallback chain: Invoice → Contract → Customer.
 // PaymentMethod is the type of payment method (e.g. bank_transfer, convenience_store).
 // If not set, it is resolved from ChargeResponse.PaymentMethodType, falling back
-// to credit_card for backward compatibility.
+// to credit_card for backward compatibility. When PaymentMethodID is also set
+// explicitly, PaymentMethod is additionally forwarded to the gateway as the
+// ChargeRequest.PaymentMethodType hint so multi-method adapters can skip a
+// per-charge PaymentMethod lookup (issue #253).
 type ProcessPaymentInput struct {
 	PaymentMethodID string
 	PaymentMethod   payment.PaymentMethod
@@ -605,13 +608,27 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// NOTE: Charge is called BEFORE the in-transaction idempotency check.
 	// This relies on the gateway honouring IdempotencyKey to prevent duplicate
 	// charges when the same request is retried (e.g. after a transient DB failure).
+	// Payment-method-type hint (issue #253): forward the caller's declared
+	// method type so multi-method gateway adapters can skip a per-charge
+	// PaymentMethod lookup. Only forwarded when the caller also pinned
+	// PaymentMethodID explicitly — when pmID was resolved via the
+	// Invoice→Contract→Customer fallback chain, input.PaymentMethod may not
+	// describe the resolved method, and a wrong hint is worse than none
+	// (gateways trust it to skip verification). Empty = unknown, and the
+	// gateway falls back to resolving the method itself.
+	var methodTypeHint port.PaymentMethodType
+	if input.PaymentMethodID != "" {
+		methodTypeHint = paymentMethodToPortType(input.PaymentMethod)
+	}
+
 	chargeResp, err := s.gateway.Charge(ctx, &port.ChargeRequest{
-		Amount:          amount,
-		CustomerID:      string(inv.AccountID()),
-		PaymentMethodID: &pmID,
-		Description:     fmt.Sprintf("Invoice %s", invoiceID),
-		Metadata:        input.Metadata,
-		IdempotencyKey:  effectiveKey,
+		Amount:            amount,
+		CustomerID:        string(inv.AccountID()),
+		PaymentMethodID:   &pmID,
+		PaymentMethodType: methodTypeHint,
+		Description:       fmt.Sprintf("Invoice %s", invoiceID),
+		Metadata:          input.Metadata,
+		IdempotencyKey:    effectiveKey,
 	})
 
 	// No ChargeResponse available on failure — resolve from input only
@@ -1751,5 +1768,36 @@ func portMethodToPaymentMethod(pmt port.PaymentMethodType) (payment.PaymentMetho
 		// Unknown gateway payment method types fall back to credit_card.
 		// If a new PaymentMethodType is added to port/, add a case here.
 		return payment.PaymentMethodCreditCard, false
+	}
+}
+
+// paymentMethodToPortType is the inverse of portMethodToPaymentMethod: it maps
+// the caller-declared payment.PaymentMethod onto the gateway-facing
+// port.PaymentMethodType hint carried by ChargeRequest.PaymentMethodType
+// (issue #253). Empty or unrecognized values map to "" (unknown), so the
+// gateway falls back to resolving the method type itself.
+func paymentMethodToPortType(m payment.PaymentMethod) port.PaymentMethodType {
+	switch m {
+	case payment.PaymentMethodCreditCard:
+		return port.PaymentMethodTypeCreditCard
+	case payment.PaymentMethodDebitCard:
+		return port.PaymentMethodTypeDebitCard
+	case payment.PaymentMethodBankTransfer:
+		return port.PaymentMethodTypeBankTransfer
+	case payment.PaymentMethodDirectDebit:
+		return port.PaymentMethodTypeDirectDebit
+	case payment.PaymentMethodConvenience:
+		return port.PaymentMethodTypeConvenienceStore
+	case payment.PaymentMethodQRCode:
+		return port.PaymentMethodTypeQRCode
+	case payment.PaymentMethodCarrier:
+		return port.PaymentMethodTypeCarrier
+	case payment.PaymentMethodPostpay:
+		return port.PaymentMethodTypePostpay
+	default:
+		// Unknown or empty payment methods map to "" (unknown hint).
+		// If a new payment.PaymentMethod is added, add a case here
+		// (and to portMethodToPaymentMethod above).
+		return ""
 	}
 }
