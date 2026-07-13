@@ -233,7 +233,9 @@ type ChargeRequest struct {
     Metadata        map[string]string
     StatementDescriptor string   // 明細表示名
 
-    // 3Dセキュア
+    // 3Dセキュア / リダイレクト型決済の戻り先。
+    // コアの ProcessPayment は ProcessPaymentInput.ReturnURL が非空の場合のみ
+    // &ThreeDSecureRequest{ReturnURL: ...} を設定する（Required は設定しない。platform#66）
     ThreeDSecure    *ThreeDSecureRequest
 }
 
@@ -1427,8 +1429,19 @@ type ProcessPaymentInput struct {
     Currency        shared.Currency
     IdempotencyKey  string
     Metadata        map[string]string
+    ReturnURL       string                // 任意。リダイレクト型決済の戻り先 URL（platform#66、下記注）
 }
 ```
+
+> **`ReturnURL`（platform#66）**: リダイレクト型決済（PayPay 等の qr_code ウォレット、
+> カード 3DS チャレンジ）で顧客が承認後に戻る URL。非空なら `ProcessPayment` が
+> `ChargeRequest.ThreeDSecure = &ThreeDSecureRequest{ReturnURL: input.ReturnURL}` として
+> ゲートウェイへ伝播する。空なら `ThreeDSecure` は従来どおり nil（後方互換）。
+> `ThreeDSecureRequest.Required` はこの経路では設定しない — 3DS の強制は別関心であり、
+> ReturnURL の伝播はあくまで「戻り先の器」の受け渡しに限る。
+> **同一 `IdempotencyKey` でのリトライでは同じ `ReturnURL` を渡すこと** — Pending
+> fall-through では同一キーで再 `Charge` されるため、リクエストボディが前回と異なると
+> `idempotency_error` で拒否するゲートウェイ（Stripe 等）がある。
 
 **`ProcessPayment(ctx, invoiceID, input)` のチャージ結果分岐**
 

@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ProcessPaymentInput.ReturnURL` (platform#66)** — optional URL the customer is
+  sent back to after approving a redirect-based payment (qr_code wallets such as
+  PayPay, card 3DS challenges). When non-empty, `PaymentService.ProcessPayment`
+  propagates it to the gateway as `ChargeRequest.ThreeDSecure.ReturnURL`
+  (`ThreeDSecureRequest.Required` is intentionally not set — forcing a 3DS
+  challenge is a separate concern); when empty, `ChargeRequest.ThreeDSecure`
+  stays nil, so existing callers and gateway adapters are unchanged. Additive
+  only — backward compatible, Minor bump.
+
 ## [0.5.0] - 2026-07-13
 
 ### Added

@@ -136,11 +136,13 @@ paymentService := service.NewPaymentService(
 
 ```go
 type ProcessPaymentInput struct {
-    PaymentMethodID string       // Optional (resolved via fallback chain if empty)
+    PaymentMethodID string                // Optional (resolved via fallback chain if empty)
+    PaymentMethod   payment.PaymentMethod // Optional payment method type (e.g. bank_transfer, convenience_store); if unset, resolved from ChargeResponse.PaymentMethodType, falling back to credit_card
     Amount          shared.Money
     Currency        shared.Currency
-    IdempotencyKey  string       // Required for deduplication
+    IdempotencyKey  string                // Required for deduplication
     Metadata        map[string]string
+    ReturnURL       string                // Optional. Where the customer returns after approving a redirect-based payment (qr_code wallets, card 3DS). Non-empty → propagated as ChargeRequest.ThreeDSecure.ReturnURL; empty → ThreeDSecure stays nil (platform#66)
 }
 
 func (s *PaymentService) ProcessPayment(
