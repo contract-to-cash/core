@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-13
+
 ### Added
 
 - **`ProcessPaymentInput.ReturnURL` (platform#66)** — optional URL the customer is
@@ -16,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   challenge is a separate concern); when empty, `ChargeRequest.ThreeDSecure`
   stays nil, so existing callers and gateway adapters are unchanged. Additive
   only — backward compatible, Minor bump.
+
+- **`PaymentMethodType` hint on `ChargeRequest` / `AuthorizeRequest` (#253)** —
+  optional field naming the payment method's type as known to the caller (e.g.
+  from the stored `PaymentMethodDetail`). Gateway adapters MAY use it to skip a
+  per-charge payment-method lookup; the zero value means "unknown" and adapters
+  resolve the method themselves as before. `PaymentService.ProcessPayment`
+  forwards `ProcessPaymentInput.PaymentMethod` as this hint only when the caller
+  also set `PaymentMethodID` explicitly — when the method ID was resolved via the
+  Invoice→Contract→Customer fallback chain, no hint is sent (the declared type
+  may not describe the resolved method, and a wrong hint is worse than none).
+  Additive only — existing gateways and callers are unaffected.
 
 ## [0.5.0] - 2026-07-13
 
