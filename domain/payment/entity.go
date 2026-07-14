@@ -33,6 +33,26 @@ const (
 	PaymentMethodPostpay      PaymentMethod = "postpay"
 )
 
+// Reserved metadata keys under which PaymentService persists the
+// customer-facing payment instructions (port.PaymentInstructions) returned by
+// a gateway for asynchronous / requires-action charge outcomes. Integrators
+// read these from Payment.Metadata() instead of hardcoding the strings.
+// Only keys whose corresponding instruction field is non-empty are set.
+const (
+	// MetadataKeyInstructionsKind classifies the instruction,
+	// e.g. "hosted_page", "konbini_voucher", "bank_transfer".
+	MetadataKeyInstructionsKind = "instructions_kind"
+	// MetadataKeyInstructionsURL is the customer-facing URL for completing
+	// the payment.
+	MetadataKeyInstructionsURL = "instructions_url"
+	// MetadataKeyInstructionsReference is an optional payment reference
+	// (payment code, masked virtual-account summary, ...).
+	MetadataKeyInstructionsReference = "instructions_reference"
+	// MetadataKeyInstructionsExpiresAt is the optional payment-window
+	// deadline, formatted as RFC3339 in UTC.
+	MetadataKeyInstructionsExpiresAt = "instructions_expires_at"
+)
+
 // Payment represents a payment entity.
 type Payment struct {
 	id                   shared.PaymentID
@@ -245,6 +265,15 @@ func (p *Payment) RecordRefund(amount shared.Money) error {
 	// the winner's already-recorded total and rejects the over-refund.
 	p.version++
 	return nil
+}
+
+// SetMetadata sets a metadata key-value pair. Like SetIdempotencyKey it is an
+// initialization-time setter (no optimistic-locking version bump): callers set
+// metadata on a freshly constructed payment before its first Save (e.g.
+// PaymentService storing gateway payment instructions on a Pending payment
+// under the MetadataKeyInstructions* keys).
+func (p *Payment) SetMetadata(key, value string) {
+	p.metadata[key] = value
 }
 
 func (p *Payment) Metadata() map[string]string {

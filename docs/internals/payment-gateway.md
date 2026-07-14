@@ -232,15 +232,32 @@ type ChargeRequest struct {
 }
 
 type ChargeResponse struct {
-    TransactionID   string
-    Status          TransactionStatus
-    Amount          shared.Money
-    Fee             *shared.Money    // 決済手数料
-    Net             *shared.Money    // 手数料差引後
-    PaymentMethodID string
-    CreatedAt       time.Time
-    Metadata        map[string]string
+    TransactionID     string
+    Status            TransactionStatus
+    Amount            shared.Money
+    Fee               *shared.Money     // 決済手数料
+    Net               *shared.Money     // 手数料差引後
+    PaymentMethodID   string
+    PaymentMethodType PaymentMethodType // ゲートウェイが実際に使った支払い方法（§6.4）
+    CreatedAt         time.Time
+    Metadata          map[string]string
+    ThreeDSecure      *ThreeDSecureResult
+    // Instructions は非同期/pending/requires_action の結果でアダプタが設定する
+    // 顧客向け支払い案内。同期キャプチャ（captured/succeeded）では nil（§6.5.6）
+    Instructions      *PaymentInstructions
     // デバッグ用の生レスポンスはインフラ層の実装側でログに記録する
+}
+
+// PaymentInstructions は非同期・プッシュ型決済（コンビニ払込票・銀行振込の
+// バーチャル口座・ホスト型決済ページ等）でゲートウェイが発行する
+// **顧客向け**の支払い案内。アダプタが async/pending/requires_action の
+// 結果に設定し、同期キャプチャでは nil のままにする。URL は顧客に提示する
+// ためのもの（統合者が「支払い方法のご案内」通知等に使う）。
+type PaymentInstructions struct {
+    Kind      string     // 案内の種別: "hosted_page" / "konbini_voucher" / "bank_transfer" 等
+    URL       string     // 顧客向け URL（払込票ページ、ホスト型チェックアウト等）
+    Reference string     // 支払いコード・マスク済み口座番号サマリ等（任意）
+    ExpiresAt *time.Time // 支払い期限（払込票の有効期限等、任意）
 }
 
 // ============================================================
@@ -1426,8 +1443,8 @@ type ProcessPaymentInput struct {
 | ChargeResponse.Status | 挙動 | 戻り値 |
 |---|---|---|
 | `captured` / `succeeded` | 成功パス: tx 内で Payment 完了 + `inv.RecordPayment` + 両 Save + outbox（§11）。保存失敗は saga 補償（Void→Refund、§6.2）で課金を巻き戻す | `(payment, nil)` |
-| `requires_action` | 3DS 認証待ち: **Pending** の Payment を保存し、請求書は未変更。saga なし（未キャプチャ） | `(pendingPayment, ErrRequiresAction)` |
-| `pending` | **非同期決済**（銀行振込・コンビニ・キャリア等、§6.5）: **Pending** の Payment（冪等キー + ゲートウェイ取引 ID + 解決済み支払い方法）を保存し、請求書は未変更。saga なし（入金前なので補償対象が存在しない） | `(pendingPayment, ErrPaymentPending)` |
+| `requires_action` | 3DS 認証待ち: **Pending** の Payment を保存し、請求書は未変更。saga なし（未キャプチャ）。`Instructions` があれば Metadata に保存（§6.5.6） | `(pendingPayment, ErrRequiresAction)` |
+| `pending` | **非同期決済**（銀行振込・コンビニ・キャリア等、§6.5）: **Pending** の Payment（冪等キー + ゲートウェイ取引 ID + 解決済み支払い方法）を保存し、請求書は未変更。saga なし（入金前なので補償対象が存在しない）。`Instructions` があれば Metadata に保存（§6.5.6） | `(pendingPayment, ErrPaymentPending)` |
 | その他（`failed` / `canceled` / `authorized` 等） | 予期しないステータスとしてエラー（成功パスへ進まない） | `(nil, error)` |
 
 ゲートウェイ呼び出し自体がエラーを返した場合は Failed の Payment 記録を best-effort 保存し、
@@ -1766,8 +1783,11 @@ webhook（`port.WebhookEventPaymentInstructionCreated` / `port.WebhookEventPayme
 
 1. **Pending の Payment を保存**する（冪等キー・ゲートウェイ取引 ID・解決済み支払い方法種別つき。
    3DS の requires_action と同じ永続化ヘルパーを共有）。請求書は**変更しない**。
+   `ChargeResponse.Instructions` があれば、保存前に Payment の Metadata へ
+   予約キーで書き込む（§6.5.6）。
 2. `(pendingPayment, ErrPaymentPending)` を返す。`errors.Is(err, service.ErrPaymentPending)` で
-   判定し、統合者は払込票 URL 等の支払い指示を顧客へ提示する。
+   判定し、統合者は払込票 URL 等の支払い指示（`Payment.Metadata()` の
+   `payment.MetadataKeyInstructions*` キー、§6.5.6）を顧客へ提示する。
 3. **saga 補償は発火しない**（何もキャプチャされていないので巻き戻す対象がない。
    requires_action と同じ扱い）。
 4. 同一冪等キーの `ProcessPayment` リトライは: ゲートウェイが依然 pending を返せば既存の
@@ -1828,6 +1848,53 @@ func (s *PaymentService) MarkPaymentFailed(ctx context.Context, paymentID shared
 - **フック数は 22 のまま**（plugin-system.md §10.3）。新フックは追加せず、既存の
   `AfterCharge` / `OnPaymentProcessed` / `OnPaymentFailed` と `PaymentOutboxWriter` ポートを
   セトルメント経路でも一貫して使う。
+
+### 6.5.6 支払い案内の伝搬（`PaymentInstructions`）
+
+**解決する課題**: 非同期・プッシュ型決済（コンビニ払込票・銀行振込のバーチャル口座等）で
+ゲートウェイは**顧客向けの支払い案内**（払込票 URL・支払いコード・支払い期限）を返すが、
+従来の `ChargeResponse` にはそれを載せるフィールドがなく、アダプタは URL を
+`ThreeDSecureResult.RedirectURL` に相乗りさせるしかなかった。さらに
+`persistUnsettledCharge` はどちらも保存しないため、**案内がサービス境界で消失**し、
+統合者が顧客に「どう支払うか」を通知できなかった。
+
+**設計（additive）**:
+
+1. **`port.ChargeResponse.Instructions *port.PaymentInstructions`**（§3.2）を追加。
+   アダプタは **async/pending/requires_action の結果で設定**し、同期キャプチャ
+   （captured/succeeded）では **nil** のままにする。`URL` は顧客向け
+   （customer-facing）であり、統合者がそのまま顧客への通知に使える値を入れること。
+   `ThreeDSecureResult.RedirectURL` への相乗りは不要になる（3DS リダイレクトという
+   本来の用途だけに戻す）。
+2. **コアの永続化**: `persistUnsettledCharge`（requires_action / pending の両出口が共有）
+   が、Pending の Payment を保存する**前**に案内を `Payment.Metadata` の予約キーへ
+   書き込む。専用のエンティティフィールドは追加しない（Metadata は既に全リポジトリ
+   実装・スナップショットで永続化されるため、DB スキーマに影響しない）。
+   空のフィールドはキー自体を書かない。
+
+   | 予約キー（`domain/payment` の公開定数） | 値 |
+   |---|---|
+   | `payment.MetadataKeyInstructionsKind`（`"instructions_kind"`） | 案内種別（`"hosted_page"` / `"konbini_voucher"` / `"bank_transfer"` 等） |
+   | `payment.MetadataKeyInstructionsURL`（`"instructions_url"`） | 顧客向け URL |
+   | `payment.MetadataKeyInstructionsReference`（`"instructions_reference"`） | 支払いコード・口座番号サマリ等（任意） |
+   | `payment.MetadataKeyInstructionsExpiresAt`（`"instructions_expires_at"`） | 支払い期限。**UTC に正規化した RFC3339**（任意） |
+
+3. **API 面での可視性**: `ProcessPayment` が `ErrPaymentPending` / `ErrRequiresAction` と
+   ともに返す pending payment は保存前に Metadata が設定済みなので、統合者は戻り値から
+   直接 `pmt.Metadata()[payment.MetadataKeyInstructionsURL]` 等で案内を取り出せる
+   （後から `FindByID` でロードしても同じ値が得られる）。統合者は生の文字列でなく
+   公開定数を使うこと。
+4. **冪等リプレイ**: 同一冪等キーのリプレイは既存の Pending レコードを**そのまま**返す
+   （永続化済みの案内 Metadata は保持され、上書きされない）。払込票の**再発行**は
+   新しい冪等キーで行う運用（新しい Pending レコードが新しい案内を持つ）なので、
+   リプレイでの in-place 更新は不要。
+5. **Payment エンティティ**: `Payment.SetMetadata(key, value string)` を追加
+   （`Product.SetMetadata` と同型）。`SetIdempotencyKey` と同じ初期化時セッターで、
+   楽観ロックの version は増やさない（初回 Save 前に設定する用途）。
+
+**SemVer**: フィールド追加（`ChargeResponse.Instructions`）・型追加
+（`port.PaymentInstructions`）・エンティティのメソッド/定数追加のみで **Minor**。
+既存アダプタは `Instructions` 未設定でも挙動不変（nil → Metadata 書き込みなし）。
 
 ---
 

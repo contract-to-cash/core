@@ -69,8 +69,11 @@ Some methods issue a payment instruction and settle later, when the customer pay
 out-of-band. When the gateway's `ChargeResponse.Status` is `pending`,
 `PaymentService.ProcessPayment` persists a **Pending** payment (idempotency key,
 gateway transaction ID, resolved method), leaves the invoice unpaid, and returns
-the sentinel `service.ErrPaymentPending` (check with `errors.Is`). From your
-webhook handling:
+the sentinel `service.ErrPaymentPending` (check with `errors.Is`). Customer-facing
+payment instructions returned by the adapter (`ChargeResponse.Instructions`: voucher
+URL, reference, deadline) are persisted on the pending payment's metadata under the
+reserved `payment.MetadataKeyInstructions*` keys, so you can surface them to the
+customer. From your webhook handling:
 
 - `payment.received` → call `PaymentService.SettlePayment(ctx, paymentID)`:
   completes the payment and marks the invoice paid in one transaction (outbox

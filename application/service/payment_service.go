@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 
@@ -1212,6 +1213,17 @@ type unsettledChargeSpec struct {
 // IdempotencyStore) would save the pending record under the original key
 // while the gateway charge landed under the effective key, causing subsequent
 // success-path retries to miss the pending record.
+//
+// Payment instructions: when the gateway returned customer-facing payment
+// instructions (chargeResp.Instructions, e.g. a konbini voucher URL or
+// bank-transfer virtual-account details), they are stored on the pending
+// payment's Metadata under the reserved payment.MetadataKeyInstructions*
+// keys BEFORE the save, so the payment returned alongside the sentinel error
+// (and every later load of the record) carries them. On the idempotent-replay
+// path the existing record is returned as-is: its previously persisted
+// instructions metadata is preserved (a re-issued instruction uses a new
+// idempotency key and therefore a new record, so refreshing in place is not
+// needed).
 func (s *PaymentService) persistUnsettledCharge(
 	ctx context.Context,
 	invoiceID shared.InvoiceID,
@@ -1247,6 +1259,7 @@ func (s *PaymentService) persistUnsettledCharge(
 	if effectiveKey != "" {
 		pendingPayment.SetIdempotencyKey(effectiveKey)
 	}
+	applyPaymentInstructionsMetadata(pendingPayment, chargeResp.Instructions)
 	if err := s.paymentRepo.Save(ctx, pendingPayment); err != nil {
 		s.logger.Error(spec.saveLogMsg,
 			"transactionID", chargeResp.TransactionID,
@@ -1256,6 +1269,35 @@ func (s *PaymentService) persistUnsettledCharge(
 		return nil, fmt.Errorf("failed to save pending payment for %s (transaction %s): %w", spec.saveLabel, chargeResp.TransactionID, err)
 	}
 	return pendingPayment, fmt.Errorf("%w: %s (transaction %s)", spec.sentinel, spec.detail, chargeResp.TransactionID)
+}
+
+// applyPaymentInstructionsMetadata copies the gateway's customer-facing
+// payment instructions onto the payment's metadata under the reserved
+// payment.MetadataKeyInstructions* keys, so they survive the service boundary
+// and round-trip through any repository that persists Metadata (issue: async
+// instructions were previously lost — adapters could only smuggle the URL via
+// ThreeDSecureResult.RedirectURL and nothing persisted it).
+//
+// A nil instructions value is a no-op (synchronous captures carry none), and
+// only non-empty fields are written so no empty reserved keys pollute the map.
+// ExpiresAt is normalized to UTC and formatted as RFC3339 (project rule:
+// everything persisted in UTC).
+func applyPaymentInstructionsMetadata(p *payment.Payment, ins *port.PaymentInstructions) {
+	if ins == nil {
+		return
+	}
+	if ins.Kind != "" {
+		p.SetMetadata(payment.MetadataKeyInstructionsKind, ins.Kind)
+	}
+	if ins.URL != "" {
+		p.SetMetadata(payment.MetadataKeyInstructionsURL, ins.URL)
+	}
+	if ins.Reference != "" {
+		p.SetMetadata(payment.MetadataKeyInstructionsReference, ins.Reference)
+	}
+	if ins.ExpiresAt != nil {
+		p.SetMetadata(payment.MetadataKeyInstructionsExpiresAt, ins.ExpiresAt.UTC().Format(time.RFC3339))
+	}
 }
 
 // settleZeroAmountPayment settles a zero-amount invoice without calling the
