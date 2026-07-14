@@ -6,7 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-14
+
 ### Added
+
+- **`PaymentInstructions` on `ChargeResponse` for asynchronous / push charges
+  (konbini vouchers, bank-transfer virtual accounts)** — async gateways return
+  customer-facing payment instructions (voucher URL, reference number, expiry)
+  that `ChargeResponse` could not previously carry; adapters smuggled a URL
+  through `ThreeDSecureResult` and the pending-payment path dropped it entirely.
+  Adds the additive `PaymentInstructions` type (`kind` / `url` / `reference` /
+  `expires_at`) to `ChargeResponse`, and `PaymentService.ProcessPayment` now
+  persists it on the unsettled payment's metadata under reserved keys
+  (`payment.MetadataKeyInstructions*`) in `persistUnsettledCharge`, so the
+  payment returned with `ErrPaymentPending` / `ErrRequiresAction` already
+  carries what the integrator needs to notify the customer. Spec:
+  `payment-gateway.md` §6.5.6. Additive only — adapters that leave
+  `Instructions` nil are behavior-identical. Minor bump.
 
 - **`OnCompensationExecutedHook` — non-fatal plugin hook for saga compensation
   (#257)** — closes the observability blind spot on the `ProcessPayment`
