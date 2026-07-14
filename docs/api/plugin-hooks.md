@@ -182,7 +182,35 @@ type OnRefundHook interface {
     Plugin
     OnRefund(ctx *PaymentContext, refundAmount shared.Money) error
 }
+
+type CompensationMethod string
+// void, refund, none
+
+type CompensationReason string
+// local_save_failed, outbox_veto
+
+type CompensationResult struct {
+    TransactionID      string             // gateway transaction ID of the original charge
+    Amount             shared.Money       // original charge amount
+    Method             CompensationMethod // reversal that took effect (none = both failed)
+    Reason             CompensationReason // why compensation ran
+    CompensationErr    error              // non-nil = both Void and Refund failed (manual reconciliation)
+    MarkCompensatedErr error              // idempotency-store marker write failure (issue #87)
+}
+
+type OnCompensationExecutedHook interface {
+    Plugin
+    OnCompensationExecuted(ctx *PaymentContext, result CompensationResult) error
+}
 ```
+
+`OnCompensationExecutedHook` (issue #257) fires non-fatally after
+`PaymentService.ProcessPayment` attempts saga compensation of a successful
+gateway charge (charge succeeded, local transaction failed). It fires on both
+outcomes — charge reversed via Void or the Refund fallback, and the
+double-failure manual-reconciliation state — so integrators can alert on charge
+reversals without scraping logs. Hook failures are logged but never change the
+outcome of `ProcessPayment`.
 
 ### PaymentContext
 
@@ -317,6 +345,7 @@ registry.GetBeforeChargeHooks() []BeforeChargeHook
 registry.GetAfterChargeHooks() []AfterChargeHook
 registry.GetOnPaymentFailedHooks() []OnPaymentFailedHook
 registry.GetOnRefundHooks() []OnRefundHook
+registry.GetOnCompensationExecutedHooks() []OnCompensationExecutedHook
 registry.GetOnContractChangeHooks() []OnContractChangeHook
 registry.GetOnInvoiceIssuedHooks() []OnInvoiceIssuedHook
 registry.GetOnPaymentProcessedHooks() []OnPaymentProcessedHook

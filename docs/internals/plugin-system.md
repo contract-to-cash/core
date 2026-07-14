@@ -370,6 +370,44 @@ type OnRefundHook interface {
     Plugin
     OnRefund(ctx *PaymentContext, refundAmount shared.Money) error
 }
+
+// CompensationMethod 補償に用いた手段（issue #257）
+type CompensationMethod string
+
+const (
+    CompensationMethodVoid   CompensationMethod = "void"   // Settlement 前の Void で取消
+    CompensationMethodRefund CompensationMethod = "refund" // Void 失敗後の Refund フォールバック
+    CompensationMethodNone   CompensationMethod = "none"   // Void も Refund も失敗（MANUAL RECONCILIATION）
+)
+
+// CompensationReason 補償が走った理由（issue #257）
+type CompensationReason string
+
+const (
+    CompensationReasonLocalSaveFailed CompensationReason = "local_save_failed" // ローカル tx（payment/invoice Save）失敗
+    CompensationReasonOutboxVeto      CompensationReason = "outbox_veto"       // PaymentOutboxWriter の veto（#248）
+)
+
+// CompensationResult サガ補償の実行結果（issue #257）
+type CompensationResult struct {
+    TransactionID      string             // 元課金の gateway transaction ID
+    Amount             shared.Money       // 元課金額
+    Method             CompensationMethod // 実際に成功した手段（失敗時は none。部分成功はあり得ない）
+    Reason             CompensationReason // 補償理由
+    CompensationErr    error              // nil = 補償成功。非 nil = Void も Refund も失敗 = MANUAL RECONCILIATION 状態
+    MarkCompensatedErr error              // 冪等キーの MarkCompensated 失敗（補償成功時のみ試行される、#87）
+}
+
+// OnCompensationExecutedHook サガ補償（charge reversal）実行後に発火する非致命フック。
+// ProcessPayment の「ゲートウェイ課金成功 → ローカル tx 失敗 → Void / fallback Refund」
+// 経路の可観測性の盲点を塞ぐ（issue #257）。補償の成功・失敗**両方**で発火する
+// （失敗 = Method none + CompensationErr 非 nil = 人手リコンサイルが必要な状態で、
+// 統合者が最もアラートしたいケース）。非致命: フックの error / panic はログされ、
+// ProcessPayment の戻り値を変えない。
+type OnCompensationExecutedHook interface {
+    Plugin
+    OnCompensationExecuted(ctx *PaymentContext, result CompensationResult) error
+}
 ```
 
 ### 3.8 メトリクスフック（ISP準拠・個別分離）
@@ -519,10 +557,11 @@ type Registry struct {
     onContractTrialEndHooks          []OnContractTrialEndHook
 
     // 支払いフック（ISP分離）
-    beforeChargeHooks    []BeforeChargeHook
-    afterChargeHooks     []AfterChargeHook
-    onPaymentFailedHooks []OnPaymentFailedHook
-    onRefundHooks        []OnRefundHook
+    beforeChargeHooks           []BeforeChargeHook
+    afterChargeHooks            []AfterChargeHook
+    onPaymentFailedHooks        []OnPaymentFailedHook
+    onRefundHooks               []OnRefundHook
+    onCompensationExecutedHooks []OnCompensationExecutedHook
 
     // メトリクスフック（ISP分離）
     onContractChangeHooks   []OnContractChangeHook
@@ -578,6 +617,7 @@ func (r *Registry) Register(plugin Plugin) error {
     if h, ok := plugin.(AfterChargeHook); ok { r.afterChargeHooks = append(r.afterChargeHooks, h) }
     if h, ok := plugin.(OnPaymentFailedHook); ok { r.onPaymentFailedHooks = append(r.onPaymentFailedHooks, h) }
     if h, ok := plugin.(OnRefundHook); ok { r.onRefundHooks = append(r.onRefundHooks, h) }
+    if h, ok := plugin.(OnCompensationExecutedHook); ok { r.onCompensationExecutedHooks = append(r.onCompensationExecutedHooks, h) }
 
     // メトリクスフック（ISP分離）
     if h, ok := plugin.(OnContractChangeHook); ok { r.onContractChangeHooks = append(r.onContractChangeHooks, h) }
@@ -706,6 +746,7 @@ func (r *Registry) GetBeforeChargeHooks() []BeforeChargeHook { ... }
 func (r *Registry) GetAfterChargeHooks() []AfterChargeHook { ... }
 func (r *Registry) GetOnPaymentFailedHooks() []OnPaymentFailedHook { ... }
 func (r *Registry) GetOnRefundHooks() []OnRefundHook { ... }
+func (r *Registry) GetOnCompensationExecutedHooks() []OnCompensationExecutedHook { ... }
 
 // メトリクス（各イベント個別）
 func (r *Registry) GetOnContractChangeHooks() []OnContractChangeHook { ... }
@@ -797,11 +838,11 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 
 ### 5.3 Hook発火責任（誰がフックを呼ぶか）
 
-全22種のフックのうち、コアが自動発火するのは14種。残りは統合者（サービス開発者）
+全23種のフックのうち、コアが自動発火するのは15種。残りは統合者（サービス開発者）
 またはアダプタが発火する。プラグインを書く前に、実装するフックが「誰に呼ばれるか」を
 この表で確認すること。
 
-**コアが自動発火するフック（14種）**
+**コアが自動発火するフック（15種）**
 
 | Hook | 発火箇所 |
 |------|---------|
@@ -814,6 +855,7 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 | `OnPaymentProcessedHook` | `PaymentService.ProcessPayment`（成功パス、非致命）、`PaymentService.SettlePayment`（同上） |
 | `OnPaymentFailedHook` | `PaymentService.ProcessPayment`（ゲートウェイ失敗時、非致命）、`PaymentService.MarkPaymentFailed`（Pending→Failed の実遷移時のみ・コミット後、非致命。冪等 no-op リプレイでは発火しない） |
 | `OnRefundHook` | `PaymentService.Refund`（非致命） |
+| `OnCompensationExecutedHook` | `PaymentService.ProcessPayment`（サガ補償の実行後、非致命。補償成功・失敗の**両方**で発火する — 失敗 = MANUAL RECONCILIATION 状態。issue #257） |
 | `OnCreditNoteIssuedHook` | `CreditNoteService`（発行後、非致命） |
 | `OnInvoiceRevisedHook` | `CreditNoteService.ReissueInvoice`（非致命） |
 | `OnContractRenewHook` | `batch.ContractRenewalProcessor`（保存後、非致命） |
@@ -851,7 +893,8 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 
 > **注（#248）**: 上表とは別に、コアは tx 内 Save 直後・コミット前で**統合者ポート
 > `PaymentOutboxWriter` / `InvoiceOutboxWriter`**（フックではない）を呼ぶ。これらは
-> トランザクショナル・アウトボックス用で、**フック数 22 は据え置き**。詳細は §11。
+> トランザクショナル・アウトボックス用で、**#248 自体はフック数を増やしていない**
+> （当時 22。現在の総数は #257 の `OnCompensationExecutedHook` を加えた 23、§10.3）。詳細は §11。
 
 ### 5.4 パニック隔離とフェイタリティ・ポリシー（issue #193）
 
@@ -871,7 +914,7 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 |------|-----------|-----------------|
 | **拒否権あり（veto）** | `InvoiceLifecycleHook.BeforeCalculation` / `DiscountHook` / `TaxHook` / `BeforeChargeHook` | パニック → パイプラインエラーとして**伝播**し、操作をクリーンに中断する（フックがエラーを返した場合と同一）。ゲートウェイ課金前・保存前なので副作用は残らない |
 | **tx 内・保存前** | `InvoiceLifecycleHook.AfterCalculation` | トランザクション内（Save より前）で発火。パニック → エラーへ変換して `tx.Run` のクロージャから返す。**パニックが `tx.Run` を突き抜けない**ため（バックエンド依存のロールバック挙動を避ける）、tx はクリーンに中断し何も永続化されない |
-| **非致命（non-fatal）** | `AfterChargeHook` / `OnPaymentProcessedHook` / `OnPaymentFailedHook` / `OnRefundHook` / `OnInvoiceIssuedHook` / `OnCreditNoteIssuedHook` / `OnInvoiceRevisedHook` / `OnContractRenewHook` / `OnContractTrialEndHook` / `OnContractChangeHook`（バッチ含む） | パニック → `plugin.LogNonFatalHookError` が**プラグイン名・フック種別・スタックを Error レベルでログ**し、処理を継続する。同種の後続フックも通常どおり実行される（1 つのパニックが他フックを止めない） |
+| **非致命（non-fatal）** | `AfterChargeHook` / `OnPaymentProcessedHook` / `OnPaymentFailedHook` / `OnRefundHook` / `OnCompensationExecutedHook` / `OnInvoiceIssuedHook` / `OnCreditNoteIssuedHook` / `OnInvoiceRevisedHook` / `OnContractRenewHook` / `OnContractTrialEndHook` / `OnContractChangeHook`（バッチ含む） | パニック → `plugin.LogNonFatalHookError` が**プラグイン名・フック種別・スタックを Error レベルでログ**し、処理を継続する。同種の後続フックも通常どおり実行される（1 つのパニックが他フックを止めない） |
 | **ライフサイクル** | `InitializeAll` / `ShutdownAll` の `Plugin.Initialize` / `Plugin.Shutdown` | パニック → エラーへ変換して返す。パニックする `Initialize` は起動を**回復不能にクラッシュさせず**、`*PluginPanicError` を含むエラーとして扱う |
 
 > **注**: 統合者が発火するフック（契約 Create/Activate/Suspend/Resume/Cancel/
@@ -1594,13 +1637,14 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 ```
 請求計算:        DiscountHook / TaxHook / InvoiceLifecycleHook
 契約ライフサイクル: OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled/Renew/TrialEndHook（9種）
-支払い:          BeforeChargeHook / AfterChargeHook / OnPaymentFailedHook / OnRefundHook（4種）
+支払い:          BeforeChargeHook / AfterChargeHook / OnPaymentFailedHook / OnRefundHook / OnCompensationExecutedHook（5種）
 メトリクス:       OnContractChangeHook / OnInvoiceIssuedHook / OnPaymentProcessedHook（3種）
 クレジットノート:   OnCreditNoteIssuedHook / OnInvoiceRevisedHook（2種）
 請求書生成:       InvoiceGenerationHook（1種）
 ```
 
-（完全な定義は §3、カテゴリ別一覧は §5.3 を参照。合計22種。）
+（完全な定義は §3、カテゴリ別一覧は §5.3 を参照。合計23種。
+`OnCompensationExecutedHook` は #257 で追加された（SemVer minor、新規フックの追加）。）
 
 `InvoiceCalculationHook`（割引・税・ライフサイクルの統合インターフェース）は
 ISP違反と計算順序の脆さの懸念から、設計段階で分割を決定した。
@@ -1656,7 +1700,8 @@ func (p *MyBillingPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.M
 
 ### 11.2 採用設計（Design W）: Writer ポート（フックではない）
 
-新しいプラグインフックは**追加しない**（フック総数は §10.3 のとおり **22 のまま**）。代わりに、
+新しいプラグインフックは**追加しない**（#248 はフック総数を変えない。当時 22、現在は
+#257 を含め §10.3 のとおり **23**）。代わりに、
 統合者が実装する **OutboxWriter ポート**をコアが tx 内 Save 直後・コミット前に呼ぶ。行の
 組み立て（自分の webhook スキーマ・イベント語彙・初回判定 I/O）は統合者側が自由に行う。
 
@@ -1786,4 +1831,4 @@ follow-up issue とする。
 
 新ポート（`PaymentOutboxWriter` / `InvoiceOutboxWriter`）と新オプション
 （`WithPaymentOutboxWriter` / `WithInvoiceOutboxWriter`）の**追加のみ**。既存挙動は writer
-未配線で不変。フック総数は 22 で不変（§10.3）。よって **Minor**。
+未配線で不変。#248 はフック総数を変えない（現在の総数は §10.3 の 23）。よって **Minor**。

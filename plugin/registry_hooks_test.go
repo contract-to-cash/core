@@ -10,7 +10,7 @@ import (
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
-// allHooksPlugin implements every one of the 22 hook interfaces so that a single
+// allHooksPlugin implements every one of the 23 hook interfaces so that a single
 // registration can be asserted to fan out into all hook slices.
 type allHooksPlugin struct {
 	basePlugin
@@ -64,6 +64,9 @@ func (p *allHooksPlugin) OnPaymentFailed(ctx *PaymentContext, err error) error  
 func (p *allHooksPlugin) OnRefund(ctx *PaymentContext, refundAmount shared.Money) error {
 	return nil
 }
+func (p *allHooksPlugin) OnCompensationExecuted(ctx *PaymentContext, result CompensationResult) error {
+	return nil
+}
 
 // Metrics hooks
 func (p *allHooksPlugin) OnContractChange(ctx *Context, event ContractChangeEvent) error { return nil }
@@ -105,6 +108,7 @@ var (
 	_ AfterChargeHook                 = (*allHooksPlugin)(nil)
 	_ OnPaymentFailedHook             = (*allHooksPlugin)(nil)
 	_ OnRefundHook                    = (*allHooksPlugin)(nil)
+	_ OnCompensationExecutedHook      = (*allHooksPlugin)(nil)
 	_ OnContractChangeHook            = (*allHooksPlugin)(nil)
 	_ OnInvoiceIssuedHook             = (*allHooksPlugin)(nil)
 	_ OnPaymentProcessedHook          = (*allHooksPlugin)(nil)
@@ -114,7 +118,7 @@ var (
 )
 
 // TestRegister_DistributesToAllHookSlices verifies that a plugin implementing all
-// 22 hook interfaces is registered into every corresponding getter's slice.
+// 23 hook interfaces is registered into every corresponding getter's slice.
 func TestRegister_DistributesToAllHookSlices(t *testing.T) {
 	r := NewRegistry()
 	p := &allHooksPlugin{
@@ -144,6 +148,7 @@ func TestRegister_DistributesToAllHookSlices(t *testing.T) {
 		{"afterCharge", len(r.GetAfterChargeHooks())},
 		{"onPaymentFailed", len(r.GetOnPaymentFailedHooks())},
 		{"onRefund", len(r.GetOnRefundHooks())},
+		{"onCompensationExecuted", len(r.GetOnCompensationExecutedHooks())},
 		{"onContractChange", len(r.GetOnContractChangeHooks())},
 		{"onInvoiceIssued", len(r.GetOnInvoiceIssuedHooks())},
 		{"onPaymentProcessed", len(r.GetOnPaymentProcessedHooks())},
@@ -151,8 +156,8 @@ func TestRegister_DistributesToAllHookSlices(t *testing.T) {
 		{"onCreditNoteIssued", len(r.GetOnCreditNoteIssuedHooks())},
 		{"onInvoiceRevised", len(r.GetOnInvoiceRevisedHooks())},
 	}
-	if len(checks) != 22 {
-		t.Fatalf("expected 22 hook categories, got %d", len(checks))
+	if len(checks) != 23 {
+		t.Fatalf("expected 23 hook categories, got %d", len(checks))
 	}
 	for _, c := range checks {
 		if c.n != 1 {
@@ -192,6 +197,7 @@ func TestRegister_NarrowPluginOnlyPopulatesImplementedHooks(t *testing.T) {
 		len(r.GetAfterChargeHooks()),
 		len(r.GetOnPaymentFailedHooks()),
 		len(r.GetOnRefundHooks()),
+		len(r.GetOnCompensationExecutedHooks()),
 		len(r.GetOnContractChangeHooks()),
 		len(r.GetOnInvoiceIssuedHooks()),
 		len(r.GetOnPaymentProcessedHooks()),

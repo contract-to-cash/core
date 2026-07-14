@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`OnCompensationExecutedHook` — non-fatal plugin hook for saga compensation
+  (#257)** — closes the observability blind spot on the `ProcessPayment`
+  "gateway charge succeeded → local transaction failed → saga compensation
+  (Void / fallback Refund)" path, which previously emitted only slog lines.
+  The core now fires the new hook after the compensation attempt, on **both**
+  outcomes: charge reversed (Method `void` or `refund`) and the double-failure
+  MANUAL RECONCILIATION state (Method `none`, `CompensationErr` non-nil — the
+  case integrators most need to page on). `CompensationResult` carries the
+  original gateway transaction ID and amount, the reversal method, the trigger
+  reason (`local_save_failed` or `outbox_veto`, issue #248), and any
+  `MarkCompensated` marker-write failure (issue #87). Hook errors and panics
+  are logged via the standard non-fatal policy and never change the outcome of
+  `ProcessPayment`. Hook interface total goes from 22 to 23 (payment category
+  4 → 5). Additive only — Minor bump.
+
 ## [0.6.0] - 2026-07-13
 
 ### Added

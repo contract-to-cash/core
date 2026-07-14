@@ -396,7 +396,7 @@ func (s *CreditNoteService) IssueCreditNote(ctx context.Context, creditNoteID sh
 // method is a status-only transition (backward-compatible).
 //
 // Observability: no Apply-specific plugin hook exists (the plugin surface is the
-// documented set of 22 hooks — adding a 23rd for this narrow event is out of
+// documented set of 23 hooks — adding a 24th for this narrow event is out of
 // scope for this fix), so the posting is recorded on the ledger and logged
 // rather than surfaced through a new hook IF. Downstream consumers observe the
 // application through the BalanceEntry / OnCreditNoteIssued-tracked note state.

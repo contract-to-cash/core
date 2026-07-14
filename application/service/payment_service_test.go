@@ -4178,3 +4178,356 @@ func TestProcessPayment_NoReturnURL_ThreeDSecureStaysNil(t *testing.T) {
 		t.Errorf("expected ChargeRequest.ThreeDSecure to stay nil without a ReturnURL, got %+v", gw.lastChargeReq.ThreeDSecure)
 	}
 }
+
+// --- OnCompensationExecuted hook (issue #257) ---
+
+// compensationSpyPlugin records OnCompensationExecuted invocations. It can be
+// configured to return an error or to panic, so tests can verify the hook is
+// non-fatal (a misbehaving plugin must not alter the ProcessPayment outcome).
+type compensationSpyPlugin struct {
+	name        string
+	returnErr   error
+	panicValue  any
+	calls       int
+	receivedCtx *plugin.PaymentContext
+	results     []plugin.CompensationResult
+}
+
+func (p *compensationSpyPlugin) Name() string {
+	if p.name == "" {
+		return "compensation-spy"
+	}
+	return p.name
+}
+func (p *compensationSpyPlugin) Version() string                                     { return "1.0.0" }
+func (p *compensationSpyPlugin) Initialize(_ context.Context, _ plugin.Config) error { return nil }
+func (p *compensationSpyPlugin) Shutdown(_ context.Context) error                    { return nil }
+func (p *compensationSpyPlugin) Priority() int                                       { return 500 }
+func (p *compensationSpyPlugin) OnCompensationExecuted(ctx *plugin.PaymentContext, result plugin.CompensationResult) error {
+	p.calls++
+	p.receivedCtx = ctx
+	p.results = append(p.results, result)
+	if p.panicValue != nil {
+		panic(p.panicValue)
+	}
+	return p.returnErr
+}
+
+func TestProcessPayment_OnCompensationExecuted_VoidSuccess(t *testing.T) {
+	// Charge succeeds → local tx fails → saga compensation reverses the charge
+	// via Void. The OnCompensationExecuted hook must fire exactly once with the
+	// gateway-side facts: Method=void, Reason=local_save_failed, no errors.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{} // Void succeeds by default
+	spy := &compensationSpyPlugin{}
+	registry := plugin.NewRegistry()
+	_ = registry.Register(spy)
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		registry,
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-comp-hook-void",
+	})
+	if err == nil {
+		t.Fatal("expected error from local save failure")
+	}
+
+	if spy.calls != 1 {
+		t.Fatalf("expected OnCompensationExecuted to fire exactly once, got %d", spy.calls)
+	}
+	res := spy.results[0]
+	if res.Method != plugin.CompensationMethodVoid {
+		t.Errorf("expected Method %q, got %q", plugin.CompensationMethodVoid, res.Method)
+	}
+	if res.Reason != plugin.CompensationReasonLocalSaveFailed {
+		t.Errorf("expected Reason %q, got %q", plugin.CompensationReasonLocalSaveFailed, res.Reason)
+	}
+	if res.CompensationErr != nil {
+		t.Errorf("expected nil CompensationErr for a successful Void, got %v", res.CompensationErr)
+	}
+	if res.MarkCompensatedErr != nil {
+		t.Errorf("expected nil MarkCompensatedErr (no store wired), got %v", res.MarkCompensatedErr)
+	}
+	if res.TransactionID != "txn-key-comp-hook-void" {
+		t.Errorf("expected TransactionID %q, got %q", "txn-key-comp-hook-void", res.TransactionID)
+	}
+	if res.Amount.Amount().Cmp(big.NewRat(10000, 1)) != 0 {
+		t.Errorf("expected Amount 10000, got %s", res.Amount.Amount().RatString())
+	}
+	if res.Amount.Currency() != shared.CurrencyJPY {
+		t.Errorf("expected Amount currency JPY, got %s", res.Amount.Currency())
+	}
+	// The context carries the (never-persisted) payment record and the invoice.
+	if spy.receivedCtx == nil {
+		t.Fatal("PaymentContext was nil")
+	}
+	if spy.receivedCtx.Payment() == nil {
+		t.Error("PaymentContext.Payment() should carry the local payment record")
+	}
+	if spy.receivedCtx.Invoice() == nil || spy.receivedCtx.Invoice().ID() != inv.ID() {
+		t.Error("PaymentContext.Invoice() should carry the invoice being paid")
+	}
+}
+
+func TestProcessPayment_OnCompensationExecuted_RefundFallback(t *testing.T) {
+	// Void fails (charge already settled) → the Refund fallback reverses the
+	// charge. The hook must report Method=refund with no compensation error.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{voidErr: fmt.Errorf("cannot void a settled transaction")}
+	spy := &compensationSpyPlugin{}
+	registry := plugin.NewRegistry()
+	_ = registry.Register(spy)
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		registry,
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-comp-hook-refund",
+	})
+	if err == nil {
+		t.Fatal("expected error from local save failure")
+	}
+
+	if spy.calls != 1 {
+		t.Fatalf("expected OnCompensationExecuted to fire exactly once, got %d", spy.calls)
+	}
+	res := spy.results[0]
+	if res.Method != plugin.CompensationMethodRefund {
+		t.Errorf("expected Method %q, got %q", plugin.CompensationMethodRefund, res.Method)
+	}
+	if res.CompensationErr != nil {
+		t.Errorf("expected nil CompensationErr for a successful Refund fallback, got %v", res.CompensationErr)
+	}
+	if res.Reason != plugin.CompensationReasonLocalSaveFailed {
+		t.Errorf("expected Reason %q, got %q", plugin.CompensationReasonLocalSaveFailed, res.Reason)
+	}
+}
+
+func TestProcessPayment_OnCompensationExecuted_BothReversalsFail(t *testing.T) {
+	// Void AND the Refund fallback fail — the MANUAL RECONCILIATION state. The
+	// hook must still fire (this is the state integrators most need to page
+	// on), reporting Method=none and the combined compensation error.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{
+		voidErr:   fmt.Errorf("cannot void a settled transaction"),
+		refundErr: fmt.Errorf("gateway timeout"),
+	}
+	spy := &compensationSpyPlugin{}
+	registry := plugin.NewRegistry()
+	_ = registry.Register(spy)
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		registry,
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-comp-hook-manual",
+	})
+	if err == nil {
+		t.Fatal("expected error when both save and compensation fail")
+	}
+	if !strings.Contains(err.Error(), "compensation also failed") {
+		t.Errorf("expected error to mention compensation failure, got: %v", err)
+	}
+
+	if spy.calls != 1 {
+		t.Fatalf("expected OnCompensationExecuted to fire exactly once, got %d", spy.calls)
+	}
+	res := spy.results[0]
+	if res.Method != plugin.CompensationMethodNone {
+		t.Errorf("expected Method %q, got %q", plugin.CompensationMethodNone, res.Method)
+	}
+	if res.CompensationErr == nil {
+		t.Fatal("expected non-nil CompensationErr when both reversals fail")
+	}
+	if !strings.Contains(res.CompensationErr.Error(), "refund fallback also failed") {
+		t.Errorf("expected CompensationErr to carry the combined failure, got: %v", res.CompensationErr)
+	}
+	if res.Reason != plugin.CompensationReasonLocalSaveFailed {
+		t.Errorf("expected Reason %q, got %q", plugin.CompensationReasonLocalSaveFailed, res.Reason)
+	}
+}
+
+func TestProcessPayment_OnCompensationExecuted_OutboxVetoReason(t *testing.T) {
+	// When the compensation was triggered by a PaymentOutboxWriter veto (issue
+	// #248) rather than a local save failure, the hook must report
+	// Reason=outbox_veto so integrators can distinguish the two trigger paths.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{} // Void succeeds by default
+	writer := inmemory.NewInMemoryOutboxWriter()
+	writer.FailWith(errors.New("outbox insert failed"))
+	spy := &compensationSpyPlugin{}
+	registry := plugin.NewRegistry()
+	_ = registry.Register(spy)
+
+	svc := NewPaymentService(
+		gw, &mockPaymentRepo{}, &mockInvoiceRepoForPayment{inv: inv}, nil, &mockEventStore{},
+		registry, clock,
+		WithPaymentOutboxWriter(writer),
+		WithoutPaymentTransactions(), // explicit noop still runs the closure
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-comp-hook-veto",
+	})
+	if err == nil {
+		t.Fatal("expected ProcessPayment to fail when the outbox writer vetoes")
+	}
+	if !gw.voidCalled {
+		t.Fatal("expected saga compensation (Void) after the outbox veto")
+	}
+
+	if spy.calls != 1 {
+		t.Fatalf("expected OnCompensationExecuted to fire exactly once, got %d", spy.calls)
+	}
+	res := spy.results[0]
+	if res.Reason != plugin.CompensationReasonOutboxVeto {
+		t.Errorf("expected Reason %q, got %q", plugin.CompensationReasonOutboxVeto, res.Reason)
+	}
+	if res.Method != plugin.CompensationMethodVoid {
+		t.Errorf("expected Method %q, got %q", plugin.CompensationMethodVoid, res.Method)
+	}
+	if res.CompensationErr != nil {
+		t.Errorf("expected nil CompensationErr, got %v", res.CompensationErr)
+	}
+}
+
+func TestProcessPayment_OnCompensationExecuted_MarkCompensatedError(t *testing.T) {
+	// The hook fires AFTER the MarkCompensated attempt so a marker-write
+	// failure (issue #87 retry-race observability) is visible in the result.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{} // Void succeeds
+	store := newFakeIdempotencyStore()
+	store.markErr = fmt.Errorf("marker write failed")
+	spy := &compensationSpyPlugin{}
+	registry := plugin.NewRegistry()
+	_ = registry.Register(spy)
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		registry,
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+		WithIdempotencyStore(store),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-comp-hook-mark",
+	})
+	if err == nil {
+		t.Fatal("expected an error (local save failed and was compensated)")
+	}
+
+	if spy.calls != 1 {
+		t.Fatalf("expected OnCompensationExecuted to fire exactly once, got %d", spy.calls)
+	}
+	res := spy.results[0]
+	if res.CompensationErr != nil {
+		t.Errorf("expected nil CompensationErr (compensation succeeded), got %v", res.CompensationErr)
+	}
+	if res.MarkCompensatedErr == nil {
+		t.Fatal("expected MarkCompensatedErr to carry the marker-write failure")
+	}
+	if !strings.Contains(res.MarkCompensatedErr.Error(), "marker write failed") {
+		t.Errorf("expected MarkCompensatedErr to wrap the store error, got: %v", res.MarkCompensatedErr)
+	}
+	if store.markCalls != 1 {
+		t.Errorf("expected 1 MarkCompensated call, got %d", store.markCalls)
+	}
+}
+
+func TestProcessPayment_OnCompensationExecuted_HookFailureIsNonFatal(t *testing.T) {
+	// A hook returning an error AND a hook panicking must not change the
+	// outcome of ProcessPayment: the caller still sees the original
+	// "local save failed (gateway charge refunded)" error, both hooks run,
+	// and neither the hook error nor the panic leaks into the returned error.
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	gw := &spyGateway{} // Void succeeds
+	errSpy := &compensationSpyPlugin{name: "comp-err-spy", returnErr: errors.New("hook boom")}
+	panicSpy := &compensationSpyPlugin{name: "comp-panic-spy", panicValue: "hook panic boom"}
+	registry := plugin.NewRegistry()
+	_ = registry.Register(errSpy)
+	_ = registry.Register(panicSpy)
+
+	svc := NewPaymentService(
+		gw,
+		&mockPaymentRepo{},
+		&mockInvoiceRepoForPayment{inv: inv},
+		nil,
+		&mockEventStore{},
+		registry,
+		clock,
+		WithPaymentTxManager(&paymentFailingTxManager{}),
+	)
+
+	_, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-comp-hook-nonfatal",
+	})
+	if err == nil {
+		t.Fatal("expected error from local save failure")
+	}
+	if !strings.Contains(err.Error(), "local save failed (gateway charge refunded)") {
+		t.Errorf("expected the original compensation-complete error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "hook boom") || strings.Contains(err.Error(), "hook panic boom") {
+		t.Errorf("hook failure must not leak into the returned error, got: %v", err)
+	}
+	if errSpy.calls != 1 {
+		t.Errorf("expected erroring hook to be called once, got %d", errSpy.calls)
+	}
+	if panicSpy.calls != 1 {
+		t.Errorf("expected panicking hook to be called once (isolated by SafeInvoke), got %d", panicSpy.calls)
+	}
+}

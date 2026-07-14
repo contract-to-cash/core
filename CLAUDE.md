@@ -28,7 +28,7 @@ application/     ユースケース層。domain にのみ依存
   projection/      Projection 更新（同期/非同期選択可能）
   tx/              トランザクション管理（TxManager, Saga）
 eventstore/      Event Sourcing 基盤（Store, EventRegistry, Snapshot, Upcaster）
-plugin/          プラグインシステム基盤（Registry と 22 種の Hook IF）
+plugin/          プラグインシステム基盤（Registry と 23 種の Hook IF）
 plugins/         公式プラグイン実装（coupon, tax, invoicecleanup）
 batch/           バッチ処理ロジック（ContractRenewal 等。スケジューラは利用側）
 infrastructure/  ドメイン IF の実装（現在は inmemory/ のみ。DB 実装は利用者が提供）
@@ -88,8 +88,8 @@ BeforeCalculation → 価格計算 → Discount → Subtotal → Tax → Total �
 
 - **ISP 準拠**: 必要な Hook インターフェースのみ実装する。空メソッドの強制実装は不要
 - `Priority` は **同一 Hook 種別内** の実行順序のみを制御する。Hook 種別間の順序はコアが保証する
-- 全 22 種の Hook は 6 カテゴリに分類される（請求計算 3 / 契約ライフサイクル 9 / 支払い 4 / メトリクス 3 / クレジットノート 2 / 請求書生成 1）
-- **発火責任は非対称**: コアが自動発火するのは 14 種のみ。契約ライフサイクル 7 種
+- 全 23 種の Hook は 6 カテゴリに分類される（請求計算 3 / 契約ライフサイクル 9 / 支払い 5 / メトリクス 3 / クレジットノート 2 / 請求書生成 1）
+- **発火責任は非対称**: コアが自動発火するのは 15 種のみ。契約ライフサイクル 7 種
   （Create/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled）は統合者、`InvoiceGenerationHook` はアダプタが発火する
   （詳細は plugin-system.md セクション 5.3 の発火責任表）
 
@@ -150,6 +150,6 @@ golangci-lint の設定は `.golangci.yml`。`exhaustive` で switch の網羅�
 
 - `docs/internals/domain-model.md` — ドメインモデル詳細仕様
 - `docs/internals/event-sourcing.md` — Event Sourcing 詳細仕様
-- `docs/internals/plugin-system.md` — プラグインシステム詳細仕様（Hook IF 全 22 種の定義）
+- `docs/internals/plugin-system.md` — プラグインシステム詳細仕様（Hook IF 全 23 種の定義）
 - `docs/internals/payment-gateway.md` — Payment Gateway 詳細仕様
 - `docs/guides/integration.md` — サービス開発者向け統合ガイド
