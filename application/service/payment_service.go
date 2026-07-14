@@ -110,7 +110,15 @@ var errPaymentOutboxVeto = errors.New("payment outbox writer vetoed the record")
 // hierarchical fallback chain: Invoice → Contract → Customer.
 // PaymentMethod is the type of payment method (e.g. bank_transfer, convenience_store).
 // If not set, it is resolved from ChargeResponse.PaymentMethodType, falling back
-// to credit_card for backward compatibility.
+// to credit_card for backward compatibility. When PaymentMethodID is also set
+// explicitly, PaymentMethod is additionally forwarded to the gateway as the
+// ChargeRequest.PaymentMethodType hint so multi-method adapters can skip a
+// per-charge PaymentMethod lookup (issue #253).
+// ReturnURL is optional — the URL the customer is sent back to after approving
+// a redirect-based payment (e.g. qr_code wallets like PayPay, or a card 3DS
+// challenge). If non-empty, it is propagated to the gateway as
+// ChargeRequest.ThreeDSecure.ReturnURL; if empty, ChargeRequest.ThreeDSecure
+// stays nil and behavior is unchanged (platform#66).
 type ProcessPaymentInput struct {
 	PaymentMethodID string
 	PaymentMethod   payment.PaymentMethod
@@ -118,6 +126,7 @@ type ProcessPaymentInput struct {
 	Currency        shared.Currency
 	IdempotencyKey  string
 	Metadata        map[string]string
+	ReturnURL       string
 }
 
 // RefundInput holds the parameters for issuing a refund.
@@ -355,6 +364,41 @@ func (s *PaymentService) firePaymentOutbox(ctx context.Context, p *payment.Payme
 		return fmt.Errorf("%w: %w", errPaymentOutboxVeto, err)
 	}
 	return nil
+}
+
+// fireOnCompensationExecuted fires the non-fatal OnCompensationExecuted hooks
+// (issue #257) after ProcessPayment has attempted saga compensation of a
+// successful gateway charge — on BOTH outcomes (charge reversed via Void or
+// the Refund fallback, and the double-failure MANUAL RECONCILIATION state).
+// Hook errors and recovered panics are logged and never change the outcome of
+// ProcessPayment (plugin panic policy, docs/internals/plugin-system.md §5.4).
+//
+// p and inv are the local in-memory copies whose mutations were rolled back
+// with the failed transaction — they were never persisted; result carries the
+// authoritative gateway-side facts (transaction ID, amount, reversal method).
+func (s *PaymentService) fireOnCompensationExecuted(
+	ctx context.Context,
+	p *payment.Payment,
+	inv *invoice.Invoice,
+	invoiceID shared.InvoiceID,
+	result plugin.CompensationResult,
+) {
+	hooks := s.registry.GetOnCompensationExecutedHooks()
+	if len(hooks) == 0 {
+		return
+	}
+	hookCtx := plugin.NewPaymentContext(ctx, p, inv)
+	for _, hook := range hooks {
+		if hookErr := plugin.SafeInvoke("OnCompensationExecutedHook.OnCompensationExecuted", hook.Name(), func() error {
+			return hook.OnCompensationExecuted(hookCtx, result)
+		}); hookErr != nil {
+			plugin.LogNonFatalHookError(s.logger, "OnCompensationExecuted hook failed", hookErr,
+				"hook", hook.Name(),
+				"paymentID", p.ID(),
+				"invoiceID", invoiceID,
+			)
+		}
+	}
 }
 
 // ProcessPayment charges an invoice and records the payment.
@@ -606,14 +650,36 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// NOTE: Charge is called BEFORE the in-transaction idempotency check.
 	// This relies on the gateway honouring IdempotencyKey to prevent duplicate
 	// charges when the same request is retried (e.g. after a transient DB failure).
-	chargeResp, err := s.gateway.Charge(ctx, &port.ChargeRequest{
-		Amount:          amount,
-		CustomerID:      string(inv.AccountID()),
-		PaymentMethodID: &pmID,
-		Description:     fmt.Sprintf("Invoice %s", invoiceID),
-		Metadata:        input.Metadata,
-		IdempotencyKey:  effectiveKey,
-	})
+	// Payment-method-type hint (issue #253): forward the caller's declared
+	// method type so multi-method gateway adapters can skip a per-charge
+	// PaymentMethod lookup. Only forwarded when the caller also pinned
+	// PaymentMethodID explicitly — when pmID was resolved via the
+	// Invoice→Contract→Customer fallback chain, input.PaymentMethod may not
+	// describe the resolved method, and a wrong hint is worse than none
+	// (gateways trust it to skip verification). Empty = unknown, and the
+	// gateway falls back to resolving the method itself.
+	var methodTypeHint port.PaymentMethodType
+	if input.PaymentMethodID != "" {
+		methodTypeHint = paymentMethodToPortType(input.PaymentMethod)
+	}
+
+	chargeReq := &port.ChargeRequest{
+		Amount:            amount,
+		CustomerID:        string(inv.AccountID()),
+		PaymentMethodID:   &pmID,
+		PaymentMethodType: methodTypeHint,
+		Description:       fmt.Sprintf("Invoice %s", invoiceID),
+		Metadata:          input.Metadata,
+		IdempotencyKey:    effectiveKey,
+	}
+	// Redirect-based payments (qr_code wallets like PayPay, card 3DS) need a
+	// return URL for the customer to come back to after approval. Propagate it
+	// via the ThreeDSecure request; Required is intentionally left false —
+	// forcing a 3DS challenge is a separate concern (platform#66).
+	if input.ReturnURL != "" {
+		chargeReq.ThreeDSecure = &port.ThreeDSecureRequest{ReturnURL: input.ReturnURL}
+	}
+	chargeResp, err := s.gateway.Charge(ctx, chargeReq)
 
 	// No ChargeResponse available on failure — resolve from input only
 	inputMethodType := s.resolvePaymentMethodType("", input.PaymentMethod)
@@ -759,6 +825,14 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// something non-deterministic would silently reintroduce double-reverse
 	// risk under concurrency.
 	saga := tx.NewSaga()
+	// compensationMethod records which reversal the compensation closure
+	// actually executed (Void or the Refund fallback) so the non-fatal
+	// OnCompensationExecuted hooks can report it (issue #257). Compensate is
+	// invoked synchronously on this goroutine, so a plain captured variable
+	// is safe — no concurrent access. It stays CompensationMethodNone when
+	// both reversals fail (the MANUAL RECONCILIATION state); partial success
+	// is impossible because a successful Void short-circuits before Refund.
+	compensationMethod := plugin.CompensationMethodNone
 	saga.AddCompensation(func(compCtx context.Context) error {
 		// One-step Charge exposes no separate AuthorizationID; the transaction
 		// ID identifies the (as-yet-unsettled) authorization for Void.
@@ -768,6 +842,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		})
 		if voidErr == nil {
 			// Pre-settlement charge reversed via Void. MUST NOT also Refund.
+			compensationMethod = plugin.CompensationMethodVoid
 			return nil
 		}
 
@@ -786,6 +861,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		if refundErr != nil {
 			return fmt.Errorf("compensation void failed (%v) and refund fallback also failed: %w", voidErr, refundErr)
 		}
+		compensationMethod = plugin.CompensationMethodRefund
 		return nil
 	})
 
@@ -1056,6 +1132,10 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		// failure: both roll the tx back and both compensate the gateway charge,
 		// but the wording below tells operators which one reversed the charge.
 		outboxVeto := errors.Is(err, errPaymentOutboxVeto)
+		compReason := plugin.CompensationReasonLocalSaveFailed
+		if outboxVeto {
+			compReason = plugin.CompensationReasonOutboxVeto
+		}
 		// Local save failed (or the outbox writer vetoed) — compensate by
 		// refunding the gateway charge
 		if compErr := saga.Compensate(ctx); compErr != nil {
@@ -1070,6 +1150,17 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 				"saveError", err,
 				"compensationError", compErr,
 			)
+			// Compensation FAILED — both Void and the Refund fallback errored,
+			// so the charge is still standing (MANUAL RECONCILIATION). Fire the
+			// non-fatal OnCompensationExecuted hooks (issue #257) so integrators
+			// can page on this state instead of scraping the log line above.
+			s.fireOnCompensationExecuted(ctx, p, inv, invoiceID, plugin.CompensationResult{
+				TransactionID:   chargeResp.TransactionID,
+				Amount:          chargeResp.Amount,
+				Method:          plugin.CompensationMethodNone,
+				Reason:          compReason,
+				CompensationErr: compErr,
+			})
 			if outboxVeto {
 				return nil, fmt.Errorf("outbox writer vetoed the payment record: %w; compensation also failed: %v", err, compErr)
 			}
@@ -1084,6 +1175,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		// a second error would obscure the primary cause. The downside is
 		// that a subsequent retry may hit the same race; operators should
 		// monitor this log line and investigate store health.
+		var markCompensatedErr error
 		if s.idempotencyStore != nil && input.IdempotencyKey != "" {
 			newEffectiveKey := s.newRetryEffectiveKey(input.IdempotencyKey)
 			if len(newEffectiveKey) > adyenMaxIdempotencyKeyLen {
@@ -1101,6 +1193,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 				)
 			}
 			if markErr := s.idempotencyStore.MarkCompensated(ctx, input.IdempotencyKey, newEffectiveKey); markErr != nil {
+				markCompensatedErr = markErr
 				s.logger.Error("failed to mark idempotency key as compensated (retry may race — see issue #87)",
 					"originalKey", input.IdempotencyKey,
 					"invoiceID", invoiceID,
@@ -1108,6 +1201,18 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 				)
 			}
 		}
+
+		// Compensation SUCCEEDED — the gateway charge was reversed via Void or
+		// the Refund fallback. Fire the non-fatal OnCompensationExecuted hooks
+		// (issue #257) AFTER the MarkCompensated attempt so the result can also
+		// report a marker-write failure (retry-race observability, issue #87).
+		s.fireOnCompensationExecuted(ctx, p, inv, invoiceID, plugin.CompensationResult{
+			TransactionID:      chargeResp.TransactionID,
+			Amount:             chargeResp.Amount,
+			Method:             compensationMethod,
+			Reason:             compReason,
+			MarkCompensatedErr: markCompensatedErr,
+		})
 
 		if outboxVeto {
 			return nil, fmt.Errorf("outbox writer vetoed the payment record (gateway charge reversed): %w", err)
@@ -1793,5 +1898,36 @@ func portMethodToPaymentMethod(pmt port.PaymentMethodType) (payment.PaymentMetho
 		// Unknown gateway payment method types fall back to credit_card.
 		// If a new PaymentMethodType is added to port/, add a case here.
 		return payment.PaymentMethodCreditCard, false
+	}
+}
+
+// paymentMethodToPortType is the inverse of portMethodToPaymentMethod: it maps
+// the caller-declared payment.PaymentMethod onto the gateway-facing
+// port.PaymentMethodType hint carried by ChargeRequest.PaymentMethodType
+// (issue #253). Empty or unrecognized values map to "" (unknown), so the
+// gateway falls back to resolving the method type itself.
+func paymentMethodToPortType(m payment.PaymentMethod) port.PaymentMethodType {
+	switch m {
+	case payment.PaymentMethodCreditCard:
+		return port.PaymentMethodTypeCreditCard
+	case payment.PaymentMethodDebitCard:
+		return port.PaymentMethodTypeDebitCard
+	case payment.PaymentMethodBankTransfer:
+		return port.PaymentMethodTypeBankTransfer
+	case payment.PaymentMethodDirectDebit:
+		return port.PaymentMethodTypeDirectDebit
+	case payment.PaymentMethodConvenience:
+		return port.PaymentMethodTypeConvenienceStore
+	case payment.PaymentMethodQRCode:
+		return port.PaymentMethodTypeQRCode
+	case payment.PaymentMethodCarrier:
+		return port.PaymentMethodTypeCarrier
+	case payment.PaymentMethodPostpay:
+		return port.PaymentMethodTypePostpay
+	default:
+		// Unknown or empty payment methods map to "" (unknown hint).
+		// If a new payment.PaymentMethod is added, add a case here
+		// (and to portMethodToPaymentMethod above).
+		return ""
 	}
 }

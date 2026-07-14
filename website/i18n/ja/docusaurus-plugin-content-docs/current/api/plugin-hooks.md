@@ -182,7 +182,34 @@ type OnRefundHook interface {
     Plugin
     OnRefund(ctx *PaymentContext, refundAmount shared.Money) error
 }
+
+type CompensationMethod string
+// void, refund, none
+
+type CompensationReason string
+// local_save_failed, outbox_veto
+
+type CompensationResult struct {
+    TransactionID      string             // 元課金の gateway transaction ID
+    Amount             shared.Money       // 元課金額
+    Method             CompensationMethod // 実際に効いた取消手段（none = 両方失敗）
+    Reason             CompensationReason // 補償が走った理由
+    CompensationErr    error              // 非 nil = Void も Refund も失敗（人手リコンサイルが必要）
+    MarkCompensatedErr error              // 冪等キーのマーカー書き込み失敗（issue #87）
+}
+
+type OnCompensationExecutedHook interface {
+    Plugin
+    OnCompensationExecuted(ctx *PaymentContext, result CompensationResult) error
+}
 ```
+
+`OnCompensationExecutedHook`（issue #257）は、`PaymentService.ProcessPayment` が
+成功したゲートウェイ課金のサガ補償（課金成功 → ローカルトランザクション失敗）を
+試行した後に非致命で発火します。**両方の結果**で発火します — Void または Refund
+フォールバックで課金が取り消された場合と、双方失敗の人手リコンサイル状態の
+両方です。これにより統合者はログをスクレイプせずに課金取消をアラートできます。
+フックの失敗はログされますが、`ProcessPayment` の結果は変わりません。
 
 ### PaymentContext
 
@@ -309,6 +336,7 @@ registry.GetBeforeChargeHooks() []BeforeChargeHook
 registry.GetAfterChargeHooks() []AfterChargeHook
 registry.GetOnPaymentFailedHooks() []OnPaymentFailedHook
 registry.GetOnRefundHooks() []OnRefundHook
+registry.GetOnCompensationExecutedHooks() []OnCompensationExecutedHook
 registry.GetOnContractChangeHooks() []OnContractChangeHook
 registry.GetOnInvoiceIssuedHooks() []OnInvoiceIssuedHook
 registry.GetOnPaymentProcessedHooks() []OnPaymentProcessedHook

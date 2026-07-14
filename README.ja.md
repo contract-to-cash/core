@@ -151,7 +151,7 @@ batch/            # バッチプロセッサ（契約更新）
 |---------|--------|------|
 | **課金計算** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | 割引、税計算、計算前後処理 |
 | **契約** | `OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled/Renew/TrialEndHook` | ライフサイクル反応 |
-| **決済** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | 決済フロー |
+| **決済** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook`, `OnCompensationExecutedHook` | 決済フロー |
 | **クレジットノート** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | クレジットノート発行、請求書再発行 |
 | **メトリクス** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI収集 |
 | **請求書生成** | `InvoiceGenerationHook` | PDFレンダリング、配信 |

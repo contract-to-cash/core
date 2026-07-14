@@ -222,12 +222,20 @@ type ChargeRequest struct {
     PaymentMethodID *string      // 登録済みの支払い方法ID
     Token           *string      // ワンタイムトークン（決済GWのJS SDKで取得）
 
+    // 支払い方法種別のヒント（任意、issue #253）。呼び出し側が把握している種別
+    // （例: 登録済み PaymentMethodDetail.Type）を渡す。マルチ決済手段アダプタは
+    // これを使って課金ごとの PaymentMethod 取得（GET）をスキップして**よい**（MAY）。
+    // ゼロ値（空）は「不明」を意味し、従来どおりアダプタが自力で解決する。
+    PaymentMethodType PaymentMethodType
+
     // オプション
     IdempotencyKey  string       // 冪等性キー
     Metadata        map[string]string
     StatementDescriptor string   // 明細表示名
 
-    // 3Dセキュア
+    // 3Dセキュア / リダイレクト型決済の戻り先。
+    // コアの ProcessPayment は ProcessPaymentInput.ReturnURL が非空の場合のみ
+    // &ThreeDSecureRequest{ReturnURL: ...} を設定する（Required は設定しない。platform#66）
     ThreeDSecure    *ThreeDSecureRequest
 }
 
@@ -269,6 +277,11 @@ type AuthorizeRequest struct {
     CustomerID      string
     PaymentMethodID *string
     Token           *string      // ワンタイムトークン
+
+    // 支払い方法種別のヒント（任意、issue #253）。ChargeRequest と同じ契約:
+    // ゲートウェイは lookup のスキップに使ってよく、空は「不明」（従来挙動）。
+    PaymentMethodType PaymentMethodType
+
     IdempotencyKey  string
     Metadata        map[string]string
 
@@ -1433,8 +1446,19 @@ type ProcessPaymentInput struct {
     Currency        shared.Currency
     IdempotencyKey  string
     Metadata        map[string]string
+    ReturnURL       string                // 任意。リダイレクト型決済の戻り先 URL（platform#66、下記注）
 }
 ```
+
+> **`ReturnURL`（platform#66）**: リダイレクト型決済（PayPay 等の qr_code ウォレット、
+> カード 3DS チャレンジ）で顧客が承認後に戻る URL。非空なら `ProcessPayment` が
+> `ChargeRequest.ThreeDSecure = &ThreeDSecureRequest{ReturnURL: input.ReturnURL}` として
+> ゲートウェイへ伝播する。空なら `ThreeDSecure` は従来どおり nil（後方互換）。
+> `ThreeDSecureRequest.Required` はこの経路では設定しない — 3DS の強制は別関心であり、
+> ReturnURL の伝播はあくまで「戻り先の器」の受け渡しに限る。
+> **同一 `IdempotencyKey` でのリトライでは同じ `ReturnURL` を渡すこと** — Pending
+> fall-through では同一キーで再 `Charge` されるため、リクエストボディが前回と異なると
+> `idempotency_error` で拒否するゲートウェイ（Stripe 等）がある。
 
 **`ProcessPayment(ctx, invoiceID, input)` のチャージ結果分岐**
 
@@ -1634,6 +1658,14 @@ saga 補償:
 - **Settlement 前**（銀行振込・コンビニ・キャリア・口座振替の同一リクエスト補償）: Void で確実に取消できる
 - **Settlement 後 / 即時確定**（クレジットカードの一般ケース）: Void は「capture 済みは Void 不可」で失敗し、Refund にフォールバックする
 
+**可観測性（issue #257）**: 補償の実行後、コアは非致命フック
+**`OnCompensationExecutedHook`**（plugin-system.md §3.7）を発火する。補償の**成功・失敗の両方**で
+発火し、`CompensationResult` が元課金の gateway transaction ID / 金額、実際に効いた手段
+（`void` / `refund`、双方失敗時は `none`）、補償理由（`local_save_failed` / `outbox_veto`）、
+補償エラー（非 nil = MANUAL RECONCILIATION 状態）、`MarkCompensated` の失敗（#87）を運ぶ。
+これにより統合者は slog のログ行をスクレイプせずに課金取消・リコンサイル要の状態を
+アラートできる。フックの error / panic はログされるのみで、ProcessPayment の戻り値は変わらない。
+
 ### 6.2.3 設計ポイント
 
 | 設計判断 | 理由 |
@@ -1650,6 +1682,9 @@ saga 補償:
 - `TestProcessPayment_SagaCompensation_VoidSucceeds_NoRefund` — Void 成功時に Refund を呼ばない（+ Void の key/AuthorizationID 検証）
 - `TestProcessPayment_SagaCompensation_VoidFails_FallsBackToRefund` — Void 失敗時に Refund へフォールバック（+ Refund の txnID/amount/reason/key 検証）
 - `TestProcessPayment_SagaCompensation_RefundFailure_ReturnsCompoundError` — Void・Refund 双方失敗時に結合エラー（MANUAL RECONCILIATION）
+- `TestProcessPayment_OnCompensationExecuted_*`（issue #257）— 補償実行後の非致命フック発火
+  （Void 成功 / Refund フォールバック / 双方失敗 / outbox veto 起因 / MarkCompensated 失敗の
+  報告 / フックの error・panic が戻り値を変えないこと）
 
 ---
 
@@ -1763,6 +1798,13 @@ Error ログを出す。
   ① `ChargeResponse.PaymentMethodType`（ゲートウェイが実際に使った方法）→
   ② `ProcessPaymentInput.PaymentMethod`（呼び出し側指定）→ ③ 既定 `credit_card`
   （後方互換）。未知のゲートウェイ種別は Warn ログ付きで `credit_card` にフォールバックする。
+- **ゲートウェイへの種別ヒント（issue #253）**: `ProcessPaymentInput.PaymentMethodID` と
+  `PaymentMethod` の**両方**を呼び出し側が明示した場合のみ、`ProcessPayment` は宣言された
+  種別を `ChargeRequest.PaymentMethodType` としてゲートウェイへ転送する（マルチ決済手段
+  アダプタが課金ごとの PaymentMethod 取得をスキップできる）。`PaymentMethodID` が空で
+  上記フォールバックチェーンにより解決された場合は**転送しない**（呼び出し側の
+  `PaymentMethod` が解決された方法を表すとは限らず、誤ったヒントはヒント無しより有害な
+  ため）。空 = 「不明」で、アダプタは従来どおり自力で解決する。
 
 ---
 
@@ -1845,7 +1887,8 @@ func (s *PaymentService) MarkPaymentFailed(ctx context.Context, paymentID shared
   ゲートウェイ取引 ID のファインダーを**追加しない**のは意図的 — 利用者実装のインターフェースへの
   メソッド追加は破壊的変更であり（§10.2 の同型ルール）、本機能は additive（SemVer minor）に
   留める。
-- **フック数は 22 のまま**（plugin-system.md §10.3）。新フックは追加せず、既存の
+- **本機能（#252）はフックを追加しない**（総数は plugin-system.md §10.3 を参照。現在は
+  #257 の `OnCompensationExecutedHook` を含め 23）。既存の
   `AfterCharge` / `OnPaymentProcessed` / `OnPaymentFailed` と `PaymentOutboxWriter` ポートを
   セトルメント経路でも一貫して使う。
 

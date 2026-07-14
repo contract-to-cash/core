@@ -32,10 +32,11 @@ type Registry struct {
 	onContractTrialEndHooks          []OnContractTrialEndHook
 
 	// Payment hooks
-	beforeChargeHooks    []BeforeChargeHook
-	afterChargeHooks     []AfterChargeHook
-	onPaymentFailedHooks []OnPaymentFailedHook
-	onRefundHooks        []OnRefundHook
+	beforeChargeHooks           []BeforeChargeHook
+	afterChargeHooks            []AfterChargeHook
+	onPaymentFailedHooks        []OnPaymentFailedHook
+	onRefundHooks               []OnRefundHook
+	onCompensationExecutedHooks []OnCompensationExecutedHook
 
 	// Metrics hooks
 	onContractChangeHooks   []OnContractChangeHook
@@ -121,6 +122,9 @@ func (r *Registry) Register(p Plugin) error {
 	}
 	if h, ok := p.(OnRefundHook); ok {
 		r.onRefundHooks = append(r.onRefundHooks, h)
+	}
+	if h, ok := p.(OnCompensationExecutedHook); ok {
+		r.onCompensationExecutedHooks = append(r.onCompensationExecutedHooks, h)
 	}
 
 	// Metrics hooks
@@ -347,6 +351,13 @@ func (r *Registry) GetOnRefundHooks() []OnRefundHook {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return sortedCopy(r.onRefundHooks)
+}
+
+// GetOnCompensationExecutedHooks returns compensation-executed hooks sorted by priority.
+func (r *Registry) GetOnCompensationExecutedHooks() []OnCompensationExecutedHook {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return sortedCopy(r.onCompensationExecutedHooks)
 }
 
 // GetOnContractChangeHooks returns contract change metrics hooks sorted by priority.

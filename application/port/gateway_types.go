@@ -62,11 +62,15 @@ type Transaction struct {
 
 // ChargeRequest is the input for a one-step charge.
 type ChargeRequest struct {
-	Amount              shared.Money
-	CustomerID          string
-	Description         string
-	PaymentMethodID     *string
-	Token               *string
+	Amount          shared.Money
+	CustomerID      string
+	Description     string
+	PaymentMethodID *string
+	Token           *string
+	// PaymentMethodType is an optional hint naming the payment method's type
+	// (as known to the caller, e.g. from the stored PaymentMethodDetail).
+	// Gateways MAY use it to skip a lookup; empty means unknown (issue #253).
+	PaymentMethodType   PaymentMethodType
 	IdempotencyKey      string
 	Metadata            map[string]string
 	StatementDescriptor string
@@ -129,10 +133,14 @@ type AuthorizeRequest struct {
 	CustomerID      string
 	PaymentMethodID *string
 	Token           *string
-	IdempotencyKey  string
-	Metadata        map[string]string
-	ExpiresIn       *time.Duration
-	ThreeDSecure    *ThreeDSecureRequest
+	// PaymentMethodType is an optional hint naming the payment method's type
+	// (as known to the caller, e.g. from the stored PaymentMethodDetail).
+	// Gateways MAY use it to skip a lookup; empty means unknown (issue #253).
+	PaymentMethodType PaymentMethodType
+	IdempotencyKey    string
+	Metadata          map[string]string
+	ExpiresIn         *time.Duration
+	ThreeDSecure      *ThreeDSecureRequest
 }
 
 // AuthorizeResponse is the output of an authorize operation.

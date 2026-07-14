@@ -6,6 +6,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`OnCompensationExecutedHook` — non-fatal plugin hook for saga compensation
+  (#257)** — closes the observability blind spot on the `ProcessPayment`
+  "gateway charge succeeded → local transaction failed → saga compensation
+  (Void / fallback Refund)" path, which previously emitted only slog lines.
+  The core now fires the new hook after the compensation attempt, on **both**
+  outcomes: charge reversed (Method `void` or `refund`) and the double-failure
+  MANUAL RECONCILIATION state (Method `none`, `CompensationErr` non-nil — the
+  case integrators most need to page on). `CompensationResult` carries the
+  original gateway transaction ID and amount, the reversal method, the trigger
+  reason (`local_save_failed` or `outbox_veto`, issue #248), and any
+  `MarkCompensated` marker-write failure (issue #87). Hook errors and panics
+  are logged via the standard non-fatal policy and never change the outcome of
+  `ProcessPayment`. Hook interface total goes from 22 to 23 (payment category
+  4 → 5). Additive only — Minor bump.
+
+## [0.6.0] - 2026-07-13
+
+### Added
+
+- **`ProcessPaymentInput.ReturnURL` (platform#66)** — optional URL the customer is
+  sent back to after approving a redirect-based payment (qr_code wallets such as
+  PayPay, card 3DS challenges). When non-empty, `PaymentService.ProcessPayment`
+  propagates it to the gateway as `ChargeRequest.ThreeDSecure.ReturnURL`
+  (`ThreeDSecureRequest.Required` is intentionally not set — forcing a 3DS
+  challenge is a separate concern); when empty, `ChargeRequest.ThreeDSecure`
+  stays nil, so existing callers and gateway adapters are unchanged. Additive
+  only — backward compatible, Minor bump.
+
+- **`PaymentMethodType` hint on `ChargeRequest` / `AuthorizeRequest` (#253)** —
+  optional field naming the payment method's type as known to the caller (e.g.
+  from the stored `PaymentMethodDetail`). Gateway adapters MAY use it to skip a
+  per-charge payment-method lookup; the zero value means "unknown" and adapters
+  resolve the method themselves as before. `PaymentService.ProcessPayment`
+  forwards `ProcessPaymentInput.PaymentMethod` as this hint only when the caller
+  also set `PaymentMethodID` explicitly — when the method ID was resolved via the
+  Invoice→Contract→Customer fallback chain, no hint is sent (the declared type
+  may not describe the resolved method, and a wrong hint is worse than none).
+  Additive only — existing gateways and callers are unaffected.
+
 ## [0.5.0] - 2026-07-13
 
 ### Added
