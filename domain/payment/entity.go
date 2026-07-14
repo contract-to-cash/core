@@ -272,6 +272,12 @@ func (p *Payment) RecordRefund(amount shared.Money) error {
 // metadata on a freshly constructed payment before its first Save (e.g.
 // PaymentService storing gateway payment instructions on a Pending payment
 // under the MetadataKeyInstructions* keys).
+//
+// ⚠️ Do NOT call this on a payment loaded from a repository: because the
+// version is not bumped, a concurrent writer cannot detect the change and a
+// later Save can silently lose it (or lose the concurrent update). Metadata
+// on an already-persisted payment is immutable by convention; if a mutation
+// path is ever needed it must go through a version-bumping method.
 func (p *Payment) SetMetadata(key, value string) {
 	p.metadata[key] = value
 }
