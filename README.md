@@ -151,7 +151,7 @@ Implement only the hooks you need:
 |----------|-------|---------|
 | **Billing** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | Discounts, tax, pre/post calculation |
 | **Contract** | `OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled/Renew/TrialEndHook` | Lifecycle reactions |
-| **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | Payment flow |
+| **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook`, `OnCompensationExecutedHook` | Payment flow |
 | **Credit Note** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | Credit note issuance, invoice revision |
 | **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |
 | **Invoice Gen** | `InvoiceGenerationHook` | PDF rendering, delivery |

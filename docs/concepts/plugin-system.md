@@ -21,13 +21,13 @@ This page is an English summary. The canonical, in-depth specification is
 
 ## Hook Categories
 
-The plugin system provides **22 hook interfaces** across 6 categories:
+The plugin system provides **23 hook interfaces** across 6 categories:
 
 | Category | Hooks | Purpose |
 |----------|-------|---------|
 | **Billing Calculation** | `DiscountHook`, `TaxHook`, `InvoiceLifecycleHook` | Discounts, tax, pre/post calculation |
 | **Contract Lifecycle** | `OnContractCreate/Activate/Suspend/Resume/Cancel/CancelScheduled/CancelUnscheduled/Renew/TrialEndHook` | React to contract state changes |
-| **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook` | Hook into payment flow |
+| **Payment** | `BeforeChargeHook`, `AfterChargeHook`, `OnPaymentFailedHook`, `OnRefundHook`, `OnCompensationExecutedHook` | Hook into payment flow (incl. saga compensation of a gateway charge) |
 | **Metrics** | `OnContractChangeHook`, `OnInvoiceIssuedHook`, `OnPaymentProcessedHook` | KPI collection |
 | **Invoice Generation** | `InvoiceGenerationHook` | PDF rendering and delivery |
 | **Credit Note** | `OnCreditNoteIssuedHook`, `OnInvoiceRevisedHook` | Credit note and invoice revision events |
@@ -101,7 +101,7 @@ A single plugin can implement multiple hook interfaces. For example, a billing p
 
 ## Transactional Outbox
 
-Separately from the 22 hooks, the core can call two *integrator ports* —
+Separately from the 23 hooks, the core can call two *integrator ports* —
 `PaymentOutboxWriter` and `InvoiceOutboxWriter` — *inside* the payment/invoice
 transaction so you can write a durable notification row atomically with the
 write (issue #248). See [`docs/internals/plugin-system.md`](../internals/plugin-system.md) §11 for the full design.

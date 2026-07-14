@@ -1641,6 +1641,14 @@ saga 補償:
 - **Settlement 前**（銀行振込・コンビニ・キャリア・口座振替の同一リクエスト補償）: Void で確実に取消できる
 - **Settlement 後 / 即時確定**（クレジットカードの一般ケース）: Void は「capture 済みは Void 不可」で失敗し、Refund にフォールバックする
 
+**可観測性（issue #257）**: 補償の実行後、コアは非致命フック
+**`OnCompensationExecutedHook`**（plugin-system.md §3.7）を発火する。補償の**成功・失敗の両方**で
+発火し、`CompensationResult` が元課金の gateway transaction ID / 金額、実際に効いた手段
+（`void` / `refund`、双方失敗時は `none`）、補償理由（`local_save_failed` / `outbox_veto`）、
+補償エラー（非 nil = MANUAL RECONCILIATION 状態）、`MarkCompensated` の失敗（#87）を運ぶ。
+これにより統合者は slog のログ行をスクレイプせずに課金取消・リコンサイル要の状態を
+アラートできる。フックの error / panic はログされるのみで、ProcessPayment の戻り値は変わらない。
+
 ### 6.2.3 設計ポイント
 
 | 設計判断 | 理由 |
@@ -1657,6 +1665,9 @@ saga 補償:
 - `TestProcessPayment_SagaCompensation_VoidSucceeds_NoRefund` — Void 成功時に Refund を呼ばない（+ Void の key/AuthorizationID 検証）
 - `TestProcessPayment_SagaCompensation_VoidFails_FallsBackToRefund` — Void 失敗時に Refund へフォールバック（+ Refund の txnID/amount/reason/key 検証）
 - `TestProcessPayment_SagaCompensation_RefundFailure_ReturnsCompoundError` — Void・Refund 双方失敗時に結合エラー（MANUAL RECONCILIATION）
+- `TestProcessPayment_OnCompensationExecuted_*`（issue #257）— 補償実行後の非致命フック発火
+  （Void 成功 / Refund フォールバック / 双方失敗 / outbox veto 起因 / MarkCompensated 失敗の
+  報告 / フックの error・panic が戻り値を変えないこと）
 
 ---
 
@@ -1856,7 +1867,8 @@ func (s *PaymentService) MarkPaymentFailed(ctx context.Context, paymentID shared
   ゲートウェイ取引 ID のファインダーを**追加しない**のは意図的 — 利用者実装のインターフェースへの
   メソッド追加は破壊的変更であり（§10.2 の同型ルール）、本機能は additive（SemVer minor）に
   留める。
-- **フック数は 22 のまま**（plugin-system.md §10.3）。新フックは追加せず、既存の
+- **本機能（#252）はフックを追加しない**（総数は plugin-system.md §10.3 を参照。現在は
+  #257 の `OnCompensationExecutedHook` を含め 23）。既存の
   `AfterCharge` / `OnPaymentProcessed` / `OnPaymentFailed` と `PaymentOutboxWriter` ポートを
   セトルメント経路でも一貫して使う。
 

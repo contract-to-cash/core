@@ -112,7 +112,17 @@ type OnRefundHook interface {
     Plugin
     OnRefund(ctx *PaymentContext, refundAmount shared.Money) error
 }
+
+type OnCompensationExecutedHook interface {
+    Plugin
+    OnCompensationExecuted(ctx *PaymentContext, result CompensationResult) error
+}
 ```
+
+**OnCompensationExecutedHook**（issue #257）は、サガ補償（ゲートウェイ課金成功 →
+ローカルトランザクション失敗 → Void / fallback Refund による課金取消）の実行後に
+非致命で発火します。補償の成功・失敗の両方で発火し、`CompensationResult` が取消手段
+（`void` / `refund` / `none`）、補償理由、エラーの有無を運びます。
 
 ### メトリクスフック
 
