@@ -77,6 +77,36 @@ type ChargeRequest struct {
 	ThreeDSecure        *ThreeDSecureRequest
 }
 
+// PaymentInstructions carries the customer-facing payment instructions a
+// gateway issues for asynchronous / push-style charge outcomes (konbini
+// voucher, bank-transfer virtual account, hosted payment pages, and similar
+// pay-later rails).
+//
+// Adapters populate this field on ChargeResponse for async/pending and
+// requires-action outcomes; it MUST be nil for synchronous captures
+// (Captured/Succeeded), where no customer action is needed. The URL is
+// customer-facing: integrators surface it to the customer (e.g. in a
+// "how to pay" notification) so the out-of-band payment can be completed.
+//
+// PaymentService persists these instructions onto the Pending payment's
+// Metadata under the reserved payment.MetadataKeyInstructions* keys (see
+// domain/payment), so the instruction survives the service boundary and is
+// available on the payment returned alongside ErrPaymentPending /
+// ErrRequiresAction.
+type PaymentInstructions struct {
+	// Kind classifies the instruction, e.g. "hosted_page", "konbini_voucher",
+	// "bank_transfer".
+	Kind string
+	// URL is the customer-facing URL for completing the payment (payment slip
+	// page, hosted checkout, transfer-details page, ...).
+	URL string
+	// Reference is an optional human-readable payment reference (payment code,
+	// masked virtual-account number summary, ...).
+	Reference string
+	// ExpiresAt is the optional payment-window deadline (voucher/slip expiry).
+	ExpiresAt *time.Time
+}
+
 // ChargeResponse is the output of a charge operation.
 type ChargeResponse struct {
 	TransactionID     string
@@ -89,6 +119,10 @@ type ChargeResponse struct {
 	CreatedAt         time.Time
 	Metadata          map[string]string
 	ThreeDSecure      *ThreeDSecureResult
+	// Instructions holds customer-facing payment instructions for
+	// async/pending/requires-action outcomes; nil for synchronous captures.
+	// Populated by adapters (see PaymentInstructions).
+	Instructions *PaymentInstructions
 }
 
 // --- Authorize ---

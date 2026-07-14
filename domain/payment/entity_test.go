@@ -220,6 +220,27 @@ func TestPayment_Metadata_ReturnsCopy(t *testing.T) {
 	}
 }
 
+func TestPayment_SetMetadata(t *testing.T) {
+	p := newTestPayment()
+	before := p.Version()
+
+	p.SetMetadata(MetadataKeyInstructionsURL, "https://gw.example.com/voucher/1")
+	p.SetMetadata("custom", "value")
+
+	meta := p.Metadata()
+	if meta[MetadataKeyInstructionsURL] != "https://gw.example.com/voucher/1" {
+		t.Errorf("expected instructions URL in metadata, got %q", meta[MetadataKeyInstructionsURL])
+	}
+	if meta["custom"] != "value" {
+		t.Errorf("expected custom metadata, got %q", meta["custom"])
+	}
+	// Initialization-time setter: no optimistic-locking version bump
+	// (mirrors SetIdempotencyKey).
+	if p.Version() != before {
+		t.Errorf("SetMetadata must not bump the version: %d -> %d", before, p.Version())
+	}
+}
+
 // --- RecordRefund tests ---
 
 func TestPayment_RecordRefund_FullRefund(t *testing.T) {

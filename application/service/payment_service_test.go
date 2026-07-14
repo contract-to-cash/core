@@ -29,9 +29,10 @@ type mockGateway struct {
 	failCharge              bool
 	requiresAction          bool
 	threeDSRedirect         string
-	chargePaymentMethodType port.PaymentMethodType // if set, returned in ChargeResponse
-	chargeStatus            port.TransactionStatus // if set, overrides the default Captured status
-	lastChargeReq           *port.ChargeRequest    // spy: last ChargeRequest received by Charge
+	chargePaymentMethodType port.PaymentMethodType    // if set, returned in ChargeResponse
+	chargeStatus            port.TransactionStatus    // if set, overrides the default Captured status
+	chargeInstructions      *port.PaymentInstructions // if set, returned in ChargeResponse.Instructions
+	lastChargeReq           *port.ChargeRequest       // spy: last ChargeRequest received by Charge
 }
 
 func (g *mockGateway) ID() string                                 { return "mock" }
@@ -51,6 +52,7 @@ func (g *mockGateway) Charge(_ context.Context, req *port.ChargeRequest) (*port.
 				Status:      port.ThreeDSecureStatusRequired,
 				RedirectURL: &g.threeDSRedirect,
 			},
+			Instructions: g.chargeInstructions,
 		}
 		return resp, nil
 	}
@@ -64,6 +66,7 @@ func (g *mockGateway) Charge(_ context.Context, req *port.ChargeRequest) (*port.
 		Amount:            req.Amount,
 		PaymentMethodType: g.chargePaymentMethodType,
 		CreatedAt:         time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+		Instructions:      g.chargeInstructions,
 	}, nil
 }
 func (g *mockGateway) Authorize(_ context.Context, _ *port.AuthorizeRequest) (*port.AuthorizeResponse, error) {
