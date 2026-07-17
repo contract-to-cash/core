@@ -40,10 +40,17 @@ import (
 // WARNING: This type bypasses state-transition invariants. Use ONLY in
 // persistence adapters.
 type PaymentSnapshot struct {
-	ID                   shared.PaymentID
-	InvoiceID            shared.InvoiceID
-	Amount               shared.Money
-	RefundedAmount       shared.Money
+	ID             shared.PaymentID
+	InvoiceID      shared.InvoiceID
+	Amount         shared.Money
+	RefundedAmount shared.Money
+	// Refunds is the per-refund ledger (gateway idempotency key + amount per
+	// applied refund, in recording order; issue #235 follow-up). Adapters that
+	// persisted payments before this field existed rehydrate with an empty
+	// slice; RefundKeysComplete() then reports false for any such payment with
+	// a non-zero RefundedAmount, and PaymentService.Refund conservatively
+	// conflicts instead of guessing on concurrent advances.
+	Refunds              []RefundEntry
 	Method               PaymentMethod
 	Status               PaymentStatus
 	GatewayTransactionID string
@@ -72,11 +79,18 @@ func (p *Payment) ToSnapshot() PaymentSnapshot {
 		failureReason = &v
 	}
 
+	var refunds []RefundEntry
+	if len(p.refunds) > 0 {
+		refunds = make([]RefundEntry, len(p.refunds))
+		copy(refunds, p.refunds)
+	}
+
 	return PaymentSnapshot{
 		ID:                   p.id,
 		InvoiceID:            p.invoiceID,
 		Amount:               p.amount,
 		RefundedAmount:       p.refundedAmount,
+		Refunds:              refunds,
 		Method:               p.method,
 		Status:               p.status,
 		GatewayTransactionID: p.gatewayTransactionID,
@@ -111,11 +125,18 @@ func FromSnapshot(s PaymentSnapshot) (*Payment, error) {
 		failureReason = &v
 	}
 
+	var refunds []RefundEntry
+	if len(s.Refunds) > 0 {
+		refunds = make([]RefundEntry, len(s.Refunds))
+		copy(refunds, s.Refunds)
+	}
+
 	return &Payment{
 		id:                   s.ID,
 		invoiceID:            s.InvoiceID,
 		amount:               s.Amount,
 		refundedAmount:       s.RefundedAmount,
+		refunds:              refunds,
 		method:               s.Method,
 		status:               s.Status,
 		gatewayTransactionID: s.GatewayTransactionID,

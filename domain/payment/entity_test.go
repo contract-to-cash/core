@@ -612,3 +612,106 @@ func TestPayment_RecordRefund_ZeroAmount(t *testing.T) {
 		t.Errorf("expected refundedAmount to be zero, got %s", p.RefundedAmount().Amount().RatString())
 	}
 }
+
+// --- RefundEntry ledger tests (issue #235 follow-up) ---
+
+func TestPayment_RecordRefundWithKey_AppendsLedgerEntries(t *testing.T) {
+	p := newCompletedPaymentForRefundLedger(t)
+
+	if err := p.RecordRefundWithKey(jpy(3000), "key-a"); err != nil {
+		t.Fatalf("RecordRefundWithKey: %v", err)
+	}
+	if err := p.RecordRefundWithKey(jpy(2000), "key-b"); err != nil {
+		t.Fatalf("RecordRefundWithKey: %v", err)
+	}
+
+	refunds := p.Refunds()
+	if len(refunds) != 2 {
+		t.Fatalf("expected 2 refund entries, got %d", len(refunds))
+	}
+	if refunds[0].IdempotencyKey != "key-a" || refunds[0].Amount.Amount().Cmp(big.NewRat(3000, 1)) != 0 {
+		t.Errorf("entry 0 = %+v, want key-a / 3000", refunds[0])
+	}
+	if refunds[1].IdempotencyKey != "key-b" || refunds[1].Amount.Amount().Cmp(big.NewRat(2000, 1)) != 0 {
+		t.Errorf("entry 1 = %+v, want key-b / 2000", refunds[1])
+	}
+
+	if !p.HasRefundWithIdempotencyKey("key-a") || !p.HasRefundWithIdempotencyKey("key-b") {
+		t.Error("recorded keys must be reported by HasRefundWithIdempotencyKey")
+	}
+	if p.HasRefundWithIdempotencyKey("key-c") {
+		t.Error("unrecorded key must not match")
+	}
+	if p.HasRefundWithIdempotencyKey("") {
+		t.Error("empty key must never match")
+	}
+	if !p.RefundKeysComplete() {
+		t.Error("ledger with all-keyed entries summing to the total must be complete")
+	}
+}
+
+func TestPayment_Refunds_ReturnsDefensiveCopy(t *testing.T) {
+	p := newCompletedPaymentForRefundLedger(t)
+	if err := p.RecordRefundWithKey(jpy(3000), "key-a"); err != nil {
+		t.Fatalf("RecordRefundWithKey: %v", err)
+	}
+	got := p.Refunds()
+	got[0].IdempotencyKey = "mutated"
+	if !p.HasRefundWithIdempotencyKey("key-a") {
+		t.Error("mutating the returned slice must not affect the payment's ledger")
+	}
+}
+
+func TestPayment_RefundKeysComplete_FalseCases(t *testing.T) {
+	// Keyless legacy RecordRefund entry → incomplete.
+	p := newCompletedPaymentForRefundLedger(t)
+	if err := p.RecordRefund(jpy(3000)); err != nil {
+		t.Fatalf("RecordRefund: %v", err)
+	}
+	if p.RefundKeysComplete() {
+		t.Error("a keyless entry must make the ledger incomplete")
+	}
+
+	// Pre-key-tracking history (cumulative total without matching entries) is
+	// covered in snapshot_test.go (TestPaymentSnapshot_RefundsLedgerRoundTrip),
+	// where the snapshot APIs may be used.
+
+	// Zero refunds → vacuously complete.
+	r := newCompletedPaymentForRefundLedger(t)
+	if !r.RefundKeysComplete() {
+		t.Error("a payment with no refunds has a (vacuously) complete ledger")
+	}
+}
+
+func TestPayment_RecordRefund_RejectionLeavesLedgerUntouched(t *testing.T) {
+	p := newCompletedPaymentForRefundLedger(t)
+	if err := p.RecordRefundWithKey(jpy(20000), "key-over"); err == nil {
+		t.Fatal("over-refund must be rejected")
+	}
+	if len(p.Refunds()) != 0 {
+		t.Error("a rejected refund must not append a ledger entry")
+	}
+}
+
+func newCompletedPaymentForRefundLedger(t *testing.T) *Payment {
+	t.Helper()
+	p, err := NewPayment(
+		shared.NewPaymentID(),
+		shared.NewInvoiceID(),
+		jpy(10000),
+		PaymentMethodCreditCard,
+		"txn-ledger",
+		time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	if err := p.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	return p
+}
+
+func jpy(n int64) shared.Money {
+	return shared.NewMoney(big.NewRat(n, 1), shared.CurrencyJPY)
+}
