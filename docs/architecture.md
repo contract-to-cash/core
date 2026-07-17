@@ -110,6 +110,7 @@ graph BT
     infra["infrastructure/inmemory/"] -.->|implements| contract
     infra -.->|implements| invoice
     plugins["plugins/"] --> plugin
+    infra -.->|"implements (coupon repository, #240)"| plugins
     batch["batch/"] --> appService
 ```
 

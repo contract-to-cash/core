@@ -123,7 +123,6 @@ domain/           # Entities, value objects, aggregates (zero dependencies)
 ├── invoice/      # Invoice entity
 ├── payment/      # Payment entity
 ├── balance/       # Credit ledger
-├── billing/      # Billing calculation interface, proration
 ├── usage/        # Usage records
 ├── pricing/      # Immutable Price entity, pricing models
 ├── product/      # Product entity
