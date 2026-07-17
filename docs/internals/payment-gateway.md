@@ -1683,6 +1683,8 @@ SELECT effective_key FROM compensated_idempotency_keys WHERE original_key = $1;
 
   Fresh-tx 読み出しで勝者がまだ visible でない場合(read-replica lag、MVCC スナップショット順序など)は、`shared.ErrCodeConflict` の transient エラーを返してリトライを促す。この場合も saga compensation は発火させない(勝者の gateway charge は実在し、refund してはならないため)。
 
+  **勝者レコードのステータスで分岐する（#234 レビュー）**: 収束は勝者を無条件に成功として返すのではなく、tx 内冪等性スイッチ・pre-charge ルックアップと同じステータス分岐を適用する — **Completed** は成功として収束（従来どおり。AfterCharge / OnPaymentProcessed / outbox は勝者レコードに対して発火）; **Pending**（3DS / 非同期決済の未確定レコード）は `persistUnsettledCharge` の pending パスと同じ形 — pending レコードを `ErrPaymentPending` でラップしたエラーと**併せて**返し、completed-success フック・outbox は発火させない（3DS か非同期かはレコードから復元できないため、広義の `ErrPaymentPending` センチネルを用いる）; **Failed / Refunded / PartiallyRefunded / ChargedBack** は `ErrCodeConflict`（payment は nil、補償なし）。いずれの分岐でも saga compensation は発火しない。zero-amount 経路の収束も同じヘルパーを共有する。
+
   InMemory 実装 (`infrastructure/inmemory/payment_repository.go`) は unique 制約をシミュレートし、この契約を満たす。統合テスト `TestPaymentIdempotency_ConcurrentSuccess_Race_Integration` および `TestPaymentIdempotency_ConcurrentSuccess_AbortedTxSimulation_Integration` (Postgres aborted-tx シミュレーション) で end-to-end を検証済み。
 
   並行**失敗** (両方が compensation 発火) の safety は `comp-refund-{txnID}` の決定性で別途保証されており、`TestPaymentIdempotency_Concurrent_CompensationRace_Integration` で検証済み。
@@ -1825,29 +1827,46 @@ invocation につき最大 1 回だけ**行い、ローカル記帳を `tx.Retry
 
 フロー: `load → ValidateRefund（事前検証）→ キー導出（このとき観測した累積返金額
 = gatewayPrior を記憶）→ gateway.Refund（1 回）→ tx.RetryOnConflict { tx.Run {
-tx スコープ repo で re-load → **進行分類** → RecordRefund → Save } }`。
-`RecordRefund` は payment の楽観ロック version をバンプするため、並行敗者の `Save` は
+tx スコープ repo で re-load → **キー台帳 + 進行の分類** → RecordRefundWithKey → Save } }`。
+`RecordRefundWithKey` は payment の楽観ロック version をバンプするため、並行敗者の `Save` は
 version conflict で失敗し、`RetryOnConflict` が**記帳だけ**を勝者のコミット済み状態に
 対して再実行する。
 
-**tx 内の進行分類（issue #235）**: 各記帳試行は、この invocation がゲートウェイキーを
-導出した時点（`gatewayPrior`）から累積返金額がどれだけ進んだかを分類してから記録する。
-行ロック方式のバックエンドでは敗者の re-load が version conflict 無しで勝者のコミット済み
-状態を読むため、この分類が無いと「ゲートウェイ呼び出しが dedupe リプレイだった返金」を
-平気で記帳してしまう:
+**tx 内の分類 — 返金ごとのキー台帳（issue #235 / #235 レビュー）**: `Payment` エンティティは
+返金 1 件ごとに「実行時のゲートウェイ冪等性キー + 金額」を **`RefundEntry` の台帳**
+（`Payment.Refunds()`）として保持し、記帳は `RecordRefundWithKey(amount, key)` が
+台帳エントリの追記と同時に行う（`PaymentSnapshot.Refunds` として永続化。キーを持たない
+旧 `RecordRefund` は台帳を「不完全」にする）。各記帳試行は、この invocation がキーを
+導出した時点（`gatewayPrior`）からの累積返金額の進行**と**キー台帳を使って分類してから
+記録する。行ロック方式のバックエンドでは敗者の re-load が version conflict 無しで勝者の
+コミット済み状態を読むため、この分類が無いと「ゲートウェイ呼び出しが dedupe リプレイ
+だった返金」を平気で記帳してしまう:
 
 | 分類 | 挙動 |
 |---|---|
-| 進行なし | 通常どおり記録 |
-| 導出キー・進行 == この返金の額 | 並行する**同一額**の返金がこの invocation のキースロットを消費した（同じ prior + 同じ額 ⇒ 同じ導出キー）: 上のゲートウェイ呼び出しは**資金移動なしのリプレイ**。記録すると幽霊返金を計上するため、**記録せず `ErrCodeConflict`** を返す（Info ログ、突合イベントではない）。並行する同一額の重複は **1 回の資金移動に収束**する。意図的に同額をもう 1 回返金したい呼び出し側は、ゲートウェイ状態を確認して `Refund` を再 invocation する（進んだ累積額から新しいキーが導出される） |
-| 導出キー・それ以外の進行 | 並行返金は**別のキー**を使った、つまりこの invocation のゲートウェイ資金移動は実在する — 新しい累積額に対して記録する（`RecordRefund` が再検証。勝者が返金可能残額を使い切っていて拒否された場合、実移動が未記録のまま残るため **MANUAL RECONCILIATION** の Error ログでエスカレーション） |
+| 記帳済み返金に**この invocation のキーが存在** | 上のゲートウェイ呼び出しは、その記帳済み返金の**資金移動なしのリプレイ**であることが証明される（並行する同一額の重複が勝者としてキースロットを消費したケース、および記帳済みキーを再送する逐次リプレイの両方）。記録すると幽霊返金を計上するため、**記録せず `ErrCodeConflict`** を返す（Info ログ、突合イベントではない）。並行する同一額の重複は **1 回の資金移動に収束**する。意図的に同額をもう 1 回返金したい呼び出し側は、ゲートウェイ状態を確認して `Refund` を再 invocation する（進んだ累積額から新しいキーが導出される） |
+| 導出キー・キー不在・進行なし | 通常どおり記録（キー付きで台帳へ追記） |
+| 導出キー・キー不在・進行あり・**台帳が完全**（全エントリがキー持ちで合計 == 累積返金額） | 並行返金はすべて**別のキー**を使った、つまりこの invocation のゲートウェイ資金移動は実在する — 新しい累積額に対して記録する（`RecordRefundWithKey` が再検証。勝者が返金可能残額を使い切っていて拒否された場合、実移動が未記録のまま残るため **MANUAL RECONCILIATION** の Error ログでエスカレーション） |
+| 導出キー・キー不在・進行あり・**台帳が不完全**（キー追跡以前の履歴、またはキー無し `RecordRefund` 記帳） | リプレイか実移動かを判定できない: **記録せず `ErrCodeConflict`** を返し、ゲートウェイ状態の確認を指示する **MANUAL RECONCILIATION の Error ログ**を出す |
 | **明示キー・任意の進行** | 呼び出し側所有のキーでは「リプレイか実移動か」をローカル状態から判定できない: **記録せず `ErrCodeConflict`** を返し、**MANUAL RECONCILIATION の Error ログ**を出す。ゲートウェイを再度叩くこともしない。リトライ前にゲートウェイ状態の確認が必要 |
 
-分類は累積額のみから推論するため、**3 者以上**が同一 payment を並行更新すると誤分類しうる
-（2 本の並行部分返金の合計がちょうどこの返金の額に一致すると「キースロット消費」に見える）。
-その場合の failure mode は保守的な `ErrCodeConflict`（オペレータにゲートウェイ確認を指示）
-であり、**サイレントな二重資金移動や幽霊台帳記録には決してならない**。より強い保証が
-必要な呼び出し側は payment 単位で返金を直列化する。
+**不変条件: ゲートウェイが動かしていない金額を記帳するパスは存在しない**。リプレイ判定は
+累積額のヒューリスティックではなく「この invocation の**キーそのもの**が記帳済み返金に
+あるか」で行うため、**3 者以上**が同一 payment を並行更新しても分類は厳密なままである
+（旧実装は累積額のみから推論したため、A(3000)/B(3000)/C(2000) が全員 prior=0 を読み
+コミット順 A→C→B となると、B が advance=5000 を「実移動」と誤分類し、ゲートウェイが
+動かしていない 3000 を台帳に計上した — 台帳 8000 vs ゲートウェイ 5000）。残る曖昧さは
+キー台帳が不完全な場合だけで、その failure mode は保守的な `ErrCodeConflict`
+（オペレータにゲートウェイ確認を指示）であり、幽霊台帳記録には決してならない。
+invocation 単位の成功（conflict-and-retry ではなく）が必要な呼び出し側は payment 単位で
+返金を直列化する。
+
+> **⚠️ アップグレード注意（返金キー台帳）**: `PaymentSnapshot` に `Refunds`
+> （返金ごとの `{IdempotencyKey, Amount}`）が追加された。BYO 永続化アダプタはこの
+> フィールドを保存・復元すること。保存しない場合も安全側に倒れる — 返金履歴を持つ
+> payment の台帳が「不完全」となり、並行進行時に（記録ではなく）保守的な
+> `ErrCodeConflict` が返る。既存データ（キー追跡以前に記帳された返金）も同様に
+> 不完全扱いとなる。
 
 真の永続化失敗（ゲートウェイ返金後に DB がダウン等）は従来どおり MANUAL RECONCILIATION
 として Error ログを出す。`tx.Run`（生の RunInTx ではない）を使うため、呼び出し側が開始済みの
@@ -1869,7 +1888,11 @@ version conflict で失敗し、`RetryOnConflict` が**記帳だけ**を勝者�
 - **Failed** は意図的にこの集合に**含めない**: Captured/Succeeded の ChargeResponse が
   「キャプチャされなかった」と記帳済みの Failed 記録のリプレイであることはあり得ない —
   いま行われた課金は**実在し、ローカル記録の裏付けが無い**。したがって Failed との衝突は
-  従来どおり汎用の補償パス（Void→Refund）に流れ、実課金が巻き戻される。
+  従来どおり汎用の補償パス（Void→Refund）に流れ、実課金が巻き戻される。この経路では
+  Save が一度も試行されていないため、`OnCompensationExecutedHook` へ報告される理由は
+  `local_save_failed` ではなく **`CompensationReasonIdempotencyConflict`**（#234 レビュー、
+  plugin-system.md §3.7）であり、呼び出し側エラーも「idempotency key collided with a
+  failed payment record (gateway charge reversed)」と衝突を明示する。
 
 ### 6.3.4 検証
 
@@ -1880,6 +1903,15 @@ version conflict で失敗し、`RetryOnConflict` が**記帳だけ**を勝者�
   敗者はドメインエラー（`-race`）
 - `TestRefund_SequentialPartialRefunds_UseDistinctKeys` — 逐次の部分返金 2 回が異なるキーを使う
 - `TestRefund_ExplicitIdempotencyKey_IsHonored` — 明示キーがゲートウェイへそのまま伝播する
+
+`application/service/payment_refund_key_test.go`（キー台帳分類、#235 レビュー）:
+- `TestRefund_ThreeWriters_CommitOrderACB_NoPhantomRecord` — 3 者レース
+  A(3000)/B(3000)/C(2000)・コミット順 A→C→B で、リプレイされた B が記帳されない
+  （台帳合計 == ゲートウェイ移動合計）
+- `TestRefund_ThreeWriters_CommitOrderABC_Converges` — コミット順 A→B→C は従来どおり
+  収束する（A・C は記録、B は conflict）
+- `TestRefund_UntrackedRefundHistory_ConcurrentAdvance_ConservativeConflict` —
+  キー台帳が不完全な payment への並行進行は保守的 conflict + Error ログ
 
 ---
 

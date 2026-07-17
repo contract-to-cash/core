@@ -4556,3 +4556,84 @@ func TestProcessPayment_OnCompensationExecuted_HookFailureIsNonFatal(t *testing.
 		t.Errorf("expected panicking hook to be called once (isolated by SafeInvoke), got %d", panicSpy.calls)
 	}
 }
+
+// TestProcessPayment_OutboxWriter_FiresOnPendingPromotion pins the issue #248
+// outbox fire on the gateway path's in-tx Pending→Completed promotion: call 1
+// persists a Pending record (3DS requires_action — no outbox fire, nothing is
+// settled), call 2 replays the same key, the gateway returns Captured, and the
+// promotion path saves both rows and must fire OnPaymentRecorded exactly once
+// with the promoted (now Completed) record.
+func TestProcessPayment_OutboxWriter_FiresOnPendingPromotion(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+	paymentRepo := newFakePaymentRepo()
+	writer := inmemory.NewInMemoryOutboxWriter()
+
+	amount := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	gw := &trackingGateway{
+		chargeResponses: []port.ChargeResponse{
+			{
+				TransactionID: "txn-promo-outbox",
+				Status:        port.TransactionStatusRequiresAction,
+				Amount:        amount,
+				CreatedAt:     time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+			},
+			{
+				TransactionID: "txn-promo-outbox",
+				Status:        port.TransactionStatusCaptured, // 3DS finished
+				Amount:        amount,
+				CreatedAt:     time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+
+	svc := NewPaymentService(
+		gw,
+		paymentRepo,
+		invRepo,
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentOutboxWriter(writer),
+		WithoutPaymentTransactions(),
+	)
+
+	input := ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          amount,
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-promo-outbox",
+	}
+
+	// Call 1: requires_action → Pending saved, NO outbox fire (nothing settled).
+	if _, err := svc.ProcessPayment(context.Background(), inv.ID(), input); !errors.Is(err, ErrRequiresAction) {
+		t.Fatalf("first call must return ErrRequiresAction, got: %v", err)
+	}
+	if writer.PaymentCount() != 0 {
+		t.Fatalf("outbox must NOT fire for an unsettled pending save, got %d entries", writer.PaymentCount())
+	}
+
+	// Call 2: Captured → in-tx Pending→Completed promotion → outbox fires once.
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), input)
+	if err != nil {
+		t.Fatalf("second call must succeed, got: %v", err)
+	}
+	if pmt.Status() != payment.PaymentStatusCompleted {
+		t.Fatalf("promotion must complete the payment, got %q", pmt.Status())
+	}
+	if writer.PaymentCount() != 1 {
+		t.Fatalf("expected OnPaymentRecorded to fire exactly once on the promotion path, got %d", writer.PaymentCount())
+	}
+	entry := writer.PaymentEntries()[0]
+	if entry.Payment == nil || entry.Payment.ID() != pmt.ID() {
+		t.Errorf("outbox entry must carry the promoted payment record")
+	}
+	if entry.Payment != nil && entry.Payment.Status() != payment.PaymentStatusCompleted {
+		t.Errorf("outbox entry payment status = %q, want completed", entry.Payment.Status())
+	}
+	if entry.Invoice == nil || entry.Invoice.ID() != inv.ID() {
+		t.Errorf("outbox entry must carry the invoice")
+	}
+}

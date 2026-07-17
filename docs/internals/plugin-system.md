@@ -396,6 +396,11 @@ type CompensationReason string
 const (
     CompensationReasonLocalSaveFailed CompensationReason = "local_save_failed" // ローカル tx（payment/invoice Save）失敗
     CompensationReasonOutboxVeto      CompensationReason = "outbox_veto"       // PaymentOutboxWriter の veto（#248）
+    // tx 内冪等性チェックが effective key と Failed 終端状態の既存 payment との
+    // 衝突を検出した（pre-charge ルックアップと並行ライターの race）。直前の課金は
+    // 実在し、ローカル記録の裏付けが無いため補償で巻き戻すが、Save は一度も
+    // 試行されていない — local_save_failed とは区別される（#234 レビュー）
+    CompensationReasonIdempotencyConflict CompensationReason = "idempotency_conflict"
 )
 
 // CompensationResult サガ補償の実行結果（issue #257）
@@ -1679,7 +1684,7 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 
 ### 10.3 初版のフック設計について
 
-本ライブラリは初版（v1.0.0）から**イベント単位の細粒度フック設計**を採用している。
+本ライブラリは初版から**イベント単位の細粒度フック設計**を採用している。
 契約ライフサイクル・支払い・メトリクスは、粗粒度の統合 IF ではなく、各イベントごとの
 個別 IF に分かれている（`ContractLifecycleHook` / `PaymentHook` / `MetricsHook` という
 粗粒度インターフェースは**存在したことがない**）。
@@ -1817,7 +1822,7 @@ type InvoiceOutboxWriter interface {
 | 昇格（両 Save 成功直後） | **発火** `OnPaymentRecorded(existing, inv)` |
 | 通常成功（両 Save 成功直後） | **発火** `OnPaymentRecorded(p, inv)` |
 | Completed 冪等リプレイ | スキップ |
-| in-closure raced-loser 収束（`return nil` だが新規 Save なし） | スキップ |
+| post-tx の raced-loser 収束（Save が `errDuplicateKeyRaceSignal` でクロージャを中断 → tx 終了後に `convergeOnDuplicateKeyWinner` が勝者へ収束。新規 Save なし、#241b） | スキップ |
 
 **`PaymentService.SettlePayment`（非同期決済のセトルメント経路、payment-gateway.md §6.5）**
 

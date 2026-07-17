@@ -16,6 +16,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/contract-to-cash/core/domain/invoice"
 	"github.com/contract-to-cash/core/domain/payment"
 	"github.com/contract-to-cash/core/domain/shared"
+	"github.com/contract-to-cash/core/infrastructure/inmemory"
 	"github.com/contract-to-cash/core/plugin"
 )
 
@@ -453,5 +455,339 @@ func TestProcessPayment_ZeroAmount_DuplicateKey_WinnerNotVisible_ReturnsConflict
 	assertDomainError(t, err, shared.ErrCodeConflict)
 	if p != nil {
 		t.Errorf("expected nil payment, got %+v", p)
+	}
+}
+
+// --- issue #234 review: duplicate-key convergence must dispatch on winner status ---
+
+// TestProcessPayment_DuplicateKey_PendingWinner_ReturnsPendingNoSuccessHooks
+// pins the Pending-winner branch of convergeOnDuplicateKeyWinner (gateway
+// path): when the duplicate-key race loser converges on a winner whose record
+// is still PENDING (e.g. saved by a 3DS requires_action flow), it must return
+// the pending record with an ErrPaymentPending-wrapped error — the same result
+// shape as the first caller's pending path — and must NOT fire the
+// completed-success hooks (AfterCharge / OnPaymentProcessed), NOT fire the
+// outbox writer, and NOT compensate. Before the fix the loser returned
+// (pendingPayment, nil) and fired the success hooks for a non-Completed
+// payment.
+func TestProcessPayment_DuplicateKey_PendingWinner_ReturnsPendingNoSuccessHooks(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+
+	winner, err := payment.NewPayment(
+		shared.NewPaymentID(), inv.ID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard, "txn-winner-pending", clock.Now(),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	winner.SetIdempotencyKey("key-pending-winner") // stays Pending
+
+	txm := &txPhaseRecordingTxManager{}
+	repo := &zeroDupPaymentRepo{txm: txm, winner: winner}
+	txm.repos = tx.Repos{Payments: repo, Invoices: invRepo}
+
+	gw := &spyGateway{} // Charge captures by default; tracks Void/Refund
+	afterSpy := &afterChargeSpyPlugin{}
+	processedSpy := &onPaymentProcessedSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(afterSpy); err != nil {
+		t.Fatalf("register afterChargeSpy: %v", err)
+	}
+	if err := registry.Register(processedSpy); err != nil {
+		t.Fatalf("register onPaymentProcessedSpy: %v", err)
+	}
+	writer := inmemory.NewInMemoryOutboxWriter()
+
+	svc := NewPaymentService(
+		gw,
+		repo,
+		invRepo,
+		nil,
+		&mockEventStore{},
+		registry,
+		clock,
+		WithPaymentTxManager(txm),
+		WithPaymentOutboxWriter(writer),
+	)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-pending-winner",
+	})
+
+	if !errors.Is(err, ErrPaymentPending) {
+		t.Fatalf("converging on a Pending winner must return ErrPaymentPending, got: %v", err)
+	}
+	if p == nil {
+		t.Fatal("the pending winner record must be returned alongside the error")
+	}
+	if p.ID() != winner.ID() {
+		t.Errorf("expected the winner's record %s, got %s", winner.ID(), p.ID())
+	}
+	if p.Status() != payment.PaymentStatusPending {
+		t.Errorf("returned payment status = %q, want pending", p.Status())
+	}
+	if afterSpy.called {
+		t.Error("AfterCharge must NOT fire for a Pending winner")
+	}
+	if processedSpy.called {
+		t.Error("OnPaymentProcessed must NOT fire for a Pending winner")
+	}
+	if writer.PaymentCount() != 0 {
+		t.Errorf("outbox writer must NOT fire for a Pending winner, got %d entries", writer.PaymentCount())
+	}
+	if gw.voidCalled || gw.refundCalled {
+		t.Errorf("saga compensation must NOT fire on duplicate-key convergence (void=%v refund=%v)", gw.voidCalled, gw.refundCalled)
+	}
+	// NOTE: the loser's in-memory invoice copy stays mutated by RecordPayment
+	// (the fake TxManager has no rollback); that is the documented tx.Run
+	// contract — a real backend rolls the write back and the caller returns an
+	// error without reusing the object. What matters here is that no
+	// Invoices.Save committed and no success hook observed the invoice as paid.
+}
+
+// TestProcessPayment_DuplicateKey_TerminalWinner_ConflictNoCompensation pins
+// the terminal-winner branch: converging on a winner in a terminal state
+// (Failed / Refunded / PartiallyRefunded / ChargedBack) must surface
+// ErrCodeConflict — mirroring the in-tx idempotency switch — with no payment
+// returned, no success hooks, no outbox, and no compensation.
+func TestProcessPayment_DuplicateKey_TerminalWinner_ConflictNoCompensation(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, p *payment.Payment)
+	}{
+		{"Failed", func(t *testing.T, p *payment.Payment) {
+			if err := p.Fail("declined"); err != nil {
+				t.Fatalf("Fail: %v", err)
+			}
+		}},
+		{"Refunded", func(t *testing.T, p *payment.Payment) {
+			if err := p.Complete(); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if err := p.MarkRefunded(); err != nil {
+				t.Fatalf("MarkRefunded: %v", err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newPaymentTestClock()
+			inv := newSimpleFinalizedInvoice()
+			invRepo := &mockInvoiceRepoForPayment{inv: inv}
+
+			winner, err := payment.NewPayment(
+				shared.NewPaymentID(), inv.ID(),
+				shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+				payment.PaymentMethodCreditCard, "txn-winner-terminal", clock.Now(),
+			)
+			if err != nil {
+				t.Fatalf("NewPayment: %v", err)
+			}
+			winner.SetIdempotencyKey("key-terminal-winner")
+			tc.mutate(t, winner)
+
+			txm := &txPhaseRecordingTxManager{}
+			repo := &zeroDupPaymentRepo{txm: txm, winner: winner}
+			txm.repos = tx.Repos{Payments: repo, Invoices: invRepo}
+
+			gw := &spyGateway{}
+			afterSpy := &afterChargeSpyPlugin{}
+			registry := plugin.NewRegistry()
+			if err := registry.Register(afterSpy); err != nil {
+				t.Fatalf("register afterChargeSpy: %v", err)
+			}
+			writer := inmemory.NewInMemoryOutboxWriter()
+
+			svc := NewPaymentService(
+				gw,
+				repo,
+				invRepo,
+				nil,
+				&mockEventStore{},
+				registry,
+				clock,
+				WithPaymentTxManager(txm),
+				WithPaymentOutboxWriter(writer),
+			)
+
+			p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+				PaymentMethodID: "pm-001",
+				Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+				Currency:        shared.CurrencyJPY,
+				IdempotencyKey:  "key-terminal-winner",
+			})
+
+			if err == nil {
+				t.Fatalf("converging on a %s winner must return a conflict", tc.name)
+			}
+			assertDomainError(t, err, shared.ErrCodeConflict)
+			if p != nil {
+				t.Errorf("expected nil payment for a terminal winner, got %+v", p)
+			}
+			if afterSpy.called {
+				t.Error("AfterCharge must NOT fire for a terminal winner")
+			}
+			if writer.PaymentCount() != 0 {
+				t.Errorf("outbox writer must NOT fire for a terminal winner, got %d entries", writer.PaymentCount())
+			}
+			if gw.voidCalled || gw.refundCalled {
+				t.Errorf("saga compensation must NOT fire on duplicate-key convergence (void=%v refund=%v)", gw.voidCalled, gw.refundCalled)
+			}
+		})
+	}
+}
+
+// TestProcessPayment_ZeroAmount_DuplicateKey_PendingWinner_ReturnsPending
+// covers the zero-amount call site of the same dispatch: the zero-settlement
+// race loser converging on a Pending winner returns (winner, ErrPaymentPending)
+// and fires no success hooks.
+func TestProcessPayment_ZeroAmount_DuplicateKey_PendingWinner_ReturnsPending(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newZeroAmountFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+
+	winner, err := payment.NewPayment(
+		shared.NewPaymentID(), inv.ID(), shared.Zero(shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard, "", clock.Now(),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	winner.SetIdempotencyKey("idem-zero-pending-winner") // stays Pending
+
+	txm := &txPhaseRecordingTxManager{}
+	repo := &zeroDupPaymentRepo{txm: txm, winner: winner}
+	txm.repos = tx.Repos{Payments: repo, Invoices: invRepo}
+
+	afterSpy := &afterChargeSpyPlugin{}
+	processedSpy := &onPaymentProcessedSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(afterSpy); err != nil {
+		t.Fatalf("register afterChargeSpy: %v", err)
+	}
+	if err := registry.Register(processedSpy); err != nil {
+		t.Fatalf("register onPaymentProcessedSpy: %v", err)
+	}
+
+	// failCharge proves the zero settlement never touches the gateway.
+	svc := NewPaymentService(
+		&mockGateway{failCharge: true},
+		repo,
+		invRepo,
+		nil,
+		&mockEventStore{},
+		registry,
+		clock,
+		WithPaymentTxManager(txm),
+	)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		Currency:       shared.CurrencyJPY,
+		IdempotencyKey: "idem-zero-pending-winner",
+	})
+
+	if !errors.Is(err, ErrPaymentPending) {
+		t.Fatalf("zero-amount loser converging on a Pending winner must return ErrPaymentPending, got: %v", err)
+	}
+	if p == nil || p.ID() != winner.ID() {
+		t.Fatalf("expected the pending winner record, got %+v", p)
+	}
+	if p.Status() != payment.PaymentStatusPending {
+		t.Errorf("returned payment status = %q, want pending", p.Status())
+	}
+	if afterSpy.called || processedSpy.called {
+		t.Errorf("success hooks must NOT fire for a Pending winner (afterCharge=%v onPaymentProcessed=%v)", afterSpy.called, processedSpy.called)
+	}
+}
+
+// --- issue #234 review: Failed-state in-tx conflict compensation reason ---
+
+// TestProcessPayment_FailedStateRace_CompensationReason_IdempotencyConflict
+// pins the OnCompensationExecuted payload for the in-tx Failed-state
+// idempotency conflict: the charge is real and gets compensated, but no local
+// Save was attempted, so the reason must be
+// plugin.CompensationReasonIdempotencyConflict (NOT local_save_failed) and the
+// caller-facing error must name the collision, not a save failure.
+func TestProcessPayment_FailedStateRace_CompensationReason_IdempotencyConflict(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+
+	// The concurrent writer's Failed record lands between the pre-charge
+	// lookup (which misses) and the in-tx lookup (which finds it).
+	delayed, err := payment.NewPayment(
+		shared.NewPaymentID(), inv.ID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard, "txn-race-failed", clock.Now(),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	delayed.SetIdempotencyKey("key-failed-race")
+	if err := delayed.Fail("declined"); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+
+	repo := newRaceFakePaymentRepo(delayed)
+	gw := &spyGateway{} // Void succeeds → compensation Method = void
+	spy := &compensationSpyPlugin{}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(spy); err != nil {
+		t.Fatalf("register compensationSpy: %v", err)
+	}
+
+	svc := NewPaymentService(
+		gw,
+		repo,
+		invRepo,
+		nil,
+		&mockEventStore{},
+		registry,
+		clock,
+	)
+
+	p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-failed-race",
+	})
+
+	if err == nil {
+		t.Fatal("expected error for Failed-state in-tx conflict")
+	}
+	assertDomainError(t, err, shared.ErrCodeConflict)
+	if p != nil {
+		t.Errorf("expected nil payment, got %+v", p)
+	}
+	// The caller-facing error must describe the collision, not a save failure.
+	if !strings.Contains(err.Error(), "idempotency key collided with a failed payment record") {
+		t.Errorf("error must name the failed-record collision, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "local save failed") {
+		t.Errorf("error must NOT claim a local save failure (no Save was attempted), got: %v", err)
+	}
+	// Compensation fired (the charge was real) with the new reason.
+	if !gw.voidCalled {
+		t.Error("Failed-state conflict must compensate the real charge (Void)")
+	}
+	if spy.calls != 1 {
+		t.Fatalf("expected OnCompensationExecuted to fire exactly once, got %d", spy.calls)
+	}
+	res := spy.results[0]
+	if res.Reason != plugin.CompensationReasonIdempotencyConflict {
+		t.Errorf("expected Reason %q, got %q", plugin.CompensationReasonIdempotencyConflict, res.Reason)
+	}
+	if res.Method != plugin.CompensationMethodVoid {
+		t.Errorf("expected Method %q, got %q", plugin.CompensationMethodVoid, res.Method)
+	}
+	if res.CompensationErr != nil {
+		t.Errorf("expected nil CompensationErr, got %v", res.CompensationErr)
 	}
 }

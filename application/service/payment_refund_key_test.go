@@ -486,3 +486,213 @@ func TestRefund_InTxReloadNil_ReturnsNotFound_NoPanic(t *testing.T) {
 	}
 	assertDomainError(t, err, shared.ErrCodeNotFound)
 }
+
+// TestRefund_ThreeWriters_CommitOrderACB_NoPhantomRecord is the phantom-record
+// regression scenario (issue #235 review): three refunds A(3000), B(3000) and
+// C(2000) all load the payment at priorRefunded=0. A and B derive the SAME key
+// (0,3000) — the gateway executes A and replays B without moving money — while
+// C derives its own key (0,2000) and is a real movement. Commit order A → C →
+// B: when B's recording attempt reloads, the cumulative total has advanced by
+// 5000 (A's 3000 + C's 2000), which under the old cumulative-advance heuristic
+// fell into "movement was real" and recorded a 3000 the gateway never moved
+// (ledger 8000 vs gateway 5000, silently). The per-refund key ledger detects
+// B's key on A's recorded refund and converges WITHOUT recording.
+func TestRefund_ThreeWriters_CommitOrderACB_NoPhantomRecord(t *testing.T) {
+	clock := newPaymentTestClock()
+	ctx := context.Background()
+
+	inner := inmemory.NewInMemoryPaymentRepository()
+	seed, mkStale := seedRefundablePayment(t, ctx, inner, clock)
+	repo := &staleReadPaymentRepo{inner: inner}
+	gw := newDedupingRefundGateway()
+
+	svc := NewPaymentService(
+		gw,
+		repo,
+		&mockInvoiceRepoForPayment{},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	a := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+	b := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+	c := shared.NewMoney(big.NewRat(2000, 1), shared.CurrencyJPY)
+
+	// A: 3000, normal path (prior=0, key (0,3000)) — real movement, recorded.
+	if err := svc.Refund(ctx, seed.ID(), RefundInput{Amount: &a, Reason: port.RefundReasonRequestedByCustomer}); err != nil {
+		t.Fatalf("refund A failed: %v", err)
+	}
+
+	// C: 2000, stale pre-flight load (prior=0, key (0,2000)) — distinct key,
+	// real movement; the in-tx classification sees A's advance, finds C's key
+	// absent from a COMPLETE key ledger, and records.
+	repo.arm(mkStale(), 1)
+	if err := svc.Refund(ctx, seed.ID(), RefundInput{Amount: &c, Reason: port.RefundReasonRequestedByCustomer}); err != nil {
+		t.Fatalf("refund C must converge and record its real movement, got: %v", err)
+	}
+
+	// B: 3000, stale pre-flight load (prior=0) — derives A's key (0,3000); the
+	// gateway replays it without moving money. B's reload sees advance=5000
+	// (neither 0 nor 3000); the recorded-refund key match must classify it as
+	// a replay and NOT record.
+	repo.arm(mkStale(), 1)
+	err := svc.Refund(ctx, seed.ID(), RefundInput{Amount: &b, Reason: port.RefundReasonRequestedByCustomer})
+	if err == nil {
+		t.Fatal("refund B (replayed key) must get a conflict, got nil")
+	}
+	assertDomainError(t, err, shared.ErrCodeConflict)
+
+	stored, ferr := inner.FindByID(ctx, seed.ID())
+	if ferr != nil {
+		t.Fatalf("final load: %v", ferr)
+	}
+	// THE invariant: ledger total == gateway-moved total (5000). Before the
+	// fix the ledger recorded 8000 against 5000 moved.
+	wantTotal := big.NewRat(5000, 1)
+	if stored.RefundedAmount().Amount().Cmp(wantTotal) != 0 {
+		t.Errorf("ledger refunded total = %s, want 5000 (no phantom record)", stored.RefundedAmount().Amount().RatString())
+	}
+	if moved := gw.totalMoved(); moved.Cmp(stored.RefundedAmount().Amount()) != 0 {
+		t.Errorf("gateway-moved total (%s) must equal ledger total (%s) — no path may record an amount the gateway did not move",
+			moved.RatString(), stored.RefundedAmount().Amount().RatString())
+	}
+	// Exactly two REAL movements (A's 3000 and C's 2000); B's call was a replay.
+	if len(gw.moved) != 2 {
+		t.Errorf("expected exactly 2 REAL gateway refunds, got %d: %v", len(gw.moved), gw.keys)
+	}
+	if got := gw.callCount(); got != 3 {
+		t.Errorf("expected 3 gateway Refund calls (A real, C real, B replay), got %d: %v", got, gw.keys)
+	}
+}
+
+// TestRefund_ThreeWriters_CommitOrderABC_Converges pins that the A → B → C
+// commit order keeps converging exactly as before the fix: A records its real
+// 3000, B (same key as A) converges with a conflict and no record, and C's
+// real 2000 — whose key is absent from the complete key ledger — is recorded.
+func TestRefund_ThreeWriters_CommitOrderABC_Converges(t *testing.T) {
+	clock := newPaymentTestClock()
+	ctx := context.Background()
+
+	inner := inmemory.NewInMemoryPaymentRepository()
+	seed, mkStale := seedRefundablePayment(t, ctx, inner, clock)
+	repo := &staleReadPaymentRepo{inner: inner}
+	gw := newDedupingRefundGateway()
+
+	svc := NewPaymentService(
+		gw,
+		repo,
+		&mockInvoiceRepoForPayment{},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+	)
+
+	a := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+	b := shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)
+	c := shared.NewMoney(big.NewRat(2000, 1), shared.CurrencyJPY)
+
+	// A: real movement, recorded.
+	if err := svc.Refund(ctx, seed.ID(), RefundInput{Amount: &a, Reason: port.RefundReasonRequestedByCustomer}); err != nil {
+		t.Fatalf("refund A failed: %v", err)
+	}
+	// B: stale load → same key as A → gateway replay → conflict, no record.
+	repo.arm(mkStale(), 1)
+	if err := svc.Refund(ctx, seed.ID(), RefundInput{Amount: &b, Reason: port.RefundReasonRequestedByCustomer}); err == nil {
+		t.Fatal("refund B (replayed key) must get a conflict, got nil")
+	} else {
+		assertDomainError(t, err, shared.ErrCodeConflict)
+	}
+	// C: stale load → own key (0,2000) → real movement → recorded.
+	repo.arm(mkStale(), 1)
+	if err := svc.Refund(ctx, seed.ID(), RefundInput{Amount: &c, Reason: port.RefundReasonRequestedByCustomer}); err != nil {
+		t.Fatalf("refund C must converge and record its real movement, got: %v", err)
+	}
+
+	stored, ferr := inner.FindByID(ctx, seed.ID())
+	if ferr != nil {
+		t.Fatalf("final load: %v", ferr)
+	}
+	wantTotal := big.NewRat(5000, 1)
+	if stored.RefundedAmount().Amount().Cmp(wantTotal) != 0 {
+		t.Errorf("ledger refunded total = %s, want 5000", stored.RefundedAmount().Amount().RatString())
+	}
+	if moved := gw.totalMoved(); moved.Cmp(stored.RefundedAmount().Amount()) != 0 {
+		t.Errorf("gateway-moved total (%s) must equal ledger total (%s)",
+			moved.RatString(), stored.RefundedAmount().Amount().RatString())
+	}
+	if len(gw.moved) != 2 {
+		t.Errorf("expected exactly 2 REAL gateway refunds, got %d: %v", len(gw.moved), gw.keys)
+	}
+}
+
+// TestRefund_UntrackedRefundHistory_ConcurrentAdvance_ConservativeConflict
+// pins the fallback for payments whose refund history does not carry complete
+// idempotency keys (refunds recorded through the legacy keyless RecordRefund,
+// or persisted before key tracking existed): a concurrent advance can then
+// neither be proven a replay nor a real movement, so the derived-key path must
+// return a conservative ErrCodeConflict with an Error-level log instructing
+// gateway-state verification — and record NOTHING.
+func TestRefund_UntrackedRefundHistory_ConcurrentAdvance_ConservativeConflict(t *testing.T) {
+	clock := newPaymentTestClock()
+	ctx := context.Background()
+
+	inner := inmemory.NewInMemoryPaymentRepository()
+	seed, mkStale := seedRefundablePayment(t, ctx, inner, clock)
+	repo := &staleReadPaymentRepo{inner: inner}
+	gw := newDedupingRefundGateway()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	svc := NewPaymentService(
+		gw,
+		repo,
+		&mockInvoiceRepoForPayment{},
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentLogger(logger),
+	)
+
+	// Concurrent winner: an integrator records a KEYLESS 3000 refund directly
+	// on the entity (its own gateway bookkeeping) and saves — the key ledger
+	// is now incomplete.
+	loaded, err := inner.FindByID(ctx, seed.ID())
+	if err != nil {
+		t.Fatalf("load for keyless refund: %v", err)
+	}
+	if err := loaded.RecordRefund(shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY)); err != nil {
+		t.Fatalf("keyless RecordRefund: %v", err)
+	}
+	if err := inner.Save(ctx, loaded); err != nil {
+		t.Fatalf("save keyless refund: %v", err)
+	}
+
+	// Loser: derived-key 2000 refund with a stale pre-flight load (prior=0).
+	// Its in-tx reload sees an advance it cannot classify (incomplete key
+	// ledger) → conservative conflict, nothing recorded.
+	repo.arm(mkStale(), 1)
+	amt := shared.NewMoney(big.NewRat(2000, 1), shared.CurrencyJPY)
+	err = svc.Refund(ctx, seed.ID(), RefundInput{Amount: &amt, Reason: port.RefundReasonRequestedByCustomer})
+	if err == nil {
+		t.Fatal("expected conservative conflict on untracked refund history, got nil")
+	}
+	assertDomainError(t, err, shared.ErrCodeConflict)
+
+	stored, ferr := inner.FindByID(ctx, seed.ID())
+	if ferr != nil {
+		t.Fatalf("final load: %v", ferr)
+	}
+	// Nothing recorded by the loser: the ledger still shows only the keyless 3000.
+	if stored.RefundedAmount().Amount().Cmp(big.NewRat(3000, 1)) != 0 {
+		t.Errorf("ledger refunded total = %s, want 3000 (loser must not record)", stored.RefundedAmount().Amount().RatString())
+	}
+	// The undecidable state must be escalated at Error level with a
+	// gateway-verification instruction.
+	if !containsAll(logBuf.String(), "MANUAL RECONCILIATION", "verify gateway state") {
+		t.Errorf("expected Error-level MANUAL RECONCILIATION log instructing gateway verification, got:\n%s", logBuf.String())
+	}
+}
