@@ -1683,7 +1683,9 @@ SELECT effective_key FROM compensated_idempotency_keys WHERE original_key = $1;
 
   Fresh-tx 読み出しで勝者がまだ visible でない場合(read-replica lag、MVCC スナップショット順序など)は、`shared.ErrCodeConflict` の transient エラーを返してリトライを促す。この場合も saga compensation は発火させない(勝者の gateway charge は実在し、refund してはならないため)。
 
-  **勝者レコードのステータスで分岐する（#234 レビュー）**: 収束は勝者を無条件に成功として返すのではなく、tx 内冪等性スイッチ・pre-charge ルックアップと同じステータス分岐を適用する — **Completed** は成功として収束（従来どおり。AfterCharge / OnPaymentProcessed / outbox は勝者レコードに対して発火）; **Pending**（3DS / 非同期決済の未確定レコード）は `persistUnsettledCharge` の pending パスと同じ形 — pending レコードを `ErrPaymentPending` でラップしたエラーと**併せて**返し、completed-success フック・outbox は発火させない（3DS か非同期かはレコードから復元できないため、広義の `ErrPaymentPending` センチネルを用いる）; **Failed / Refunded / PartiallyRefunded / ChargedBack** は `ErrCodeConflict`（payment は nil、補償なし）。いずれの分岐でも saga compensation は発火しない。zero-amount 経路の収束も同じヘルパーを共有する。
+  **勝者レコードのステータスで分岐する（#234 レビュー）**: 収束は勝者を無条件に成功として返すのではなく、ステータスで分岐する — **Completed** は成功として収束（従来どおり。AfterCharge / OnPaymentProcessed / outbox は勝者レコードに対して発火）; **Pending**（3DS / 非同期決済の未確定レコード）は `persistUnsettledCharge` の pending パスと同じ形 — pending レコードを `ErrPaymentPending` でラップしたエラーと**併せて**返し、completed-success フック・outbox は発火させない（3DS か非同期かはレコードから復元できないため、広義の `ErrPaymentPending` センチネルを用いる）; **Refunded / PartiallyRefunded / ChargedBack** は `ErrCodeConflict`（payment は nil、補償なし。pre-charge のターミナル短絡と同じ）。この分岐は pre-charge ルックアップと一致し、**Failed を除いて** tx 内冪等性スイッチとも一致する。
+
+  **Failed 勝者は tx 内スイッチと意図的に非対称（#234 レビュー round-3）**: tx 内スイッチの Failed 衝突は補償する（直前の Charge が Captured を返した以上、「キャプチャされなかった」と記帳済みの Failed 記録のリプレイではあり得ず、課金は実在かつ裏付けなしと**証明できる**）。一方この収束パスでは証拠が**矛盾**している — 敗者の同一キー Charge レスポンスは資金移動を示すのに、勝者はまさにそのキーで Failed 記録を永続化している（例: 敗者へのリプレイ応答がキャッシュされた後に勝者のゲートウェイ試行が失敗した等）。この曖昧さの上で補償すると**動いていない資金を返金**しかねないため、コアは保守的に**補償せず** `ErrCodeConflict` を返し、代わりに **Error レベルのログ**（MANUAL RECONCILIATION REQUIRED: 裏付けのないキャプチャ済み課金が存在し得る。payment / invoice / キー識別子付き）で人手のゲートウェイ状態確認を要求する。いずれの分岐でも saga compensation は発火しない。zero-amount 経路の収束も同じヘルパーを共有する。
 
   InMemory 実装 (`infrastructure/inmemory/payment_repository.go`) は unique 制約をシミュレートし、この契約を満たす。統合テスト `TestPaymentIdempotency_ConcurrentSuccess_Race_Integration` および `TestPaymentIdempotency_ConcurrentSuccess_AbortedTxSimulation_Integration` (Postgres aborted-tx シミュレーション) で end-to-end を検証済み。
 
@@ -1804,6 +1806,13 @@ refund-<paymentID>-<currency>-<この返金前の累積返金額>-<この返金�
 進むので次の invocation は新しいキーを導出する）か、明示的に異なる
 `RefundInput.IdempotencyKey` を渡す。
 
+裏返すと、導出キーは**逐次の同額返金を意図的に別個の資金移動として扱う**（1 回目が記帳
+されて累積額が進めば、2 回目の同額 invocation は新しいキーを導出して実返金になる）。
+したがって「レスポンスを失った後にリトライし得る」呼び出し側がエンドツーエンドの
+exactly-once を必要とする場合は、導出キーに頼らず**明示的な `RefundInput.IdempotencyKey`
+を渡さなければならない** — 明示キーのリトライは収束する（既に記帳済みならキー台帳の
+dedup が `ErrCodeConflict` を返し、未記帳ならちょうど 1 回だけ記帳される）。
+
 > **⚠️ アップグレード注意（キー形式の変更）**: #235 より前のリリースは金額成分の無い
 > `refund-<paymentID>-<currency>-<prior>` を導出していた。アップグレード後のリトライは
 > **新形式の（別の）キー**を使うため、アップグレード前の試行とゲートウェイ側で衝突しない —
@@ -1850,6 +1859,14 @@ version conflict で失敗し、`RetryOnConflict` が**記帳だけ**を勝者�
 | 導出キー・キー不在・進行あり・**台帳が不完全**（キー追跡以前の履歴、またはキー無し `RecordRefund` 記帳） | リプレイか実移動かを判定できない: **記録せず `ErrCodeConflict`** を返し、ゲートウェイ状態の確認を指示する **MANUAL RECONCILIATION の Error ログ**を出す |
 | **明示キー・任意の進行** | 呼び出し側所有のキーでは「リプレイか実移動か」をローカル状態から判定できない: **記録せず `ErrCodeConflict`** を返し、**MANUAL RECONCILIATION の Error ログ**を出す。ゲートウェイを再度叩くこともしない。リトライ前にゲートウェイ状態の確認が必要 |
 
+> **⚠️ 前提: ゲートウェイの冪等性キー保持期間**: 明示的な `RefundInput.IdempotencyKey`
+> の再利用に対する上記の dedup 分類（「記帳済みキーの再送 = 資金移動なしのリプレイ」）は、
+> **ゲートウェイ側がそのキーをまだ保持している期間内**（例: Stripe は約 24h、Adyen は 7 日、
+> PayPal は 45 日 — §6.1.5/§6.1.8 参照）でのみ健全である。保持期限切れ後に同じ明示キーを
+> 再送すると、ゲートウェイはそれを**新規の実返金として実行**し得るが、コアはローカル台帳の
+> キー一致から「リプレイ」（Info ログの `ErrCodeConflict`）と分類してしまう。保持期間を
+> 超えて明示キーを再利用しないこと。
+
 **不変条件: ゲートウェイが動かしていない金額を記帳するパスは存在しない**。リプレイ判定は
 累積額のヒューリスティックではなく「この invocation の**キーそのもの**が記帳済み返金に
 あるか」で行うため、**3 者以上**が同一 payment を並行更新しても分類は厳密なままである
@@ -1869,8 +1886,16 @@ invocation 単位の成功（conflict-and-retry ではなく）が必要な呼�
 > 不完全扱いとなる。
 
 真の永続化失敗（ゲートウェイ返金後に DB がダウン等）は従来どおり MANUAL RECONCILIATION
-として Error ログを出す。`tx.Run`（生の RunInTx ではない）を使うため、呼び出し側が開始済みの
-外側トランザクションにはジョインする。
+として Error ログを出す。
+
+**呼び出し側所有トランザクション内からの呼び出しは入口で拒否する（#233 フォローアップ、
+BREAKING pre-1.0）**: `Refund` は `tx.InTransaction(ctx)` を検出すると、**ゲートウェイを
+一切呼ぶ前に** `ErrCodeBusinessRule` の DomainError で拒否する。旧挙動（外側 tx にジョイン）
+では、version conflict 後の `RetryOnConflict` の各リトライが**中断済みの外側 tx に再ジョイン**
+し（Postgres 25P02: 以後の全クエリが失敗）、実返金が動いた後に「local save failed after
+gateway refund (MANUAL RECONCILIATION REQUIRED)」という誤ったラベルの非収束エラーとして
+表面化していた。入口拒否は資金移動前の決定的なユーザーエラーに変える — `Refund` は
+トランザクションの**外**で呼び出すこと（記帳 tx は Refund 自身が管理する）。
 
 `OnRefund` フックは従来どおり永続化成功後に発火する（非致命）。
 

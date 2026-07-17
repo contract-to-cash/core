@@ -15,9 +15,11 @@ package service
 //     sentinel as the gateway path.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"sync"
@@ -554,18 +556,29 @@ func TestProcessPayment_DuplicateKey_PendingWinner_ReturnsPendingNoSuccessHooks(
 // TestProcessPayment_DuplicateKey_TerminalWinner_ConflictNoCompensation pins
 // the terminal-winner branch: converging on a winner in a terminal state
 // (Failed / Refunded / PartiallyRefunded / ChargedBack) must surface
-// ErrCodeConflict — mirroring the in-tx idempotency switch — with no payment
-// returned, no success hooks, no outbox, and no compensation.
+// ErrCodeConflict with no payment returned, no success hooks, no outbox, and
+// no compensation. The Failed winner is special: unlike the in-tx idempotency
+// switch (which compensates the just-made real charge on a Failed collision),
+// the converger holds contradictory evidence — the loser's same-key Charge
+// response vs the winner's keyed Failed record — so it must NOT compensate,
+// and instead emits an ERROR-level MANUAL RECONCILIATION log stating a
+// possibly-unbacked captured charge may exist. The other terminal states log
+// at Warn only.
 func TestProcessPayment_DuplicateKey_TerminalWinner_ConflictNoCompensation(t *testing.T) {
+	const failedWinnerLogMsg = "duplicate-key race converged on a FAILED winner"
 	cases := []struct {
 		name   string
 		mutate func(t *testing.T, p *payment.Payment)
+		// wantFailedErrorLog: the ERROR-level possibly-unbacked-charge log must
+		// fire for the Failed winner and must NOT fire for the money-already-
+		// moved terminal states.
+		wantFailedErrorLog bool
 	}{
 		{"Failed", func(t *testing.T, p *payment.Payment) {
 			if err := p.Fail("declined"); err != nil {
 				t.Fatalf("Fail: %v", err)
 			}
-		}},
+		}, true},
 		{"Refunded", func(t *testing.T, p *payment.Payment) {
 			if err := p.Complete(); err != nil {
 				t.Fatalf("Complete: %v", err)
@@ -573,13 +586,15 @@ func TestProcessPayment_DuplicateKey_TerminalWinner_ConflictNoCompensation(t *te
 			if err := p.MarkRefunded(); err != nil {
 				t.Fatalf("MarkRefunded: %v", err)
 			}
-		}},
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := newPaymentTestClock()
 			inv := newSimpleFinalizedInvoice()
 			invRepo := &mockInvoiceRepoForPayment{inv: inv}
+			var logBuf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			winner, err := payment.NewPayment(
 				shared.NewPaymentID(), inv.ID(),
@@ -614,6 +629,7 @@ func TestProcessPayment_DuplicateKey_TerminalWinner_ConflictNoCompensation(t *te
 				clock,
 				WithPaymentTxManager(txm),
 				WithPaymentOutboxWriter(writer),
+				WithPaymentLogger(logger),
 			)
 
 			p, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
@@ -639,7 +655,86 @@ func TestProcessPayment_DuplicateKey_TerminalWinner_ConflictNoCompensation(t *te
 			if gw.voidCalled || gw.refundCalled {
 				t.Errorf("saga compensation must NOT fire on duplicate-key convergence (void=%v refund=%v)", gw.voidCalled, gw.refundCalled)
 			}
+			logs := logBuf.String()
+			if tc.wantFailedErrorLog {
+				// The Failed winner is the observability-critical branch: a
+				// possibly-unbacked captured charge exists and the core does not
+				// compensate, so it MUST flag manual gateway-state verification
+				// at Error level (with the payment/invoice/key identifiers).
+				if !containsAll(logs, "level=ERROR", failedWinnerLogMsg, "MANUAL RECONCILIATION REQUIRED",
+					"key-terminal-winner", string(inv.ID()), string(winner.ID())) {
+					t.Errorf("expected Error-level MANUAL RECONCILIATION log for a Failed winner (with key/invoice/payment identifiers), got:\n%s", logs)
+				}
+			} else if strings.Contains(logs, failedWinnerLogMsg) {
+				t.Errorf("the Failed-winner Error log must not fire for a %s winner (money already moved/returned; Warn suffices), got:\n%s", tc.name, logs)
+			}
 		})
+	}
+}
+
+// TestRefund_InsideCallerOwnedTransaction_RejectedBeforeGateway pins the #233
+// follow-up guard on Refund: invoked from inside a caller-owned transaction
+// (tx.InTransaction(ctx)), Refund must be rejected up front with an
+// ErrCodeBusinessRule DomainError BEFORE the gateway is touched. Without the
+// guard, Refund's RetryOnConflict re-joins the aborted outer transaction on a
+// version conflict and surfaces a mislabeled "local save failed after gateway
+// refund (MANUAL RECONCILIATION REQUIRED)" — after real money already moved.
+func TestRefund_InsideCallerOwnedTransaction_RejectedBeforeGateway(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+	repo := newFakePaymentRepo()
+	gw := &spyGateway{}
+
+	svc := NewPaymentService(
+		gw,
+		repo,
+		invRepo,
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithoutPaymentTransactions(),
+	)
+
+	// Seed a completed payment OUTSIDE any transaction.
+	seed, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-refund-joined-tx",
+	})
+	if err != nil {
+		t.Fatalf("seed charge failed: %v", err)
+	}
+
+	outerTxm := tx.NewNoopTxManagerExplicit(tx.Repos{Payments: repo, Invoices: invRepo})
+	var refundErr error
+	_ = tx.Run(context.Background(), outerTxm, func(txCtx context.Context, _ tx.Repos) error {
+		refundErr = svc.Refund(txCtx, seed.ID(), RefundInput{
+			Reason: port.RefundReasonRequestedByCustomer,
+		})
+		return refundErr
+	})
+
+	if refundErr == nil {
+		t.Fatal("expected Refund inside a caller-owned transaction to be rejected")
+	}
+	assertDomainError(t, refundErr, shared.ErrCodeBusinessRule)
+	if !strings.Contains(refundErr.Error(), "caller-owned transaction") {
+		t.Errorf("rejection must name the caller-owned transaction, got: %v", refundErr)
+	}
+	// The guard fires BEFORE any gateway call — no money may have moved.
+	if gw.refundCalled {
+		t.Error("gateway.Refund must NOT be called when Refund is rejected by the joined-tx guard")
+	}
+	// And the payment record stays untouched.
+	stored, findErr := repo.FindByID(context.Background(), seed.ID())
+	if findErr != nil {
+		t.Fatalf("FindByID: %v", findErr)
+	}
+	if got := stored.RefundedAmount(); !got.IsZero() {
+		t.Errorf("no refund may be recorded, got refundedAmount %v", got)
 	}
 }
 

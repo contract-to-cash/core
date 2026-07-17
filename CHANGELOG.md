@@ -119,6 +119,16 @@ per-entry upgrade notes.
   failed at first invoice). `ContractType` is an open string type, so consumers that passed
   custom values (which previously flowed through) now get a validation error; use the
   shipped `one_time` / `subscription` / `usage_based` constants.
+- **BREAKING — `Refund` rejects invocation inside a caller-owned transaction
+  (#233 follow-up)** — when `tx.InTransaction(ctx)` is true, `PaymentService.Refund`
+  now returns an `ErrCodeBusinessRule` DomainError up front, BEFORE any gateway
+  call. Previously it joined the outer transaction; after a version conflict its
+  `RetryOnConflict` re-joined the aborted outer tx (Postgres 25P02) on every
+  attempt and surfaced a mislabeled, non-convergent "local save failed after
+  gateway refund (MANUAL RECONCILIATION REQUIRED)" — after real money had moved.
+  Callers that invoked `Refund` inside their own transaction now get a
+  money-safe, deterministic upfront rejection instead: call `Refund` outside the
+  transaction (it manages its own bookkeeping transaction).
 - **`DateRange.Next` / `AddBillingCycleDuration` deprecated (#244)** — they silently
   default unknown cycle strings to monthly; use `pricing.BillingInterval`.
 
@@ -149,9 +159,17 @@ per-entry upgrade notes.
   Now: Completed → success (unchanged); Pending → `(pendingPayment,
   ErrPaymentPending)` with no success hooks and no outbox fire (same result
   shape as the first caller's pending path); Failed/Refunded/
-  PartiallyRefunded/ChargedBack → `ErrCodeConflict`, mirroring the in-tx
-  idempotency switch. No branch fires saga compensation. Applies to both the
-  gateway and zero-amount call sites.
+  PartiallyRefunded/ChargedBack → `ErrCodeConflict`. The dispatch matches the
+  pre-charge terminal short-circuit, and matches the in-tx idempotency switch
+  for every status EXCEPT Failed: the in-tx switch COMPENSATES a Failed
+  collision (the just-made charge is provably real and unbacked), while the
+  converger deliberately does not — its evidence is contradictory (the
+  loser's same-key Charge response vs the winner's keyed Failed record), and
+  compensating on that ambiguity could reverse money that never moved. The
+  Failed-winner branch instead emits an Error-level MANUAL RECONCILIATION log
+  (a possibly-unbacked captured charge may exist; verify gateway state for
+  the key) with payment/invoice/key identifiers. No branch fires saga
+  compensation. Applies to both the gateway and zero-amount call sites.
 - **Duplicate-invoice guards now exempt proration invoices (#232)** — a mid-period
   proration invoice no longer permanently blocks `GenerateInvoice` /
   `RegenerateInvoice` / `ReissueInvoice` for its period (matching the repository
@@ -202,6 +220,16 @@ per-entry upgrade notes.
   per-refund key-ledger classification table + adapter upgrade note, winner-status
   dispatch on duplicate-key convergence, and the `idempotency_conflict` compensation
   reason for the Failed-state collision (also added to `plugin-system.md` §3.7).
+- `payment-gateway.md` round-3 review corrections: §6.1 no longer claims the
+  duplicate-key converger "mirrors the in-tx idempotency switch" for the Failed
+  status (the two paths intentionally diverge — see the Fixed entry above); §6.3
+  documents that explicit-key dedup classification is only sound within the
+  gateway's idempotency-key retention window (reusing an explicit key after
+  expiry can execute a real second movement that core classifies as a replay),
+  and that callers needing end-to-end exactly-once across lost-response retries
+  must pass an explicit `RefundInput.IdempotencyKey` (derived keys deliberately
+  treat sequential same-amount refunds as distinct movements); §6.3 also
+  documents the new joined-tx rejection at the `Refund` entry.
 - `event-sourcing.md` caught up with shipped behavior (#237/#246, canonical-docs
   policy): the `ProjectionService.Start` pseudocode now shows the real
   channel-close semantics (`projection.ErrSubscriptionClosed` when the feed dies
