@@ -53,6 +53,16 @@ type Plugin interface {
 
 // Config プラグイン設定
 type Config map[string]interface{}
+
+// 設定値の読み出しヘルパー（issue #239）。Initialize では生の型アサーション
+// （config["key"].(int) 等）ではなくこれらを使う: JSON からロードした設定は
+// encoding/json が数値を float64 でデコードするため素の .(int) にマッチせず、
+// また present-but-mistyped な値は「黙って既定値のまま走る」のではなく
+// エラーとして Initialize から返すべきであるため。
+//   - 欠落キー: (zero, false, nil) — 欠落はエラーではない
+//   - Int は int と「整数値の float64」を受理し、それ以外の型・非整数はエラー
+func (c Config) Int(key string) (value int, present bool, err error)
+func (c Config) Bool(key string) (value bool, present bool, err error)
 ```
 
 ### 2.2 計算コンテキスト（型安全）
@@ -883,7 +893,9 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
   （統合者が集約の `ScheduleCancellation` / `UnscheduleCancellation` を呼んだ後に発火する）
 
 実装リファレンス: `examples/hosting-integration-demo/main.go`（集約の状態遷移を
-実行 → 保存 → `registry.GetOnContract*Hooks()` をループして発火するパターン）。
+実行 → 保存 → `registry.GetOnContract*Hooks()` をループし、各フックを
+`plugin.FireNonFatal` 経由で発火するパターン。パニック隔離と「ログして続行」の
+非致命ポリシーがコア発火フックと揃う — §5.4）。
 
 **アダプタが発火するフック（1種）**
 
@@ -905,6 +917,10 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 `Stack` を保持）へ変換する。これにより、暴走したプラグイン 1 つが進行中の請求・支払い
 トランザクションを破壊すること（例: 課金成功後に `AfterCharge` がパニックし、
 `ProcessPayment` のローカル永続化を突き抜けて「課金済みだが未記録」状態を生む）を防ぐ。
+なお `SafeInvoke` が隔離するのはフック本体の呼び出しのみである: `Name()` / `Priority()` は
+`SafeInvoke` の**外**で呼ばれる（`SafeInvoke` の引数として、および Priority ソート中）ため、
+これらのゲッターがパニックすると隔離されない — プラグイン作者は `Name()` / `Priority()` を
+自明な実装（フィールド/定数を返すだけ）に保つこと。
 
 **捕捉したパニックは、フックがエラーを返したのと同じフェイタリティ・ポリシーで扱う。**
 フックが「拒否権を持つ（veto-capable）」か「非致命（non-fatal）」かは §5.3 の発火箇所と
@@ -921,8 +937,11 @@ TaxPluginのPriorityをどう設定してもDiscountHookより先に実行され
 > CancelScheduled/CancelUnscheduled の 7 種）と
 > アダプタが発火する `InvoiceGenerationHook` はコアの発火経路外のため、コアの
 > `SafeInvoke` ラップは適用されない。統合者・アダプタは自コードで同様のパニック隔離を
-> 行うことが推奨される（`plugin.SafeInvoke` / `plugin.LogNonFatalHookError` は公開 API なので
-> そのまま利用できる）。`examples/hosting-integration-demo/main.go` の発火ループはリファレンス。
+> 行うこと。このパターン（SafeInvoke + LogNonFatalHookError の「ログして続行」）を
+> 1 呼び出しに束ねた出荷済みヘルパーが **`plugin.FireNonFatal`** で、非致命な統合者発火
+> フックはこれをそのまま使えばよい（veto 意味論が必要なフックは `SafeInvoke` を直接使い、
+> 返ったエラーを自分で処理する）。`examples/hosting-integration-demo/main.go` の発火ループが
+> `FireNonFatal` 利用のリファレンス。
 
 **API**:
 
@@ -932,6 +951,10 @@ func SafeInvoke(hookType, pluginName string, fn func() error) error
 func SafeInvokeMoney(hookType, pluginName string, fn func() (shared.Money, error)) (shared.Money, error)
 func AsPanic(err error) (*PluginPanicError, bool)   // err が *PluginPanicError を包むか判定
 func LogNonFatalHookError(logger *slog.Logger, msg string, err error, attrs ...any)
+// FireNonFatal は 1 フックを SafeInvoke で実行し、返却/回復されたエラーを
+// LogNonFatalHookError でログして**伝播させない**（非致命ポリシーの統合者向けヘルパー。
+// パニックは Error レベル + スタック、通常エラーは Warn。nil logger は slog.Default()）。
+func FireNonFatal(logger *slog.Logger, hookType, pluginName string, fn func() error)
 
 type PluginPanicError struct {
     PluginName string
@@ -948,7 +971,8 @@ type PluginPanicError struct {
 > **⚠️ この例は要点の抜粋**: 完全な実装（フィルタリング・使用上限のアドバイザリ判定・
 > 引換確定）は `plugins/coupon/plugin.go` を参照。クーポンは「計算（`CalculateDiscount`）」と
 > 「引換確定（`AfterCalculation`）」を分離しており、その設計根拠とトランザクション整合性は
-> §6.3 にある。
+> §6.3 にある。リポジトリ側（原子的 `SaveRedemption` 契約）のリファレンス実装は
+> `infrastructure/inmemory` の `CouponRepository`（issue #240）。
 
 ```go
 // plugins/coupon/plugin.go
@@ -1003,16 +1027,24 @@ func (p *CouponPlugin) Name() string    { return "coupon" }
 func (p *CouponPlugin) Version() string { return "1.2.0" }
 func (p *CouponPlugin) Priority() int   { return p.priority }
 
-// Initialize は maxCouponsPerInvoice / allowStacking / priority を読む（型アサーション付き）。
+// Initialize は maxCouponsPerInvoice / allowStacking / priority を読む。
+// 生の型アサーションではなく Config.Int / Config.Bool を使う（issue #239, §2.1）—
+// JSON 由来の数値（float64）を受理し、型不一致は黙殺せずエラーとして返す。
 func (p *CouponPlugin) Initialize(_ context.Context, config plugin.Config) error {
-    if v, ok := config["maxCouponsPerInvoice"].(int); ok {
-        p.config.MaxCouponsPerInvoice = v
+    if n, ok, err := config.Int("maxCouponsPerInvoice"); err != nil {
+        return fmt.Errorf("coupon: %w", err)
+    } else if ok {
+        p.config.MaxCouponsPerInvoice = n
     }
-    if v, ok := config["allowStacking"].(bool); ok {
-        p.config.AllowStacking = v
+    if b, ok, err := config.Bool("allowStacking"); err != nil {
+        return fmt.Errorf("coupon: %w", err)
+    } else if ok {
+        p.config.AllowStacking = b
     }
-    if v, ok := config["priority"].(int); ok {
-        p.priority = v
+    if n, ok, err := config.Int("priority"); err != nil {
+        return fmt.Errorf("coupon: %w", err)
+    } else if ok {
+        p.priority = n
     }
     return nil
 }
@@ -1301,7 +1333,9 @@ type CouponRepository interface {
 > `(coupon_id, contract_id, period_start, period_end)` の UNIQUE 制約で冪等性を、
 > **クーポン ID をキーにした直列化（advisory lock / SERIALIZABLE tx /
 > `INSERT ... ON CONFLICT DO NOTHING` + 同一ロック下でのカウント再チェック）** で上限強制の
-> 原子性を担保する。インメモリ実装は (a)〜(c) 全体を1つの mutex で囲む。`AfterCalculation` からの
+> 原子性を担保する。インメモリ実装は (a)〜(c) 全体を1つの mutex で囲む —
+> 出荷済みのリファレンス実装は `infrastructure/inmemory` の `CouponRepository`（issue #240）。
+> `AfterCalculation` からの
 > 引換確定エラーは致命（tx をロールバック）— 「請求書は保存されたのにクーポン使用が記録されない」
 > 状態、および上限超過での過剰引換を防ぐ。抽象的な発火順序・可観測性は §5.1 を参照。
 > 実装リファレンスは `plugins/coupon/plugin.go`（`AfterCalculation` が `RedemptionLimits` を
@@ -1361,12 +1395,12 @@ func (p *TaxPlugin) Name() string    { return "tax" }
 func (p *TaxPlugin) Version() string { return "1.0.0" }
 func (p *TaxPlugin) Priority() int   { return p.priority }
 
-// Initialize は config["priority"] があれば priority を上書きする
+// Initialize は "priority" があれば priority を上書きする（Config.Int 経由、issue #239）
 func (p *TaxPlugin) Initialize(_ context.Context, config plugin.Config) error {
-    if v, ok := config["priority"]; ok {
-        if n, ok := v.(int); ok {
-            p.priority = n
-        }
+    if n, ok, err := config.Int("priority"); err != nil {
+        return fmt.Errorf("tax: %w", err)
+    } else if ok {
+        p.priority = n
     }
     return nil
 }
@@ -1379,12 +1413,22 @@ func (p *TaxPlugin) CalculateTax(ctx *plugin.CalculationContext) (shared.Money, 
     afterDiscount := ctx.SubtotalAfterDiscount()
     // 現行実装は住所を参照しない（管轄別税率は利用者が TaxCalculator を差し替えて実装）
     taxRate := p.calculator.GetTaxRate(ctx.Context())
+    // nil レートは契約違反として ErrCodeBusinessRule で拒否する（Money.Multiply は
+    // nil 係数で panic するため、*PluginPanicError ではなく行動可能なエラーに変える）
+    if taxRate == nil {
+        return shared.Zero(afterDiscount.Currency()), shared.NewDomainError(
+            shared.ErrCodeBusinessRule, "tax: TaxCalculator.GetTaxRate returned a nil rate ...")
+    }
     tax := afterDiscount.Multiply(taxRate)
     return tax, nil
 }
 
 // TaxCalculator 税率計算インターフェース（住所引数なしの最小 IF）
 type TaxCalculator interface {
+    // GetTaxRate は適用税率を返す。
+    // 契約: 戻り値は **非 nil**。「税なし」は nil ではなく明示的なゼロ率
+    // big.NewRat(0, 1) を返すこと（nil は CalculateTax が ErrCodeBusinessRule で
+    // 拒否し、その請求書の計算を veto する）。
     GetTaxRate(ctx context.Context) *big.Rat
 }
 
@@ -1608,6 +1652,12 @@ func TestCouponPlugin_CalculateDiscount(t *testing.T) {
 ## 10. API互換性とバージョニング戦略
 
 ### 10.1 Semantic Versioning
+
+> **📌 pre-1.0 注記**: 本ライブラリは現在 **v0.x** である。v1.0.0 までは
+> **MINOR バージョン（v0.x.0）に破壊的変更が含まれ得る**。破壊的変更は
+> CHANGELOG の該当エントリに **BREAKING** と明記される（pre-v1.0 の運用規約。
+> 例: v0.3.0 の `OnPaymentProcessedHook` シグネチャ変更）。
+> 以下の表は v1.0.0 以降のバージョニング整理である。
 
 本ライブラリはSemantic Versioning 2.0.0に従う。
 

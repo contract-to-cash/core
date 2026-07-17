@@ -200,7 +200,9 @@ func TestRefund_RetryAfterGatewayTimeout_ReusesIdempotencyKey(t *testing.T) {
 	paymentID := pmts[0].ID()
 
 	// Make the first Refund call for the derived key fail (gateway timeout).
-	expectedKey := "refund-" + string(paymentID) + "-JPY-0"
+	// The derived key binds the payment, the prior cumulative refunded total
+	// (0), and the refund amount (10000) — issue #235.
+	expectedKey := "refund-" + string(paymentID) + "-JPY-0-10000"
 	gw.failKeys[expectedKey] = 1
 
 	// First refund attempt: gateway "times out" → error, nothing recorded.
@@ -321,13 +323,21 @@ func TestRefund_ConcurrentRefunds_SingleRealRefund(t *testing.T) {
 			successes, failures, errs)
 	}
 
-	// The loser's error must be a domain error (invalid state / over-refund),
-	// NOT a manual-reconciliation persistence failure.
+	// The loser's error must be a clean domain error, NOT a
+	// manual-reconciliation persistence failure. Depending on when the loser's
+	// pre-flight read lands relative to the winner's commit it converges via
+	// one of two equivalent paths (issue #235 convergence policy):
+	//   - pre-flight ValidateRefund against the winner's committed state →
+	//     invalid_state_transition / business_rule (no gateway call at all); or
+	//   - in-tx consumed-key-slot detection (the gateway replayed the loser's
+	//     call without moving money) → conflict.
 	var domainErr *shared.DomainError
 	if !errors.As(loserErr, &domainErr) {
 		t.Fatalf("loser error must be a domain error, got %T: %v", loserErr, loserErr)
 	}
-	if domainErr.Code != shared.ErrCodeInvalidStateTransition && domainErr.Code != shared.ErrCodeBusinessRule {
+	if domainErr.Code != shared.ErrCodeInvalidStateTransition &&
+		domainErr.Code != shared.ErrCodeBusinessRule &&
+		domainErr.Code != shared.ErrCodeConflict {
 		t.Errorf("unexpected domain error code %q: %v", domainErr.Code, loserErr)
 	}
 
@@ -400,8 +410,9 @@ func TestRefund_SequentialPartialRefunds_UseDistinctKeys(t *testing.T) {
 	if keys[0] == keys[1] {
 		t.Errorf("distinct partial refunds must use DIFFERENT idempotency keys; both were %q", keys[0])
 	}
-	wantFirst := "refund-" + string(paymentID) + "-JPY-0"
-	wantSecond := "refund-" + string(paymentID) + "-JPY-3000"
+	// Keys bind (prior cumulative total, amount) — issue #235.
+	wantFirst := "refund-" + string(paymentID) + "-JPY-0-3000"
+	wantSecond := "refund-" + string(paymentID) + "-JPY-3000-2000"
 	if keys[0] != wantFirst {
 		t.Errorf("first key: want %q, got %q", wantFirst, keys[0])
 	}

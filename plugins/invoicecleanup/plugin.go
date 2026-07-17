@@ -10,8 +10,10 @@ import (
 )
 
 // InvoiceCleanupPlugin voids orphaned Draft and Finalized invoices
-// when a contract is cancelled. Invoices in other statuses (Paid,
-// PartialPaid, Overdue) are left untouched as they require human judgment.
+// when a contract is cancelled. Invoices in other statuses (Issued, Paid,
+// PartialPaid, Overdue) are left untouched as they require human judgment
+// (FindUnpaidByContract also returns Issued invoices; the status filter
+// below skips them).
 type InvoiceCleanupPlugin struct {
 	invoiceRepo invoice.Repository
 	priority    int
@@ -35,11 +37,17 @@ func (p *InvoiceCleanupPlugin) Name() string    { return "invoice-cleanup" }
 func (p *InvoiceCleanupPlugin) Version() string { return "1.0.0" }
 func (p *InvoiceCleanupPlugin) Priority() int   { return p.priority }
 
+// Initialize initializes the plugin with the given configuration.
+//
+// A present-but-mistyped "priority" is a configuration error and is returned
+// rather than silently ignored (issue #239); JSON-decoded numbers (float64 with
+// an integral value) are accepted via plugin.Config.Int. Unknown keys are
+// ignored.
 func (p *InvoiceCleanupPlugin) Initialize(_ context.Context, config plugin.Config) error {
-	if v, ok := config["priority"]; ok {
-		if n, ok := v.(int); ok {
-			p.priority = n
-		}
+	if n, ok, err := config.Int("priority"); err != nil {
+		return fmt.Errorf("invoice-cleanup: %w", err)
+	} else if ok {
+		p.priority = n
 	}
 	return nil
 }

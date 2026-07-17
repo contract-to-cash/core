@@ -54,7 +54,7 @@ func main() {
 	must("register audit", registry.Register(auditPlugin))
 
 	// Plugin 2: Coupon (10% discount)
-	couponRepo := newInMemoryCouponRepo(clock)
+	couponRepo := newDemoCouponRepo(ctx, clock)
 	couponPlugin := coupon.NewCouponPlugin(couponRepo, clock)
 	must("register coupon", registry.Register(couponPlugin))
 
@@ -214,20 +214,57 @@ func (p *loyaltyDiscountPlugin) CalculateDiscount(ctx *plugin.CalculationContext
 	return discount, nil
 }
 
-// ── In-Memory Coupon Repository ──
+// ── Coupon Repository (canonical inmemory + demo narration) ──
+//
+// The canonical inmemory.InMemoryCouponRepository (issue #240) is the
+// reference implementation of the CouponRepository contract: SaveRedemption
+// is idempotent on (coupon, contract, billing period) and enforces usage
+// limits atomically with the insert (issues #185/#195). The demo wraps it
+// only to narrate redemption confirmations on stdout — no billing behavior is
+// duplicated here.
 
-type inMemoryCouponRepo struct {
-	coupons []*coupon.Coupon
-	// redemptions is keyed by Redemption.IdempotencyKey() so that a retry /
-	// regeneration for the same (coupon, contract, billing period) confirms a
-	// single use (issue #185). Usage is reconciled from these rows.
-	redemptions map[string]*coupon.Redemption
+// mustCoupon unwraps NewCoupon's (coupon, error) for this demo's known-valid
+// fixture (NewCoupon rejects a nil *big.Rat value at construction).
+func mustCoupon(c *coupon.Coupon, err error) *coupon.Coupon {
+	if err != nil {
+		panic(err)
+	}
+	return c
 }
 
-func newInMemoryCouponRepo(clock shared.Clock) *inMemoryCouponRepo {
+// narratedCouponRepo decorates the canonical repository with stdout narration
+// for the pipeline walkthrough. All contract semantics come from the embedded
+// repository.
+type narratedCouponRepo struct {
+	coupon.CouponRepository
+}
+
+func (r *narratedCouponRepo) SaveRedemption(ctx context.Context, redemption *coupon.Redemption, limits coupon.RedemptionLimits) error {
+	before, err := r.FindRedemptions(ctx, redemption.CouponID(), nil)
+	if err != nil {
+		return err
+	}
+	if err := r.CouponRepository.SaveRedemption(ctx, redemption, limits); err != nil {
+		return err
+	}
+	after, err := r.FindRedemptions(ctx, redemption.CouponID(), nil)
+	if err != nil {
+		return err
+	}
+	if len(after) == len(before) {
+		fmt.Println("  >> [Coupon] Redemption already confirmed for this period (idempotent no-op)")
+	} else {
+		fmt.Printf("  >> [Coupon] Redemption confirmed for coupon %s\n", redemption.Code())
+	}
+	return nil
+}
+
+// newDemoCouponRepo seeds the canonical repository with the demo's SAVE10
+// coupon and wraps it with narration.
+func newDemoCouponRepo(ctx context.Context, clock shared.Clock) coupon.CouponRepository {
 	now := clock.Now()
 	limit := 100
-	c := coupon.NewCoupon(
+	c := mustCoupon(coupon.NewCoupon(
 		coupon.CouponID("coupon-001"),
 		"SAVE10",
 		coupon.CouponTypePercentage,
@@ -237,86 +274,12 @@ func newInMemoryCouponRepo(clock shared.Clock) *inMemoryCouponRepo {
 		now.Add(-24*time.Hour), now.Add(365*24*time.Hour), // valid for 1 year
 		&limit, 0, // usage limit 100, used 0
 		nil,
-	)
-	return &inMemoryCouponRepo{
-		coupons:     []*coupon.Coupon{c},
-		redemptions: make(map[string]*coupon.Redemption),
+	))
+	repo := inmemory.NewInMemoryCouponRepository()
+	if err := repo.Save(ctx, c); err != nil {
+		panic(fmt.Sprintf("seed coupon: %v", err))
 	}
-}
-
-func (r *inMemoryCouponRepo) FindByCode(_ context.Context, code string) (*coupon.Coupon, error) {
-	for _, c := range r.coupons {
-		if c.Code() == code {
-			return c, nil
-		}
-	}
-	return nil, fmt.Errorf("coupon not found: %s", code)
-}
-
-func (r *inMemoryCouponRepo) FindApplicable(_ context.Context, _ coupon.CouponQuery) ([]*coupon.Coupon, error) {
-	return r.coupons, nil
-}
-
-func (r *inMemoryCouponRepo) Save(_ context.Context, _ *coupon.Coupon) error { return nil }
-
-// SaveRedemption atomically confirms a redemption keyed by
-// (coupon, contract, billing period). A second confirmation of the same key is a
-// no-op, so billing retries / regenerations consume exactly one use (issue #185).
-// Usage limits are enforced as part of the same operation (issue #195): if
-// inserting would exceed the coupon's global or per-account limit,
-// coupon.ErrUsageLimitReached is returned and nothing is inserted. A real DB does
-// this with a UNIQUE index on the idempotency key plus a serialized conditional
-// insert; this single-threaded demo just checks the map.
-func (r *inMemoryCouponRepo) SaveRedemption(_ context.Context, redemption *coupon.Redemption, limits coupon.RedemptionLimits) error {
-	key := redemption.IdempotencyKey()
-	if _, exists := r.redemptions[key]; exists {
-		fmt.Println("  >> [Coupon] Redemption already confirmed for this period (idempotent no-op)")
-		return nil
-	}
-	if limits.GlobalLimit != nil {
-		if limits.GlobalBaseline+r.countRedemptions(redemption.CouponID(), nil) >= *limits.GlobalLimit {
-			return coupon.ErrUsageLimitReached
-		}
-	}
-	if limits.PerAccountLimit != nil {
-		acct := redemption.AccountID()
-		if r.countRedemptions(redemption.CouponID(), &acct) >= *limits.PerAccountLimit {
-			return coupon.ErrUsageLimitReached
-		}
-	}
-	r.redemptions[key] = redemption
-	fmt.Println("  >> [Coupon] Redemption confirmed for coupon SAVE10")
-	return nil
-}
-
-// countRedemptions counts distinct redemptions of a coupon (optionally filtered
-// to an account).
-func (r *inMemoryCouponRepo) countRedemptions(couponID coupon.CouponID, accountID *shared.AccountID) int {
-	n := 0
-	for _, rd := range r.redemptions {
-		if rd.CouponID() != couponID {
-			continue
-		}
-		if accountID != nil && rd.AccountID() != *accountID {
-			continue
-		}
-		n++
-	}
-	return n
-}
-
-func (r *inMemoryCouponRepo) FindRedemptions(_ context.Context, couponID coupon.CouponID, accountID *shared.AccountID) ([]*coupon.Redemption, error) {
-	var result []*coupon.Redemption
-	for _, rd := range r.redemptions {
-		if rd.CouponID() != couponID {
-			continue
-		}
-		if accountID != nil && rd.AccountID() != *accountID {
-			continue
-		}
-		result = append(result, rd)
-	}
-	return result, nil
+	return &narratedCouponRepo{repo}
 }
 
 // ── Helpers ──

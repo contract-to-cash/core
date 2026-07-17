@@ -120,10 +120,12 @@ func (r *InMemoryInvoiceRepository) checkPeriodUniquenessLocked(inv *invoice.Inv
 // (contract_id, billing_period) uniqueness constraint. Voided invoices,
 // proration adjustments, and invoices without a billing period are exempt —
 // matching the partial unique index recommended in invoice.Repository.Save.
+// The predicate is defined once on the domain entity
+// (Invoice.ParticipatesInPeriodUniqueness) so this repository and the
+// BillingService duplicate-invoice guards share a single source of truth
+// (issue #232).
 func participatesInPeriodUniqueness(inv *invoice.Invoice) bool {
-	return inv.Status() != invoice.InvoiceStatusVoided &&
-		!inv.IsProration() &&
-		!inv.BillingPeriod().IsZero()
+	return inv.ParticipatesInPeriodUniqueness()
 }
 
 // FindByID loads an invoice by its ID.

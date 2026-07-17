@@ -199,26 +199,26 @@ func confirmRedemptions(
 }
 
 func newTestCoupon(id CouponID, code string, ct CouponType, value *big.Rat, applicableTo []shared.ProductID) *Coupon {
-	return NewCoupon(
+	return mustCoupon(NewCoupon(
 		id, code, ct, value, shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, applicableTo,
-	)
+	))
 }
 
 // TestCouponPlugin_DefensivelySkipsExpiredCoupon guards review M4: even if a repo
 // returns an expired/exhausted coupon, the plugin must defensively skip it via
 // IsValid rather than apply it and record a redemption.
 func TestCouponPlugin_DefensivelySkipsExpiredCoupon(t *testing.T) {
-	expired := NewCoupon(
+	expired := mustCoupon(NewCoupon(
 		"c-exp", "OLD10", CouponTypePercentage, big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), // expired before testClock (2026-06-01)
 		nil, 0, nil,
-	)
+	))
 	repo := newMockRepo(expired)
 	p := NewCouponPlugin(repo, testClock)
 
@@ -239,13 +239,13 @@ func TestCouponPlugin_DefensivelySkipsExpiredCoupon(t *testing.T) {
 // coupon denominated in a different currency from the invoice must be skipped, not
 // abort the whole invoice calculation with a currency-mismatch error.
 func TestCouponPlugin_SkipsForeignCurrencyFixedCoupon(t *testing.T) {
-	usdCoupon := NewCoupon(
+	usdCoupon := mustCoupon(NewCoupon(
 		"c-usd", "USD5", CouponTypeFixed, big.NewRat(5, 1), shared.CurrencyUSD,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 	repo := newMockRepo(usdCoupon)
 	p := NewCouponPlugin(repo, testClock)
 
@@ -302,14 +302,14 @@ func TestCouponPlugin_FixedDiscount(t *testing.T) {
 
 func TestCouponPlugin_MaxDiscount(t *testing.T) {
 	maxDiscount := shared.NewMoney(big.NewRat(300, 1), shared.CurrencyJPY)
-	coupon := NewCoupon(
+	coupon := mustCoupon(NewCoupon(
 		"c1", "BIG50", CouponTypePercentage,
 		big.NewRat(50, 100), shared.CurrencyJPY,
 		nil, &maxDiscount,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
@@ -361,13 +361,13 @@ func TestCouponPlugin_NoStackingReturnsFirst(t *testing.T) {
 
 // newExpiredCoupon builds a coupon whose validity window closed before testClock.
 func newExpiredCoupon(id CouponID, code string, value *big.Rat) *Coupon {
-	return NewCoupon(
+	return mustCoupon(NewCoupon(
 		id, code, CouponTypePercentage, value, shared.CurrencyJPY,
 		nil, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), // expired before testClock (2026-06-01)
 		nil, 0, nil,
-	)
+	))
 }
 
 // TestCouponPlugin_NoStacking_InvalidFirstValidSecond is the core regression for
@@ -666,14 +666,14 @@ func TestCouponPlugin_RedemptionRecorded(t *testing.T) {
 
 func TestCouponPlugin_MinAmountNotMet(t *testing.T) {
 	minAmt := shared.NewMoney(big.NewRat(5000, 1), shared.CurrencyJPY)
-	coupon := NewCoupon(
+	coupon := mustCoupon(NewCoupon(
 		"c1", "MIN5000", CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		&minAmt, nil,
 		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
 		nil, 0, nil,
-	)
+	))
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
 
@@ -914,7 +914,13 @@ func TestCouponPlugin_AfterCalculationSurfacesSaveError(t *testing.T) {
 	}
 }
 
-func TestCouponPlugin_SubtotalAfterDiscountUpdated(t *testing.T) {
+// TestCouponPlugin_DoesNotWriteSubtotalAfterDiscount verifies the plugin never
+// writes ctx.SetSubtotalAfterDiscount — that field is owned by the core billing
+// pipeline, which sets it after summing ALL DiscountHook results, rounding, and
+// applying the cap guard (issue #244). A plugin-side write would be overwritten
+// anyway and, with multiple DiscountHooks, would expose a misleading
+// intermediate value.
+func TestCouponPlugin_DoesNotWriteSubtotalAfterDiscount(t *testing.T) {
 	coupon := newTestCoupon("c1", "SAVE10", CouponTypePercentage, big.NewRat(10, 100), nil)
 	repo := newMockRepo(coupon)
 	p := NewCouponPlugin(repo, testClock)
@@ -922,16 +928,78 @@ func TestCouponPlugin_SubtotalAfterDiscountUpdated(t *testing.T) {
 	subtotal := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
 	ctx := newTestContext(subtotal)
 
-	_, err := p.CalculateDiscount(ctx)
+	discount, err := p.CalculateDiscount(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	// SubtotalAfterDiscount should be 10000 - 1000 = 9000
-	expected := big.NewRat(9000, 1)
-	if ctx.SubtotalAfterDiscount().Amount().Cmp(expected) != 0 {
-		t.Errorf("expected subtotal after discount 9000, got %s", ctx.SubtotalAfterDiscount().Amount().RatString())
+	if discount.Amount().Cmp(big.NewRat(1000, 1)) != 0 {
+		t.Errorf("expected discount 1000, got %s", discount.Amount().RatString())
 	}
+
+	// SubtotalAfterDiscount must be untouched (still the initial subtotal);
+	// the core sets it after the cap guard, not the plugin.
+	if ctx.SubtotalAfterDiscount().Amount().Cmp(subtotal.Amount()) != 0 {
+		t.Errorf("expected SubtotalAfterDiscount to be untouched (%s), got %s",
+			subtotal.Amount().RatString(), ctx.SubtotalAfterDiscount().Amount().RatString())
+	}
+}
+
+// TestCouponPlugin_Initialize_ConfigTypes covers issue #239: JSON-decoded
+// configs (float64 numbers) work, and present-but-mistyped values are
+// configuration errors rather than silently ignored. Unknown keys stay ignored.
+func TestCouponPlugin_Initialize_ConfigTypes(t *testing.T) {
+	newPlugin := func() *CouponPlugin { return NewCouponPlugin(newMockRepo(), testClock) }
+
+	t.Run("json float64 accepted", func(t *testing.T) {
+		p := newPlugin()
+		if err := p.Initialize(context.Background(), plugin.Config{
+			"maxCouponsPerInvoice": float64(3),
+			"allowStacking":        true,
+			"priority":             float64(42),
+		}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p.config.MaxCouponsPerInvoice != 3 {
+			t.Errorf("expected MaxCouponsPerInvoice 3, got %d", p.config.MaxCouponsPerInvoice)
+		}
+		if !p.config.AllowStacking {
+			t.Error("expected AllowStacking true")
+		}
+		if p.Priority() != 42 {
+			t.Errorf("expected priority 42, got %d", p.Priority())
+		}
+	})
+
+	t.Run("string for int key rejected", func(t *testing.T) {
+		p := newPlugin()
+		if err := p.Initialize(context.Background(), plugin.Config{"maxCouponsPerInvoice": "3"}); err == nil {
+			t.Fatal("expected error for string maxCouponsPerInvoice, got nil")
+		}
+		if err := p.Initialize(context.Background(), plugin.Config{"priority": "high"}); err == nil {
+			t.Fatal("expected error for string priority, got nil")
+		}
+	})
+
+	t.Run("non-integral float rejected", func(t *testing.T) {
+		p := newPlugin()
+		if err := p.Initialize(context.Background(), plugin.Config{"maxCouponsPerInvoice": 2.5}); err == nil {
+			t.Fatal("expected error for non-integral float, got nil")
+		}
+	})
+
+	t.Run("non-bool for bool key rejected", func(t *testing.T) {
+		p := newPlugin()
+		if err := p.Initialize(context.Background(), plugin.Config{"allowStacking": "yes"}); err == nil {
+			t.Fatal("expected error for string allowStacking, got nil")
+		}
+	})
+
+	t.Run("unknown keys ignored", func(t *testing.T) {
+		p := newPlugin()
+		if err := p.Initialize(context.Background(), plugin.Config{"unknownKey": "whatever"}); err != nil {
+			t.Fatalf("unexpected error for unknown key: %v", err)
+		}
+	})
 }
 
 // createTestAggregate creates a ContractAggregate via the Create command for testing.
@@ -942,12 +1010,12 @@ func limitedCoupon(id CouponID, code string, globalLimit, perAccountLimit int) *
 	if globalLimit > 0 {
 		gl = &globalLimit
 	}
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		id, code, CouponTypePercentage, big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		testClock.Now().AddDate(-1, 0, 0), testClock.Now().AddDate(1, 0, 0),
 		gl, 0, nil,
-	)
+	))
 	if perAccountLimit > 0 {
 		c.WithPerAccountUsageLimit(perAccountLimit)
 	}

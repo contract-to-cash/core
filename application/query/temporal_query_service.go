@@ -36,6 +36,28 @@ func NewTemporalQueryService(eventStore eventstore.Store, clock shared.Clock) *T
 }
 
 // GetContractAsOf reconstructs a contract aggregate as it existed at a specific point in time.
+//
+// Nonexistent-contract convention (INTENTIONAL, issue #246): a contractID with
+// no events yields a ZERO-VALUE aggregate with a nil error — Store.LoadUntil
+// returns (empty, nil) for an unknown stream, so "the contract did not exist
+// yet at asOf" and "the contract never existed" are indistinguishable here and
+// both reconstruct to an empty aggregate (Version 0, zero-value status). This
+// deliberately differs from the repositories' FindByIDAsOf, which return a
+// shared.DomainError with code shared.ErrCodeNotFound for a missing aggregate.
+// Callers that need existence semantics should check the reconstructed
+// aggregate's Version()/status or use the repository instead.
+//
+// OccurredAt-monotonicity assumption (review W7): events are bounded by
+// OccurredAt (LoadUntil) while replay applies them in Version order. The
+// snapshot consistency guard below assumes OccurredAt is monotonically
+// non-decreasing in Version WITHIN a stream. If a stream contains interleaved
+// BACKDATED events (a later-Version event with an earlier OccurredAt), the
+// asOf cut can select a version-GAPPED subsequence (e.g. versions 1,2,4
+// without 3) and the reconstruction applies that gapped sequence as-is —
+// producing a state that never actually existed at asOf. Core aggregates stamp
+// OccurredAt from a monotonic clock at RaiseEvent time, so this holds for
+// events produced by this library; integrators importing historical events
+// with hand-set OccurredAt values must preserve per-stream monotonicity.
 func (s *TemporalQueryService) GetContractAsOf(ctx context.Context, contractID shared.ContractID, asOf time.Time) (*contract.ContractAggregate, error) {
 	streamID := string(contractID)
 

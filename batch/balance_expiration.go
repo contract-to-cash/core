@@ -2,6 +2,7 @@ package batch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -88,17 +89,28 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 	if concurrency == 1 || opts.DryRun {
 		// Sequential processing
 		for _, entry := range entries {
+			// External cancellation aborts the run: the remainder is skipped
+			// and the cancellation is surfaced as the run's error, so a
+			// cancelled run is never mistaken for a clean one (issue #242).
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				result.Skipped = result.Total - result.Succeeded - result.Failed
+				return result, ctxErr
+			}
 			if err := p.processOne(ctx, entry, opts.DryRun); err != nil {
 				result.Failed++
 				result.Errors = append(result.Errors, fmt.Errorf("balance entry %s: %w", entry.ID(), err))
 				if !opts.ContinueOnError {
-					return result, nil
+					// Items never attempted because of the early stop are
+					// skipped, not failed, so Total == Succeeded+Failed+Skipped
+					// (issue #242).
+					result.Skipped = result.Total - result.Succeeded - result.Failed
+					return result, ctx.Err()
 				}
 			} else {
 				result.Succeeded++
 			}
 		}
-		return result, nil
+		return result, ctx.Err()
 	}
 
 	// Concurrent processing
@@ -107,8 +119,22 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 
 	sem := make(chan struct{}, concurrency)
 	var mu sync.Mutex
+	// stopped marks the internal early stop (ContinueOnError=false after a
+	// genuine failure). It is set under mu BEFORE cancel() so an in-flight
+	// item failing with context.Canceled can tell an internal early stop
+	// (benign: counted as Skipped) apart from an external caller cancellation
+	// (abnormal: counted as Failed and surfaced via the returned error)
+	// (issue #242).
+	stopped := false
+	launched := 0
 
 	for _, entry := range entries {
+		// External cancellation aborts the launch loop; unlaunched items are
+		// counted as skipped below and the cancellation is surfaced as the
+		// run's error.
+		if ctx.Err() != nil {
+			break
+		}
 		// Check if we should stop early (ContinueOnError=false and an error occurred)
 		if !opts.ContinueOnError {
 			mu.Lock()
@@ -118,6 +144,7 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 				break
 			}
 		}
+		launched++
 
 		sem <- struct{}{}
 		go func(e *balance.BalanceEntry) {
@@ -125,10 +152,20 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 
 			if err := p.processOne(cctx, e, opts.DryRun); err != nil {
 				mu.Lock()
-				result.Failed++
-				result.Errors = append(result.Errors, fmt.Errorf("balance entry %s: %w", e.ID(), err))
+				if stopped && errors.Is(err, context.Canceled) {
+					// The run was already stopped internally (the early stop
+					// cancelled the shared context); an in-flight cancellation
+					// is not a genuine per-item failure (issue #242).
+					result.Skipped++
+				} else {
+					result.Failed++
+					result.Errors = append(result.Errors, fmt.Errorf("balance entry %s: %w", e.ID(), err))
+				}
 				mu.Unlock()
 				if !opts.ContinueOnError {
+					mu.Lock()
+					stopped = true
+					mu.Unlock()
 					cancel()
 				}
 			} else {
@@ -144,7 +181,13 @@ func (p *BalanceExpirationProcessor) Process(ctx context.Context, opts BatchOpti
 		sem <- struct{}{}
 	}
 
-	return result, nil
+	// Items never launched because of an early stop or an external
+	// cancellation are skipped, not failed (issue #242).
+	result.Skipped += result.Total - launched
+
+	// Surface an external cancellation so a cancelled run is never mistaken
+	// for a clean partial run (nil when the caller's context is intact).
+	return result, ctx.Err()
 }
 
 func (p *BalanceExpirationProcessor) processOne(ctx context.Context, entry *balance.BalanceEntry, dryRun bool) error {

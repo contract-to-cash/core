@@ -172,8 +172,26 @@ type Invoice struct {
 type InvoiceOption func(*Invoice)
 
 // WithStatus sets the initial status of the invoice.
+//
+// Only InvoiceStatusDraft is accepted (issue #238, pre-1.0 tightening): any
+// other status makes NewInvoice return a validation DomainError. Every other
+// status carries state that construction cannot supply (paid amounts, void or
+// refund reasons, version bumps), so an invoice constructed directly in, say,
+// Paid would report paidAmount=0 — an inconsistent entity. Drive the invoice
+// to its target status through the real transitions instead (Finalize,
+// MarkIssued, MarkOverdue, RecordPayment, Void, VoidWithReason, MarkRefunded);
+// persistence adapters reconstitute historical statuses via
+// InvoiceFromSnapshot, which is exempt by design.
 func WithStatus(s InvoiceStatus) InvoiceOption {
 	return func(inv *Invoice) {
+		if s != InvoiceStatusDraft {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("WithStatus accepts only %s: an invoice cannot be constructed directly in status %s — use the state-transition methods (or InvoiceFromSnapshot in persistence adapters)",
+						InvoiceStatusDraft, s))
+			}
+			return
+		}
 		inv.status = s
 	}
 }
@@ -599,6 +617,27 @@ func (inv *Invoice) IsProration() bool {
 	return inv.metadata[MetadataKeyInvoiceType] == InvoiceTypeProration
 }
 
+// ParticipatesInPeriodUniqueness reports whether the invoice is subject to the
+// per-period uniqueness constraint documented on Repository.Save: at most one
+// such invoice may exist per (contract_id, billing_period). An invoice
+// participates when it is NOT voided, NOT a proration adjustment, and has a
+// non-zero billing period — mirroring the partial unique index the Save
+// contract recommends (voided invoices are exempt so void-and-recreate leaves
+// the original alongside its replacement; proration invoices are exempt
+// because they intentionally coexist with the period's regular invoice; an
+// invoice without a billing period has no period slot to occupy).
+//
+// This is the single source of truth for the exemption predicate: repository
+// implementations (see infrastructure/inmemory) and the BillingService
+// duplicate-invoice guards both delegate to it so the service-level
+// check-then-insert guards and the storage-level constraint can never drift
+// apart (issue #232).
+func (inv *Invoice) ParticipatesInPeriodUniqueness() bool {
+	return inv.status != InvoiceStatusVoided &&
+		!inv.IsProration() &&
+		!inv.billingPeriod.IsZero()
+}
+
 // WithIssueDate sets the issue date.
 func WithIssueDate(t time.Time) InvoiceOption {
 	return func(inv *Invoice) {
@@ -802,15 +841,40 @@ func WithPaymentMethodID(id *string) InvoiceOption {
 }
 
 // WithOriginalInvoiceID sets the original invoice ID (for reissued invoices).
+//
+// A self-reference (id == the invoice's own ID) makes NewInvoice fail with a
+// validation DomainError — the same guard SetOriginalInvoiceID applies (issue
+// #162 L-9, closed for the option path in #238): the chain root is by
+// definition an EARLIER invoice, and a self-link would corrupt revision-chain
+// traversal.
 func WithOriginalInvoiceID(id shared.InvoiceID) InvoiceOption {
 	return func(inv *Invoice) {
+		if id == inv.id {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("original invoice ID must not reference the invoice itself: %s", id))
+			}
+			return
+		}
 		inv.originalInvoiceID = &id
 	}
 }
 
 // WithRevisionOf sets the revision link to the original invoice.
+//
+// A self-reference (id == the invoice's own ID) makes NewInvoice fail with a
+// validation DomainError — the same guard SetRevisionOf applies (issue #162
+// L-9, closed for the option path in #238): an invoice cannot be a revision of
+// itself, and linking one would create a cycle that breaks chain traversal.
 func WithRevisionOf(id shared.InvoiceID) InvoiceOption {
 	return func(inv *Invoice) {
+		if id == inv.id {
+			if inv.optErr == nil {
+				inv.optErr = shared.NewDomainError(shared.ErrCodeValidation,
+					fmt.Sprintf("revision link must not reference the invoice itself: %s", id))
+			}
+			return
+		}
 		inv.revisionOf = &id
 	}
 }

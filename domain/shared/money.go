@@ -75,9 +75,17 @@ func (m Money) Subtract(other Money) (Money, error) {
 }
 
 // Multiply multiplies the amount by a factor.
+//
+// A nil factor PANICS (issue #244). Multiplying money by "no factor" has no
+// meaningful result: the old behavior silently treated nil as zero and
+// returned a zero amount, which turned a caller bug (an unset rate — e.g. a
+// coupon or tax rate never populated) into a silently wrong charge. This is
+// the same "caller bug must surface loudly" policy as
+// pricing.assertNonNegativeUsage and mustAddTier. Callers with an optional
+// rate must check for nil themselves before calling.
 func (m Money) Multiply(factor *big.Rat) Money {
 	if factor == nil {
-		factor = new(big.Rat)
+		panic("Money.Multiply: nil factor (caller bug — an unset rate must be handled by the caller, not multiplied)")
 	}
 	result := new(big.Rat).Mul(m.safeAmount(), factor)
 	return NewMoney(result, m.currency)

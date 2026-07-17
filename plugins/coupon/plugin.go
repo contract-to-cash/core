@@ -61,21 +61,26 @@ func (p *CouponPlugin) Version() string { return "1.2.0" }
 func (p *CouponPlugin) Priority() int { return p.priority }
 
 // Initialize initializes the plugin with the given configuration.
+//
+// A present-but-mistyped value is a configuration error and is returned rather
+// than silently ignored (issue #239); JSON-decoded numbers (float64 with an
+// integral value) are accepted for the integer keys via plugin.Config.Int.
+// Unknown keys are ignored.
 func (p *CouponPlugin) Initialize(_ context.Context, config plugin.Config) error {
-	if v, ok := config["maxCouponsPerInvoice"]; ok {
-		if n, ok := v.(int); ok {
-			p.config.MaxCouponsPerInvoice = n
-		}
+	if n, ok, err := config.Int("maxCouponsPerInvoice"); err != nil {
+		return fmt.Errorf("coupon: %w", err)
+	} else if ok {
+		p.config.MaxCouponsPerInvoice = n
 	}
-	if v, ok := config["allowStacking"]; ok {
-		if b, ok := v.(bool); ok {
-			p.config.AllowStacking = b
-		}
+	if b, ok, err := config.Bool("allowStacking"); err != nil {
+		return fmt.Errorf("coupon: %w", err)
+	} else if ok {
+		p.config.AllowStacking = b
 	}
-	if v, ok := config["priority"]; ok {
-		if n, ok := v.(int); ok {
-			p.priority = n
-		}
+	if n, ok, err := config.Int("priority"); err != nil {
+		return fmt.Errorf("coupon: %w", err)
+	} else if ok {
+		p.priority = n
 	}
 	return nil
 }
@@ -269,17 +274,11 @@ func (p *CouponPlugin) CalculateDiscount(ctx *plugin.CalculationContext) (shared
 		total = sum
 	}
 
-	// 9. Update subtotal after discount for downstream hooks.
-	// Each coupon's discount is calculated against the original subtotal (parallel application),
-	// not the cumulative reduced amount.
-	if !total.IsZero() {
-		afterDiscount, err := ctx.Subtotal().Subtract(total)
-		if err != nil {
-			return zero, fmt.Errorf("coupon: update subtotal after discount: %w", err)
-		}
-		ctx.SetSubtotalAfterDiscount(afterDiscount)
-	}
-
+	// NOTE: The plugin deliberately does NOT call ctx.SetSubtotalAfterDiscount —
+	// that field is owned by the core billing pipeline, which sets it after
+	// summing ALL DiscountHook results, rounding, and applying the cap guard
+	// (§5.1 steps 3-4). Each coupon's discount is calculated against the
+	// original subtotal (parallel application), not a cumulative reduced amount.
 	return total, nil
 }
 

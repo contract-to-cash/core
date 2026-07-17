@@ -4,23 +4,29 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/contract-to-cash/core/domain/shared"
 )
 
-// newInvoiceWithStatus builds an invoice directly in the given status for
-// state-transition tests (mirrors the WithStatus usage in void_test.go).
+// newInvoiceWithStatus builds an invoice in the given status for
+// state-transition tests. WithStatus accepts only Draft (issue #238), so the
+// fixture drives the invoice to its target status through the real
+// transitions (see advanceInvoiceTo in status_fixture_test.go).
 func newInvoiceWithStatus(t *testing.T, status InvoiceStatus) *Invoice {
 	t.Helper()
-	return mustNewInvoice(t,
+	opts := fixtureOptionsFor(status, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
 		shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
-		WithStatus(status),
+		opts...,
 	)
+	advanceInvoiceTo(t, inv, status)
+	return inv
 }
 
 func TestMarkRefunded_FromPaid(t *testing.T) {

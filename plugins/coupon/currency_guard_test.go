@@ -22,10 +22,10 @@ func guardUSD(n int64) shared.Money { return shared.NewMoney(big.NewRat(n, 1), s
 // discount) — CalculateDiscount surfaces it as an error.
 func TestCoupon_CalculateDiscount_ForeignMaxDiscountErrors(t *testing.T) {
 	maxUSD := guardUSD(100)
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c-max", "MAX", CouponTypePercentage, big.NewRat(50, 100), shared.CurrencyJPY,
 		nil, &maxUSD, guardValidFrom, guardValidUntil, nil, 0, nil,
-	)
+	))
 	_, err := c.CalculateDiscount(guardJPY(10000))
 	if err == nil {
 		t.Fatal("expected currency mismatch error, got nil")
@@ -38,10 +38,10 @@ func TestCoupon_CalculateDiscount_ForeignMaxDiscountErrors(t *testing.T) {
 
 func TestCoupon_CalculateDiscount_MatchingMaxDiscountCaps(t *testing.T) {
 	maxJPY := guardJPY(1000)
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c-max", "MAX", CouponTypePercentage, big.NewRat(50, 100), shared.CurrencyJPY,
 		nil, &maxJPY, guardValidFrom, guardValidUntil, nil, 0, nil,
-	)
+	))
 	// 50% of 10000 = 5000, capped at 1000.
 	discount, err := c.CalculateDiscount(guardJPY(10000))
 	if err != nil {
@@ -56,10 +56,10 @@ func TestCoupon_CalculateDiscount_MatchingMaxDiscountCaps(t *testing.T) {
 // CalculateDiscount rather than being swallowed (issue #148).
 func TestCouponPlugin_ForeignMaxDiscountPropagatesError(t *testing.T) {
 	maxUSD := guardUSD(100)
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c-max", "MAX", CouponTypePercentage, big.NewRat(50, 100), shared.CurrencyJPY,
 		nil, &maxUSD, guardValidFrom, guardValidUntil, nil, 0, nil,
-	)
+	))
 	repo := newMockRepo(c)
 	p := NewCouponPlugin(repo, testClock)
 
@@ -77,10 +77,10 @@ func TestCouponPlugin_ForeignMaxDiscountPropagatesError(t *testing.T) {
 // consistent with the plugin's foreign-currency fixed-discount handling.
 func TestCouponPlugin_SkipsCouponWithForeignMinAmount(t *testing.T) {
 	minUSD := guardUSD(1)
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c-min", "MIN", CouponTypePercentage, big.NewRat(10, 100), shared.CurrencyJPY,
 		&minUSD, nil, guardValidFrom, guardValidUntil, nil, 0, nil,
-	)
+	))
 	repo := newMockRepo(c)
 	p := NewCouponPlugin(repo, testClock)
 
@@ -101,10 +101,10 @@ func TestCouponPlugin_SkipsCouponWithForeignMinAmount(t *testing.T) {
 // at/above applies.
 func TestCouponPlugin_MatchingMinAmountGates(t *testing.T) {
 	minJPY := guardJPY(20000)
-	c := NewCoupon(
+	c := mustCoupon(NewCoupon(
 		"c-min", "MIN", CouponTypePercentage, big.NewRat(10, 100), shared.CurrencyJPY,
 		&minJPY, nil, guardValidFrom, guardValidUntil, nil, 0, nil,
-	)
+	))
 	repo := newMockRepo(c)
 	p := NewCouponPlugin(repo, testClock)
 

@@ -138,7 +138,6 @@ github.com/contract-to-cash/core/
 │   ├── invoice/                 #   Invoice + CreditNote entities
 │   ├── payment/                 #   Payment entity + Dunning
 │   ├── balance/                 #   Credit ledger
-│   ├── billing/                 #   Billing calculation abstraction
 │   ├── pricing/                 #   Immutable Price, pricing models
 │   ├── product/                 #   Product definition
 │   ├── usage/                   #   Usage record + summary

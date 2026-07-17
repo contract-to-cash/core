@@ -46,45 +46,21 @@ func TestVoid_FromFinalized(t *testing.T) {
 }
 
 func TestVoid_FromPaid_Rejected(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusPaid),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusPaid)
 	if err := inv.Void(); err == nil {
 		t.Fatal("expected error voiding paid invoice, got nil")
 	}
 }
 
 func TestVoid_FromPartialPaid_Rejected(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusPartialPaid),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusPartialPaid)
 	if err := inv.Void(); err == nil {
 		t.Fatal("expected error voiding partial_paid invoice, got nil")
 	}
 }
 
 func TestVoid_FromOverdue_Rejected(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusOverdue),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusOverdue)
 	if err := inv.Void(); err == nil {
 		t.Fatal("expected error voiding overdue invoice, got nil")
 	}

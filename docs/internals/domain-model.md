@@ -599,15 +599,26 @@ func NewContractAggregate(id shared.ContractID, clock shared.Clock) *ContractAgg
 // nil Clock（NewContractAggregate に nil を渡した場合。panic ではなく validation error）、
 // 空 AccountID、PriceID も非ゼロ Price も無い（価格参照が皆無）、Price と BasePrice の
 // 通貨不一致（両者非ゼロのとき）を拒否する。zero の Interval は one_time のみ許容
-// （issue #218、§3.11）— 他タイプでは従来どおり validation error。
+// （issue #218、§3.11）— 他タイプでは従来どおり validation error。さらに未知の
+// ContractType も拒否する（one_time / subscription / usage_based 以外は validation error。
+// ContractType は下流の課金分岐を駆動するため。検証はコマンド受付時のみ — Apply /
+// リプレイは歴史的イベントをそのまま受け入れる）（issue #243）。
 func (a *ContractAggregate) Create(cmd CreateContractCommand, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) Activate(metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) Suspend(config SuspensionConfiguration, metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) Resume(metadata eventstore.EventMetadata) error
 // Cancel の Apply は pendingPriceID / trialConfig をクリアする（issue #196）。終端契約が
 // HasPendingChange()==true を報告したり trialing からの解約後に trialConfig を残さないため。
-// Apply でのクリアは決定的・冪等なのでリプレイ安全。
+// Apply でのクリアは決定的・冪等なのでリプレイ安全。ContractExpiredEvent の Apply も
+// 同様に pendingPriceID / trialConfig をクリアする（issue #243）: 満了は autoRenew=false の
+// RenewWithInterval から到達し、予約済みの期末価格変更を消費しないため、クリアしないと
+// 満了（終端）契約が HasPendingChange()==true を報告し続ける。
 func (a *ContractAggregate) Cancel(reason string, metadata eventstore.EventMetadata) error
+// MarkPastDue は active な契約を past_due へ遷移させる（支払い失敗による Dunning 開始等）。
+// past_due からは回復（RecoverFromPastDue）・一時停止（リトライ上限到達）・解約が可能。
+func (a *ContractAggregate) MarkPastDue(reason string, metadata eventstore.EventMetadata) error
+// RecoverFromPastDue は past_due の契約を active へ戻す（支払い成功で未収が解消したとき等）。
+func (a *ContractAggregate) RecoverFromPastDue(metadata eventstore.EventMetadata) error
 func (a *ContractAggregate) ChangePrice(newPriceID shared.PriceID, policy ChangePolicy, proration *PlanChangeProration, metadata eventstore.EventMetadata) error
 // UnscheduleChange は終端契約（cancelled/expired）では invalid_state_transition を返す（issue #196）。
 func (a *ContractAggregate) UnscheduleChange(reason string, metadata eventstore.EventMetadata) error
@@ -665,7 +676,7 @@ func (a *ContractAggregate) UpdatedAt() time.Time
 // domain/contract/events.go
 package contract
 
-// 全15種のドメインイベント
+// 全17種のドメインイベント
 const (
     EventTypeContractCreated         eventstore.EventType = "contract.created"
     EventTypeContractActivated       eventstore.EventType = "contract.activated"
@@ -682,6 +693,8 @@ const (
     EventTypeCancellationUnscheduled eventstore.EventType = "contract.cancellation_unscheduled"
     EventTypePriceChangeScheduled    eventstore.EventType = "contract.price_change_scheduled"
     EventTypePriceChangeUnscheduled  eventstore.EventType = "contract.price_change_unscheduled"
+    EventTypeContractPastDue         eventstore.EventType = "contract.past_due"
+    EventTypeContractRecovered       eventstore.EventType = "contract.recovered"
 )
 
 type ContractCreatedEvent struct {
@@ -799,6 +812,21 @@ type CancellationScheduledEvent struct {
 type CancellationUnscheduledEvent struct {
     ContractID    shared.ContractID
     UnscheduledAt time.Time
+}
+
+// ContractPastDueEvent は active な契約が past_due 状態に入ったとき（典型的には
+// 支払い失敗による Dunning 開始時）に発生する
+type ContractPastDueEvent struct {
+    ContractID shared.ContractID
+    Reason     string
+    MarkedAt   time.Time
+}
+
+// ContractRecoveredEvent は past_due の契約が active に復帰したとき（典型的には
+// 支払い成功時）に発生する
+type ContractRecoveredEvent struct {
+    ContractID  shared.ContractID
+    RecoveredAt time.Time
 }
 ```
 
@@ -1219,6 +1247,13 @@ func NewInvoice(
 
 // Functional Options
 type InvoiceOption func(*Invoice)
+// WithStatus は **draft のみ** 受け付ける（issue #238, BREAKING pre-1.0）。それ以外の
+// ステータスを渡すと NewInvoice が validation の DomainError を返す — draft 以外の
+// ステータスは構築時に供給できない状態（paidAmount / void・refund 理由 / version）を
+// 伴うため、直接構築すると不整合なエンティティになる（例: Paid なのに paidAmount=0）。
+// 目的のステータスへは実際の状態遷移メソッド（Finalize / MarkIssued / RecordPayment /
+// Void / MarkRefunded 等）で到達させる。永続化アダプタの歴史的ステータス復元は
+// InvoiceFromSnapshot（対象外の別 API）を使う。
 func WithStatus(s InvoiceStatus) InvoiceOption
 func WithBillingPeriod(p shared.DateRange) InvoiceOption
 func WithDueDate(t time.Time) InvoiceOption
@@ -1388,6 +1423,13 @@ import (
 )
 
 type Repository interface {
+    // Save の実装契約（詳細な godoc はソースが正準）:
+    //  1. 並行制御（issue #130）: load → 状態チェック → save のシーケンスを
+    //     lost update から守る（楽観ロック + tx.ErrVersionConflict、または行ロック/
+    //     SERIALIZABLE による読み取り直列化のいずれか）。
+    //  2. 期間一意性（issue #149）: 同一 (contract_id, billing_period) に対して
+    //     **一意性に参加する**請求書は最多 1 件（partial unique index 等で強制、
+    //     違反時は ErrCodeConflict の DomainError を返す）。
     Save(ctx context.Context, invoice *Invoice) error
     FindByID(ctx context.Context, id shared.InvoiceID) (*Invoice, error)
     FindByContractID(ctx context.Context, contractID shared.ContractID) ([]*Invoice, error)
@@ -1402,6 +1444,15 @@ type Repository interface {
     FindByIDAsOf(ctx context.Context, id shared.InvoiceID, asOf time.Time) (*Invoice, error)
 }
 ```
+
+> **期間一意性の判定述語は `Invoice.ParticipatesInPeriodUniqueness()` が単一の情報源**
+> （issue #232）: 「voided でない ∧ proration 調整でない ∧ billing period が非ゼロ」の
+> とき一意性制約に参加する。voided は void-and-recreate で原本が差替と併存するため、
+> proration は期間の通常請求書と意図的に併存するため、それぞれ除外される
+> （regeneration の差替請求書は通常の期間請求書として**参加する**）。リポジトリ実装
+> （`infrastructure/inmemory` がリファレンス）と `BillingService` の重複請求ガードの
+> 双方がこの述語に委譲することで、サービス層の check-then-insert ガードと
+> ストレージ層の制約のスコープが乖離しない。
 
 ### 4.4 CreditNote リポジトリインターフェース
 
@@ -1965,8 +2016,15 @@ type Repository interface {
 
 ### 9.1 請求計算サービス
 
+> **⚠️ 未実装の設計案**: `domain/billing` パッケージは現在のコードベースに**存在しない**。
+> 以下の `Calculator` / `ProrationResult` は将来ドメインサービスとして切り出す場合の
+> 設計スケッチである。現実装では、請求書生成は `application/service/billing_service.go`
+> （`GenerateInvoice` → `executeBillingPipeline`）が担い、日割り計算は**統合者側の計算機**が
+> 行って結果を `contract.PlanChangeProration` として `ContractAggregate.ChangePrice` /
+> `BillingService.GenerateProrationInvoice` に渡す（3.7 参照）。
+
 ```go
-// domain/billing/service.go
+// 設計スケッチ（未実装）— 仮に domain/billing/service.go として切り出す場合の形
 package billing
 
 import (

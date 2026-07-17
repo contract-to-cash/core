@@ -69,15 +69,30 @@ func (r DateRange) MarshalJSON() ([]byte, error) {
 
 // Next returns the next DateRange based on the billing cycle.
 // The new range starts where the current one ends.
+//
+// Deprecated: use pricing.BillingInterval.AddTo to advance billing periods.
+// This method uses the legacy string-based cycle and inherits
+// AddBillingCycleDuration's hazardous fallback: ⚠️ ANY unrecognized cycle
+// string (a typo like "montly", "biweekly", "") SILENTLY advances by ONE
+// MONTH instead of failing. It has no in-repo production callers and is kept
+// only so external callers do not break; the monthly-default behavior is
+// intentionally left unchanged for the same reason.
 func (r DateRange) Next(cycle string) DateRange {
 	end := AddBillingCycleDuration(r.end, cycle)
 	return DateRange{start: r.end, end: end}
 }
 
 // AddBillingCycleDuration adds one billing cycle duration to a time.
-// This is kept for backward compatibility with DateRange.Next() and other callers
-// that use string-based billing cycles.
-// For new code, use pricing.BillingInterval.AddTo() directly.
+//
+// Deprecated: use pricing.BillingInterval.AddTo (or
+// pricing.BillingCycleToIntervalStrict to convert a cycle string with
+// validation). ⚠️ This function SILENTLY DEFAULTS TO MONTHLY for any cycle
+// string other than "daily", "weekly", "monthly", or "yearly" — a typo or an
+// unsupported cycle does not error, it just advances the time by one month,
+// which can mis-schedule billing periods. It has no in-repo production
+// callers and is kept only for backward compatibility with external callers
+// that use string-based billing cycles; the fallback behavior is intentionally
+// left unchanged so as not to break them.
 func AddBillingCycleDuration(t time.Time, cycle string) time.Time {
 	switch cycle {
 	case "monthly":

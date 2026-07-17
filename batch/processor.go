@@ -28,16 +28,41 @@ type BatchOptions struct {
 	Limit int
 }
 
+// DryRunAction records, for a dry run (BatchOptions.DryRun=true), the action a
+// real run would take for a single would-succeed item (issue #242). Processors
+// define their own action labels (e.g. RenewalActionRenew / RenewalActionExpire
+// / RenewalActionCancel for ContractRenewalProcessor).
+type DryRunAction struct {
+	// ItemID identifies the item (e.g. contract ID).
+	ItemID string
+	// Action is the processor-specific action label.
+	Action string
+}
+
 // BatchResult summarizes the outcome of a batch operation.
+//
+// Accounting invariant: Total == Succeeded + Failed + Skipped (issue #242).
 type BatchResult struct {
 	Total     int
 	Succeeded int
 	Failed    int
 	// Skipped counts items that were deliberately not processed rather than
-	// failed — e.g. a zero-interval one_time contract that a permissive
-	// FindDueForRenewal adapter selected even though it has no billing period
-	// to renew (issue #218). Skipped items are included in Total but appear in
-	// neither Succeeded nor Failed and produce no Errors entry.
+	// failed. That covers (a) items that were not attempted because the run
+	// stopped early — after a failure with ContinueOnError=false (including
+	// in-flight concurrent items aborted by the internal early-stop
+	// cancellation, which is not a genuine per-item failure and is not
+	// recorded in Errors), or because the caller's context was cancelled (an
+	// external cancellation is additionally surfaced as a non-nil error from
+	// Process, so a cancelled run is never mistaken for a clean one) — and
+	// (b) items skipped by per-item business rules, e.g. a zero-interval
+	// one_time contract that a permissive FindDueForRenewal adapter selected
+	// even though it has no billing period to renew (issue #218). Skipped
+	// items are included in Total but appear in neither Succeeded nor Failed
+	// and produce no Errors entry.
 	Skipped int
 	Errors  []error
+	// DryRunActions lists, for dry runs only, the action a real run would
+	// take for each would-succeed item (one entry per Succeeded item, in
+	// processing order). Real runs leave it empty.
+	DryRunActions []DryRunAction
 }

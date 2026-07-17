@@ -27,10 +27,14 @@ func (p *MyPlugin) Version() string { return "1.0.0" }
 func (p *MyPlugin) Priority() int   { return p.priority }
 
 func (p *MyPlugin) Initialize(_ context.Context, config plugin.Config) error {
-    if v, ok := config["priority"]; ok {
-        if n, ok := v.(int); ok {
-            p.priority = n
-        }
+    // Use Config.Int / Config.Bool instead of raw type assertions (issue #239):
+    // JSON-loaded configs decode numbers as float64, so config["priority"].(int)
+    // would silently miss them, and a mistyped value should be a returned error,
+    // not a silently-kept default.
+    if n, ok, err := config.Int("priority"); err != nil {
+        return fmt.Errorf("my-plugin: %w", err)
+    } else if ok {
+        p.priority = n
     }
     return nil
 }
@@ -59,10 +63,10 @@ func (p *LoyaltyDiscountPlugin) Version() string { return "1.0.0" }
 func (p *LoyaltyDiscountPlugin) Priority() int   { return p.priority }
 
 func (p *LoyaltyDiscountPlugin) Initialize(_ context.Context, config plugin.Config) error {
-    if v, ok := config["priority"]; ok {
-        if n, ok := v.(int); ok {
-            p.priority = n
-        }
+    if n, ok, err := config.Int("priority"); err != nil {
+        return fmt.Errorf("loyalty-discount: %w", err)
+    } else if ok {
+        p.priority = n
     }
     return nil
 }
