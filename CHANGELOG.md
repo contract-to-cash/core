@@ -13,6 +13,38 @@ per-entry upgrade notes.
 
 ### Added
 
+- **Stale pending payment cleanup skeleton (#98)** — compensation-after-3DS
+  leaves orphan Pending payment records (their gateway transaction already
+  refunded/voided by saga compensation; see payment-gateway.md §6.1.8) that
+  pollute listings and metrics forever. New:
+  - **BREAKING — `payment.Repository.FindStalePending(ctx, olderThan, limit)`**:
+    returns Pending payments whose `ProcessedAt()` (the construction-time
+    charge-attempt timestamp — the entity carries no createdAt/updatedAt, and
+    ProcessedAt never advances, so it is exactly "Pending since then") is
+    strictly before `olderThan`, ordered ProcessedAt ascending, `limit <= 0` =
+    unbounded. **Upgrade note for BYO repository implementers**: add the
+    method (`WHERE status = 'pending' AND processed_at < $1 ORDER BY
+    processed_at ASC LIMIT $2`-shaped query); the in-memory repository is the
+    reference. Full executable contract in `domain/payment/repository.go`.
+  - **`port.PendingPaymentReconciler`** + `port.PendingPaymentDisposition`
+    (`PendingPaymentKeep` / `PendingPaymentMarkFailed`): the consumer-owned
+    verdict on each stale Pending payment. The gateway-state lookup (was the
+    transaction voided/refunded/expired?) lives entirely in the consumer's
+    implementation — the core never queries the gateway here (BYO boundary).
+  - **`batch.StalePendingPaymentProcessor`**: scans `FindStalePending`, asks
+    the reconciler, and routes MarkFailed dispositions through the EXISTING
+    `PaymentService.MarkPaymentFailed` (via the narrow
+    `batch.PendingPaymentFailer` seam that `*service.PaymentService`
+    satisfies), so the transition keeps its semantics intact: OnPaymentFailed
+    hooks fire post-commit, non-fatally, only on the real Pending→Failed
+    transition; already-Failed replays are idempotent no-ops; a payment that
+    settled between scan and transition is rejected by the terminal-state
+    guard and counted as Skipped (Warn), not Failed. Keep dispositions count
+    as Skipped; reconciler errors fail the item honoring `ContinueOnError`;
+    dry runs perform no writes and report `DryRunActions` (action
+    `"mark_failed"`). The processor performs no writes itself and takes no
+    TxManager. Nothing is auto-wired — schedule `Process` yourself, like every
+    other batch. Canonical docs: payment-gateway.md §6.6.
 - **Per-refund idempotency-key ledger on `Payment` (#235 review)** —
   `payment.RefundEntry`, `Payment.RecordRefundWithKey(amount, key)`,
   `Payment.Refunds()`, `Payment.HasRefundWithIdempotencyKey(key)`,

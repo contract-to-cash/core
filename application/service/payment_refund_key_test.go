@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/contract-to-cash/core/application/port"
 	"github.com/contract-to-cash/core/domain/payment"
@@ -105,6 +106,10 @@ func (r *staleReadPaymentRepo) FindByInvoiceID(ctx context.Context, id shared.In
 
 func (r *staleReadPaymentRepo) FindByIdempotencyKey(ctx context.Context, key string) (*payment.Payment, error) {
 	return r.inner.FindByIdempotencyKey(ctx, key)
+}
+
+func (r *staleReadPaymentRepo) FindStalePending(ctx context.Context, olderThan time.Time, limit int) ([]*payment.Payment, error) {
+	return r.inner.FindStalePending(ctx, olderThan, limit)
 }
 
 // seedRefundablePayment stores a completed 10000 JPY payment and returns it
@@ -296,6 +301,10 @@ func (r *failFirstSavePaymentRepo) FindByInvoiceID(ctx context.Context, id share
 
 func (r *failFirstSavePaymentRepo) FindByIdempotencyKey(ctx context.Context, key string) (*payment.Payment, error) {
 	return r.inner.FindByIdempotencyKey(ctx, key)
+}
+
+func (r *failFirstSavePaymentRepo) FindStalePending(ctx context.Context, olderThan time.Time, limit int) ([]*payment.Payment, error) {
+	return r.inner.FindStalePending(ctx, olderThan, limit)
 }
 
 // TestRefund_ExplicitKey_SequentialRetry_RecordsOnce verifies the legitimate

@@ -370,6 +370,17 @@ cron / CronJob / Cloud Scheduler):
 batch.NewContractRenewalProcessor(contractRepo, priceRepo, registry, clock, txManager, logger)
 batch.NewTrialExpirationProcessor(contractRepo, registry, clock, txManager, logger)
 batch.NewBalanceExpirationProcessor(balanceRepo, clock, txManager, logger) // forfeits expired credit (issue #159)
+// Cleans up stale Pending payment records (issue #98): scans
+// payment.Repository.FindStalePending, asks YOUR port.PendingPaymentReconciler
+// for a disposition (Keep → Skipped / MarkFailed → routed through
+// PaymentService.MarkPaymentFailed, preserving its hook semantics). The
+// gateway-state lookup lives in your reconciler (BYO boundary); the core never
+// queries the gateway here. invoiceRepo may be nil; staleAfter <= 0 falls back
+// to batch.DefaultStalePendingAfter (24h). No TxManager — the only write path
+// (MarkPaymentFailed) manages its own transaction. Dry runs report
+// DryRunActions with action "mark_failed". See
+// docs/internals/payment-gateway.md §6.6 (canonical).
+batch.NewStalePendingPaymentProcessor(paymentRepo, invoiceRepo, reconciler, paymentService, staleAfter, clock, logger)
 ```
 
 `InvoiceGenerator` / `PaymentRetry` / `UsageAggregator` are NOT shipped as

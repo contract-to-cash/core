@@ -136,6 +136,9 @@ func (m *mockPaymentRepo) FindByIdempotencyKey(_ context.Context, _ string) (*pa
 	}
 	return nil, nil
 }
+func (m *mockPaymentRepo) FindStalePending(_ context.Context, _ time.Time, _ int) ([]*payment.Payment, error) {
+	return nil, nil
+}
 
 type mockInvoiceRepoForPayment struct {
 	inv        *invoice.Invoice
@@ -1627,6 +1630,21 @@ func (r *fakePaymentRepo) FindByIdempotencyKey(_ context.Context, key string) (*
 		}
 	}
 	return nil, nil
+}
+
+func (r *fakePaymentRepo) FindStalePending(_ context.Context, olderThan time.Time, limit int) ([]*payment.Payment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var stale []*payment.Payment
+	for _, p := range r.byID {
+		if p.Status() == payment.PaymentStatusPending && p.ProcessedAt().Before(olderThan) {
+			stale = append(stale, p)
+		}
+	}
+	if limit > 0 && len(stale) > limit {
+		stale = stale[:limit]
+	}
+	return stale, nil
 }
 
 func (r *fakePaymentRepo) countCompleted() int {
@@ -3857,6 +3875,10 @@ func (r *conflictInjectingPaymentRepo) FindByInvoiceID(ctx context.Context, id s
 }
 func (r *conflictInjectingPaymentRepo) FindByIdempotencyKey(ctx context.Context, key string) (*payment.Payment, error) {
 	return r.inner.FindByIdempotencyKey(ctx, key)
+}
+
+func (r *conflictInjectingPaymentRepo) FindStalePending(ctx context.Context, olderThan time.Time, limit int) ([]*payment.Payment, error) {
+	return r.inner.FindStalePending(ctx, olderThan, limit)
 }
 
 // TestRefund_RetriesOnVersionConflict verifies that PaymentService.Refund

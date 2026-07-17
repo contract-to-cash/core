@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"time"
 
 	"github.com/contract-to-cash/core/domain/shared"
 )
@@ -88,4 +89,39 @@ type Repository interface {
 	// FindByIdempotencyKey returns a payment with the given idempotency key,
 	// or nil if not found. Used to prevent duplicate payment records on retry.
 	FindByIdempotencyKey(ctx context.Context, key string) (*Payment, error)
+
+	// FindStalePending returns payments that are still in Pending status and
+	// whose ProcessedAt() is strictly before olderThan. ProcessedAt is the
+	// staleness timestamp by contract: it is the charge-attempt time stamped at
+	// construction (NewPayment receives clock.Now()) and never advances — the
+	// Payment entity carries no separate createdAt/updatedAt — so "processed
+	// before olderThan and still Pending" is exactly the "nothing settled or
+	// failed this record for the whole window" predicate the stale-pending
+	// cleanup needs.
+	//
+	// This is the scan feeding batch.StalePendingPaymentProcessor (issue #98),
+	// the counterpart of balance.Repository.FindExpired for payments: it
+	// selects candidate ORPHANS — Pending records whose gateway transaction may
+	// have been reversed by saga compensation (compensation-after-3DS leaves
+	// the 3DS pending record permanently dangling) — for the integrator's
+	// PendingPaymentReconciler to classify. The repository does NOT decide
+	// whether a candidate is genuinely orphaned; it only applies the
+	// status+age filter.
+	//
+	// Contract:
+	//   - Only PaymentStatusPending rows are returned. Every other status is
+	//     excluded regardless of age.
+	//   - The cutoff is strict: ProcessedAt().Before(olderThan). A payment
+	//     processed exactly AT olderThan is not stale.
+	//   - Results are ordered by ProcessedAt ascending (oldest first) for
+	//     deterministic batch processing; the in-memory implementation breaks
+	//     ties by PaymentID ascending.
+	//   - limit bounds the number of rows returned (mirroring
+	//     balance.Repository.FindExpired): a positive limit returns at most
+	//     that many (oldest first, so repeated batch runs drain the backlog
+	//     deterministically); 0 or negative means "no limit". The cleanup
+	//     batch threads BatchOptions.Limit here.
+	//   - No matches is a non-error: return an empty (or nil) slice and a nil
+	//     error.
+	FindStalePending(ctx context.Context, olderThan time.Time, limit int) ([]*Payment, error)
 }

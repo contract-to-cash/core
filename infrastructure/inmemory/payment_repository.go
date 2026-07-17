@@ -3,7 +3,9 @@ package inmemory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
+	"time"
 
 	"github.com/contract-to-cash/core/application/tx"
 	"github.com/contract-to-cash/core/domain/payment"
@@ -135,6 +137,44 @@ func (r *InMemoryPaymentRepository) FindByInvoiceID(_ context.Context, invoiceID
 		}
 	}
 	return result, nil
+}
+
+// FindStalePending returns Pending payments whose ProcessedAt is strictly
+// before olderThan, ordered by ProcessedAt ascending (ties broken by PaymentID
+// ascending for determinism). A positive limit caps the result at the oldest
+// `limit` rows; 0 or negative means no limit. See payment.Repository for the
+// full contract (issue #98).
+//
+// Returns ISOLATED copies (snapshot round-trip), consistent with the other
+// finders (issue #152).
+func (r *InMemoryPaymentRepository) FindStalePending(_ context.Context, olderThan time.Time, limit int) ([]*payment.Payment, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var stale []*payment.Payment
+	for _, p := range r.payments {
+		if p.Status() != payment.PaymentStatusPending {
+			continue
+		}
+		if !p.ProcessedAt().Before(olderThan) {
+			continue
+		}
+		clone, err := clonePayment(p)
+		if err != nil {
+			return nil, err
+		}
+		stale = append(stale, clone)
+	}
+	sort.Slice(stale, func(i, j int) bool {
+		if stale[i].ProcessedAt().Equal(stale[j].ProcessedAt()) {
+			return stale[i].ID() < stale[j].ID()
+		}
+		return stale[i].ProcessedAt().Before(stale[j].ProcessedAt())
+	})
+	if limit > 0 && len(stale) > limit {
+		stale = stale[:limit]
+	}
+	return stale, nil
 }
 
 // FindByIdempotencyKey returns a payment with the given idempotency key, or nil if not found.
