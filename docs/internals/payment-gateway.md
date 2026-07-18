@@ -2180,6 +2180,10 @@ result, err := proc.Process(ctx, batch.BatchOptions{ContinueOnError: true, Limit
   決してしない — 遅延セトルメントを誤って failed にすると、後続の `SettlePayment` が
   `invalid_state_transition` で拒否される。
 - Keep が長期間続く場合はアラート対象（reconciler が判定材料を持っていない兆候）。
+- `MarkPaymentFailed` に渡す reason は `batch.StalePendingFailureReason`（エクスポート済み
+  定数）で、`OnPaymentFailedHook` 実装はこれを使ってバッチ由来のクリーンアップと本物の
+  決済失敗を区別できる（例: `strings.Contains(err.Error(), batch.StalePendingFailureReason)`
+  でこのケースだけダニング・ページングを抑止する）。
 
 **SemVer**: `FindStalePending`（インターフェースへのメソッド追加）は BYO リポジトリ
 実装者に対して **BREAKING**（pre-1.0 規約で CHANGELOG に明記）。port / batch の追加は

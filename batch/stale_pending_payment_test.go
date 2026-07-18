@@ -83,6 +83,17 @@ func (p *paymentFailedSpyPlugin) callCount() int {
 	return p.calls
 }
 
+// lastReason returns the error message from the most recent OnPaymentFailed
+// invocation ("" if none yet).
+func (p *paymentFailedSpyPlugin) lastReason() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.reasons) == 0 {
+		return ""
+	}
+	return p.reasons[len(p.reasons)-1]
+}
+
 // stalePendingEnv wires the processor against real in-memory repos and a real
 // PaymentService, so the MarkFailed disposition exercises the genuine
 // MarkPaymentFailed semantics (transition + post-commit OnPaymentFailed hooks).
@@ -200,8 +211,8 @@ func TestStalePendingPaymentProcessor_Orphan_MarkedFailedViaService(t *testing.T
 	if err != nil {
 		t.Fatalf("FindByID: %v", err)
 	}
-	if loaded.FailureReason() == nil || !strings.Contains(*loaded.FailureReason(), "issue #98") {
-		t.Errorf("failure reason must reference the reconciliation, got %v", loaded.FailureReason())
+	if loaded.FailureReason() == nil || !strings.Contains(*loaded.FailureReason(), StalePendingFailureReason) {
+		t.Errorf("failure reason must equal the exported StalePendingFailureReason, got %v", loaded.FailureReason())
 	}
 	// The fresh pending payment was never scanned or touched.
 	if got := env.paymentStatus(t, fresh.ID()); got != payment.PaymentStatusPending {
@@ -211,6 +222,14 @@ func TestStalePendingPaymentProcessor_Orphan_MarkedFailedViaService(t *testing.T
 	// path, not from the batch.
 	if got := env.failedSpy.callCount(); got != 1 {
 		t.Errorf("OnPaymentFailed calls = %d, want 1", got)
+	}
+	// The reason string reaching the OnPaymentFailedHook (via
+	// PaymentService.MarkPaymentFailed's error message) must contain the
+	// exported StalePendingFailureReason constant, so integrator hook
+	// implementations can filter batch-cleanup failures out of dunning/paging
+	// without substring-matching an unexported sentence.
+	if got := env.failedSpy.lastReason(); !strings.Contains(got, StalePendingFailureReason) {
+		t.Errorf("OnPaymentFailed reason must contain StalePendingFailureReason, got %q", got)
 	}
 	// The reconciler received the cheaply-loaded invoice.
 	if len(env.reconciler.sawInvoice) != 1 || !env.reconciler.sawInvoice[0] {

@@ -113,10 +113,12 @@ graph BT
     infra -.->|implements| invoice
     plugins["plugins/"] --> plugin
     infra -.->|"implements (coupon repository, #240)"| plugins
-    %% batch/ does NOT import application/service. Direct deps shown below;
-    %% it also imports domain/balance, domain/pricing, domain/shared directly
-    %% (edges omitted for readability).
-    batch["batch/"] --> tx["application/tx/"]
+    %% batch/ does NOT import application/service — it uses narrow seams
+    %% (e.g. batch.PendingPaymentFailer) instead. Direct deps shown below;
+    %% it also imports domain/invoice, domain/payment, domain/balance,
+    %% domain/pricing, domain/shared directly (edges omitted for readability).
+    batch["batch/"] --> port
+    batch --> tx["application/tx/"]
     batch --> plugin
     batch --> eventstore
     batch --> contract

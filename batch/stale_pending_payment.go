@@ -17,8 +17,10 @@ import (
 // StalePendingActionMarkFailed is the dry-run action label reported by
 // StalePendingPaymentProcessor in BatchResult.DryRunActions for a payment the
 // reconciler classified as an orphan (a real run would route it through
-// PaymentService.MarkPaymentFailed).
-const StalePendingActionMarkFailed = "mark_failed"
+// PaymentService.MarkPaymentFailed). Derived from port.PendingPaymentMarkFailed
+// so the two labels ("the reconciler's disposition" and "the dry-run action")
+// cannot drift apart into two separately-maintained "mark_failed" literals.
+const StalePendingActionMarkFailed = string(port.PendingPaymentMarkFailed)
 
 // DefaultStalePendingAfter is the staleness threshold used when
 // NewStalePendingPaymentProcessor receives a non-positive staleAfter. 24h is a
@@ -41,9 +43,18 @@ type PendingPaymentFailer interface {
 	MarkPaymentFailed(ctx context.Context, paymentID shared.PaymentID, reason string) (*payment.Payment, error)
 }
 
-// staleReconciledReason is the failure reason recorded on payments the
-// reconciler classified as orphans.
-const staleReconciledReason = "stale pending payment reconciled as orphaned: gateway shows the transaction was refunded/voided/expired (batch.StalePendingPaymentProcessor, issue #98)"
+// StalePendingFailureReason is the failure reason recorded on payments the
+// reconciler classified as orphans (passed as the reason string to
+// PaymentService.MarkPaymentFailed, which is what reaches integrator
+// OnPaymentFailedHook implementations via the returned error's message).
+//
+// Exported so hook implementations can distinguish this batch-driven cleanup
+// from a genuine payment failure without substring-matching an unexported
+// sentence: check strings.Contains(err.Error(), batch.StalePendingFailureReason)
+// (or errors.As to a *shared.DomainError and inspect its message) to, for
+// example, suppress dunning/paging for these orphan reconciliations while
+// still alerting on real OnPaymentFailed events.
+const StalePendingFailureReason = "stale pending payment reconciled as orphaned: gateway shows the transaction was refunded/voided/expired (batch.StalePendingPaymentProcessor, issue #98)"
 
 // StalePendingPaymentProcessor cleans up stale Pending payment records
 // (issue #98).
@@ -332,7 +343,7 @@ func (p *StalePendingPaymentProcessor) processOne(ctx context.Context, stale *pa
 			// orphan; report what a real run would do without side effects.
 			return port.PendingPaymentMarkFailed, nil
 		}
-		if _, failErr := p.failer.MarkPaymentFailed(ctx, stale.ID(), staleReconciledReason); failErr != nil {
+		if _, failErr := p.failer.MarkPaymentFailed(ctx, stale.ID(), StalePendingFailureReason); failErr != nil {
 			// A payment that left Pending between the scan and this call (e.g.
 			// a late settlement webhook completed it) is rejected by
 			// MarkPaymentFailed with invalid_state_transition — that is the
