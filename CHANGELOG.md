@@ -7,7 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Fixes from the 2026-07-12 objective review (#231–#246) and the follow-up merge
-review (money-path items #233/#234/#235, docs #237/#245/#246). Contains several
+review (money-path items #233/#234/#235, docs #237/#245/#246), plus the
+stale-pending-payment cleanup feature (#98). Contains several
 **BREAKING** changes, marked below per the pre-v1.0 convention; see the
 per-entry upgrade notes.
 

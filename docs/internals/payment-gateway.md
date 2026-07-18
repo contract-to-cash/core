@@ -2182,8 +2182,13 @@ result, err := proc.Process(ctx, batch.BatchOptions{ContinueOnError: true, Limit
 - Keep が長期間続く場合はアラート対象（reconciler が判定材料を持っていない兆候）。
 - `MarkPaymentFailed` に渡す reason は `batch.StalePendingFailureReason`（エクスポート済み
   定数）で、`OnPaymentFailedHook` 実装はこれを使ってバッチ由来のクリーンアップと本物の
-  決済失敗を区別できる（例: `strings.Contains(err.Error(), batch.StalePendingFailureReason)`
-  でこのケースだけダニング・ページングを抑止する）。
+  決済失敗を区別できる。推奨は**エンティティ側の照合**: entity は raw reason をそのまま
+  保持するため、`r := ctx.Payment().FailureReason(); r != nil && *r ==
+  batch.StalePendingFailureReason` で判定する（このケースだけダニング・ページングを
+  抑止する等）。フォールバックとして
+  `strings.Contains(err.Error(), batch.StalePendingFailureReason)` も一致する。
+  なお hook に渡る error は reason を埋め込んだ素の `fmt.Errorf` であり
+  `*shared.DomainError` では**ない**ため、`errors.As` ベースの照合は決して一致しない。
 
 **SemVer**: `FindStalePending`（インターフェースへのメソッド追加）は BYO リポジトリ
 実装者に対して **BREAKING**（pre-1.0 規約で CHANGELOG に明記）。port / batch の追加は

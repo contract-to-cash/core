@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"sync"
@@ -474,6 +475,93 @@ func TestStalePendingPaymentProcessor_Concurrent_MatchesSequential(t *testing.T)
 	}
 	if got := env.failedSpy.callCount(); got != 5 {
 		t.Errorf("OnPaymentFailed calls = %d, want 5", got)
+	}
+}
+
+// failingInvoiceRepo embeds invoice.Repository (nil — only FindByID is ever
+// called by processOne) and fails every lookup, simulating an invoice-side
+// outage during reconciliation.
+type failingInvoiceRepo struct {
+	invoice.Repository
+}
+
+func (r *failingInvoiceRepo) FindByID(_ context.Context, _ shared.InvoiceID) (*invoice.Invoice, error) {
+	return nil, errors.New("invoice store unavailable")
+}
+
+func TestStalePendingPaymentProcessor_InvoiceLookupFailure_ProcessesWithNilInvoiceAndWarns(t *testing.T) {
+	// An invoice-repo lookup FAILURE (not just a nil repo) must not block
+	// reconciliation of the payment: the item is still processed, the
+	// reconciler receives a nil invoice, and the failure is logged at Warn.
+	env := newStalePendingEnv(t)
+	orphan := env.seedPendingPayment(t, 48*time.Hour)
+	env.reconciler.byID = map[shared.PaymentID]port.PendingPaymentDisposition{
+		orphan.ID(): port.PendingPaymentMarkFailed,
+	}
+
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	proc := NewStalePendingPaymentProcessor(
+		env.paymentRepo, &failingInvoiceRepo{}, env.reconciler, env.svc, 24*time.Hour, env.clock, logger,
+	)
+	result, err := proc.Process(context.Background(), BatchOptions{})
+	if err != nil {
+		t.Fatalf("Process failed: %v", err)
+	}
+	// The lookup failure is best-effort context loss, not an item failure.
+	if result.Total != 1 || result.Succeeded != 1 || result.Failed != 0 || result.Skipped != 0 {
+		t.Fatalf("invoice lookup failure must not fail the item, got %+v", result)
+	}
+	// The reconciler was consulted and received a nil invoice.
+	if len(env.reconciler.sawInvoice) != 1 || env.reconciler.sawInvoice[0] {
+		t.Errorf("reconciler must receive a nil invoice on lookup failure, saw %v", env.reconciler.sawInvoice)
+	}
+	// The disposition was still applied through the real service.
+	if got := env.paymentStatus(t, orphan.ID()); got != payment.PaymentStatusFailed {
+		t.Errorf("orphan status = %s, want failed", got)
+	}
+	// The failure was logged at Warn with the payment/invoice identifiers.
+	logged := logBuf.String()
+	if !strings.Contains(logged, "invoice lookup failed for stale pending payment") {
+		t.Errorf("expected a Warn log about the invoice lookup failure, got logs:\n%s", logged)
+	}
+	if !strings.Contains(logged, string(orphan.ID())) {
+		t.Errorf("the Warn log must name the payment, got logs:\n%s", logged)
+	}
+}
+
+func TestStalePendingPaymentProcessor_NonPositiveStaleAfter_UsesDefault(t *testing.T) {
+	// A non-positive staleAfter at construction falls back to
+	// DefaultStalePendingAfter (24h). Pinned two ways: the stored threshold,
+	// and the scan cutoff behavior under the FixedClock — a payment older than
+	// 24h is scanned, one younger is not.
+	for _, staleAfter := range []time.Duration{0, -time.Hour} {
+		t.Run(fmt.Sprintf("staleAfter=%s", staleAfter), func(t *testing.T) {
+			env := newStalePendingEnv(t)
+			stale := env.seedPendingPayment(t, 25*time.Hour) // older than the 24h default → scanned
+			young := env.seedPendingPayment(t, 23*time.Hour) // younger → never scanned
+			env.reconciler.defaultDisposition = port.PendingPaymentMarkFailed
+
+			proc := env.newProcessor(t, staleAfter)
+			if proc.staleAfter != DefaultStalePendingAfter {
+				t.Fatalf("staleAfter = %s, want DefaultStalePendingAfter (%s)", proc.staleAfter, DefaultStalePendingAfter)
+			}
+
+			result, err := proc.Process(context.Background(), BatchOptions{})
+			if err != nil {
+				t.Fatalf("Process failed: %v", err)
+			}
+			if result.Total != 1 || result.Succeeded != 1 {
+				t.Fatalf("only the >24h payment must be scanned under the default threshold, got %+v", result)
+			}
+			if got := env.paymentStatus(t, stale.ID()); got != payment.PaymentStatusFailed {
+				t.Errorf("stale payment status = %s, want failed", got)
+			}
+			if got := env.paymentStatus(t, young.ID()); got != payment.PaymentStatusPending {
+				t.Errorf("younger-than-default payment status = %s, want pending (not scanned)", got)
+			}
+		})
 	}
 }
 

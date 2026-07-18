@@ -24,9 +24,12 @@ const StalePendingActionMarkFailed = string(port.PendingPaymentMarkFailed)
 
 // DefaultStalePendingAfter is the staleness threshold used when
 // NewStalePendingPaymentProcessor receives a non-positive staleAfter. 24h is a
-// conservative floor: it exceeds every shipped gateway's synchronous-settlement
-// horizon and typical 3DS challenge windows, so a Pending record younger than
-// this is plausibly still in flight and not worth a reconciliation lookup.
+// safe FLOOR, not a recommendation: a Keep disposition is a no-op (the record
+// is re-evaluated next run), so scanning a still-in-flight payment early costs
+// only a reconciliation lookup. Integrations handling asynchronous payment
+// instruments (konbini slips, bank-transfer windows — legitimately pending for
+// 14+ days) should configure an explicitly longer staleAfter per the
+// operational guidance in payment-gateway.md §6.6.4.
 const DefaultStalePendingAfter = 24 * time.Hour
 
 // PendingPaymentFailer is the narrow seam through which the processor applies
@@ -45,15 +48,25 @@ type PendingPaymentFailer interface {
 
 // StalePendingFailureReason is the failure reason recorded on payments the
 // reconciler classified as orphans (passed as the reason string to
-// PaymentService.MarkPaymentFailed, which is what reaches integrator
-// OnPaymentFailedHook implementations via the returned error's message).
+// PaymentService.MarkPaymentFailed, which stores it verbatim on the entity
+// via Payment.Fail and embeds it in the error passed to integrator
+// OnPaymentFailedHook implementations).
 //
 // Exported so hook implementations can distinguish this batch-driven cleanup
-// from a genuine payment failure without substring-matching an unexported
-// sentence: check strings.Contains(err.Error(), batch.StalePendingFailureReason)
-// (or errors.As to a *shared.DomainError and inspect its message) to, for
-// example, suppress dunning/paging for these orphan reconciliations while
-// still alerting on real OnPaymentFailed events.
+// from a genuine payment failure — for example, to suppress dunning/paging
+// for these orphan reconciliations while still alerting on real
+// OnPaymentFailed events. Recommended check: the entity stores the raw
+// reason, so compare it directly:
+//
+//	if r := ctx.Payment().FailureReason(); r != nil && *r == batch.StalePendingFailureReason {
+//	    // batch-driven orphan cleanup, not a genuine failure
+//	}
+//
+// As a fallback (when only the hook's error argument is at hand),
+// strings.Contains(err.Error(), batch.StalePendingFailureReason) also
+// matches. Do NOT use errors.As to *shared.DomainError for this: the error
+// MarkPaymentFailed passes to OnPaymentFailedHook is a plain fmt.Errorf
+// wrapping the reason string, so errors.As never matches it.
 const StalePendingFailureReason = "stale pending payment reconciled as orphaned: gateway shows the transaction was refunded/voided/expired (batch.StalePendingPaymentProcessor, issue #98)"
 
 // StalePendingPaymentProcessor cleans up stale Pending payment records
