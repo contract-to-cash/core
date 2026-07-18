@@ -1724,7 +1724,6 @@ func TestRegenerateInvoice_VoidedAndNonVoidedExist_DuplicateBlocked(t *testing.T
 	draftInv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), agg.AccountID(), agg.ContractID(),
 		jpy(1000), jpy(0), jpy(0),
-		invoice.WithStatus(invoice.InvoiceStatusDraft),
 		invoice.WithBillingPeriod(period),
 	)
 	if err != nil {
@@ -2128,7 +2127,6 @@ func newDraftInvoiceForFinalize(t *testing.T) *invoice.Invoice {
 		shared.NewAccountID(),
 		shared.NewContractID(),
 		jpy(10000), jpy(0), jpy(0),
-		invoice.WithStatus(invoice.InvoiceStatusDraft),
 	)
 	if err != nil {
 		t.Fatalf("failed to create draft invoice: %v", err)

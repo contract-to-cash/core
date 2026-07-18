@@ -802,7 +802,6 @@ func (s *BillingService) executeBillingPipeline(ctx context.Context, input pipel
 		dueDate := now.AddDate(0, 0, s.config.effectiveDaysUntilDue())
 
 		invOpts := []invoice.InvoiceOption{
-			invoice.WithStatus(invoice.InvoiceStatusDraft),
 			invoice.WithBillingPeriod(input.period),
 			invoice.WithDueDate(dueDate),
 			invoice.WithAppliedBalance(appliedBalance),

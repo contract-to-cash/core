@@ -107,11 +107,19 @@ graph BT
     appService --> plugin
     appService --> eventstore
     port["application/port/"] --> shared
+    port --> invoice
+    port --> payment
     infra["infrastructure/inmemory/"] -.->|implements| contract
     infra -.->|implements| invoice
     plugins["plugins/"] --> plugin
     infra -.->|"implements (coupon repository, #240)"| plugins
-    batch["batch/"] --> appService
+    %% batch/ does NOT import application/service. Direct deps shown below;
+    %% it also imports domain/balance, domain/pricing, domain/shared directly
+    %% (edges omitted for readability).
+    batch["batch/"] --> tx["application/tx/"]
+    batch --> plugin
+    batch --> eventstore
+    batch --> contract
 ```
 
 ### 2.3 CQRS (Command Query Responsibility Segregation)

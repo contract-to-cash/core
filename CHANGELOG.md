@@ -59,16 +59,21 @@ per-entry upgrade notes.
   mirroring the constructor invariants, for validating persisted/literal models.
 - **`tx.InTransaction(ctx)`** — intent-revealing probe for "running inside a caller's
   transaction" (used by the #233 joined-tx guards).
-- **`projection.ErrSubscriptionClosed` (#246)** — `ProjectionService.Start` now returns
-  this sentinel when the subscription channel closes while the context is live
+- **BREAKING — `projection.ErrSubscriptionClosed` (#246)** — `ProjectionService.Start` now
+  returns this sentinel when the subscription channel closes while the context is live
   (previously `nil`, indistinguishable from graceful shutdown); a close after
-  cancellation consistently returns `ctx.Err()`.
-- **`batch.BatchResult.Skipped` + `DryRunActions` (#242)** — result accounting invariant
-  `Total == Succeeded + Failed + Skipped`; renewal dry-runs now mirror the real run's
-  classification (`renew`/`expire`/`cancel` actions) instead of reporting
+  cancellation consistently returns `ctx.Err()`. Consumers that treated `err == nil` from
+  `Start` as graceful shutdown now receive this non-nil sentinel on an abnormal channel
+  close.
+- **BREAKING — `batch.BatchResult.Skipped` + `DryRunActions` (#242)** — result accounting
+  invariant `Total == Succeeded + Failed + Skipped`; renewal dry-runs now mirror the real
+  run's classification (`renew`/`expire`/`cancel` actions) instead of reporting
   `cancelAtPeriodEnd`/`autoRenew=false` contracts as failures. External context
   cancellation now surfaces as a non-nil error from `Process` (previously a cancelled
-  run could look like a clean one).
+  run could look like a clean one). `Process` now returns `ctx.Err()` on external
+  cancellation (previously `nil`), and dry runs reclassify `cancelAtPeriodEnd`/
+  `autoRenew=false` contracts from `Failed` to would-succeed, so alerting keyed on
+  `BatchResult.Failed` or on `Process`'s error return changes behavior on upgrade.
 
 ### Changed
 
@@ -131,6 +136,10 @@ per-entry upgrade notes.
   transaction (it manages its own bookkeeping transaction).
 - **`DateRange.Next` / `AddBillingCycleDuration` deprecated (#244)** — they silently
   default unknown cycle strings to monthly; use `pricing.BillingInterval`.
+- **`invoice.WithStatus` deprecated** — non-breaking: since #238 it only accepts
+  `InvoiceStatusDraft`, which is already `NewInvoice`'s default, so the option is now a
+  documented no-op retained for source compatibility. Construct with `NewInvoice` and
+  drive the invoice through its real state-transition methods instead.
 
 ### Fixed
 

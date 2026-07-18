@@ -182,6 +182,12 @@ type InvoiceOption func(*Invoice)
 // MarkIssued, MarkOverdue, RecordPayment, Void, VoidWithReason, MarkRefunded);
 // persistence adapters reconstitute historical statuses via
 // InvoiceFromSnapshot, which is exempt by design.
+//
+// Deprecated: since #238 the only accepted value is InvoiceStatusDraft, which
+// is already NewInvoice's default, so this option is now a no-op for valid
+// callers. Construct with NewInvoice (status defaults to draft) and use the
+// real state-transition methods to reach any other status. Retained
+// pre-1.0 for source compatibility; not removed.
 func WithStatus(s InvoiceStatus) InvoiceOption {
 	return func(inv *Invoice) {
 		if s != InvoiceStatusDraft {

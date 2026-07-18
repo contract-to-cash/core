@@ -71,7 +71,6 @@ func TestFinalizeInvoice_ConcurrentFinalize_SingleWinner_Integration(t *testing.
 	inv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
 		moneyJPY(10000), moneyJPY(0), moneyJPY(0),
-		invoice.WithStatus(invoice.InvoiceStatusDraft),
 	)
 	if err != nil {
 		t.Fatalf("NewInvoice failed: %v", err)
