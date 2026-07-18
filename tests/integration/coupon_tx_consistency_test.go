@@ -17,6 +17,15 @@ import (
 	"github.com/contract-to-cash/core/plugins/coupon"
 )
 
+// mustCoupon unwraps NewCoupon's (coupon, error) for fixtures whose inputs are
+// known-valid (the nil-value guard is unit-tested in plugins/coupon).
+func mustCoupon(c *coupon.Coupon, err error) *coupon.Coupon {
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
 // These tests exercise issue #185: coupon redemption must not be persisted as a
 // side effect of the discount CALCULATION hook (which runs before the billing
 // transaction). Redemptions are confirmed idempotently in AfterCalculation,
@@ -26,103 +35,35 @@ import (
 //	(ii)  a retry / RegenerateInvoice for the same period consumes exactly one,
 //	(iii) concurrent confirmations of the same key collapse to one redemption.
 
-// --- Idempotent in-memory coupon repository ---
+// --- Coupon repository: canonical inmemory implementation + test helpers ---
 
+// integrationCouponRepo embeds the canonical inmemory.InMemoryCouponRepository
+// (the reference implementation of the atomic SaveRedemption contract, issue
+// #240) and adds only the tiny helpers these tests need. The bespoke
+// implementation this replaces duplicated the same (a) idempotency /
+// (b) atomic limit / (c) insert sequence.
 type integrationCouponRepo struct {
-	mu          sync.Mutex
-	coupons     []*coupon.Coupon
-	redemptions map[string]*coupon.Redemption // IdempotencyKey -> redemption
+	*inmemory.InMemoryCouponRepository
 }
 
 func newIntegrationCouponRepo() *integrationCouponRepo {
-	return &integrationCouponRepo{redemptions: make(map[string]*coupon.Redemption)}
+	return &integrationCouponRepo{inmemory.NewInMemoryCouponRepository()}
 }
 
-func (r *integrationCouponRepo) add(c *coupon.Coupon) { r.coupons = append(r.coupons, c) }
-
-func (r *integrationCouponRepo) FindByCode(_ context.Context, code string) (*coupon.Coupon, error) {
-	for _, c := range r.coupons {
-		if c.Code() == code {
-			return c, nil
-		}
+func (r *integrationCouponRepo) add(c *coupon.Coupon) {
+	if err := r.Save(context.Background(), c); err != nil {
+		panic(fmt.Sprintf("save coupon: %v", err))
 	}
-	return nil, nil
 }
 
-func (r *integrationCouponRepo) FindApplicable(_ context.Context, _ coupon.CouponQuery) ([]*coupon.Coupon, error) {
-	return r.coupons, nil
-}
-
-func (r *integrationCouponRepo) Save(_ context.Context, _ *coupon.Coupon) error { return nil }
-
-// SaveRedemption atomically deduplicates on (coupon, contract, billing period)
-// and enforces usage limits under a single lock (issues #185, #195).
-func (r *integrationCouponRepo) SaveRedemption(_ context.Context, redemption *coupon.Redemption, limits coupon.RedemptionLimits) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	key := redemption.IdempotencyKey()
-	if _, exists := r.redemptions[key]; exists {
-		return nil // (a) idempotent no-op
-	}
-	// (b) atomic limit check against existing distinct rows.
-	if limits.GlobalLimit != nil {
-		if limits.GlobalBaseline+r.countLocked(redemption.CouponID(), nil) >= *limits.GlobalLimit {
-			return coupon.ErrUsageLimitReached
-		}
-	}
-	if limits.PerAccountLimit != nil {
-		acct := redemption.AccountID()
-		if r.countLocked(redemption.CouponID(), &acct) >= *limits.PerAccountLimit {
-			return coupon.ErrUsageLimitReached
-		}
-	}
-	// (c) insert
-	r.redemptions[key] = redemption
-	return nil
-}
-
-// countLocked counts distinct redemptions of a coupon (optionally filtered to an
-// account). Callers must hold r.mu.
-func (r *integrationCouponRepo) countLocked(couponID coupon.CouponID, accountID *shared.AccountID) int {
-	n := 0
-	for _, rd := range r.redemptions {
-		if rd.CouponID() != couponID {
-			continue
-		}
-		if accountID != nil && rd.AccountID() != *accountID {
-			continue
-		}
-		n++
-	}
-	return n
-}
-
-func (r *integrationCouponRepo) FindRedemptions(_ context.Context, couponID coupon.CouponID, accountID *shared.AccountID) ([]*coupon.Redemption, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var result []*coupon.Redemption
-	for _, rd := range r.redemptions {
-		if rd.CouponID() != couponID {
-			continue
-		}
-		if accountID != nil && rd.AccountID() != *accountID {
-			continue
-		}
-		result = append(result, rd)
-	}
-	return result, nil
-}
-
+// countFor returns the number of confirmed redemption rows for a coupon —
+// the tests' usage-count oracle, reconciled from rows per issue #185.
 func (r *integrationCouponRepo) countFor(couponID coupon.CouponID) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	n := 0
-	for _, rd := range r.redemptions {
-		if rd.CouponID() == couponID {
-			n++
-		}
+	rows, err := r.FindRedemptions(context.Background(), couponID, nil)
+	if err != nil {
+		panic(fmt.Sprintf("find redemptions: %v", err))
 	}
-	return n
+	return len(rows)
 }
 
 // --- Invoice repository that fails Save a fixed number of times ---
@@ -182,13 +123,13 @@ func newCouponBillingService(
 func tenPercentCoupon(clock shared.Clock) *coupon.Coupon {
 	usageLimit := 5
 	now := clock.Now()
-	return coupon.NewCoupon(
+	return mustCoupon(coupon.NewCoupon(
 		"cpn-185", "SAVE10", coupon.CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		now.AddDate(-1, 0, 0), now.AddDate(1, 0, 0),
 		&usageLimit, 0, nil,
-	).WithPerAccountUsageLimit(1)
+	)).WithPerAccountUsageLimit(1)
 }
 
 // Invariant (i) + (ii): a billing pipeline that fails after the discount hook
@@ -277,13 +218,13 @@ func TestCouponRedemption_RegenerateSamePeriod_NoDoubleRedeem(t *testing.T) {
 func globalLimitOneCoupon(clock shared.Clock) *coupon.Coupon {
 	usageLimit := 1
 	now := clock.Now()
-	return coupon.NewCoupon(
+	return mustCoupon(coupon.NewCoupon(
 		"cpn-195", "SAVE10", coupon.CouponTypePercentage,
 		big.NewRat(10, 100), shared.CurrencyJPY,
 		nil, nil,
 		now.AddDate(-1, 0, 0), now.AddDate(1, 0, 0),
 		&usageLimit, 0, nil,
-	)
+	))
 }
 
 // Issue #195: two concurrent GenerateInvoice runs for DIFFERENT contracts against

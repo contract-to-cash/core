@@ -246,3 +246,74 @@ func TestPayment_PointerIndependence(t *testing.T) {
 		t.Error("FromSnapshot: Metadata map was shared")
 	}
 }
+
+// TestPaymentSnapshot_RefundsLedgerRoundTrip verifies the per-refund key
+// ledger (issue #235 follow-up) survives the snapshot round-trip, and that a
+// snapshot missing the ledger (an adapter persisted before the field existed)
+// rehydrates to an INCOMPLETE ledger so the refund classification falls back
+// to the conservative conflict.
+func TestPaymentSnapshot_RefundsLedgerRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	p, err := NewPayment(
+		shared.NewPaymentID(),
+		shared.NewInvoiceID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		PaymentMethodCreditCard,
+		"txn-ledger-snap",
+		time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("NewPayment: %v", err)
+	}
+	if err := p.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if err := p.RecordRefundWithKey(shared.NewMoney(big.NewRat(3000, 1), shared.CurrencyJPY), "key-a"); err != nil {
+		t.Fatalf("RecordRefundWithKey: %v", err)
+	}
+	if err := p.RecordRefundWithKey(shared.NewMoney(big.NewRat(2000, 1), shared.CurrencyJPY), "key-b"); err != nil {
+		t.Fatalf("RecordRefundWithKey: %v", err)
+	}
+
+	restored, err := FromSnapshot(p.ToSnapshot())
+	if err != nil {
+		t.Fatalf("FromSnapshot: %v", err)
+	}
+	refunds := restored.Refunds()
+	if len(refunds) != 2 {
+		t.Fatalf("expected 2 refund entries after round-trip, got %d", len(refunds))
+	}
+	if refunds[0].IdempotencyKey != "key-a" || refunds[1].IdempotencyKey != "key-b" {
+		t.Errorf("refund keys lost in round-trip: %+v", refunds)
+	}
+	if !restored.HasRefundWithIdempotencyKey("key-b") {
+		t.Error("HasRefundWithIdempotencyKey must see round-tripped entries")
+	}
+	if !restored.RefundKeysComplete() {
+		t.Error("a fully-keyed round-tripped ledger must be complete")
+	}
+
+	// Snapshot isolation: mutating the snapshot's Refunds slice must not
+	// affect the source payment.
+	snap := p.ToSnapshot()
+	snap.Refunds[0].IdempotencyKey = "mutated"
+	if !p.HasRefundWithIdempotencyKey("key-a") {
+		t.Error("mutating the snapshot must not affect the source payment")
+	}
+
+	// Adapter that never persisted the ledger: cumulative total present,
+	// entries absent → incomplete ledger.
+	legacy := p.ToSnapshot()
+	legacy.Refunds = nil
+	restoredLegacy, err := FromSnapshot(legacy)
+	if err != nil {
+		t.Fatalf("FromSnapshot(legacy): %v", err)
+	}
+	if restoredLegacy.RefundKeysComplete() {
+		t.Error("cumulative refunded total without matching entries must be incomplete")
+	}
+	if restoredLegacy.HasRefundWithIdempotencyKey("key-a") {
+		t.Error("legacy snapshot has no entries; no key may match")
+	}
+}

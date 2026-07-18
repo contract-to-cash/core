@@ -6,6 +6,265 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Fixes from the 2026-07-12 objective review (#231–#246) and the follow-up merge
+review (money-path items #233/#234/#235, docs #237/#245/#246). Contains several
+**BREAKING** changes, marked below per the pre-v1.0 convention; see the
+per-entry upgrade notes.
+
+### Added
+
+- **Per-refund idempotency-key ledger on `Payment` (#235 review)** —
+  `payment.RefundEntry`, `Payment.RecordRefundWithKey(amount, key)`,
+  `Payment.Refunds()`, `Payment.HasRefundWithIdempotencyKey(key)`,
+  `Payment.RefundKeysComplete()`, and the `PaymentSnapshot.Refunds` field. Every
+  refund recorded through `PaymentService.Refund` now stores the gateway
+  idempotency key it was executed under, which is what makes the refund
+  convergence classification exact (see Fixed). The legacy keyless
+  `Payment.RecordRefund` remains and marks the ledger incomplete.
+  **Upgrade note for BYO persistence adapters**: persist and rehydrate
+  `PaymentSnapshot.Refunds`. Not persisting it is safe but degrades — payments
+  with refund history then classify concurrent advances as a conservative
+  `ErrCodeConflict` instead of recording (see Fixed).
+- **`plugin.CompensationReasonIdempotencyConflict` (#234 review)** — new
+  `CompensationReason` value reported to `OnCompensationExecutedHook` when saga
+  compensation was triggered by the in-tx idempotency conflict with a `Failed`
+  payment record (a pre-charge-lookup race). Previously this path was
+  mislabeled `local_save_failed` even though no Save was ever attempted; the
+  caller-facing error now also names the collision ("idempotency key collided
+  with a failed payment record (gateway charge reversed)") instead of claiming
+  a local save failure. Additive — Minor.
+
+- **`port.CustomerIDResolver` + `WithCustomerIDResolver` (#231)** — `PaymentService` now
+  resolves the gateway-side customer ID before `Charge`/`GetCustomer` instead of passing
+  the internal `AccountID` verbatim. Unwired, the identity fallback preserves existing
+  behavior — but it only suits gateways that accept caller-chosen customer IDs; Stripe-style
+  ID-minting gateways MUST wire a resolver. Resolver errors abort before the gateway call.
+- **`infrastructure/inmemory.CouponRepository` (#240)** — shipped reference implementation
+  of the atomic `SaveRedemption` contract ((a) idempotent same-key no-op, (b) atomic limit
+  enforcement with `ErrUsageLimitReached`, (c) insert — all under one mutex), with
+  concurrency tests. The e2e/integration/example bespoke copies now delegate to it.
+- **`plugin.Config.Int` / `plugin.Config.Bool` (#239)** — type-coercing config readers
+  (accept `int` and integral JSON `float64`; descriptive error on mismatch). Official
+  plugins now use them and **return an error from `Initialize` on mistyped values**
+  instead of silently applying defaults (**BREAKING** — a config typo now fails startup
+  loudly; see the Changed entry).
+- **`plugin.FireNonFatal`** — exported composition of `SafeInvoke` +
+  `LogNonFatalHookError` for integrator-fired lifecycle hooks (the §5.4 pattern);
+  the hosting demo now uses it.
+- **`Invoice.ParticipatesInPeriodUniqueness()`** — single-source predicate for the
+  period-uniqueness contract (not voided / not proration / non-zero period), used by the
+  billing-service guards, the in-memory repository, and referenced by the
+  `invoice.Repository.Save` contract docs.
+- **`TieredPrice.Validate()` / `UsagePrice.Validate()` (#238)** — graceful pre-checks
+  mirroring the constructor invariants, for validating persisted/literal models.
+- **`tx.InTransaction(ctx)`** — intent-revealing probe for "running inside a caller's
+  transaction" (used by the #233 joined-tx guards).
+- **BREAKING — `projection.ErrSubscriptionClosed` (#246)** — `ProjectionService.Start` now
+  returns this sentinel when the subscription channel closes while the context is live
+  (previously `nil`, indistinguishable from graceful shutdown); a close after
+  cancellation consistently returns `ctx.Err()`. Consumers that treated `err == nil` from
+  `Start` as graceful shutdown now receive this non-nil sentinel on an abnormal channel
+  close.
+- **BREAKING — `batch.BatchResult.Skipped` + `DryRunActions` (#242)** — result accounting
+  invariant `Total == Succeeded + Failed + Skipped`; renewal dry-runs now mirror the real
+  run's classification (`renew`/`expire`/`cancel` actions) instead of reporting
+  `cancelAtPeriodEnd`/`autoRenew=false` contracts as failures. External context
+  cancellation now surfaces as a non-nil error from `Process` (previously a cancelled
+  run could look like a clean one). `Process` now returns `ctx.Err()` on external
+  cancellation (previously `nil`), and dry runs reclassify `cancelAtPeriodEnd`/
+  `autoRenew=false` contracts from `Failed` to would-succeed, so alerting keyed on
+  `BatchResult.Failed` or on `Process`'s error return changes behavior on upgrade.
+
+### Changed
+
+- **BREAKING — `ProcessPayment` rejects an empty `IdempotencyKey` (#241)** with
+  `ErrCodeValidation` before any work. Previously an empty key silently disabled every
+  dedup layer (a retried request double-charged). Callers must supply a key; the e2e
+  harness shows the pattern.
+- **BREAKING — refund idempotency keys now bind the amount (#235)**:
+  `refund-<paymentID>-<currency>-<prior>-<amount>` (was `...-<prior>`), and `Refund` now
+  guarantees **at most one gateway movement per invocation**: the gateway is called once
+  before the recording transaction; concurrent same-amount duplicates collapse to a single
+  movement (the loser gets `ErrCodeConflict`); concurrent distinct amounts are both real
+  and both recorded; explicit-key conflicts are never recorded and log a
+  MANUAL RECONCILIATION error. **Upgrade note**: the key format changed — a refund left
+  ambiguous across the deploy (gateway moved money, local record failed) must be verified
+  at the gateway before retrying, because the retry will derive a fresh key.
+- **BREAKING — `NewInvoice(..., WithStatus(s))` errors for `s != draft` (#238)** —
+  non-draft statuses carry state construction cannot supply (paid amounts, void reasons),
+  so minting them created invariant-violating invoices. Persistence adapters keep using
+  `InvoiceFromSnapshot`; tests use real transitions.
+- **BREAKING — `NewInvoice(..., WithRevisionOf(id))` / `WithOriginalInvoiceID(id)` reject a
+  self-reference (#238)** — an invoice can no longer be constructed as a revision (or
+  reissue) of itself; `NewInvoice` returns `ErrCodeValidation` when either option carries
+  the invoice's own ID. A self-referencing revision link corrupted the revision chain
+  (walking `revisionOf`/`originalInvoiceID` loops forever). Consumers that passed the same
+  ID (always a bug) must pass the actual predecessor's ID.
+- **BREAKING — official plugins reject mistyped `Initialize` config values (#239)** — a
+  config typo (e.g. a string where an int is expected) that previously ran silently with
+  the default value now fails `Registry.InitializeAll` at startup with a descriptive error
+  naming the key. JSON-loaded numeric values (integral `float64`) remain accepted via
+  `plugin.Config.Int`. Fix the config value's type to upgrade.
+- **BREAKING — `coupon.NewCoupon` returns `(*Coupon, error)` (#244)** and rejects a nil
+  value, so a nil-value coupon fails at construction instead of panicking inside the
+  billing pipeline.
+- **BREAKING — `Money.Multiply(nil)` panics (#244)** instead of silently returning zero
+  (a nil rate is a caller bug that previously produced a silent zero charge). The official
+  tax plugin guards its `TaxCalculator` contract and returns a clean `ErrCodeBusinessRule`
+  error for a nil rate — custom `TaxCalculator`s must return `big.NewRat(0,1)` for
+  "no tax", never nil.
+- **BREAKING — struct-literal `TieredPrice`/`UsagePrice` bypasses now fail loudly (#238)**:
+  `CalculatePrice` validates tier ordering and clamp currencies (previously produced
+  silently wrong amounts, e.g. a wrong-currency `Maximum` was ignored and usage bills
+  sailed past their cap). The billing pipeline converts a poisoned *persisted* price into
+  a per-contract `DomainError` naming the price (no process crash); direct misuse panics
+  per the documented policy.
+- **BREAKING — `Contract.Create` validates `ContractType` (#243)** — unknown/empty types are
+  rejected at command intake with `ErrCodeValidation` (previously persisted uncorrectably and
+  failed at first invoice). `ContractType` is an open string type, so consumers that passed
+  custom values (which previously flowed through) now get a validation error; use the
+  shipped `one_time` / `subscription` / `usage_based` constants.
+- **BREAKING — `Refund` rejects invocation inside a caller-owned transaction
+  (#233 follow-up)** — when `tx.InTransaction(ctx)` is true, `PaymentService.Refund`
+  now returns an `ErrCodeBusinessRule` DomainError up front, BEFORE any gateway
+  call. Previously it joined the outer transaction; after a version conflict its
+  `RetryOnConflict` re-joined the aborted outer tx (Postgres 25P02) on every
+  attempt and surfaced a mislabeled, non-convergent "local save failed after
+  gateway refund (MANUAL RECONCILIATION REQUIRED)" — after real money had moved.
+  Callers that invoked `Refund` inside their own transaction now get a
+  money-safe, deterministic upfront rejection instead: call `Refund` outside the
+  transaction (it manages its own bookkeeping transaction).
+- **`DateRange.Next` / `AddBillingCycleDuration` deprecated (#244)** — they silently
+  default unknown cycle strings to monthly; use `pricing.BillingInterval`.
+- **`invoice.WithStatus` deprecated** — non-breaking: since #238 it only accepts
+  `InvoiceStatusDraft`, which is already `NewInvoice`'s default, so the option is now a
+  documented no-op retained for source compatibility. Construct with `NewInvoice` and
+  drive the invoice through its real state-transition methods instead.
+
+### Fixed
+
+- **BREAKING — refund convergence can no longer book a phantom refund under
+  3+ concurrent writers (#235 review)** — the old classification reasoned from
+  the cumulative refunded total alone, so with three racing refunds
+  A(3000)/B(3000)/C(2000) all loading prior=0 and committing A→C→B, the
+  replayed B observed an advance of 5000, was misclassified as "real movement",
+  and recorded 3000 the gateway never moved (ledger 8000 vs gateway 5000,
+  silently). `Refund` now matches this invocation's exact gateway key against
+  the payment's per-refund key ledger: a recorded refund carrying the key
+  proves a no-movement replay (conflict, no record); an absent key with a
+  COMPLETE ledger proves a real movement (recorded). The invariant is now
+  strict: **no path records an amount the gateway did not move**. BREAKING
+  edges: (1) payments whose refund history lacks complete keys (pre-upgrade
+  data, keyless `RecordRefund` bookkeeping) get a conservative
+  `ErrCodeConflict` + MANUAL RECONCILIATION error log on concurrent advances
+  where the old code recorded; (2) re-invoking `Refund` with an explicit key
+  that is already recorded now returns `ErrCodeConflict` instead of silently
+  double-booking the gateway's replay.
+- **BREAKING — Duplicate-key convergence now dispatches on the winner's status
+  (#234 review)** — the race loser previously returned whatever record the
+  winner wrote as unconditional success: a PENDING winner (3DS
+  requires_action / async settlement) was returned as `(payment, nil)` and the
+  loser fired `AfterCharge`/`OnPaymentProcessed` for a non-Completed payment.
+  Now: Completed → success (unchanged); Pending → `(pendingPayment,
+  ErrPaymentPending)` with no success hooks and no outbox fire (same result
+  shape as the first caller's pending path); Failed/Refunded/
+  PartiallyRefunded/ChargedBack → `ErrCodeConflict`. The dispatch matches the
+  pre-charge terminal short-circuit, and matches the in-tx idempotency switch
+  for every status EXCEPT Failed: the in-tx switch COMPENSATES a Failed
+  collision (the just-made charge is provably real and unbacked), while the
+  converger deliberately does not — its evidence is contradictory (the
+  loser's same-key Charge response vs the winner's keyed Failed record), and
+  compensating on that ambiguity could reverse money that never moved. The
+  Failed-winner branch instead emits an Error-level MANUAL RECONCILIATION log
+  (a possibly-unbacked captured charge may exist; verify gateway state for
+  the key) with payment/invoice/key identifiers. A winner in a status this
+  code does not recognize (a future `PaymentStatus` value) also fails closed
+  with `ErrCodeConflict` instead of converging as success. No branch fires
+  saga compensation. Applies to both the gateway and zero-amount call sites.
+  BREAKING: a race-losing `ProcessPayment` that previously returned
+  `(payment, nil)` for a Pending winner now returns
+  `(winner, ErrPaymentPending)` — consumers that treated a nil error as
+  proof of payment must handle the sentinel.
+- **Duplicate-invoice guards now exempt proration invoices (#232)** — a mid-period
+  proration invoice no longer permanently blocks `GenerateInvoice` /
+  `RegenerateInvoice` / `ReissueInvoice` for its period (matching the repository
+  uniqueness contract and both SQL adapters' indexes). `RegenerateInvoice`'s
+  voided-invoice selection likewise excludes prorations, so a voided proration can no
+  longer become the revision root, hijack the balance restoration target, or authorize
+  minting a net-new invoice.
+- **Joined-tx duplicate-key race no longer refunds the winner's charge (#233)** —
+  inside a caller's transaction, `ProcessPayment` returns a retryable conflict instead
+  of reading through the aborted tx and firing saga compensation; a top-level
+  winner-read failure also converges without compensation.
+- **Terminal-state replay no longer double-refunds (#234)** — an in-tx idempotency
+  collision with a `Refunded`/`PartiallyRefunded`/`ChargedBack` record converges without
+  compensation (WARN logged); `Failed` still routes to compensation because a captured
+  response cannot be a replay of a never-captured charge.
+- **Silent misbilling guards (#241)** — the billing pipeline and
+  `RestoreBalancesForVoidedInvoice` now fail loudly when `WithBalanceRepo` is wired but
+  the TxManager's repos omit `Balances` (previously credit application / restoration was
+  silently skipped); `Refund`'s in-tx reload nil-guard added; zero-amount duplicate-key
+  losers converge after the tx exits.
+- **Trial-expiration decisions re-evaluated inside the transaction (#242)** — a payment
+  method detached between scan and tx can no longer auto-convert a trial the
+  `RequirePaymentMethod` gate should block. Renewal `ContractChangeEvent`s now populate
+  `OldPriceID`/`NewPriceID` when a pending price change is applied.
+- **`ContractExpiredEvent` clears pending price change and trial state (#243)** — a
+  terminal Expired contract no longer reports `HasPendingChange() == true` forever.
+- **Reference demo corrected (#236)** — `hosting-integration-demo` no longer double-fires
+  `AfterCharge` (core fires it), fires lifecycle hooks after save (not before), isolates
+  integrator-fired hooks via `plugin.FireNonFatal`, and uses the injected clock.
+- **`eventstore.Store` godocs now specify the full BYO implementer contract (#237)** —
+  conflict-error encoding for `tx.RetryOnConflict`, Load ordering, gap-free monotonic
+  `GlobalPosition` visibility, Subscribe semantics, empty-stream behavior, and
+  `Event.Version` handling. `BaseAggregate.UncommittedEvents` returns a copy.
+- **Coupon plugin no longer writes the core-owned `SetSubtotalAfterDiscount` (#244)**.
+
+### Docs
+
+- Canonical docs synced with all behavior changes above: `payment-gateway.md`
+  (empty-key rejection, amount-bound refund keys + convergence policy, terminal-state
+  policy, `CustomerIDResolver`), `domain-model.md` (17 domain events incl.
+  PastDue/Recovered, `WithStatus` draft-only, `ContractType` validation, Expired-clearing,
+  `ParticipatesInPeriodUniqueness`), `plugin-system.md` (pre-1.0 versioning note, §5.4
+  Name/Priority isolation gap, `Config.Int/Bool` + `FireNonFatal`, in-memory
+  `CouponRepository` reference), SECURITY.md (tagged releases exist; pin the latest tag),
+  CLAUDE.md (lint scope, CreditNote lifecycle), and removal of the ghost `domain/billing`
+  package references.
+- `payment-gateway.md` §6.1/§6.3 synced with the merge-review money-path fixes above:
+  per-refund key-ledger classification table + adapter upgrade note, winner-status
+  dispatch on duplicate-key convergence, and the `idempotency_conflict` compensation
+  reason for the Failed-state collision (also added to `plugin-system.md` §3.7).
+- `payment-gateway.md` round-3 review corrections: §6.1 no longer claims the
+  duplicate-key converger "mirrors the in-tx idempotency switch" for the Failed
+  status (the two paths intentionally diverge — see the Fixed entry above); §6.3
+  documents that explicit-key dedup classification is only sound within the
+  gateway's idempotency-key retention window (reusing an explicit key after
+  expiry can execute a real second movement that core classifies as a replay),
+  and that callers needing end-to-end exactly-once across lost-response retries
+  must pass an explicit `RefundInput.IdempotencyKey` (derived keys deliberately
+  treat sequential same-amount refunds as distinct movements); §6.3 also
+  documents the new joined-tx rejection at the `Refund` entry.
+- `event-sourcing.md` caught up with shipped behavior (#237/#246, canonical-docs
+  policy): the `ProjectionService.Start` pseudocode now shows the real
+  channel-close semantics (`projection.ErrSubscriptionClosed` when the feed dies
+  with a live context — a supervisor-restart signal — vs `ctx.Err()` on
+  cancellation); new §2.4 summarizes the BYO `eventstore.Store` implementer
+  contract (conflict-error encoding required by `tx.RetryOnConflict`,
+  Version-ascending Load ordering, empty-stream convention, gap-free monotonic
+  `GlobalPosition` visibility, Subscribe semantics, `Event.Version` stamping,
+  snapshot selection) with `eventstore/store.go` godoc as normative; new §6.2
+  documents `GetContractAsOf`'s empty-aggregate-for-nonexistent-contract
+  convention and the per-stream monotonic-OccurredAt assumption.
+- `plugin-system.md`: §11.4 zero-amount outbox table row updated to the actual
+  post-tx duplicate-key convergence (`errDuplicateKeyRaceSignal` →
+  `convergeOnDuplicateKeyWinner`; the pre-#241b in-closure wording was stale);
+  §10.3 no longer asserts a v1.0.0 initial release (the library is v0.x).
+- `docs/architecture.md` §2.2 dependency graph gained the
+  `infrastructure/inmemory -.-> plugins` implements-edge (in-memory
+  `CouponRepository`, #240). README.md / README.ja.md architecture trees no
+  longer list the nonexistent `domain/billing` package.
+
 ## [0.7.0] - 2026-07-14
 
 ### Added

@@ -48,7 +48,6 @@ func TestInvoice_Snapshot_RoundTrip(t *testing.T) {
 		shared.ContractID("ctr-1"),
 		subtotal, discount, tax,
 		WithInvoiceNumber("INV-2026-001"),
-		WithStatus(InvoiceStatusPaid),
 		WithBillingPeriod(period),
 		WithDueDate(time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)),
 		WithIssueDate(time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)),
@@ -62,11 +61,11 @@ func TestInvoice_Snapshot_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInvoice: %v", err)
 	}
-	// Record payment via the domain method so that paidAmount/balance/paidAt
-	// are set through the legitimate construction path.
-	// Note: NewInvoice with WithStatus(InvoiceStatusPaid) still leaves paidAmount=0,
-	// so we simulate a complete life-cycle by creating a finalized invoice first.
-	// For round-trip testing purposes, we build state via direct snapshot manipulation.
+	// The paid state (status/paidAmount/balance/paidAt) is deliberately built
+	// via direct snapshot manipulation below: this test exercises the full
+	// snapshot round-trip, including fields the public construction API cannot
+	// reach (WithStatus accepts only Draft since issue #238; persistence
+	// adapters legitimately restore historical statuses this way).
 
 	snap := inv.ToSnapshot()
 	// Manually set fields that the public API cannot reach, to exercise full round-trip.

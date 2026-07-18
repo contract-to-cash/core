@@ -12,18 +12,26 @@ import (
 // statuses were previously reachable only via InvoiceFromSnapshot (persistence
 // adapters) — the same defect class fixed for refunded in issue #99.
 
+// newInvoiceWithStatusAndDueDate builds an invoice with the given due date and
+// drives it to the target status via real transitions (WithStatus accepts only
+// Draft since issue #238 — see advanceInvoiceTo in status_fixture_test.go).
 func newInvoiceWithStatusAndDueDate(t *testing.T, status InvoiceStatus, due time.Time) *Invoice {
 	t.Helper()
-	return mustNewInvoice(t,
+	opts := []InvoiceOption{WithDueDate(due)}
+	if status == InvoiceStatusPartialPaid {
+		opts = append(opts, WithAllowPartialPayment(true))
+	}
+	inv := mustNewInvoice(t,
 		shared.NewInvoiceID(),
 		shared.NewAccountID(),
 		shared.NewContractID(),
 		shared.NewMoney(big.NewRat(1000, 1), shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
 		shared.Zero(shared.CurrencyJPY),
-		WithStatus(status),
-		WithDueDate(due),
+		opts...,
 	)
+	advanceInvoiceTo(t, inv, status)
+	return inv
 }
 
 // --- MarkIssued ---

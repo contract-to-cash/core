@@ -105,6 +105,37 @@ var errDuplicateKeyRaceSignal = errors.New("duplicate idempotency key race; conv
 // This sentinel is package-private; consumers cannot observe it.
 var errPaymentOutboxVeto = errors.New("payment outbox writer vetoed the record")
 
+// errTerminalStateReplay marks the conflict produced by the IN-TX idempotency
+// switch when the effective key collides with an existing payment in a
+// terminal state whose money is accounted as HAVING MOVED: Refunded /
+// PartiallyRefunded / ChargedBack. For those, the gateway Charge that preceded
+// the transaction was an idempotent REPLAY of the transaction backing the
+// terminal record — the gateway moved no new money — so the post-tx error
+// handling must NOT route this through saga compensation: a compensation
+// Refund would be a SECOND real reversal of the original transaction (worst on
+// ChargedBack, where the funds were already pulled back by the network).
+//
+// PaymentStatusFailed is deliberately NOT in this set (issue #234 review): a
+// Captured/Succeeded ChargeResponse cannot be a replay of a transaction that a
+// Failed record accounts as never-captured — the charge the gateway just made
+// is REAL and backed by no local record, so the Failed-state conflict must
+// keep flowing through the generic compensation path (Void→Refund).
+//
+// Wrapped together with the caller-facing ErrCodeConflict DomainError so
+// ProcessPayment can converge cleanly (issue #234).
+var errTerminalStateReplay = errors.New("idempotency key collides with a terminal payment record")
+
+// errFailedStateConflict marks the in-tx idempotency conflict with an existing
+// payment in the Failed terminal state (see errTerminalStateReplay for why
+// Failed is excluded from the replay set). This path correctly flows through
+// saga compensation — the just-captured charge is real and unbacked — but no
+// local Save was ever attempted, so the post-tx handler must report it as
+// plugin.CompensationReasonIdempotencyConflict and word the caller-facing
+// error accordingly instead of claiming "local save failed" (issue #234
+// review). This sentinel is package-private; consumers observe only the
+// wrapped ErrCodeConflict DomainError.
+var errFailedStateConflict = errors.New("idempotency key collides with a failed payment record")
+
 // ProcessPaymentInput holds the parameters for processing a payment.
 // PaymentMethodID is optional — if empty, the service resolves it via the
 // hierarchical fallback chain: Invoice → Contract → Customer.
@@ -144,39 +175,70 @@ type RefundInput struct {
 	// the same logical refund reuse the SAME key while DISTINCT refunds of the
 	// same payment use DIFFERENT keys; violating it reintroduces the double-refund
 	// window this field exists to close.
+	//
+	// SEQUENTIAL retries with the same explicit key are safe when the earlier
+	// attempt did NOT record locally (the gateway replays; the recording
+	// converges). Retrying a refund that already RECORDED (e.g. the caller
+	// lost the response of a fully successful invocation) is detected via the
+	// payment's per-refund key ledger — the recorded refund already carries
+	// the key, so the retry returns ErrCodeConflict without booking the
+	// gateway's no-movement replay a second time. And if
+	// a CONCURRENT refund records
+	// against the payment while an explicit-key refund is in flight, Refund
+	// returns ErrCodeConflict WITHOUT recording and logs a manual-
+	// reconciliation error: for a caller-owned key the service cannot decide
+	// whether the gateway executed or replayed the call, so it refuses to
+	// guess. Verify gateway state before retrying after such a conflict.
 	IdempotencyKey string
 }
 
 // deriveRefundIdempotencyKey builds a deterministic gateway idempotency key for
-// a refund of paymentID whose cumulative refunded total, BEFORE this attempt, is
-// priorRefunded.
+// a refund of paymentID of refundAmount, where the payment's cumulative
+// refunded total BEFORE this attempt is priorRefunded.
 //
-// Scheme: "refund-<paymentID>-<currency>-<priorRefunded as a big.Rat string>".
+// Scheme: "refund-<paymentID>-<currency>-<priorRefunded>-<refundAmount>"
+// (amounts as big.Rat strings).
 //
-// Why prior cumulative refunded amount is the right discriminator:
+// Why (prior cumulative total, amount) is the right discriminator:
 //
 //   - A payment's refundedAmount is monotonically non-decreasing: every
 //     successful RecordRefund adds a positive amount (ValidateRefund rejects
-//     non-positive amounts). So the pre-refund cumulative total uniquely
-//     identifies the "next" refund attempt in the payment's refund sequence.
+//     non-positive amounts). So the pre-refund cumulative total identifies the
+//     "slot" in the payment's refund sequence this attempt is filling.
 //   - Two RETRIES of the SAME attempt (e.g. after a gateway timeout, or two
-//     concurrent callers that both loaded the same un-refunded state) observe
-//     the SAME priorRefunded → derive the SAME key → the gateway collapses them
-//     into ONE real refund (Stripe/Adyen/GMO PG/PayPal all dedupe on the
-//     idempotency key). This is what closes the double-refund window.
+//     concurrent callers that both loaded the same un-refunded state and asked
+//     for the SAME amount) observe the SAME (priorRefunded, refundAmount) →
+//     derive the SAME key → the gateway collapses them into ONE real refund
+//     (Stripe/Adyen/GMO PG/PayPal all dedupe on the idempotency key). This is
+//     what closes the double-refund window.
 //   - Two DISTINCT partial refunds (a 3000 refund followed by a later 2000
 //     refund) observe DIFFERENT priorRefunded (0, then 3000) → derive DIFFERENT
 //     keys → both legitimately reach the gateway.
+//   - Two CONCURRENT partial refunds of DIFFERENT amounts (a 3000 and a 2000
+//     that both loaded priorRefunded=0) derive DIFFERENT keys — binding the
+//     amount into the key is what makes this true (issue #235). Under the old
+//     prior-only scheme they collided: the gateway executed only the first
+//     amount and replayed its cached response for the second, while the local
+//     ledger recorded BOTH — booking a refund the gateway never moved. With
+//     the amount bound, both are real gateway refunds and the ledger matches
+//     the gateway-moved total.
 //
-// The key is independent of the requested amount on purpose: a concurrent
-// "second" refund that shares the same prior cumulative total is, by
-// definition, racing the same slot in the sequence and MUST collide so the
-// gateway can dedupe it — even if the caller asked for a different amount.
-// Callers who genuinely need two different-amount refunds issue them
-// sequentially (distinct prior cumulative totals) or supply explicit distinct
+// A concurrent refund with the same prior total AND the same amount is
+// indistinguishable from a retry of the same logical refund and is deduped to
+// one movement; callers that genuinely need two identical-amount refunds issue
+// them sequentially (distinct prior totals) or supply explicit distinct
 // [RefundInput.IdempotencyKey] values.
-func deriveRefundIdempotencyKey(paymentID shared.PaymentID, priorRefunded shared.Money) string {
-	return fmt.Sprintf("refund-%s-%s-%s", paymentID, priorRefunded.Currency(), priorRefunded.Amount().RatString())
+//
+// VERSION-SENSITIVE derivation: releases before issue #235 derived
+// "refund-<paymentID>-<currency>-<prior>" WITHOUT the amount component, so a
+// retry issued after upgrading does NOT collide at the gateway with a
+// pre-upgrade attempt's key. A refund that was in flight or in an ambiguous
+// state across the upgrade boundary must be verified at the gateway before
+// being retried — the post-upgrade retry is a NEW key and would move money
+// again if the pre-upgrade attempt actually executed.
+func deriveRefundIdempotencyKey(paymentID shared.PaymentID, priorRefunded, refundAmount shared.Money) string {
+	return fmt.Sprintf("refund-%s-%s-%s-%s",
+		paymentID, priorRefunded.Currency(), priorRefunded.Amount().RatString(), refundAmount.Amount().RatString())
 }
 
 // PaymentServiceOption configures optional dependencies of PaymentService.
@@ -194,6 +256,28 @@ func WithPaymentLogger(l *slog.Logger) PaymentServiceOption {
 func WithCustomerGateway(gw port.CustomerGateway) PaymentServiceOption {
 	return func(s *PaymentService) {
 		s.customerGateway = gw
+	}
+}
+
+// WithCustomerIDResolver wires a [port.CustomerIDResolver] that maps internal
+// account IDs to gateway-side customer IDs (issue #231).
+//
+// When wired, the resolver runs before EVERY gateway call that carries a
+// customer ID (the Charge in ProcessPayment and the CustomerGateway.GetCustomer
+// lookup in ResolvePaymentMethod). A resolver error aborts the operation
+// BEFORE the gateway is touched, so resolution failures are money-safe.
+//
+// When NOT wired, the service preserves the legacy identity mapping: the
+// internal shared.AccountID is sent verbatim as the gateway customer ID. That
+// only suits gateways that accept caller-chosen customer identifiers (e.g.
+// GMO PG MemberID registered under the integrator's own ID scheme). It is
+// WRONG for gateways that mint their own customer IDs — Stripe is the
+// canonical example ("cus_..." values assigned by Stripe) — where charges
+// referencing an internal account ID as the customer will fail. Deployments on
+// such gateways MUST wire a resolver.
+func WithCustomerIDResolver(r port.CustomerIDResolver) PaymentServiceOption {
+	return func(s *PaymentService) {
+		s.customerIDResolver = r
 	}
 }
 
@@ -264,17 +348,18 @@ func WithIdempotencyStore(store port.IdempotencyStore) PaymentServiceOption {
 
 // PaymentService orchestrates payment processing with plugin hooks.
 type PaymentService struct {
-	gateway          port.PaymentGateway
-	paymentRepo      payment.Repository
-	invoiceRepo      invoice.Repository
-	contractRepo     contract.Repository
-	customerGateway  port.CustomerGateway
-	eventStore       eventstore.Store
-	registry         *plugin.Registry
-	clock            shared.Clock
-	logger           *slog.Logger
-	txManager        tx.TxManager
-	idempotencyStore port.IdempotencyStore
+	gateway            port.PaymentGateway
+	paymentRepo        payment.Repository
+	invoiceRepo        invoice.Repository
+	contractRepo       contract.Repository
+	customerGateway    port.CustomerGateway
+	customerIDResolver port.CustomerIDResolver
+	eventStore         eventstore.Store
+	registry           *plugin.Registry
+	clock              shared.Clock
+	logger             *slog.Logger
+	txManager          tx.TxManager
+	idempotencyStore   port.IdempotencyStore
 	// outboxWriter, when non-nil, is called inside the payment bookkeeping
 	// transaction (post-save, pre-commit) so an integrator can write a durable
 	// notification row atomically with the payment (issue #248). nil skips the
@@ -401,6 +486,217 @@ func (s *PaymentService) fireOnCompensationExecuted(
 	}
 }
 
+// resolveGatewayCustomerID maps an internal account ID to the gateway-side
+// customer ID via the wired [port.CustomerIDResolver] (issue #231). Without a
+// resolver it preserves the legacy identity mapping (see
+// [WithCustomerIDResolver] for when that is — and is not — appropriate).
+//
+// Callers MUST invoke this before every gateway call that carries a customer
+// ID, and MUST abort on error before touching the gateway: a resolution
+// failure is money-safe only as long as nothing has been charged.
+func (s *PaymentService) resolveGatewayCustomerID(ctx context.Context, accountID shared.AccountID) (string, error) {
+	if s.customerIDResolver == nil {
+		return string(accountID), nil
+	}
+	customerID, err := s.customerIDResolver.ResolveCustomerID(ctx, accountID)
+	if err != nil {
+		return "", fmt.Errorf("customer ID resolution failed for account %s: %w", accountID, err)
+	}
+	if customerID == "" {
+		return "", shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("customer ID resolver returned an empty customer ID for account %s", accountID))
+	}
+	return customerID, nil
+}
+
+// convergeOnDuplicateKeyWinner resolves a duplicate-idempotency-key race after
+// the losing transaction has exited (the closure returned
+// errDuplicateKeyRaceSignal). Shared by ProcessPayment's gateway path and
+// settleZeroAmountPayment. It returns the winning payment when it is visible,
+// or a retryable ErrCodeConflict DomainError otherwise — it NEVER signals that
+// compensation should fire, because the duplicate-key violation itself proves
+// a concurrent winner's payment record owns any underlying gateway charge.
+//
+// Branches:
+//
+//   - joinedTx (issue #233): the sentinel came out of a CALLER-OWNED
+//     transaction, so nothing was rolled back — on Postgres the ambient
+//     transaction is still aborted (25P02) and EVERY read on this connection
+//     fails spuriously. Re-reading the winner would error, and (on the gateway
+//     path) compensating on that error would refund the winner's legitimate
+//     charge. Return a retryable conflict WITHOUT reading; the caller must
+//     roll back its transaction and retry, at which point the pre-charge
+//     idempotency check converges on the winner.
+//
+//   - winner read error: an infrastructure hiccup, NOT evidence the charge is
+//     orphaned — return a retryable conflict (wrapping the cause).
+//
+//   - winner not visible: read-replica lag, MVCC snapshot ordering, or a
+//     winner whose tx has not committed yet — return a transient conflict so
+//     the caller retries (a follow-up call usually finds the winner via the
+//     pre-charge idempotency check).
+//
+//   - winner found: dispatch on the winner's STATUS (issue #234 review; the
+//     dispatch matches the pre-charge terminal short-circuit, and matches the
+//     in-tx idempotency switch for every status EXCEPT Failed — see that
+//     branch below):
+//
+//     Completed → converge as success: return (winner, nil). The caller
+//     treats itself as the race loser, fires the success hooks against the
+//     winner's record, and must not compensate.
+//
+//     Pending → the winner persisted an UNSETTLED charge (3DS
+//     requires_action or an async-settling method). Returning it as plain
+//     success would fire AfterCharge/OnPaymentProcessed for a non-Completed
+//     payment and let the caller treat an unpaid invoice as paid. Instead
+//     return (winner, ErrPaymentPending-wrapped error) — the same result
+//     shape as the pending path in persistUnsettledCharge — so the caller
+//     surfaces "not settled yet" and completes it later via a retry or
+//     SettlePayment. Whether the winner's charge was 3DS or async cannot be
+//     recovered from the record, so the broader ErrPaymentPending sentinel is
+//     used; no success hooks and no outbox fire for it.
+//
+//     Refunded / PartiallyRefunded / ChargedBack → terminal states that must
+//     not be silently replayed as success: return (nil, ErrCodeConflict),
+//     exactly as the pre-charge terminal short-circuit does. No compensation
+//     fires (the duplicate-key violation proves the winner's record owns
+//     whatever gateway transaction exists, and its money is accounted as
+//     already moved/returned).
+//
+//     Failed → return (nil, ErrCodeConflict) WITHOUT compensation, and log at
+//     ERROR level that a possibly-unbacked captured charge may exist. This
+//     deliberately does NOT mirror the in-tx idempotency switch, which
+//     COMPENSATES on a Failed-state collision: there, the Charge this call
+//     just made returned Captured/Succeeded while the colliding record says
+//     nothing was captured, so the charge is provably real and unbacked. Here
+//     the evidence is CONTRADICTORY — this call's same-key Charge response
+//     says money moved, yet the winner persisted a KEYED Failed record for
+//     that very key (e.g. the winner's gateway attempt failed after this
+//     loser's replay response was cached, or a gateway whose idempotent
+//     replay semantics diverge from ours). Compensating on that ambiguity
+//     could refund money that never moved, so the core stays conservative
+//     (no reversal) and loud: the ERROR log flags MANUAL RECONCILIATION —
+//     operators must verify gateway state for this idempotency key and
+//     refund out-of-band if a captured charge is standing without a local
+//     Completed record.
+//
+//     Any OTHER status (a PaymentStatus value this binary does not
+//     recognize, e.g. written by a newer version during a rolling upgrade)
+//     fails CLOSED: (nil, ErrCodeConflict) with an ERROR log naming the
+//     unexpected status. A payment path must never converge a state it does
+//     not understand as success; no compensation fires.
+//
+// The read uses s.paymentRepo on the OUTER ctx (not tx-scoped repos): by the
+// time this runs at the top level, RunInTx has rolled the failed tx back, so
+// the connection is safe to query.
+//
+// Result contract for callers: on a non-nil error the returned payment is nil
+// EXCEPT on the Pending branch, where the pending winner is returned alongside
+// the ErrPaymentPending-wrapped error; callers must propagate both and must
+// not fire completed-success hooks or the outbox writer for it.
+func (s *PaymentService) convergeOnDuplicateKeyWinner(ctx context.Context, effectiveKey string, invoiceID shared.InvoiceID, joinedTx bool) (*payment.Payment, error) {
+	if joinedTx {
+		s.logger.Warn("duplicate-key race detected inside a caller-owned transaction; returning retryable conflict (no compensation)",
+			"effectiveKey", effectiveKey,
+			"invoiceID", invoiceID,
+		)
+		return nil, shared.NewDomainError(
+			shared.ErrCodeConflict,
+			fmt.Sprintf("duplicate idempotency key %q detected inside a caller-owned transaction; roll back the enclosing transaction and retry to converge on the winning payment", effectiveKey),
+		)
+	}
+	winner, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, effectiveKey)
+	if findErr != nil {
+		s.logger.Error("duplicate-key race detected; winner read failed (returning retryable conflict, NOT compensating)",
+			"effectiveKey", effectiveKey,
+			"invoiceID", invoiceID,
+			"error", findErr,
+		)
+		return nil, shared.NewDomainErrorWithCause(
+			shared.ErrCodeConflict,
+			fmt.Sprintf("duplicate idempotency key %q detected but the winning payment could not be read; retry the operation", effectiveKey),
+			findErr,
+		)
+	}
+	if winner == nil {
+		s.logger.Warn("duplicate-key race detected but winner not yet visible on fresh tx; returning transient conflict",
+			"effectiveKey", effectiveKey,
+			"invoiceID", invoiceID,
+		)
+		return nil, shared.NewDomainError(
+			shared.ErrCodeConflict,
+			fmt.Sprintf("duplicate idempotency key %q detected but winner not yet visible; retry the operation", effectiveKey),
+		)
+	}
+	// Dispatch on the winner's status (issue #234 review; branch rationale in
+	// the godoc above). All PaymentStatus values are listed explicitly (no
+	// default) so `exhaustive` lint catches new states.
+	switch winner.Status() {
+	case payment.PaymentStatusCompleted:
+		return winner, nil
+	case payment.PaymentStatusPending:
+		s.logger.Info("duplicate-key race converged on a PENDING winner; returning it with ErrPaymentPending (no success hooks, no outbox)",
+			"effectiveKey", effectiveKey,
+			"invoiceID", invoiceID,
+			"winnerPaymentID", winner.ID(),
+		)
+		return winner, fmt.Errorf("%w: concurrent request holds an unsettled pending payment (transaction %s)",
+			ErrPaymentPending, winner.GatewayTransactionID())
+	case payment.PaymentStatusFailed:
+		// Unlike the in-tx idempotency switch — which compensates on a Failed
+		// collision because the just-made charge is provably real and unbacked —
+		// the evidence here is contradictory (same-key Charge response vs a
+		// keyed Failed record), so compensating could reverse money that never
+		// moved. Stay conservative (no compensation) but loud: a captured
+		// charge may be standing with no local Completed record backing it.
+		s.logger.Error("duplicate-key race converged on a FAILED winner; returning conflict without compensation, but a possibly-unbacked captured charge may exist (MANUAL RECONCILIATION REQUIRED: verify gateway state for this idempotency key)",
+			"effectiveKey", effectiveKey,
+			"invoiceID", invoiceID,
+			"winnerPaymentID", winner.ID(),
+			"winnerStatus", winner.Status(),
+		)
+		return nil, shared.NewDomainError(
+			shared.ErrCodeConflict,
+			fmt.Sprintf("cannot replay payment in terminal state %q (idempotency key %q)",
+				winner.Status(), effectiveKey),
+		)
+	case payment.PaymentStatusRefunded,
+		payment.PaymentStatusPartiallyRefunded,
+		payment.PaymentStatusChargedBack:
+		s.logger.Warn("duplicate-key race converged on a terminal winner; returning conflict without compensation",
+			"effectiveKey", effectiveKey,
+			"invoiceID", invoiceID,
+			"winnerPaymentID", winner.ID(),
+			"winnerStatus", winner.Status(),
+		)
+		return nil, shared.NewDomainError(
+			shared.ErrCodeConflict,
+			fmt.Sprintf("cannot replay payment in terminal state %q (idempotency key %q)",
+				winner.Status(), effectiveKey),
+		)
+	}
+	// Unreachable with the current status set (the switch above is enforced
+	// exhaustive by lint), but reachable if a NEWER writer persisted a
+	// PaymentStatus value this binary does not know (e.g. a snapshot written
+	// during a rolling upgrade). A payment path must fail CLOSED on states it
+	// does not understand: converging an unknown status as success would fire
+	// the completed-success hooks and mark the invoice paid on a record whose
+	// semantics this code cannot judge. Return a conservative retryable
+	// conflict instead (no compensation — the winner's record still owns any
+	// underlying gateway charge).
+	s.logger.Error("duplicate-key race converged on a winner with an unrecognized payment status; failing closed with conflict (no compensation)",
+		"effectiveKey", effectiveKey,
+		"invoiceID", invoiceID,
+		"winnerPaymentID", winner.ID(),
+		"winnerStatus", winner.Status(),
+	)
+	return nil, shared.NewDomainError(
+		shared.ErrCodeConflict,
+		fmt.Sprintf("duplicate idempotency key %q converged on a payment with unrecognized status %q; refusing to converge (fail closed) — retry after reconciling",
+			effectiveKey, winner.Status()),
+	)
+}
+
 // ProcessPayment charges an invoice and records the payment.
 //
 // SECURITY-CRITICAL — concurrency contract (issue #97).
@@ -468,6 +764,18 @@ func (s *PaymentService) fireOnCompensationExecuted(
 // transient [shared.ErrCodeConflict] error so the caller can retry
 // instead of compensating against a real charge.
 func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.InvoiceID, input ProcessPaymentInput) (*payment.Payment, error) {
+	// Boundary validation (issue #241): an empty IdempotencyKey silently
+	// disables every duplicate-charge defence in this method — the pre-charge
+	// and in-tx idempotency lookups are skipped, the storage uniqueness
+	// contract cannot fire, and the gateway cannot collapse concurrent
+	// retries into one charge. The domain model declares the key mandatory
+	// (see the Payment entity table in CLAUDE.md), so reject up front instead
+	// of degrading to an unprotected charge.
+	if input.IdempotencyKey == "" {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			"ProcessPayment requires a non-empty IdempotencyKey (duplicate-charge protection depends on it)")
+	}
+
 	// Load invoice
 	inv, err := s.invoiceRepo.FindByID(ctx, invoiceID)
 	if err != nil {
@@ -628,6 +936,15 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 		return s.settleZeroAmountPayment(ctx, inv, invoiceID, amount, effectiveKey, input)
 	}
 
+	// Resolve the gateway-side customer ID BEFORE the BeforeCharge hooks and
+	// the gateway Charge (issue #231). A resolution failure aborts here —
+	// before any money moves and before plugins observe a phantom charge
+	// attempt.
+	customerID, err := s.resolveGatewayCustomerID(ctx, inv.AccountID())
+	if err != nil {
+		return nil, err
+	}
+
 	// Build PaymentContext with invoice (payment is nil at this stage for BeforeCharge)
 	payCtx := plugin.NewPaymentContext(ctx, nil, inv)
 
@@ -665,7 +982,7 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 
 	chargeReq := &port.ChargeRequest{
 		Amount:            amount,
-		CustomerID:        string(inv.AccountID()),
+		CustomerID:        customerID,
 		PaymentMethodID:   &pmID,
 		PaymentMethodType: methodTypeHint,
 		Description:       fmt.Sprintf("Invoice %s", invoiceID),
@@ -915,6 +1232,18 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	// RunInTx returns so the AfterCharge hooks see a fresh snapshot
 	// consistent with the winner's payment.
 	var racedLoser bool
+	// terminalReplayStatus records the terminal state (Refunded /
+	// PartiallyRefunded / ChargedBack) that the in-tx idempotency switch
+	// collided with, for the post-tx warn log on the no-compensation path.
+	var terminalReplayStatus payment.PaymentStatus
+	// Joined-tx detection (issue #233): when the caller invoked ProcessPayment
+	// from inside its OWN transaction, tx.Run below joins it — there is no
+	// rollback boundary between the duplicate-key violation and this method's
+	// post-tx code. On backends like Postgres the violation leaves the AMBIENT
+	// transaction aborted (SQLSTATE 25P02), so the "fresh" winner re-read would
+	// fail spuriously and must not be attempted (see the duplicate-key handler
+	// below).
+	joinedTx := tx.InTransaction(ctx)
 	// tx.Run (not raw RunInTx) so this stamps the transaction onto the context
 	// and joins an outer transaction when one is active (review M2). The
 	// duplicate-key convergence below re-reads the winner on the OUTER ctx (which
@@ -1006,19 +1335,47 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 					// call already wrote the payment (and its outbox row).
 					p = existing
 					return nil
-				case payment.PaymentStatusFailed,
-					payment.PaymentStatusRefunded,
+				case payment.PaymentStatusFailed:
+					// Terminal state that must not be silently replayed —
+					// but unlike the refunded/charged-back branch below,
+					// the Charge above CANNOT be an idempotent replay of a
+					// transaction this record accounts as failed (a Failed
+					// record captured nothing). The gateway charge just
+					// made is REAL and unbacked, so this conflict flows
+					// into the generic compensation path (Void→Refund),
+					// which reverses it (issue #234 review). Wrapped in
+					// errFailedStateConflict so the post-tx handler reports
+					// the compensation reason as idempotency_conflict (no
+					// Save was attempted on this path) rather than
+					// local_save_failed.
+					return fmt.Errorf("%w: %w", errFailedStateConflict,
+						shared.NewDomainError(
+							shared.ErrCodeConflict,
+							fmt.Sprintf("cannot replay payment in terminal state %q (idempotency key %q)",
+								existing.Status(), effectiveKey),
+						))
+				case payment.PaymentStatusRefunded,
 					payment.PaymentStatusPartiallyRefunded,
 					payment.PaymentStatusChargedBack:
-					// Terminal states that must not be silently replayed.
-					// Pre-charge lookup normally catches these; only a
-					// rare read-then-write race between the pre-charge
-					// read and this in-tx read reaches here.
-					return shared.NewDomainError(
-						shared.ErrCodeConflict,
-						fmt.Sprintf("cannot replay payment in terminal state %q (idempotency key %q)",
-							existing.Status(), effectiveKey),
-					)
+					// Terminal states whose money already moved. Pre-charge
+					// lookup normally catches these; only a rare
+					// read-then-write race between the pre-charge read and
+					// this in-tx read reaches here.
+					//
+					// Wrapped in errTerminalStateReplay so the post-tx
+					// handling returns the conflict WITHOUT firing saga
+					// compensation (issue #234): the Charge above was an
+					// idempotent replay of the transaction that already
+					// backs this terminal record — no new money moved, and
+					// a compensation Refund would be a second real reversal
+					// of the original charge.
+					terminalReplayStatus = existing.Status()
+					return fmt.Errorf("%w: %w", errTerminalStateReplay,
+						shared.NewDomainError(
+							shared.ErrCodeConflict,
+							fmt.Sprintf("cannot replay payment in terminal state %q (idempotency key %q)",
+								existing.Status(), effectiveKey),
+						))
 				}
 			}
 		}
@@ -1079,69 +1436,67 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 	})
 
 	// Issue #97 review follow-up: duplicate-key race convergence on a
-	// FRESH transaction context. By the time we reach this branch, the
-	// in-flight tx has already been rolled back by RunInTx (the closure
-	// returned errDuplicateKeyRaceSignal), so on Postgres the connection
-	// is no longer in in_failed_sql_transaction state and the outer ctx
-	// is safe to query. We rely on s.paymentRepo (NOT repos.Payments,
-	// which is tx-scoped) to read the winner's record.
+	// FRESH transaction context (all branch rationale on
+	// convergeOnDuplicateKeyWinner). An error from the helper is returned
+	// as-is — saga compensation must NOT fire on any duplicate-key outcome,
+	// because the underlying gateway charge is backing the winner. On the
+	// Pending-winner branch the helper returns the winner ALONGSIDE an
+	// ErrPaymentPending-wrapped error (same result shape as the
+	// persistUnsettledCharge pending path); returning here means the
+	// completed-success hooks and the outbox never fire for a non-Completed
+	// payment (issue #234 review).
 	if errors.Is(err, errDuplicateKeyRaceSignal) {
-		winner, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, effectiveKey)
-		if findErr != nil {
-			// Fresh-tx read also failed — this is a genuine
-			// infrastructure problem (the winner exists but we
-			// cannot prove it). Fall through to saga compensation
-			// because we cannot guarantee the gateway charge is
-			// owned by a persisted payment record.
-			s.logger.Error("duplicate-key race detected; fresh-tx winner read failed (compensation will fire)",
-				"effectiveKey", effectiveKey,
-				"invoiceID", invoiceID,
-				"error", findErr,
-			)
-			err = fmt.Errorf("duplicate-key race: fresh-tx winner read failed: %w", findErr)
-		} else if winner == nil {
-			// The unique-violation fired but the winner's record
-			// is not yet visible — typically read-replica lag, MVCC
-			// snapshot ordering, or a winner whose tx has not
-			// committed yet. Refusing to compensate here is the
-			// safe choice: the winner's gateway charge is real and
-			// must not be refunded just because we cannot see the
-			// local record yet. Return a transient conflict so the
-			// caller retries (a follow-up call usually finds the
-			// winner via the pre-charge idempotency check).
-			s.logger.Warn("duplicate-key race detected but winner not yet visible on fresh tx; returning transient conflict",
-				"effectiveKey", effectiveKey,
-				"invoiceID", invoiceID,
-			)
-			return nil, shared.NewDomainError(
-				shared.ErrCodeConflict,
-				fmt.Sprintf("duplicate idempotency key %q detected but winner not yet visible; retry the operation", effectiveKey),
-			)
-		} else {
-			// Converge on the winner's record. Saga compensation
-			// must NOT fire because the underlying gateway charge
-			// is backing the winner.
-			p = winner
-			racedLoser = true
-			err = nil
+		winner, convErr := s.convergeOnDuplicateKeyWinner(ctx, effectiveKey, invoiceID, joinedTx)
+		if convErr != nil {
+			return winner, convErr
 		}
+		p = winner
+		racedLoser = true
+		err = nil
+	}
+
+	// Terminal-state conflict convergence (issue #234): the in-tx idempotency
+	// switch found a refunded/charged-back payment under the effective key. The
+	// Charge above was an idempotent replay of the transaction backing that
+	// record — no new money moved — so this MUST NOT fall into the generic
+	// compensation path below (a compensation Refund would reverse the original
+	// transaction a second time; worst on ChargedBack). Return the conflict to
+	// the caller with no compensation and no idempotency-store marker; warn so
+	// the replay attempt is observable (a client replaying the key of an
+	// already-unwound payment usually indicates a stale retry queue).
+	if errors.Is(err, errTerminalStateReplay) {
+		s.logger.Warn("idempotency key collides with a terminal payment record; returning conflict without compensation (gateway charge was an idempotent replay)",
+			"effectiveKey", effectiveKey,
+			"invoiceID", invoiceID,
+			"terminalStatus", terminalReplayStatus,
+		)
+		return nil, err
 	}
 
 	if err != nil {
-		// Distinguish an outbox-writer veto (issue #248) from a local save
-		// failure: both roll the tx back and both compensate the gateway charge,
-		// but the wording below tells operators which one reversed the charge.
+		// Distinguish the three compensation triggers (issue #248 / #234
+		// review): an outbox-writer veto, an in-tx idempotency conflict with a
+		// Failed record (no Save was attempted), and a genuine local save
+		// failure. All three roll the tx back and compensate the gateway
+		// charge, but the reason reported to OnCompensationExecuted hooks and
+		// the wording below tell operators which one reversed the charge.
 		outboxVeto := errors.Is(err, errPaymentOutboxVeto)
+		failedStateConflict := errors.Is(err, errFailedStateConflict)
 		compReason := plugin.CompensationReasonLocalSaveFailed
-		if outboxVeto {
+		switch {
+		case outboxVeto:
 			compReason = plugin.CompensationReasonOutboxVeto
+		case failedStateConflict:
+			compReason = plugin.CompensationReasonIdempotencyConflict
 		}
-		// Local save failed (or the outbox writer vetoed) — compensate by
-		// refunding the gateway charge
+		// Compensate by reversing the gateway charge (Void → Refund fallback).
 		if compErr := saga.Compensate(ctx); compErr != nil {
 			reason := "local save failed and compensation also failed (MANUAL RECONCILIATION REQUIRED)"
-			if outboxVeto {
+			switch {
+			case outboxVeto:
 				reason = "outbox writer vetoed the payment record and compensation also failed (MANUAL RECONCILIATION REQUIRED)"
+			case failedStateConflict:
+				reason = "idempotency key collided with a failed payment record and compensation also failed (MANUAL RECONCILIATION REQUIRED)"
 			}
 			s.logger.Error(reason,
 				"paymentID", p.ID(),
@@ -1161,8 +1516,11 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 				Reason:          compReason,
 				CompensationErr: compErr,
 			})
-			if outboxVeto {
+			switch {
+			case outboxVeto:
 				return nil, fmt.Errorf("outbox writer vetoed the payment record: %w; compensation also failed: %v", err, compErr)
+			case failedStateConflict:
+				return nil, fmt.Errorf("idempotency key collided with a failed payment record: %w; compensation also failed: %v", err, compErr)
 			}
 			return nil, fmt.Errorf("local save failed: %w; compensation also failed: %v", err, compErr)
 		}
@@ -1214,8 +1572,11 @@ func (s *PaymentService) ProcessPayment(ctx context.Context, invoiceID shared.In
 			MarkCompensatedErr: markCompensatedErr,
 		})
 
-		if outboxVeto {
+		switch {
+		case outboxVeto:
 			return nil, fmt.Errorf("outbox writer vetoed the payment record (gateway charge reversed): %w", err)
+		case failedStateConflict:
+			return nil, fmt.Errorf("idempotency key collided with a failed payment record (gateway charge reversed): %w", err)
 		}
 		return nil, fmt.Errorf("local save failed (gateway charge refunded): %w", err)
 	}
@@ -1444,6 +1805,10 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 	// goroutine's Save lost a duplicate-idempotency-key race and converged on
 	// the winner's payment, leaving the local `inv` mutated but unpersisted.
 	var racedLoser bool
+	// Joined-tx detection, mirroring the gateway path (issue #233): inside a
+	// caller-owned transaction the duplicate-key violation aborts the ambient
+	// tx, so the winner re-read below must not be attempted.
+	joinedTx := tx.InTransaction(ctx)
 	err := tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
 		invoiceRepo := repos.Invoices
 		if invoiceRepo == nil {
@@ -1514,18 +1879,17 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 			return fmt.Errorf("failed to record zero-amount payment on invoice: %w", recordErr)
 		}
 		if saveErr := repos.Payments.Save(txCtx, p); saveErr != nil {
-			// A duplicate-key collision means a concurrent settlement won. There is
-			// no gateway charge to reconcile for a zero payment, so converge on the
-			// winner by re-reading it on the outer ctx.
+			// A duplicate-key collision means a concurrent settlement won. There
+			// is no gateway charge to reconcile for a zero payment, but the
+			// convergence read must still happen AFTER this transaction exits
+			// (issue #241 item 2, mirroring the gateway path's #97 handling): on
+			// Postgres the unique-violation has aborted the transaction
+			// (SQLSTATE 25P02), so converging — or even returning nil to commit —
+			// from inside the aborted tx is backend-dependent and unsafe. Return
+			// the same abort sentinel the gateway path uses so the tx rolls back
+			// cleanly and the post-tx handler converges on the winner.
 			if errors.Is(saveErr, payment.ErrDuplicateIdempotencyKey) && effectiveKey != "" {
-				winner, findErr := s.paymentRepo.FindByIdempotencyKey(ctx, effectiveKey)
-				if findErr == nil && winner != nil {
-					p = winner
-					racedLoser = true
-					return nil
-				}
-				return shared.NewDomainError(shared.ErrCodeConflict,
-					fmt.Sprintf("duplicate idempotency key %q detected for zero-amount settlement; retry", effectiveKey))
+				return errDuplicateKeyRaceSignal
 			}
 			return fmt.Errorf("failed to save zero-amount payment: %w", saveErr)
 		}
@@ -1533,14 +1897,34 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 			return fmt.Errorf("failed to save invoice after zero-amount payment: %w", saveErr)
 		}
 		// Issue #248: zero-amount normal settlement — both rows saved. Write the
-		// outbox row in this transaction before returning nil (commit). The
-		// in-closure raced-loser convergence above returned nil earlier WITHOUT a
-		// new save, so it correctly never reaches this outbox fire.
+		// outbox row in this transaction before returning nil (commit). A raced
+		// loser never reaches this fire: its Save returned
+		// errDuplicateKeyRaceSignal above, aborting the closure, and it
+		// converges on the winner POST-tx via convergeOnDuplicateKeyWinner
+		// (issue #241 item 2) — the winner already wrote the row (and its
+		// outbox entry) in its own transaction.
 		if outboxErr := s.firePaymentOutbox(txCtx, p, inv); outboxErr != nil {
 			return outboxErr
 		}
 		return nil
 	})
+	// Duplicate-key convergence on a FRESH context, after the failed tx has
+	// rolled back (issue #241 item 2). There is no gateway charge behind a
+	// zero-amount settlement, so there is never anything to compensate here —
+	// the loser simply converges on the winner's record or asks the caller to
+	// retry. As on the gateway path, the helper dispatches on the winner's
+	// status: a Pending winner is returned alongside an ErrPaymentPending-
+	// wrapped error (no success hooks below), a terminal winner surfaces as
+	// ErrCodeConflict (issue #234 review).
+	if errors.Is(err, errDuplicateKeyRaceSignal) {
+		winner, convErr := s.convergeOnDuplicateKeyWinner(ctx, effectiveKey, invoiceID, joinedTx)
+		if convErr != nil {
+			return winner, convErr
+		}
+		p = winner
+		racedLoser = true
+		err = nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1605,14 +1989,17 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 //
 // The gateway refund is ALWAYS sent with a non-empty idempotency key. The key
 // is either the caller-supplied [RefundInput.IdempotencyKey] or, when that is
-// empty, a deterministic key derived from the payment and its pre-refund
-// cumulative refunded total (see [deriveRefundIdempotencyKey]). This is the
+// empty, a deterministic key derived from the payment, its pre-refund
+// cumulative refunded total, AND the refund amount (see
+// [deriveRefundIdempotencyKey]; the amount binding is issue #235). This is the
 // core of the fix: a caller that retries after a gateway timeout, and two
-// concurrent callers that both loaded the same un-refunded state, all derive
-// the SAME key for the SAME logical refund, so the gateway collapses the
-// duplicate calls into a SINGLE real refund instead of moving money twice.
-// Distinct refunds of the same payment (sequential partials) derive DIFFERENT
-// keys and are not deduped.
+// concurrent callers that both loaded the same un-refunded state and asked for
+// the same amount, all derive the SAME key for the SAME logical refund, so the
+// gateway collapses the duplicate calls into a SINGLE real refund instead of
+// moving money twice. Distinct refunds of the same payment — sequential
+// partials (different prior totals) or concurrent partials of DIFFERENT
+// amounts — derive DIFFERENT keys and are not deduped, so each is a real
+// gateway movement matched one-to-one by a ledger record.
 //
 // # Transaction boundary and gateway placement
 //
@@ -1631,31 +2018,85 @@ func (s *PaymentService) settleZeroAmountPayment(ctx context.Context, inv *invoi
 //     idempotent replay of Charge.
 //
 // The local bookkeeping (re-load → RecordRefund → Save) runs INSIDE tx.Run so
-// that the check-then-act is not split across the transaction boundary. Re-load
-// happens through the transaction-scoped repository, so on a backend that
-// honours the payment [payment.Repository] concurrency contract (row lock /
-// SELECT ... FOR UPDATE / SERIALIZABLE / optimistic version), a concurrent second refund observes
-// the winner's already-recorded state and RecordRefund rejects it with a domain
-// error (invalid_state_transition or over-refund). The money never moved twice
-// because the gateway deduped the two calls under one key. On a last-writer-wins
-// backend the local guard is weaker, but the gateway key still prevents the
-// double refund — the worst case is a redundant local write, not lost money.
+// that the check-then-act is not split across the transaction boundary, and
+// every recording attempt classifies concurrent state advances (see the
+// convergence policy below) — on ANY backend, row-locking included, a refund
+// whose gateway call was a deduped replay is never recorded.
 //
-// The tx.Run is wrapped in tx.RetryOnConflict (issue #190): now that
-// RecordRefund bumps the payment's optimistic-locking version, an
-// optimistic-locking backend rejects the loser's Save with a version conflict
-// instead of silently overwriting. RetryOnConflict re-runs the closure, which
-// re-reads the payment (now carrying the winner's refund) and lets RecordRefund
-// re-validate — converging on a clean over-refund domain error rather than a
-// spurious reconciliation alert. This mirrors CreditNoteService.RefundCreditNote.
+// # Convergence policy: one Refund invocation = at most ONE gateway movement
 //
-// tx.Run (not raw RunInTx) joins an outer transaction if the caller already
-// started one, and stamps the tx onto the context.
+// The gateway is called AT MOST ONCE per Refund invocation, before the local
+// bookkeeping. The bookkeeping tx.Run is wrapped in tx.RetryOnConflict (issue
+// #190): RecordRefundWithKey bumps the payment's optimistic-locking version,
+// so a race-loser's Save fails with a version conflict and the RECORDING —
+// never the gateway call — is retried against the winner's committed state.
+// Each recording attempt classifies the concurrent state using the payment's
+// PER-REFUND KEY LEDGER ([payment.Payment.Refunds]: every recorded refund
+// carries the gateway idempotency key it was executed under) plus the advance
+// of the cumulative refunded total since this invocation derived its gateway
+// key (issue #235):
+//
+//   - A recorded refund already carries THIS invocation's key → the gateway
+//     call above was a no-movement REPLAY of that recorded refund (the
+//     concurrent identical duplicate, or a re-invocation replaying an
+//     already-recorded key). Returns ErrCodeConflict without recording and
+//     without re-hitting the gateway — identical duplicates collapse to a
+//     SINGLE movement. A caller that intentionally wants a second identical
+//     refund verifies gateway state and re-invokes Refund (the fresh
+//     invocation derives a fresh key from the advanced total).
+//   - Derived key, key absent, no advance → record normally.
+//   - Derived key, key absent, concurrent advance, and the key ledger fully
+//     accounts for the cumulative total → every concurrent refund used a
+//     DIFFERENT key, so this invocation's gateway movement was real; the
+//     refund is recorded against the fresh total. (RecordRefundWithKey still
+//     re-validates; an over-refund rejection here means a real movement is
+//     left unrecorded and is escalated as a MANUAL RECONCILIATION error.)
+//   - Derived key, key absent, concurrent advance, but the key ledger is
+//     INCOMPLETE (refund history predating key tracking, or keyless
+//     integrator-side RecordRefund bookkeeping) → replay-vs-real is
+//     undecidable: returns ErrCodeConflict, logs a MANUAL RECONCILIATION
+//     error instructing gateway-state verification, records nothing.
+//   - Explicit caller-supplied key, ANY advance → replay-vs-real cannot be
+//     decided for caller-owned keys: returns ErrCodeConflict, logs a MANUAL
+//     RECONCILIATION error, records nothing, never re-hits the gateway.
+//
+// INVARIANT: no path records an amount the gateway did not move. Because the
+// replay check matches this invocation's EXACT key against recorded refunds
+// (not a heuristic over the cumulative total), the classification stays exact
+// under any number of concurrent writers: with three-plus writers racing one
+// payment, every real movement is recorded and every replayed call converges
+// with a conflict and no record. The only remaining ambiguity — an incomplete
+// key ledger — fails closed as a conservative ErrCodeConflict, never a
+// phantom ledger record. Callers needing every invocation to succeed (rather
+// than conflict-and-retry) serialize refunds per payment.
+//
+// # Caller-owned transactions are rejected (issue #233 follow-up, BREAKING)
+//
+// Refund must NOT be invoked from inside a caller-owned transaction
+// (tx.InTransaction(ctx)). It is rejected up front with an
+// ErrCodeBusinessRule DomainError BEFORE the gateway is touched. Rationale:
+// unlike ProcessPayment — whose joined-tx duplicate-key race has a dedicated
+// no-read no-compensation convergence (#233) — Refund's RetryOnConflict
+// would JOIN the caller's transaction on every attempt. After a version
+// conflict the ambient transaction is aborted on backends like Postgres
+// (SQLSTATE 25P02), so every retry re-enters the same dead transaction and
+// the failure surfaces as a mislabeled "local save failed after gateway
+// refund (MANUAL RECONCILIATION REQUIRED)" — loud, but non-convergent, and
+// only AFTER real money moved. Rejecting before the gateway call turns that
+// into a money-safe, deterministic usage error: invoke Refund OUTSIDE any
+// transaction (its own tx.Run manages the bookkeeping transaction).
 //
 // # Hooks
 //
 // OnRefund hooks fire after successful persistence and are non-fatal.
 func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID, input RefundInput) error {
+	// Joined-tx guard (see the godoc section above): reject BEFORE any gateway
+	// call — nothing has moved yet, so this rejection is money-safe.
+	if tx.InTransaction(ctx) {
+		return shared.NewDomainError(shared.ErrCodeBusinessRule,
+			fmt.Sprintf("Refund of payment %s must not be called inside a caller-owned transaction: the refund bookkeeping manages its own transaction and cannot converge inside an aborted outer one — call Refund outside the transaction", paymentID))
+	}
+
 	// Load payment
 	p, err := s.paymentRepo.FindByID(ctx, paymentID)
 	if err != nil {
@@ -1690,69 +2131,145 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		return fmt.Errorf("refund validation failed: %w", err)
 	}
 
-	// Derive the gateway idempotency key. The pre-refund cumulative refunded
-	// total is read here (before the gateway call and before the tx) so that a
-	// retry of THIS attempt — which re-loads the payment while nothing has been
-	// committed — reads the same prior total and derives the same key.
+	// Derive the gateway idempotency key from the pre-flight cumulative total
+	// and the refund amount (issue #235), unless the caller pinned an explicit
+	// key. gatewayPrior is remembered so the recording attempts below can
+	// classify concurrent advances of the total relative to the state this
+	// invocation's single gateway call was keyed on.
+	gatewayPrior := p.RefundedAmount()
+	explicitKey := input.IdempotencyKey != ""
 	refundKey := input.IdempotencyKey
-	if refundKey == "" {
-		refundKey = deriveRefundIdempotencyKey(paymentID, p.RefundedAmount())
+	if !explicitKey {
+		refundKey = deriveRefundIdempotencyKey(paymentID, gatewayPrior, refundAmount)
 	}
 
+	// Phase 2: the gateway refund — AT MOST ONE gateway call per Refund
+	// invocation (see the convergence policy in the godoc). A gateway error
+	// returns here with nothing recorded and nothing to reconcile.
+	//
 	// Send the RESOLVED refund amount to the gateway, not input.Amount (issue
 	// #197). On a full refund input.Amount is nil; forwarding nil would ask the
 	// gateway to refund "the full charge" by its own reckoning while the local
-	// ledger records the amount computed here (payment amount − already-refunded).
-	// If those two notions ever diverge — a prior partial refund the gateway
-	// knows about, a gateway that treats nil as "the original charge" rather than
-	// "the remaining balance" — the gateway moves a different amount than the
-	// ledger records, silently desynchronising them. Passing &refundAmount makes
-	// the gateway and the ledger agree on exactly one figure.
+	// ledger records the amount computed here (payment amount − already-
+	// refunded). Passing &refundAmount makes the gateway and the ledger agree
+	// on exactly one figure.
 	refundReq := &port.RefundRequest{
 		TransactionID:  p.GatewayTransactionID(),
 		Amount:         &refundAmount,
 		Reason:         input.Reason,
 		IdempotencyKey: refundKey,
 	}
-
-	_, err = s.gateway.Refund(ctx, refundReq)
-	if err != nil {
+	if _, err = s.gateway.Refund(ctx, refundReq); err != nil {
 		return fmt.Errorf("gateway refund failed: %w", err)
 	}
 
-	// Phase 3: local bookkeeping inside a transaction. Re-load the payment
-	// through the tx-scoped repository so the load + RecordRefund + Save is a
-	// single check-then-act under the transaction's isolation, closing the
-	// concurrency window (issue #150). RecordRefund re-runs ValidateRefund, so a
-	// concurrent refund that already committed makes this one fail with a domain
-	// error rather than double-recording.
-	var recorded *payment.Payment
-	var recordRejected bool
+	// Phase 3: local bookkeeping inside a transaction, wrapped in
+	// tx.RetryOnConflict (issue #190). Retries re-run ONLY the recording —
+	// never the gateway call. Each attempt reloads the payment through the
+	// tx-scoped repository (single check-then-act under the transaction's
+	// isolation, issue #150) and classifies any concurrent advance of the
+	// cumulative refunded total before recording (issue #235).
+	var (
+		recorded       *payment.Payment
+		recordRejected bool
+		// dedupConflict: a refund already RECORDED against this payment carries
+		// THIS invocation's gateway idempotency key, which proves the gateway
+		// call above was a no-movement replay of that recorded refund. Nothing
+		// to record, nothing to reconcile.
+		dedupConflict bool
+		// ambiguousConflict: explicit-key path — the total advanced while this
+		// refund was in flight; replay-vs-real is undecidable for caller-owned
+		// keys, so nothing is recorded and the operator must reconcile.
+		ambiguousConflict bool
+		// untrackedConflict: derived-key path — the total advanced but the
+		// payment's per-refund key ledger is incomplete (refund history
+		// predating key tracking, or keyless RecordRefund entries), so the
+		// absence of this invocation's key cannot prove the movement was real.
+		// Nothing is recorded; the operator must verify gateway state.
+		untrackedConflict bool
+	)
 	err = tx.RetryOnConflict(paymentMaxRetries, func() error {
-		// Reset per attempt: a prior attempt that hit a version conflict must not
-		// leak its (unset) recordRejected state into this one. RetryOnConflict only
-		// retries on version conflicts, which are NOT domain rejections, so
-		// recordRejected is always false when we retry — but reset defensively.
-		recordRejected = false
+		// Reset per attempt: a prior attempt that hit a version conflict must
+		// not leak its outcome flags into this one.
+		recordRejected, dedupConflict, ambiguousConflict, untrackedConflict = false, false, false, false
 		recorded = nil
 		return tx.Run(ctx, s.txManager, func(txCtx context.Context, repos tx.Repos) error {
 			loaded, findErr := repos.Payments.FindByID(txCtx, paymentID)
 			if findErr != nil {
 				return fmt.Errorf("failed to reload payment for refund: %w", findErr)
 			}
-			if refundErr := loaded.RecordRefund(refundAmount); refundErr != nil {
-				// Domain rejection (already refunded / over-refund) — typically a
-				// concurrent refund that recorded first. Flag it so the outer code
-				// distinguishes this benign case from a genuine persistence failure.
-				// This is NOT a version conflict, so RetryOnConflict will not retry
-				// it — the error propagates straight out.
+			// Defensive nil-guard (issue #197 pattern): a BYO-DB adapter
+			// returning (nil, nil) for a missing payment would otherwise
+			// nil-panic on RecordRefund below (issue #241).
+			if loaded == nil {
+				return shared.NewDomainError(shared.ErrCodeNotFound,
+					fmt.Sprintf("payment %s not found", paymentID))
+			}
+			// Classify any concurrent advance of the cumulative refunded total
+			// since this invocation derived its gateway key (issue #235). The
+			// guard applies to BOTH derived and explicit keys: on a row-locking
+			// backend the loser's reload sees the winner's committed state
+			// without any version conflict, so without this check it would
+			// happily record a refund whose gateway call was a deduped replay.
+			advance, subErr := loaded.RefundedAmount().Subtract(gatewayPrior)
+			if subErr != nil {
+				return fmt.Errorf("failed to compute refunded-total advance: %w", subErr)
+			}
+			if !advance.IsZero() && explicitKey {
+				// Caller-owned key + concurrent advance: whether the gateway
+				// executed or replayed this invocation's call cannot be decided
+				// from local state (the caller owns the retry-vs-distinct
+				// contract for its key, so even a matching recorded key is not
+				// trusted here). Never record, never re-hit; surface a conflict
+				// and flag for manual reconciliation.
+				ambiguousConflict = true
+				return shared.NewDomainError(shared.ErrCodeConflict,
+					fmt.Sprintf("concurrent refund recorded against payment %s while this refund (explicit idempotency key %q) was in flight; whether the gateway executed or replayed this refund is unknown — verify gateway state and reconcile manually", paymentID, refundKey))
+			}
+			// Exact replay detection via the per-refund key ledger: a recorded
+			// refund that already carries THIS invocation's gateway key proves
+			// the gateway call above was a no-movement replay of that refund —
+			// recording it again would book a phantom refund. This covers both
+			// the concurrent identical duplicate (same prior total + same
+			// amount ⇒ same derived key, recorded by the winner) and a
+			// sequential re-invocation replaying an already-recorded key.
+			if loaded.HasRefundWithIdempotencyKey(refundKey) {
+				dedupConflict = true
+				return shared.NewDomainError(shared.ErrCodeConflict,
+					fmt.Sprintf("a recorded refund of payment %s already carries idempotency key %q — the gateway call was a no-movement replay; verify gateway state before intentionally refunding again", paymentID, refundKey))
+			}
+			if !advance.IsZero() {
+				// Derived key, concurrent advance, and this invocation's key is
+				// NOT among the recorded refunds. That absence proves the
+				// movement was real ONLY if the key ledger fully accounts for
+				// the cumulative total (every concurrent refund recorded its
+				// key). Otherwise — refund history predating key tracking or
+				// keyless RecordRefund bookkeeping — replay-vs-real cannot be
+				// decided, and the conservative outcome is a conflict, never a
+				// possibly-phantom record.
+				if !loaded.RefundKeysComplete() {
+					untrackedConflict = true
+					return shared.NewDomainError(shared.ErrCodeConflict,
+						fmt.Sprintf("concurrent refund(s) advanced the refunded total of payment %s but its refund history does not carry complete idempotency keys; whether the gateway executed or replayed this refund is unknown — verify gateway state and reconcile manually", paymentID))
+				}
+				// Complete key ledger + this key absent: every concurrent
+				// refund used a DIFFERENT key, so this invocation's gateway
+				// movement was real — fall through and record it against the
+				// fresh total. RecordRefundWithKey re-validates below; if the
+				// winner exhausted the headroom the rejection is escalated as a
+				// reconciliation error.
+			}
+			if refundErr := loaded.RecordRefundWithKey(refundAmount, refundKey); refundErr != nil {
+				// Domain rejection (non-refundable state / over-refund) against
+				// the fresh state. This is NOT a version conflict, so
+				// RetryOnConflict will not retry it — the error propagates out.
 				recordRejected = true
 				return refundErr
 			}
 			// A version conflict here (optimistic-locking backend, concurrent
 			// writer committed first) is returned unwrapped so tx.IsVersionConflict
-			// recognizes it and RetryOnConflict re-runs this closure against the
-			// winner's freshly-persisted state.
+			// recognizes it and RetryOnConflict re-runs the recording against
+			// the winner's freshly-persisted state.
 			if saveErr := repos.Payments.Save(txCtx, loaded); saveErr != nil {
 				return saveErr
 			}
@@ -1761,27 +2278,63 @@ func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID,
 		})
 	})
 	if err != nil {
-		if recordRejected {
-			// The in-tx re-validation rejected the refund. Because the gateway
-			// idempotency key is deterministic, a concurrent refund of the same
-			// attempt was collapsed by the gateway into a single real refund —
-			// the winner recorded it. No money moved twice, so this is NOT a
-			// reconciliation event: surface the domain error cleanly.
-			s.logger.Info("refund rejected on in-tx re-validation (concurrent refund likely recorded first)",
+		switch {
+		case dedupConflict:
+			// The gateway call was a no-movement replay of a refund that is
+			// already recorded (its idempotency key is on the payment's refund
+			// ledger); ledger and gateway agree. Not a reconciliation event.
+			s.logger.Info("refund not recorded: a recorded refund already carries this invocation's idempotency key (gateway call was a replay, no new movement)",
+				"paymentID", paymentID,
+				"refundAmount", refundAmount,
+				"refundKey", refundKey,
+			)
+			return err
+		case untrackedConflict:
+			// Derived key + concurrent advance, but the payment's refund
+			// history lacks complete idempotency keys (pre-key-tracking data or
+			// keyless RecordRefund bookkeeping): replay-vs-real is undecidable,
+			// so nothing was recorded. The gateway may or may not have moved
+			// this amount — escalate for gateway-state verification.
+			s.logger.Error("refund not recorded after concurrent advance: payment's refund history lacks complete idempotency keys (MANUAL RECONCILIATION REQUIRED: verify gateway state before retrying)",
+				"paymentID", paymentID,
+				"refundAmount", refundAmount,
+				"refundKey", refundKey,
+				"error", err,
+			)
+			return err
+		case ambiguousConflict:
+			// Explicit caller key + concurrent advance: this invocation's
+			// gateway call may or may not have moved money. Escalate loudly.
+			s.logger.Error("refund not recorded after concurrent advance under an explicit idempotency key (MANUAL RECONCILIATION REQUIRED: replay-vs-real is ambiguous)",
+				"paymentID", paymentID,
+				"refundAmount", refundAmount,
+				"refundKey", refundKey,
+				"error", err,
+			)
+			return err
+		case recordRejected:
+			// The recording was rejected against the fresh state after this
+			// invocation's gateway call — which, on every path that reaches
+			// RecordRefund, was keyed distinctly from the concurrent winner's
+			// (the deduped same-key case is caught above as dedupConflict). A
+			// real movement is therefore left unrecorded.
+			s.logger.Error("refund recording rejected after gateway refund (MANUAL RECONCILIATION REQUIRED: gateway movement may be unrecorded)",
+				"paymentID", paymentID,
+				"refundAmount", refundAmount,
+				"refundKey", refundKey,
+				"error", err,
+			)
+			return fmt.Errorf("refund not recorded after gateway refund (MANUAL RECONCILIATION REQUIRED): %w", err)
+		default:
+			// Gateway refund succeeded but local persistence failed — this requires
+			// manual reconciliation. Refunds cannot be reversed, so we log at Error level.
+			s.logger.Error("local save failed after gateway refund (MANUAL RECONCILIATION REQUIRED)",
 				"paymentID", paymentID,
 				"refundAmount", refundAmount,
 				"error", err,
 			)
-			return fmt.Errorf("refund not recorded (already refunded by a concurrent operation): %w", err)
+			return fmt.Errorf("local save failed after gateway refund (MANUAL RECONCILIATION REQUIRED): %w", err)
 		}
-		// Gateway refund succeeded but local persistence failed — this requires
-		// manual reconciliation. Refunds cannot be reversed, so we log at Error level.
-		s.logger.Error("local save failed after gateway refund (MANUAL RECONCILIATION REQUIRED)",
-			"paymentID", paymentID,
-			"refundAmount", refundAmount,
-			"error", err,
-		)
-		return fmt.Errorf("local save failed after gateway refund (MANUAL RECONCILIATION REQUIRED): %w", err)
 	}
 	p = recorded
 
@@ -1836,9 +2389,15 @@ func (s *PaymentService) ResolvePaymentMethod(ctx context.Context, inv *invoice.
 			return *agg.PaymentMethodID(), nil
 		}
 
-		// Level 3: Customer-level default (via gateway)
+		// Level 3: Customer-level default (via gateway). The lookup carries a
+		// gateway-side customer ID, so it goes through the same resolution seam
+		// as the Charge path (issue #231).
 		if s.customerGateway != nil {
-			customer, err := s.customerGateway.GetCustomer(ctx, string(agg.AccountID()))
+			gatewayCustomerID, resolveErr := s.resolveGatewayCustomerID(ctx, agg.AccountID())
+			if resolveErr != nil {
+				return "", resolveErr
+			}
+			customer, err := s.customerGateway.GetCustomer(ctx, gatewayCustomerID)
 			if err != nil {
 				return "", fmt.Errorf("failed to load customer for payment method resolution: %w", err)
 			}

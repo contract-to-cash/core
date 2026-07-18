@@ -20,8 +20,9 @@ const (
 // It aliases shared.RoundingMode so that a proration calculator can apply the
 // configured mode directly via Money.Round (e.g.
 // adjustment.Round(2, cfg.RoundingMode)). Proration itself is computed by the
-// consumer-provided billing.BillingCalculationService; this config carries the
-// rounding policy through to that implementation.
+// consumer's proration calculator (whose PlanChangeProration result is passed to
+// ContractAggregate.ChangePrice and BillingService.GenerateProrationInvoice);
+// this config carries the rounding policy through to that implementation.
 type RoundingMode = shared.RoundingMode
 
 const (
@@ -37,7 +38,9 @@ type ProrationConfig struct {
 }
 
 // PlanChangeProration holds the result of a proration calculation for a plan change.
-// This mirrors billing.ProrationResult but lives in the contract domain to avoid circular dependencies.
+// It is produced by the consumer's proration calculator and consumed by
+// ContractAggregate.ChangePrice (recorded on PriceChangedEvent) and
+// BillingService.GenerateProrationInvoice.
 type PlanChangeProration struct {
 	CreditAmount     shared.Money `json:"credit_amount"`
 	ChargeAmount     shared.Money `json:"charge_amount"`

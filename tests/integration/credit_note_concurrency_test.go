@@ -53,10 +53,17 @@ func TestCreateCreditNote_ConcurrentIssuance_CumulativeCapEnforced(t *testing.T)
 	inv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
 		moneyJPY(1000), moneyJPY(0), moneyJPY(0),
-		invoice.WithStatus(invoice.InvoiceStatusIssued),
 	)
 	if err != nil {
 		t.Fatalf("NewInvoice failed: %v", err)
+	}
+	// WithStatus accepts only Draft (issue #238) — reach issued via the real
+	// transitions.
+	if err := inv.Finalize(); err != nil {
+		t.Fatalf("Finalize failed: %v", err)
+	}
+	if err := inv.MarkIssued(); err != nil {
+		t.Fatalf("MarkIssued failed: %v", err)
 	}
 	if err := invoiceRepo.Save(ctx, inv); err != nil {
 		t.Fatalf("seeding invoice failed: %v", err)

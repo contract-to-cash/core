@@ -66,6 +66,19 @@ func TestMoney_Multiply(t *testing.T) {
 	}
 }
 
+// TestMoney_Multiply_NilFactorPanics pins the issue #244 tightening: a nil
+// factor is a caller bug (an unset rate) and must panic loudly instead of
+// silently multiplying by zero and producing a wrong (zero) charge.
+func TestMoney_Multiply_NilFactorPanics(t *testing.T) {
+	m := NewMoney(big.NewRat(1000, 1), CurrencyJPY)
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil factor, got none")
+		}
+	}()
+	m.Multiply(nil)
+}
+
 func TestMoney_Negate(t *testing.T) {
 	m := NewMoney(big.NewRat(100, 1), CurrencyJPY)
 	neg := m.Negate()

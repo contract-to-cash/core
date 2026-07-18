@@ -127,6 +127,9 @@ paymentService := service.NewPaymentService(
     clock,         // shared.Clock
     // Optional:
     service.WithCustomerGateway(customerGateway),  // port.CustomerGateway — fallback resolution
+    service.WithCustomerIDResolver(resolver),      // port.CustomerIDResolver — maps AccountID → gateway customer ID (issue #231).
+                                                   // Without it, the AccountID is sent verbatim (only valid for gateways that
+                                                   // accept caller-chosen customer IDs); Stripe-style ID-minting gateways MUST wire one.
     service.WithPaymentTxManager(txManager),       // tx.TxManager — REQUIRED for production; without it, defaults to NoopTxManager (non-atomic, warns at construction)
     service.WithPaymentLogger(logger),             // *slog.Logger (defaults to slog.Default())
 )
@@ -140,7 +143,7 @@ type ProcessPaymentInput struct {
     PaymentMethod   payment.PaymentMethod // Optional payment method type (e.g. bank_transfer, convenience_store); if unset, resolved from ChargeResponse.PaymentMethodType, falling back to credit_card
     Amount          shared.Money
     Currency        shared.Currency
-    IdempotencyKey  string                // Required for deduplication
+    IdempotencyKey  string                // Required — an empty key is rejected up front with ErrCodeValidation (issue #241)
     Metadata        map[string]string
     ReturnURL       string                // Optional. Where the customer returns after approving a redirect-based payment (qr_code wallets, card 3DS). Non-empty → propagated as ChargeRequest.ThreeDSecure.ReturnURL; empty → ThreeDSecure stays nil (platform#66)
 }
@@ -160,6 +163,10 @@ Flow: BeforeChargeHook → Gateway.Charge → AfterChargeHook (success) / OnPaym
 type RefundInput struct {
     Amount *shared.Money     // nil = refund full remaining amount
     Reason port.RefundReason
+    // Optional explicit gateway idempotency key. Leave empty (common case) to let
+    // Refund derive a deterministic, amount-bound key (issue #235); see
+    // docs/internals/payment-gateway.md §6.3.2 for the derivation and caller contract.
+    IdempotencyKey string
 }
 
 func (s *PaymentService) Refund(
@@ -325,16 +332,34 @@ type BatchProcessor interface {
 }
 
 type BatchOptions struct {
-    DryRun          bool
+    DryRun          bool // report what would be done, without side effects
     ContinueOnError bool
     Concurrency     int
+    Limit           int  // cap on due items loaded per run (0 = unlimited, issue #197)
 }
 
+// Accounting invariant: Total == Succeeded + Failed + Skipped (issue #242).
 type BatchResult struct {
     Total     int
     Succeeded int
     Failed    int
+    // Skipped counts items not attempted because the run stopped early after a
+    // failure with ContinueOnError=false — including in-flight concurrent items
+    // aborted by the early-stop context cancellation (not recorded in Errors)
+    // and items never launched.
+    Skipped   int
     Errors    []error
+    // DryRunActions (dry runs only): the action a real run would take for each
+    // would-succeed item, one entry per Succeeded item in processing order.
+    // ContractRenewalProcessor labels: "renew" / "expire" (autoRenew=false) /
+    // "cancel" (scheduled cancelAtPeriodEnd) — a dry run mirrors the real run's
+    // classification instead of reporting these as failures (issue #242).
+    DryRunActions []DryRunAction
+}
+
+type DryRunAction struct {
+    ItemID string // e.g. contract ID
+    Action string // processor-specific label
 }
 ```
 

@@ -62,12 +62,30 @@ func TestInvoiceCleanupPlugin_Initialize_PriorityOverride(t *testing.T) {
 		t.Errorf("expected priority 7, got %d", p.Priority())
 	}
 
-	// Non-int is ignored.
-	if err := p.Initialize(context.Background(), plugin.Config{"priority": "nope"}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// A JSON-decoded number (float64 with integral value) is accepted (issue #239).
+	if err := p.Initialize(context.Background(), plugin.Config{"priority": float64(11)}); err != nil {
+		t.Fatalf("unexpected error for float64 priority: %v", err)
 	}
-	if p.Priority() != 7 {
-		t.Errorf("expected priority to stay 7 after non-int config, got %d", p.Priority())
+	if p.Priority() != 11 {
+		t.Errorf("expected priority 11 after float64 config, got %d", p.Priority())
+	}
+
+	// A present-but-mistyped value is a configuration error (issue #239).
+	if err := p.Initialize(context.Background(), plugin.Config{"priority": "nope"}); err == nil {
+		t.Fatal("expected error for string priority, got nil")
+	}
+	if p.Priority() != 11 {
+		t.Errorf("expected priority to stay 11 after rejected config, got %d", p.Priority())
+	}
+
+	// A non-integral float is rejected rather than truncated (issue #239).
+	if err := p.Initialize(context.Background(), plugin.Config{"priority": 1.5}); err == nil {
+		t.Fatal("expected error for non-integral float priority, got nil")
+	}
+
+	// Unknown keys stay ignored.
+	if err := p.Initialize(context.Background(), plugin.Config{"unknownKey": 3}); err != nil {
+		t.Fatalf("unexpected error for unknown key: %v", err)
 	}
 }
 
@@ -88,13 +106,21 @@ func TestInvoiceCleanupPlugin_LeavesNonDraftFinalizedUntouched(t *testing.T) {
 	accountID := shared.NewAccountID()
 
 	// An overdue invoice must be left untouched (requires human judgment).
+	// WithStatus accepts only Draft (issue #238), so reach overdue via the
+	// real transitions: a past due date + finalize + MarkOverdue.
 	overdue, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), accountID, contractID,
 		jpy(3000), jpy(0), jpy(0),
-		invoice.WithStatus(invoice.InvoiceStatusOverdue),
+		invoice.WithDueDate(time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC)),
 	)
 	if err != nil {
 		t.Fatalf("create overdue invoice: %v", err)
+	}
+	if err := overdue.Finalize(); err != nil {
+		t.Fatalf("finalize overdue invoice: %v", err)
+	}
+	if err := overdue.MarkOverdue(clock.Now()); err != nil {
+		t.Fatalf("mark overdue: %v", err)
 	}
 	_ = repo.Save(ctx, overdue)
 

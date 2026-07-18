@@ -1,9 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"sync"
@@ -301,9 +303,7 @@ func newSimpleFinalizedInvoice() *invoice.Invoice {
 }
 
 func newFinalizedInvoice(accountID shared.AccountID, contractID shared.ContractID, amount shared.Money, pmID *string) *invoice.Invoice {
-	opts := []invoice.InvoiceOption{
-		invoice.WithStatus(invoice.InvoiceStatusFinalized),
-	}
+	var opts []invoice.InvoiceOption
 	if pmID != nil {
 		opts = append(opts, invoice.WithPaymentMethodID(pmID))
 	}
@@ -319,7 +319,7 @@ func newFinalizedInvoice(accountID shared.AccountID, contractID shared.ContractI
 	if err != nil {
 		panic("newFinalizedInvoice: " + err.Error())
 	}
-	return inv
+	return transitionInvoiceForTest(inv, invoice.InvoiceStatusFinalized)
 }
 
 func strPtr(s string) *string {
@@ -1980,10 +1980,12 @@ func TestProcessPayment_CompensationFires_MarksKey(t *testing.T) {
 
 // --- Empty IdempotencyKey must not attempt any store interaction ---
 
-func TestProcessPayment_EmptyKey_StoreNotConsulted(t *testing.T) {
-	// An empty IdempotencyKey cannot be meaningfully tracked by the store
-	// (the gateway has no way to replay an empty key either), so the service
-	// must skip ResolveEffectiveKey / MarkCompensated entirely and proceed.
+func TestProcessPayment_EmptyKey_RejectedAtBoundary(t *testing.T) {
+	// Issue #241: an empty IdempotencyKey disables every duplicate-charge
+	// defence in ProcessPayment (pre-charge/in-tx lookups skipped, storage
+	// uniqueness cannot fire, gateway cannot dedupe retries). The service must
+	// reject it at the boundary with ErrCodeValidation — before consulting the
+	// idempotency store and before any gateway call.
 	clock := newPaymentTestClock()
 	inv := newSimpleFinalizedInvoice()
 	store := newFakeIdempotencyStore()
@@ -2007,8 +2009,12 @@ func TestProcessPayment_EmptyKey_StoreNotConsulted(t *testing.T) {
 		Currency:        shared.CurrencyJPY,
 		IdempotencyKey:  "", // empty
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected validation error for empty IdempotencyKey")
+	}
+	assertDomainError(t, err, shared.ErrCodeValidation)
+	if pmt != nil {
+		t.Errorf("expected nil payment on validation rejection, got %+v", pmt)
 	}
 	if store.resolveCalls != 0 {
 		t.Errorf("ResolveEffectiveKey must not be called for empty key, got %d calls", store.resolveCalls)
@@ -2016,22 +2022,12 @@ func TestProcessPayment_EmptyKey_StoreNotConsulted(t *testing.T) {
 	if store.markCalls != 0 {
 		t.Errorf("MarkCompensated must not be called for empty key, got %d calls", store.markCalls)
 	}
-
-	// The charge must have gone through normally with an empty key and no
-	// derivation (i.e. no "-"+ULID suffix leaking from the retry helper).
-	if len(gw.chargeKeys) != 1 {
-		t.Fatalf("expected exactly 1 Charge call, got %d", len(gw.chargeKeys))
+	// Money-safety: the gateway must never be touched.
+	if len(gw.chargeKeys) != 0 {
+		t.Errorf("gateway must not be charged for an empty key, got %d calls", len(gw.chargeKeys))
 	}
-	if gw.chargeKeys[0] != "" {
-		t.Errorf("Charge must receive the empty key verbatim, got %q", gw.chargeKeys[0])
-	}
-
-	// The saved Payment must not have a spurious IdempotencyKey.
-	if pmt == nil {
-		t.Fatal("expected payment")
-	}
-	if pmt.IdempotencyKey() != "" {
-		t.Errorf("payment IdempotencyKey must remain empty, got %q", pmt.IdempotencyKey())
+	if paymentRepo.saved != nil {
+		t.Error("no payment record may be persisted for a rejected empty key")
 	}
 }
 
@@ -2992,14 +2988,20 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 	// the in-tx terminal rejection would silently pass the main test
 	// suite (pre-charge catches everything in the happy path).
 	tests := []struct {
-		name     string
-		mutate   func(p *payment.Payment)
-		wantCode shared.ErrorCode
+		name   string
+		mutate func(p *payment.Payment)
+		// wantCompensation: whether the saga compensation refund must fire
+		// (issue #234). Refunded / PartiallyRefunded / ChargedBack account
+		// their money as already moved, so the Charge was an idempotent
+		// replay and compensating would reverse the original transaction a
+		// second time. Failed captured NOTHING, so the fresh Captured charge
+		// is real and unbacked — compensation MUST reverse it.
+		wantCompensation bool
 	}{
-		{"Refunded", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkRefunded() }, shared.ErrCodeConflict},
-		{"PartiallyRefunded", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkPartiallyRefunded() }, shared.ErrCodeConflict},
-		{"Failed", func(p *payment.Payment) { _ = p.Fail("declined") }, shared.ErrCodeConflict},
-		{"ChargedBack", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkChargedBack() }, shared.ErrCodeConflict},
+		{"Refunded", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkRefunded() }, false},
+		{"PartiallyRefunded", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkPartiallyRefunded() }, false},
+		{"Failed", func(p *payment.Payment) { _ = p.Fail("declined") }, true},
+		{"ChargedBack", func(p *payment.Payment) { _ = p.Complete(); _ = p.MarkChargedBack() }, false},
 	}
 
 	for _, tc := range tests {
@@ -3021,6 +3023,8 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 
 			paymentRepo := newRaceFakePaymentRepo(delayed)
 			gw := &trackingGateway{}
+			var logBuf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			svc := NewPaymentService(
 				gw,
@@ -3030,6 +3034,7 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 				&mockEventStore{},
 				plugin.NewRegistry(),
 				clock,
+				WithPaymentLogger(logger),
 			)
 
 			pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), ProcessPaymentInput{
@@ -3043,12 +3048,7 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error for in-tx terminal-state race (%s)", tc.name)
 			}
-			var domainErr *shared.DomainError
-			if !errors.As(err, &domainErr) {
-				t.Errorf("expected shared.DomainError, got %T: %v", err, err)
-			} else if domainErr.Code != tc.wantCode {
-				t.Errorf("expected error code %q, got %q", tc.wantCode, domainErr.Code)
-			}
+			assertDomainError(t, err, shared.ErrCodeConflict)
 			if pmt != nil {
 				t.Errorf("expected nil payment, got %+v", pmt)
 			}
@@ -3060,13 +3060,35 @@ func TestProcessPayment_TerminalStateRace_InTxRejection(t *testing.T) {
 				t.Errorf("expected 1 Charge call (pre-charge lookup missed), got %d", len(gw.chargeKeys))
 			}
 
-			// Compensation MUST have fired to refund the captured txn,
-			// because the in-tx rejection returns a non-nil error from
-			// the closure. This is the correct saga behavior for the
-			// race case: the gateway actually charged, so we must
-			// actually refund.
-			if len(gw.refundTxnIDs) != 1 {
-				t.Errorf("expected 1 compensation Refund after in-tx race rejection, got %d", len(gw.refundTxnIDs))
+			if tc.wantCompensation {
+				// Failed-state conflict: the Captured charge is REAL (nothing
+				// was captured by the Failed record) → the generic saga path
+				// must reverse it. trackingGateway's Void fails (captured
+				// txn), so compensation lands as one comp- Refund.
+				if len(gw.refundTxnIDs) != 1 {
+					t.Errorf("Failed-state conflict must fire saga compensation exactly once, got refunds: %v", gw.refundTxnIDs)
+				}
+				return
+			}
+
+			// Refunded / PartiallyRefunded / ChargedBack: compensation MUST
+			// NOT fire (issue #234) — the Charge above was an idempotent
+			// replay of the transaction that already backs the terminal
+			// record; a compensation Void/Refund would be a SECOND real
+			// reversal (worst on ChargedBack, where the network already
+			// pulled the funds back).
+			if len(gw.refundTxnIDs) != 0 {
+				t.Errorf("compensation must NOT fire on in-tx terminal-state conflict (issue #234), got refunds: %v", gw.refundTxnIDs)
+			}
+			for _, k := range gw.refundKeys {
+				if strings.HasPrefix(k, "comp-") {
+					t.Errorf("no comp- refund key may reach the gateway on terminal-state replay, got %q", k)
+				}
+			}
+			// The no-compensation path must be observable: a Warn naming the
+			// key and terminal status is emitted.
+			if !containsAll(logBuf.String(), "terminal payment record", "key-race") {
+				t.Errorf("expected warn log on the no-compensation terminal-replay path, got:\n%s", logBuf.String())
 			}
 		})
 	}
@@ -4532,5 +4554,86 @@ func TestProcessPayment_OnCompensationExecuted_HookFailureIsNonFatal(t *testing.
 	}
 	if panicSpy.calls != 1 {
 		t.Errorf("expected panicking hook to be called once (isolated by SafeInvoke), got %d", panicSpy.calls)
+	}
+}
+
+// TestProcessPayment_OutboxWriter_FiresOnPendingPromotion pins the issue #248
+// outbox fire on the gateway path's in-tx Pending→Completed promotion: call 1
+// persists a Pending record (3DS requires_action — no outbox fire, nothing is
+// settled), call 2 replays the same key, the gateway returns Captured, and the
+// promotion path saves both rows and must fire OnPaymentRecorded exactly once
+// with the promoted (now Completed) record.
+func TestProcessPayment_OutboxWriter_FiresOnPendingPromotion(t *testing.T) {
+	clock := newPaymentTestClock()
+	inv := newSimpleFinalizedInvoice()
+	invRepo := &mockInvoiceRepoForPayment{inv: inv}
+	paymentRepo := newFakePaymentRepo()
+	writer := inmemory.NewInMemoryOutboxWriter()
+
+	amount := shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY)
+	gw := &trackingGateway{
+		chargeResponses: []port.ChargeResponse{
+			{
+				TransactionID: "txn-promo-outbox",
+				Status:        port.TransactionStatusRequiresAction,
+				Amount:        amount,
+				CreatedAt:     time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+			},
+			{
+				TransactionID: "txn-promo-outbox",
+				Status:        port.TransactionStatusCaptured, // 3DS finished
+				Amount:        amount,
+				CreatedAt:     time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+
+	svc := NewPaymentService(
+		gw,
+		paymentRepo,
+		invRepo,
+		nil,
+		&mockEventStore{},
+		plugin.NewRegistry(),
+		clock,
+		WithPaymentOutboxWriter(writer),
+		WithoutPaymentTransactions(),
+	)
+
+	input := ProcessPaymentInput{
+		PaymentMethodID: "pm-001",
+		Amount:          amount,
+		Currency:        shared.CurrencyJPY,
+		IdempotencyKey:  "key-promo-outbox",
+	}
+
+	// Call 1: requires_action → Pending saved, NO outbox fire (nothing settled).
+	if _, err := svc.ProcessPayment(context.Background(), inv.ID(), input); !errors.Is(err, ErrRequiresAction) {
+		t.Fatalf("first call must return ErrRequiresAction, got: %v", err)
+	}
+	if writer.PaymentCount() != 0 {
+		t.Fatalf("outbox must NOT fire for an unsettled pending save, got %d entries", writer.PaymentCount())
+	}
+
+	// Call 2: Captured → in-tx Pending→Completed promotion → outbox fires once.
+	pmt, err := svc.ProcessPayment(context.Background(), inv.ID(), input)
+	if err != nil {
+		t.Fatalf("second call must succeed, got: %v", err)
+	}
+	if pmt.Status() != payment.PaymentStatusCompleted {
+		t.Fatalf("promotion must complete the payment, got %q", pmt.Status())
+	}
+	if writer.PaymentCount() != 1 {
+		t.Fatalf("expected OnPaymentRecorded to fire exactly once on the promotion path, got %d", writer.PaymentCount())
+	}
+	entry := writer.PaymentEntries()[0]
+	if entry.Payment == nil || entry.Payment.ID() != pmt.ID() {
+		t.Errorf("outbox entry must carry the promoted payment record")
+	}
+	if entry.Payment != nil && entry.Payment.Status() != payment.PaymentStatusCompleted {
+		t.Errorf("outbox entry payment status = %q, want completed", entry.Payment.Status())
+	}
+	if entry.Invoice == nil || entry.Invoice.ID() != inv.ID() {
+		t.Errorf("outbox entry must carry the invoice")
 	}
 }

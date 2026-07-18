@@ -1,6 +1,7 @@
 package invoice
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 
@@ -10,15 +11,7 @@ import (
 // --- VoidWithReason tests ---
 
 func TestVoidWithReason_FromIssued(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusIssued),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusIssued)
 
 	if err := inv.VoidWithReason("billing error"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -32,15 +25,7 @@ func TestVoidWithReason_FromIssued(t *testing.T) {
 }
 
 func TestVoidWithReason_FromPaid(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusPaid),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusPaid)
 
 	if err := inv.VoidWithReason("credit note issued"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -51,15 +36,7 @@ func TestVoidWithReason_FromPaid(t *testing.T) {
 }
 
 func TestVoidWithReason_FromOverdue(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusOverdue),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusOverdue)
 
 	if err := inv.VoidWithReason("order cancelled"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -93,15 +70,7 @@ func TestVoidWithReason_FromFinalized(t *testing.T) {
 }
 
 func TestVoidWithReason_FromPartialPaid(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusPartialPaid),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusPartialPaid)
 
 	if err := inv.VoidWithReason("credit note issued for partial refund"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -124,15 +93,7 @@ func TestVoidWithReason_FromVoided_Rejected(t *testing.T) {
 }
 
 func TestVoidWithReason_FromRefunded_Rejected(t *testing.T) {
-	inv := mustNewInvoice(t,
-		shared.NewInvoiceID(),
-		shared.NewAccountID(),
-		shared.NewContractID(),
-		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		shared.Zero(shared.CurrencyJPY),
-		WithStatus(InvoiceStatusRefunded),
-	)
+	inv := newInvoiceWithStatus(t, InvoiceStatusRefunded)
 
 	if err := inv.VoidWithReason("already refunded"); err == nil {
 		t.Fatal("expected error voiding refunded invoice")
@@ -228,5 +189,64 @@ func TestInvoice_RevisionFields_DefaultNil(t *testing.T) {
 	}
 	if inv.VoidReason() != "" {
 		t.Error("expected voidReason to be empty by default")
+	}
+}
+
+// --- Option-path self-reference guards (issue #238, mirrors #162 L-9) ---
+
+// The setters (SetRevisionOf / SetOriginalInvoiceID) reject a self-reference as
+// a no-op; the construction-time options must not be a bypass. NewInvoice fails
+// with a validation DomainError instead, since a silently-dropped link at
+// construction would be invisible to the caller.
+
+func newSelfLinkArgs() (shared.InvoiceID, shared.AccountID, shared.ContractID, shared.Money, shared.Money, shared.Money) {
+	return shared.NewInvoiceID(),
+		shared.NewAccountID(),
+		shared.NewContractID(),
+		shared.NewMoney(big.NewRat(10000, 1), shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY),
+		shared.Zero(shared.CurrencyJPY)
+}
+
+func assertValidationError(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected validation error, got nil")
+	}
+	var de *shared.DomainError
+	if !errors.As(err, &de) {
+		t.Fatalf("expected *shared.DomainError, got %T (%v)", err, err)
+	}
+	if de.Code != shared.ErrCodeValidation {
+		t.Errorf("expected code %s, got %s", shared.ErrCodeValidation, de.Code)
+	}
+}
+
+func TestNewInvoice_WithRevisionOf_SelfReferenceRejected(t *testing.T) {
+	id, acc, ctr, sub, disc, tax := newSelfLinkArgs()
+	_, err := NewInvoice(id, acc, ctr, sub, disc, tax, WithRevisionOf(id))
+	assertValidationError(t, err)
+}
+
+func TestNewInvoice_WithOriginalInvoiceID_SelfReferenceRejected(t *testing.T) {
+	id, acc, ctr, sub, disc, tax := newSelfLinkArgs()
+	_, err := NewInvoice(id, acc, ctr, sub, disc, tax, WithOriginalInvoiceID(id))
+	assertValidationError(t, err)
+}
+
+func TestNewInvoice_RevisionLinks_NonSelfStillAccepted(t *testing.T) {
+	id, acc, ctr, sub, disc, tax := newSelfLinkArgs()
+	rootID := shared.NewInvoiceID()
+	parentID := shared.NewInvoiceID()
+	inv, err := NewInvoice(id, acc, ctr, sub, disc, tax,
+		WithOriginalInvoiceID(rootID), WithRevisionOf(parentID))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if inv.OriginalInvoiceID() == nil || *inv.OriginalInvoiceID() != rootID {
+		t.Errorf("expected originalInvoiceID %s, got %v", rootID, inv.OriginalInvoiceID())
+	}
+	if inv.RevisionOf() == nil || *inv.RevisionOf() != parentID {
+		t.Errorf("expected revisionOf %s, got %v", parentID, inv.RevisionOf())
 	}
 }

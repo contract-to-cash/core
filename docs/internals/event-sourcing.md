@@ -152,6 +152,49 @@ type Snapshot struct {
 }
 ```
 
+### 2.4 BYO Store 実装者契約（issue #237）
+
+本ライブラリは BYO DB であり、本番の `eventstore.Store` 実装は利用者が持ち込む。
+**正準（normative）な実装契約は `eventstore/store.go` のメソッドごとの godoc** であり、
+コアのサービス群（contract リポジトリ・SnapshotService・TemporalQueryService・
+ProjectionService）と `tx.RetryOnConflict` はそれに依存する。逸脱はコンパイラでは
+捕捉できず、リトライ・時点再構築・Projection チェックポイントを静かに壊す。要点:
+
+- **バージョン衝突エラーのエンコーディング（Append、必須）**: ストリームが
+  `expectedVersion` に無いとき、`Append` は **`tx.IsVersionConflict` が認識するエラー**を
+  返さなければならない — `shared.ErrCodeVersionConflict` コードの `*shared.DomainError`
+  （in-memory 参照実装のエンコーディング。この層に application/tx の import を持ち込まない）
+  **または** `tx.ErrVersionConflict` センチネルをラップしたエラー（`errors.Is` が成立）。
+  `tx.RetryOnConflict` はこの 2 エンコーディングだけをリトライする。独自の衝突エラーは
+  **システム中の全衝突リトライを静かに無効化**する（RetryOnConflict で包まれた契約保存が
+  最初の並行書き込みで恒久的に失敗する）。
+- **`Event.Version` の刻印（Append）**: コアの集約はバッチを常に連続番号で刻印する
+  （`BaseAggregate.RaiseEvent` が version+1, version+2, ...）。実装は呼び出し側の刻印を
+  検証して honour する（参照実装: `expectedVersion+1` からの連続性を検証し、歯抜け・
+  順序違反のバッチを validation エラーで拒否）か、同一の番号を自ら振り直すか、いずれか。
+  不連続なストリームの永続化は禁止。バッチは **all-or-nothing**（部分適用は集約を
+  再構築不能にする）。
+- **Load の順序（必須）**: `Load` / `LoadUntilVersion` / `LoadUntil` / `LoadRange` は
+  **Version 昇順**で返す — リプレイ（`LoadFromHistory`）はスライス順に適用しソートしない。
+- **空ストリームの規約**: イベントを持たない（書き込まれたことのない）streamID には
+  `(空スライス, nil)` を返す — not-found エラーではない。TemporalQueryService の
+  「まだ存在しない集約 = ゼロ値集約」再構築（§6.2）がこれに依存する。
+- **GlobalPosition の可視性（LoadAll / Subscribe、必須）**: 位置は読者に対して
+  **ギャップ無し・単調**に可視化されなければならない — 位置 N を見た読者が、後から
+  N より小さい未見のイベントを発見することがあってはならない。Projection の
+  チェックポイントは最後に処理した GlobalPosition の**厳密に後**から再開するため、
+  チェックポイントの「背後」に現れたイベントは永遠にスキップされ読み取りモデルが
+  静かに乖離する。素朴なシーケンス/オートインクリメント採番は並行コミット下でこれを
+  破る（N-1 を予約した tx が、読者が N を見た後にコミットしうる）。単一ライタでの
+  直列化・コミット順採番・in-flight ギャップの待機などで窓を閉じること。
+- **Subscribe の意味論**: `fromPosition`（排他的）より後の全イベントを、バックフィル →
+  ライブテールの順に、グローバル位置順・ギャップ無し・ハンドオーバー重複無しで配信する。
+  配信は at-least-once（消費者は再配信に耐えること）。ctx キャンセルで購読を解除し
+  **チャネルを閉じる**（消費者が永久ブロックせず end-of-stream を観測できるように）。
+- **スナップショット選択**: `LoadSnapshot` は「最新 = **最大 Version**」（最後に書かれた
+  ものではない）、`LoadSnapshotBefore` は CreatedAt カット・最大 CreatedAt 勝ち・
+  Version タイブレーク。どちらも該当なしは `(nil, nil)`（issue #157）。
+
 ## 3. 集約ルート
 
 ### 3.1 基本構造
@@ -782,6 +825,30 @@ type FieldChange struct {
 }
 ```
 
+### 6.2 GetContractAsOf の規約（存在しない契約・OccurredAt 単調性）
+
+実装（`application/query/temporal_query_service.go` の godoc が正準）が定める 2 つの規約:
+
+- **存在しない契約は「空集約 + nil エラー」（意図的、issue #246）**: イベントを 1 件も
+  持たない contractID に対して `GetContractAsOf` は **ゼロ値の集約**（Version 0・ゼロ値
+  ステータス）を nil エラーで返す。`Store.LoadUntil` が未知ストリームに `(空, nil)` を
+  返すため、「asOf 時点でまだ存在しなかった契約」と「一度も存在しなかった契約」は
+  ここでは区別できず、どちらも空集約に再構築される。これはリポジトリの
+  `FindByIDAsOf`（欠落集約に `ErrCodeNotFound` の DomainError を返す）とは**意図的に
+  異なる**。存在セマンティクスが必要な呼び出し側は、再構築された集約の
+  `Version()`/ステータスを確認するか、リポジトリを使うこと。
+
+- **ストリーム内 OccurredAt 単調性の前提（review W7）**: イベントの切り出しは
+  OccurredAt 基準（`LoadUntil`）だが、リプレイは Version 順に適用される。スナップショット
+  整合性ガードは「**同一ストリーム内で OccurredAt が Version に対して単調非減少**」で
+  あることを前提とする。あるストリームに**バックデートされたイベント**（後の Version が
+  先の OccurredAt を持つ）が混在すると、asOf カットが Version の**歯抜け**部分列
+  （例: 1,2,4 で 3 なし）を選択し、その歯抜け列がそのまま適用されて「asOf 時点に実在
+  しなかった状態」が再構築されうる。コアの集約は RaiseEvent 時に単調なクロックから
+  OccurredAt を刻印するため本ライブラリ産のイベントでは常に成立するが、
+  **OccurredAt を手動設定して歴史的イベントをインポートする統合者は、ストリーム内
+  単調性を必ず保つこと**。
+
 ## 7. Projection（読み取りモデル）
 
 ### 7.1 Projection更新サービス
@@ -835,6 +902,15 @@ type CheckpointStore interface {
     Save(ctx context.Context, projectionName string, position int64) error
 }
 
+// ErrSubscriptionClosed は、コンテキストが生きているのに購読チャネルが閉じた
+// （= フィードがプロジェクションの足元で死んだ: ストアのシャットダウン、切断、
+// 不正な Subscribe 実装）ときに Start が返すセンチネル（issue #246）。
+// スーパーバイザはこれを「障害」として扱い、再購読/再起動すること
+// （CheckpointStore があれば再起動は最後の位置から再開する）。
+// ctx キャンセルによる正常シャットダウンは常に ctx.Err() を返し、この
+// センチネルにラップされることはない。
+var ErrSubscriptionClosed = errors.New("projection: event subscription closed unexpectedly")
+
 // Start Projection更新を開始（ctx キャンセルまでブロック）
 // CheckpointStore があれば起動時に位置をロードし、そこから Subscribe する
 // （バックフィル→ライブ配信、ロスなし）。イベントを正常処理するたびに Save する。
@@ -844,6 +920,10 @@ type CheckpointStore interface {
 //                     ライブ更新を継続）が、以降チェックポイントは凍結され、
 //                     失敗イベント以降の位置は保存されない。次回再起動時に
 //                     失敗イベント以降が再配信される（要冪等）。
+//
+// 戻り値の契約（issue #246）:
+//   - ctx キャンセル → ctx.Err()（正常シャットダウン）
+//   - ctx が生きたままチャネルが閉じた → ErrSubscriptionClosed（障害。要再起動）
 func (s *ProjectionService) Start(ctx context.Context) error {
     var fromPosition int64
     if s.options.CheckpointStore != nil {
@@ -866,7 +946,17 @@ func (s *ProjectionService) Start(ctx context.Context) error {
             return ctx.Err()
         case event, ok := <-eventCh:
             if !ok {
-                return nil
+                // 「呼び出し側がシャットダウンした」と「フィードが死んだ」を
+                // 区別する。参照実装の in-memory ストアは ctx キャンセルに
+                // **応答して**チャネルを閉じるため、この select は <-ctx.Done()
+                // より先に closed チャネルを観測しうる — その race を障害と
+                // 分類するとフレーキーになる。ctx が done ならクローズは
+                // graceful shutdown の一部として ctx.Err() を返し、ctx が
+                // 生きているクローズだけを異常（ErrSubscriptionClosed）とする。
+                if ctx.Err() != nil {
+                    return ctx.Err()
+                }
+                return ErrSubscriptionClosed
             }
             if err := s.ProcessEvent(ctx, event); err != nil {
                 if s.options.SyncMode {

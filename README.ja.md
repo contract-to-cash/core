@@ -123,7 +123,6 @@ domain/           # エンティティ、値オブジェクト、集約（依存
 ├── invoice/      # 請求書エンティティ
 ├── payment/      # 支払いエンティティ
 ├── balance/       # クレジット台帳
-├── billing/      # 請求計算インターフェース、日割り計算
 ├── usage/        # 使用量レコード
 ├── pricing/      # 不変Priceエンティティ、価格モデル
 ├── product/      # Productエンティティ

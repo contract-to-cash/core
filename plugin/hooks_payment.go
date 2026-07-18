@@ -54,6 +54,15 @@ const (
 	// CompensationReasonOutboxVeto — the PaymentOutboxWriter vetoed the record
 	// inside the bookkeeping transaction (issue #248), rolling it back.
 	CompensationReasonOutboxVeto CompensationReason = "outbox_veto"
+	// CompensationReasonIdempotencyConflict — the in-transaction idempotency
+	// check found the effective key colliding with an existing payment in the
+	// Failed terminal state (a race between the pre-charge lookup and a
+	// concurrent writer). The charge the gateway just captured is real and
+	// backed by no local record (a Failed record captured nothing), so the
+	// transaction is abandoned and the charge reversed — but no local Save was
+	// ever attempted, which is why this is distinct from
+	// CompensationReasonLocalSaveFailed (issue #234 review).
+	CompensationReasonIdempotencyConflict CompensationReason = "idempotency_conflict"
 )
 
 // CompensationResult carries the outcome of a saga compensation (charge

@@ -145,6 +145,15 @@ type Coupon struct {
 }
 
 // NewCoupon creates a new Coupon.
+//
+// value must be non-nil: it is the multiplicand for percentage discounts
+// (Money.Multiply) and the amount for fixed discounts (NewMoney), and a nil
+// *big.Rat would only surface as a panic deep inside the billing pipeline when
+// CalculateDiscount runs. Rejecting it here with a validation DomainError makes
+// a misconfigured coupon fail at creation instead. None of the With* builders
+// can reintroduce a nil value (they only touch code type, usage limits, and
+// account/product/contract-type restrictions), so a constructed Coupon always
+// has a non-nil value.
 func NewCoupon(
 	id CouponID,
 	code string,
@@ -157,7 +166,11 @@ func NewCoupon(
 	usageLimit *int,
 	usedCount int,
 	applicableTo []shared.ProductID,
-) *Coupon {
+) (*Coupon, error) {
+	if value == nil {
+		return nil, shared.NewDomainError(shared.ErrCodeValidation,
+			fmt.Sprintf("coupon %s: value must not be nil", code))
+	}
 	return &Coupon{
 		id:           id,
 		code:         code,
@@ -172,7 +185,7 @@ func NewCoupon(
 		usageLimit:   usageLimit,
 		usedCount:    usedCount,
 		applicableTo: applicableTo,
-	}
+	}, nil
 }
 
 // WithCodeType sets the code type and returns the coupon for chaining.

@@ -62,7 +62,14 @@ type Transaction struct {
 
 // ChargeRequest is the input for a one-step charge.
 type ChargeRequest struct {
-	Amount          shared.Money
+	Amount shared.Money
+	// CustomerID is the GATEWAY-SIDE customer identifier. PaymentService fills
+	// it via the wired CustomerIDResolver (issue #231); when no resolver is
+	// wired it falls back to the internal shared.AccountID verbatim. That
+	// identity fallback only suits gateways that accept caller-chosen customer
+	// IDs (e.g. GMO PG MemberID) — it is WRONG for gateways that mint their own
+	// customer identifiers, such as Stripe ("cus_..."). Wire
+	// service.WithCustomerIDResolver on such gateways.
 	CustomerID      string
 	Description     string
 	PaymentMethodID *string

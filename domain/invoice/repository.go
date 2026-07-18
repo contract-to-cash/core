@@ -60,6 +60,12 @@ type Repository interface {
 	// alongside its replacement. The constraint therefore ranges over non-voided,
 	// non-proration invoices only. A regeneration replacement
 	// (InvoiceTypeRegeneration) IS a regular period invoice and participates.
+	// The exemption predicate is codified as
+	// Invoice.ParticipatesInPeriodUniqueness (not voided, not proration, and a
+	// non-zero billing period); implementations SHOULD delegate to it — the
+	// infrastructure/inmemory reference and the BillingService duplicate-invoice
+	// guards do — so the constraint's scope never drifts across layers
+	// (issue #232).
 	//
 	// When the constraint fires, Save MUST return a shared.DomainError with code
 	// shared.ErrCodeConflict so the losing GenerateInvoice caller surfaces a clean

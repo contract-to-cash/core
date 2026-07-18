@@ -4,12 +4,23 @@ package projection
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/contract-to-cash/core/eventstore"
 )
+
+// ErrSubscriptionClosed is returned by Start when the event-store subscription
+// channel closes while the context is still active — i.e. the feed died
+// underneath the projection (store shutdown, broken connection, misbehaving
+// Subscribe implementation) rather than the caller requesting shutdown via
+// context cancellation. Supervisors should treat it as a failure and
+// resubscribe/restart (a CheckpointStore makes the restart resume where it
+// left off); a context-cancelled shutdown returns ctx.Err() instead and is
+// never wrapped in this sentinel (issue #246).
+var ErrSubscriptionClosed = errors.New("projection: event subscription closed unexpectedly")
 
 // Projector processes events to build read models.
 //
@@ -98,7 +109,15 @@ func (s *ProjectionService) RegisterProjector(p Projector) {
 }
 
 // Start begins processing events from the event store subscription.
-// It blocks until the context is cancelled.
+// It blocks until the context is cancelled or the subscription ends.
+//
+// Return value: on graceful shutdown (the context is cancelled, including the
+// case where the store closes the subscription channel in response to that
+// cancellation) Start returns ctx.Err(). If the subscription channel closes
+// while the context is still active, Start returns ErrSubscriptionClosed so a
+// supervisor can distinguish a dead event feed from a requested shutdown and
+// restart the projection (issue #246). In SyncMode a projector failure is
+// returned as-is (see below).
 //
 // Checkpointing: when ProjectionOptions.CheckpointStore is set, Start loads the
 // last processed global position on entry and subscribes from there (so a
@@ -147,7 +166,18 @@ func (s *ProjectionService) Start(ctx context.Context) error {
 			return ctx.Err()
 		case event, ok := <-eventCh:
 			if !ok {
-				return nil
+				// Distinguish "the caller shut us down" from "the feed died".
+				// The reference in-memory store closes the subscription channel
+				// IN RESPONSE to ctx cancellation, so this select can observe
+				// the closed channel before (or instead of) <-ctx.Done();
+				// classifying that race as a failure would be flaky. When the
+				// context is done the close is part of a graceful shutdown and
+				// Start returns ctx.Err(), exactly as the <-ctx.Done() branch
+				// does. Only a close with a live context is abnormal (#246).
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return ErrSubscriptionClosed
 			}
 			if err := s.ProcessEvent(ctx, event); err != nil {
 				if s.options.SyncMode {

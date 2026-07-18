@@ -53,12 +53,34 @@ const (
 	MetadataKeyInstructionsExpiresAt = "instructions_expires_at"
 )
 
+// RefundEntry records one applied refund: the gateway idempotency key the
+// refund was executed under and its amount (issue #235 follow-up).
+//
+// The per-refund key ledger is what lets PaymentService.Refund decide, exactly,
+// whether a concurrent refund consumed THIS invocation's gateway idempotency
+// key (the gateway call was a no-movement replay → must not be recorded) or
+// used a different key (this invocation's movement was real → must be
+// recorded). The cumulative refundedAmount alone cannot make that call once
+// three or more writers race the same payment: two concurrent partials summing
+// to another invocation's amount are indistinguishable from a consumed key
+// slot, which previously allowed a phantom ledger record.
+//
+// IdempotencyKey may be empty for refunds recorded through the legacy keyless
+// RecordRefund (integrator-side bookkeeping) — such entries make the key
+// ledger incomplete and force the service back to a conservative conflict on
+// concurrent advances (see RefundKeysComplete).
+type RefundEntry struct {
+	IdempotencyKey string
+	Amount         shared.Money
+}
+
 // Payment represents a payment entity.
 type Payment struct {
 	id                   shared.PaymentID
 	invoiceID            shared.InvoiceID
 	amount               shared.Money
-	refundedAmount       shared.Money // cumulative total of all refunds
+	refundedAmount       shared.Money  // cumulative total of all refunds
+	refunds              []RefundEntry // per-refund ledger (gateway key + amount)
 	method               PaymentMethod
 	status               PaymentStatus
 	gatewayTransactionID string
@@ -130,6 +152,55 @@ func (p *Payment) Status() PaymentStatus        { return p.status }
 func (p *Payment) GatewayTransactionID() string { return p.gatewayTransactionID }
 func (p *Payment) IdempotencyKey() string       { return p.idempotencyKey }
 func (p *Payment) RefundedAmount() shared.Money { return p.refundedAmount }
+
+// Refunds returns a defensive copy of the per-refund ledger (gateway
+// idempotency key + amount per applied refund), in recording order.
+func (p *Payment) Refunds() []RefundEntry {
+	if len(p.refunds) == 0 {
+		return nil
+	}
+	cp := make([]RefundEntry, len(p.refunds))
+	copy(cp, p.refunds)
+	return cp
+}
+
+// HasRefundWithIdempotencyKey reports whether a recorded refund was executed
+// under the given gateway idempotency key. An empty key never matches (keyless
+// legacy entries are not addressable).
+func (p *Payment) HasRefundWithIdempotencyKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, r := range p.refunds {
+		if r.IdempotencyKey == key {
+			return true
+		}
+	}
+	return false
+}
+
+// RefundKeysComplete reports whether the per-refund ledger fully accounts for
+// the cumulative refunded total AND every entry carries a non-empty gateway
+// idempotency key. Only when this holds can the absence of a key from the
+// ledger prove that no concurrent refund consumed it (see RefundEntry).
+// It returns false for payments whose refund history predates key tracking
+// (cumulative total > sum of entries) or contains keyless RecordRefund entries.
+func (p *Payment) RefundKeysComplete() bool {
+	sum := shared.Zero(p.refundedAmount.Currency())
+	for _, r := range p.refunds {
+		if r.IdempotencyKey == "" {
+			return false
+		}
+		next, err := sum.Add(r.Amount)
+		if err != nil {
+			// A currency-mismatched entry can only come from a corrupted
+			// snapshot; treat the ledger as unusable rather than guessing.
+			return false
+		}
+		sum = next
+	}
+	return sum.Amount().Cmp(p.refundedAmount.Amount()) == 0
+}
 
 // FailureReason returns a defensive copy of the failure reason pointer so
 // callers cannot mutate the payment's internal state (see issue #96).
@@ -242,7 +313,20 @@ func (p *Payment) ValidateRefund(amount shared.Money) error {
 	return nil
 }
 
+// RecordRefund records a keyless refund. Prefer RecordRefundWithKey when the
+// refund was executed at a payment gateway under an idempotency key: keyless
+// entries leave the per-refund key ledger incomplete (RefundKeysComplete
+// returns false), which downgrades PaymentService.Refund's concurrent-advance
+// classification to a conservative conflict for this payment.
 func (p *Payment) RecordRefund(amount shared.Money) error {
+	return p.RecordRefundWithKey(amount, "")
+}
+
+// RecordRefundWithKey records a refund of the given amount together with the
+// gateway idempotency key it was executed under, and updates the status.
+// See RecordRefund for the state rules and RefundEntry for why the key is
+// stored per refund.
+func (p *Payment) RecordRefundWithKey(amount shared.Money, gatewayIdempotencyKey string) error {
 	if err := p.ValidateRefund(amount); err != nil {
 		return err
 	}
@@ -252,6 +336,10 @@ func (p *Payment) RecordRefund(amount shared.Money) error {
 		return fmt.Errorf("failed to calculate refund total: %w", err)
 	}
 	p.refundedAmount = newTotal
+	p.refunds = append(p.refunds, RefundEntry{
+		IdempotencyKey: gatewayIdempotencyKey,
+		Amount:         amount,
+	})
 	// Status derived from cumulative total
 	if newTotal.Amount().Cmp(p.amount.Amount()) == 0 {
 		p.status = PaymentStatusRefunded

@@ -107,10 +107,19 @@ graph BT
     appService --> plugin
     appService --> eventstore
     port["application/port/"] --> shared
+    port --> invoice
+    port --> payment
     infra["infrastructure/inmemory/"] -.->|implements| contract
     infra -.->|implements| invoice
     plugins["plugins/"] --> plugin
-    batch["batch/"] --> appService
+    infra -.->|"implements (coupon repository, #240)"| plugins
+    %% batch/ does NOT import application/service. Direct deps shown below;
+    %% it also imports domain/balance, domain/pricing, domain/shared directly
+    %% (edges omitted for readability).
+    batch["batch/"] --> tx["application/tx/"]
+    batch --> plugin
+    batch --> eventstore
+    batch --> contract
 ```
 
 ### 2.3 CQRS (Command Query Responsibility Segregation)
@@ -138,7 +147,6 @@ github.com/contract-to-cash/core/
 │   ├── invoice/                 #   Invoice + CreditNote entities
 │   ├── payment/                 #   Payment entity + Dunning
 │   ├── balance/                 #   Credit ledger
-│   ├── billing/                 #   Billing calculation abstraction
 │   ├── pricing/                 #   Immutable Price, pricing models
 │   ├── product/                 #   Product definition
 │   ├── usage/                   #   Usage record + summary

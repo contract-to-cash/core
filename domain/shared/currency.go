@@ -13,6 +13,17 @@ const DefaultMinorUnitExponent = 2
 // smallest unit, exponent 0), USD/EUR have two (cents, exponent 2). It is an
 // open, extensible registry because Currency is an open string type — consumers
 // can register additional currencies (e.g. BHD=3, KWD=3) or override a default.
+//
+// ⚠️ This registry is PROCESS-GLOBAL MUTABLE STATE that the billing pipeline
+// reads on every rounding step (Money.RoundToMinorUnit → MinorUnitExponent).
+// All RegisterCurrencyMinorUnit calls MUST happen at application start-up,
+// before any billing runs. The mutex only makes individual reads/writes
+// data-race-free; it does NOT make a billing run atomic with respect to a
+// registration. Re-registering a currency while invoices are being generated
+// changes the rounding quantum mid-flight, so amounts computed before and
+// after the change within the same pipeline can disagree (e.g. a subtotal
+// rounded at exponent 2 combined with a tax rounded at exponent 0) — producing
+// invoices that do not reconcile against the gateway.
 var (
 	minorUnitMu        sync.RWMutex
 	minorUnitExponents = map[Currency]int{
@@ -25,8 +36,15 @@ var (
 // RegisterCurrencyMinorUnit registers (or overrides) the minor-unit exponent for
 // a currency. The exponent is the number of decimal places in the currency's
 // smallest transactable unit (e.g. 0 for JPY, 2 for USD, 3 for KWD). A negative
-// exponent is clamped to 0. This is safe for concurrent use; call it during
-// application start-up before billing runs.
+// exponent is clamped to 0.
+//
+// ⚠️ Call this ONLY during application start-up, before any billing runs. The
+// call itself is data-race-free (mutex-guarded), but the registry is global:
+// registering or overriding a currency while billing pipelines are in flight
+// changes the rounding of those in-flight calculations mid-stream, so a single
+// invoice can mix amounts quantized at different exponents and fail to
+// reconcile against the payment gateway (see the note on minorUnitExponents).
+// There is no supported way to change a currency's exponent at runtime.
 func RegisterCurrencyMinorUnit(currency Currency, exponent int) {
 	if exponent < 0 {
 		exponent = 0

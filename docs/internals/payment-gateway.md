@@ -215,7 +215,8 @@ import (
 type ChargeRequest struct {
     // 必須
     Amount      shared.Money
-    CustomerID  string           // ゲートウェイ側の顧客ID
+    CustomerID  string           // ゲートウェイ側の顧客ID（PaymentService が AccountID から
+                                 // CustomerIDResolver 経由で解決して設定する。§3.3 / issue #231）
     Description string
 
     // 支払い方法（いずれか必須）
@@ -648,6 +649,33 @@ type Customer struct {
 }
 ```
 
+#### CustomerIDResolver（内部 AccountID → ゲートウェイ顧客ID の解決、issue #231）
+
+```go
+// application/port/customer_resolver.go
+
+// CustomerIDResolver は内部の shared.AccountID を決済プロバイダ側の顧客IDへ写像する。
+type CustomerIDResolver interface {
+    // ResolveCustomerID は accountID に対応するゲートウェイ側顧客IDを返す。
+    // 非 nil エラー（または空文字の解決結果）は、ゲートウェイ呼び出しの**前**に
+    // 決済オペレーションを中断させる — ここでエラーを返すのは money-safe。
+    // マッピングが無い場合は内部IDへ黙ってフォールバックせず not-found 系エラーを返すこと。
+    ResolveCustomerID(ctx context.Context, accountID shared.AccountID) (string, error)
+}
+```
+
+- `service.WithCustomerIDResolver(r)` で `PaymentService` に配線する。配線すると、
+  顧客IDを運ぶ**すべてのゲートウェイ呼び出しの前**（`ProcessPayment` の Charge、
+  `ResolvePaymentMethod` の `CustomerGateway.GetCustomer` 参照）にリゾルバが走り、
+  解決失敗は**ゲートウェイに触れる前に**オペレーションを中断する（money-safe）。
+- **未配線時は legacy identity mapping**: 内部 `shared.AccountID` をそのまま
+  ゲートウェイ顧客IDとして送る。これは**呼び出し側が顧客IDを自由に決められる
+  ゲートウェイ**（例: GMO PG の MemberID を自社ID体系で登録する運用）にのみ適合する。
+- **ゲートウェイが顧客IDを自前で採番する方式（Stripe が典型 — `cus_...` は Stripe が
+  採番する不透明値）では identity mapping は誤り**で、内部 AccountID を顧客IDとして
+  参照する Charge は失敗する。そうしたゲートウェイのデプロイメントは**必ず**リゾルバを
+  配線すること。実装は通常、`CustomerGateway.CreateCustomer` がプロバイダ採番IDを
+  返した時点で記録したマッピングを引く。
 ### 3.4 Webhookインターフェース
 
 ```go
@@ -1432,6 +1460,7 @@ func NewPaymentService(
 ```
 
 オプション: `WithPaymentLogger` / `WithCustomerGateway`（顧客デフォルト支払い方法の参照、§6.4）/
+`WithCustomerIDResolver`（内部 AccountID → ゲートウェイ顧客IDの解決シーム、§3.3 / issue #231）/
 `WithPaymentTxManager`（**本番必須**。省略時は Noop へフォールバックし Warn ログ、
 意図的な場合は `WithoutPaymentTransactions()` で明示）/ `WithIdempotencyStore`（§6.1）/
 `WithPaymentOutboxWriter`（トランザクショナル・アウトボックス、plugin-system.md §11）。
@@ -1439,14 +1468,19 @@ func NewPaymentService(
 **入力型（現行）**
 
 ```go
+// ProcessPaymentInput に CustomerID は**無い** — ゲートウェイ顧客IDは呼び出し側が
+// 渡すのではなく、請求書の AccountID から CustomerIDResolver で解決する（issue #231）。
+// 解決は BeforeCharge フック・ゲートウェイ Charge より前に行われ、失敗はその場で中断する
+// （money-safe: まだ何も課金されていない）。
 type ProcessPaymentInput struct {
     PaymentMethodID string                // 省略時は §6.4 のフォールバックチェーンで解決
     PaymentMethod   payment.PaymentMethod // 支払い方法種別（省略時は ChargeResponse → credit_card）
     Amount          shared.Money          // ゼロ値なら invoice.AmountDue()
     Currency        shared.Currency
-    IdempotencyKey  string
+    IdempotencyKey  string                // 必須。空は入口で ErrCodeValidation（issue #241, BREAKING pre-1.0 — 以前の「空キーは冪等性チェックをスキップして続行」という許容は廃止）
     Metadata        map[string]string
     ReturnURL       string                // 任意。リダイレクト型決済の戻り先 URL（platform#66、下記注）
+
 }
 ```
 
@@ -1479,6 +1513,25 @@ Pending→Completed 昇格、terminal は `ErrCodeConflict`）。
 
 フック発火・パニック隔離・アウトボックスの正確なタイミングは
 `docs/internals/plugin-system.md` §5.3〜§5.4 / §11 を参照。
+
+**`Refund(ctx, paymentID, input)`**（フローの正準は §6.3）:
+
+```go
+// load → ValidateRefund（事前検証、ゲートウェイ前）→ 冪等性キー導出（§6.3.2）
+// → ゲートウェイ返金（1 invocation につき最大 1 回、tx の前）
+// → tx.RetryOnConflict + tx.Run 内で re-load → 累積返金額の進行分類 → RecordRefund → Save（§6.3.3）
+// → OnRefund フック（非致命）
+func (s *PaymentService) Refund(ctx context.Context, paymentID shared.PaymentID, input RefundInput) error
+
+type RefundInput struct {
+    Amount *shared.Money // nil = 未返金残額の全額
+    Reason port.RefundReason
+    // IdempotencyKey は任意の明示キー。空（通常ケース）なら §6.3.2 の決定的キーを導出する。
+    // 明示キーを渡す場合、「同一論理返金のリトライは同一キー・別個の返金は別キー」の契約は
+    // 呼び出し側が負う（§6.3.3 の explicit-key 衝突ポリシー参照）
+    IdempotencyKey string
+}
+```
 
 ---
 
@@ -1515,9 +1568,17 @@ type IdempotencyStore interface {
 
 ### 6.1.3 ProcessPayment のフロー変更
 
+> **📌 空 IdempotencyKey は入口で拒否（issue #241, BREAKING pre-1.0）**: `ProcessPayment` は
+> 空の `input.IdempotencyKey` を最初の境界検証で `ErrCodeValidation` により拒否する。
+> 以前の「空キーは冪等性チェック・store 呼び出しをスキップして続行」という許容は廃止された
+> （空キーでは gateway 側でも重複課金を防げないため、静かな続行はサイレントな二重課金リスク）。
+> したがって以下のフローに入る時点でキーは常に非空である。
+
 ```
+入口: input.IdempotencyKey == "" → ErrCodeValidation で即時 return（#241）
+
 Charge 前:
-  if store != nil && input.IdempotencyKey != "" {
+  if store != nil {
       if eff, ok := store.ResolveEffectiveKey(input.IdempotencyKey); ok {
           effectiveKey = eff   // 補償マーカーあり → 新キーで Charge
       }
@@ -1534,7 +1595,7 @@ RunInTx:
 
 RunInTx 失敗 → Saga 補償 Refund
   ↓
-  if store != nil && input.IdempotencyKey != "" {
+  if store != nil {
       newEffectiveKey := newRetryEffectiveKey(input.IdempotencyKey) // originalKey + "-" + ULID
       store.MarkCompensated(input.IdempotencyKey, newEffectiveKey)
       // 失敗はログ出力のみ。補償自体は成功済み。
@@ -1547,7 +1608,7 @@ RunInTx 失敗 → Saga 補償 Refund
 |---|---|
 | **opt-in** (`WithIdempotencyStore`) | 後方互換。store 未設定なら完全に従来挙動 |
 | **first-call-wins** | 並行リトライでも effective key が収束する。「同じ original key → 同じ effective key」の関係を保証 |
-| **空 key はスキップ** | 空キーはそもそも冪等性が機能しない（gateway 側でも追跡できない）ため store 呼び出し不要 |
+| **空 key は入口で拒否（#241, BREAKING pre-1.0）** | 空キーでは gateway 側でも重複を追跡できず、重複課金防止が成立しない。旧挙動（空キーを許容し冪等性チェックをスキップして課金続行）は廃止し、`ProcessPayment` が `ErrCodeValidation` で即時拒否する |
 | **MarkCompensated 失敗は非致命的** | 補償自体は成功済み。ここで追加エラーを返すと呼び出し元が本質(local save failed)を見失う。ログ監視で検知 |
 | **3DS (`requires_action`) 経路は影響なし** | 3DS では補償 Refund が発火しないためマーカーは書かれない。既存の pending retry は生キーで引き続き動作 |
 | **Payment.idempotencyKey は effective key** | RunInTx 内冪等性チェックとgateway 側キーを一致させ、2回目 retry でも正しく既存 Payment を返す |
@@ -1621,6 +1682,10 @@ SELECT effective_key FROM compensated_idempotency_keys WHERE original_key = $1;
   失敗 tx 内で `FindByIdempotencyKey` を呼ばない理由は重要：Postgres の UNIQUE 違反は接続を `in_failed_sql_transaction` 状態(SQLSTATE 25P02)にし、同 tx 上の後続クエリは全て失敗する。失敗 tx 内で勝者を読みに行く設計だと、その読み出しも失敗 → 通常エラー扱い → `saga.Compensate` 発火 → 勝者の charge を refund、というサイレント・リグレッションになる。アダプタ実装者が Postgres 等で `Save` 失敗時に SAVEPOINT を張って outer tx を生かす必要は **無い**(application 側で fresh-tx 読み出しに切り替えているため)。
 
   Fresh-tx 読み出しで勝者がまだ visible でない場合(read-replica lag、MVCC スナップショット順序など)は、`shared.ErrCodeConflict` の transient エラーを返してリトライを促す。この場合も saga compensation は発火させない(勝者の gateway charge は実在し、refund してはならないため)。
+
+  **勝者レコードのステータスで分岐する（#234 レビュー）**: 収束は勝者を無条件に成功として返すのではなく、ステータスで分岐する — **Completed** は成功として収束（従来どおり。AfterCharge / OnPaymentProcessed / outbox は勝者レコードに対して発火）; **Pending**（3DS / 非同期決済の未確定レコード）は `persistUnsettledCharge` の pending パスと同じ形 — pending レコードを `ErrPaymentPending` でラップしたエラーと**併せて**返し、completed-success フック・outbox は発火させない（3DS か非同期かはレコードから復元できないため、広義の `ErrPaymentPending` センチネルを用いる）; **Refunded / PartiallyRefunded / ChargedBack** は `ErrCodeConflict`（payment は nil、補償なし。pre-charge のターミナル短絡と同じ）。この分岐は pre-charge ルックアップと一致し、**Failed を除いて** tx 内冪等性スイッチとも一致する。
+
+  **Failed 勝者は tx 内スイッチと意図的に非対称（#234 レビュー round-3）**: tx 内スイッチの Failed 衝突は補償する（直前の Charge が Captured を返した以上、「キャプチャされなかった」と記帳済みの Failed 記録のリプレイではあり得ず、課金は実在かつ裏付けなしと**証明できる**）。一方この収束パスでは証拠が**矛盾**している — 敗者の同一キー Charge レスポンスは資金移動を示すのに、勝者はまさにそのキーで Failed 記録を永続化している（例: 敗者へのリプレイ応答がキャッシュされた後に勝者のゲートウェイ試行が失敗した等）。この曖昧さの上で補償すると**動いていない資金を返金**しかねないため、コアは保守的に**補償せず** `ErrCodeConflict` を返し、代わりに **Error レベルのログ**（MANUAL RECONCILIATION REQUIRED: 裏付けのないキャプチャ済み課金が存在し得る。payment / invoice / キー識別子付き）で人手のゲートウェイ状態確認を要求する。いずれの分岐でも saga compensation は発火しない。zero-amount 経路の収束も同じヘルパーを共有する。
 
   InMemory 実装 (`infrastructure/inmemory/payment_repository.go`) は unique 制約をシミュレートし、この契約を満たす。統合テスト `TestPaymentIdempotency_ConcurrentSuccess_Race_Integration` および `TestPaymentIdempotency_ConcurrentSuccess_AbortedTxSimulation_Integration` (Postgres aborted-tx シミュレーション) で end-to-end を検証済み。
 
@@ -1706,62 +1771,153 @@ saga 補償:
 Refund 側に適用されていなかったことに起因する（Saga 補償パスは `comp-refund-<txID>` で
 正しく決定的キーを使っていた）。
 
-### 6.3.2 決定的な冪等性キーの導出
+### 6.3.2 決定的な冪等性キーの導出（issue #235 で金額バインドに変更、BREAKING pre-1.0）
 
 ゲートウェイ返金には**常に非空の冪等性キー**を渡す。`RefundInput.IdempotencyKey` が
 指定されていればそれを使い、空なら以下から決定的に導出する（`deriveRefundIdempotencyKey`）:
 
 ```
-refund-<paymentID>-<currency>-<この返金前の累積返金額 (big.Rat 文字列)>
+refund-<paymentID>-<currency>-<この返金前の累積返金額>-<この返金の要求額>
 ```
 
-**なぜ「返金前の累積返金額」が正しい識別子か:**
+（金額はいずれも `big.Rat` 文字列。）
+
+**なぜ (返金前の累積額, 要求額) の組が正しい識別子か:**
 
 - payment の `refundedAmount` は単調非減少（`ValidateRefund` が非正の額を拒否するため、
   成功する `RecordRefund` は必ず正の額を加算する）。したがって「返金前の累積額」は
-  返金シーケンス上の「次の返金試行」を一意に識別する。
-- **同一試行のリトライ**（タイムアウト後の再送、または同じ未返金状態をロードした並行呼び出し）
-  は同じ累積額を観測 → **同じキー** → ゲートウェイが 1 回の実返金に集約する。これが二重返金の窓を閉じる。
+  返金シーケンス上でこの試行が埋めようとしている「スロット」を識別する。
+- **同一試行のリトライ**（タイムアウト後の再送、または同じ未返金状態をロードして**同じ額**を
+  要求した並行呼び出し）は同じ (累積額, 要求額) を観測 → **同じキー** → ゲートウェイ
+  （Stripe/Adyen/GMO PG/PayPal はいずれもキーで dedupe）が 1 回の実返金に集約する。
+  これが二重返金の窓を閉じる。
 - **別個の部分返金**（3000 の返金の後に 2000 の返金）は異なる累積額（0、次に 3000）を観測 →
   **異なるキー** → 両方が正当にゲートウェイに届く。
+- **異なる額の並行部分返金**（両方が累積額 0 をロードした 3000 と 2000）は、要求額が
+  キーに束縛されているため**異なるキー**を導出する — これが #235 の修正点。
+  旧スキーム（累積額のみ）では両者が衝突し、ゲートウェイは最初の額だけを実行して
+  2 本目にはキャッシュ済みレスポンスをリプレイする一方、ローカル台帳は**両方**を記録
+  していた — ゲートウェイが動かしていない返金を計上する。金額を束縛すれば両方が実際の
+  ゲートウェイ返金となり、台帳はゲートウェイが動かした総額と一致する。並行する別額の
+  返金は**別個の実資金移動**でなければならず、台帳は両方を記録できる必要がある。
 
-キーは要求額に依存させない: 同じ累積額を共有する並行の「2 回目」返金は、定義上シーケンスの
-同じスロットを争っており、たとえ要求額が違っても衝突して**ゲートウェイに dedupe させる**のが
-安全側。異なる額の返金を意図的に 2 回行いたい場合は逐次実行（累積額が変わる）するか、
-明示的に異なる `RefundInput.IdempotencyKey` を渡す。
+同じ累積額かつ**同じ額**の並行返金は、同一論理返金のリトライと区別できないため 1 回の
+資金移動に dedupe される。同額の返金を意図的に 2 回行いたい場合は逐次実行（累積額が
+進むので次の invocation は新しいキーを導出する）か、明示的に異なる
+`RefundInput.IdempotencyKey` を渡す。
 
-### 6.3.3 トランザクション境界とゲートウェイ呼び出しの配置
+裏返すと、導出キーは**逐次の同額返金を意図的に別個の資金移動として扱う**（1 回目が記帳
+されて累積額が進めば、2 回目の同額 invocation は新しいキーを導出して実返金になる）。
+したがって「レスポンスを失った後にリトライし得る」呼び出し側がエンドツーエンドの
+exactly-once を必要とする場合は、導出キーに頼らず**明示的な `RefundInput.IdempotencyKey`
+を渡さなければならない** — 明示キーのリトライは収束する（既に記帳済みならキー台帳の
+dedup が `ErrCodeConflict` を返し、未記帳ならちょうど 1 回だけ記帳される）。
 
-`ProcessPayment` と同じ方針: **ゲートウェイ呼び出しは tx の外（前）**で行い、ローカル記帳
-（re-load → `RecordRefund` → `Save`）を `tx.Run` の中で行う。理由:
+> **⚠️ アップグレード注意（キー形式の変更）**: #235 より前のリリースは金額成分の無い
+> `refund-<paymentID>-<currency>-<prior>` を導出していた。アップグレード後のリトライは
+> **新形式の（別の）キー**を使うため、アップグレード前の試行とゲートウェイ側で衝突しない —
+> つまり**アップグレード前の試行が実は実行されていた場合、アップグレード後のリトライは
+> もう一度お金を動かす**。アップグレード境界をまたいで in-flight / 結果不明の返金がある
+> 場合は、リトライする前に必ずゲートウェイ側の状態を確認すること。
+
+### 6.3.3 トランザクション境界と収束ポリシー（1 invocation = 最大 1 回の資金移動）
+
+`ProcessPayment` と同じ方針: **ゲートウェイ呼び出しは tx の外（前）で、1 回の `Refund`
+invocation につき最大 1 回だけ**行い、ローカル記帳を `tx.RetryOnConflict` でラップした
+`tx.Run` の中で行う。**リトライループが再実行するのは記帳のみ** — ゲートウェイ呼び出しは
+決して再実行されない。理由:
 
 - 返金は補償できない（Charge と違い巻き戻せない）。遅く失敗しやすいゲートウェイ呼び出しを跨いで
   DB トランザクションを開いたままにしてロールバックすると、「お金は動いたのにローカル記録がなく
   反転もできない」状態になる。ゲートウェイを tx の外に置くことで、tx が扱うのは可逆なローカル
   記帳だけになる。
-- 並行・リトライ時の安全性は上記の決定的キーが担保する（`ProcessPayment` が Charge の冪等
+- 並行・リトライ時の安全性は §6.3.2 の決定的キーが担保する（`ProcessPayment` が Charge の冪等
   リプレイに依存するのと同じ）。
 
-ローカル記帳は `tx.Run` 内で **payment を tx スコープのリポジトリから re-load** してから
-`RecordRefund`（内部で `ValidateRefund` を再実行）する。したがって payment
-[`payment.Repository`] の並行制御契約（行ロック / `SELECT ... FOR UPDATE` / SERIALIZABLE）を
-満たすバックエンドでは、並行する 2 回目の返金は勝者が記録済みの状態を観測し、`RecordRefund` が
-ドメインエラー（`invalid_state_transition` / over-refund）で拒否する。ゲートウェイは 1 つの
-キーで 2 呼び出しを dedupe しているのでお金は二重に動かない。無条件 last-writer-wins の
-アダプタではローカルガードは弱まるが、ゲートウェイキーが二重返金を防ぐため、最悪ケースは
-冗長なローカル書き込みであってお金の喪失ではない。
+フロー: `load → ValidateRefund（事前検証）→ キー導出（このとき観測した累積返金額
+= gatewayPrior を記憶）→ gateway.Refund（1 回）→ tx.RetryOnConflict { tx.Run {
+tx スコープ repo で re-load → **キー台帳 + 進行の分類** → RecordRefundWithKey → Save } }`。
+`RecordRefundWithKey` は payment の楽観ロック version をバンプするため、並行敗者の `Save` は
+version conflict で失敗し、`RetryOnConflict` が**記帳だけ**を勝者のコミット済み状態に
+対して再実行する。
 
-> **注**: `Payment` は楽観ロックの version を持たない（PR #164 の version bump は Invoice /
-> CreditNote のみ）。Refund の並行保証は `FinalizeInvoice` と同じく **Repository の並行制御契約**に
-> 依存する。in-memory の並行テストは行ロックを `serializingTxManager` で、per-tx スナップショット
-> 分離を `isolatingPaymentRepo` でモデル化している。
+**tx 内の分類 — 返金ごとのキー台帳（issue #235 / #235 レビュー）**: `Payment` エンティティは
+返金 1 件ごとに「実行時のゲートウェイ冪等性キー + 金額」を **`RefundEntry` の台帳**
+（`Payment.Refunds()`）として保持し、記帳は `RecordRefundWithKey(amount, key)` が
+台帳エントリの追記と同時に行う（`PaymentSnapshot.Refunds` として永続化。キーを持たない
+旧 `RecordRefund` は台帳を「不完全」にする）。各記帳試行は、この invocation がキーを
+導出した時点（`gatewayPrior`）からの累積返金額の進行**と**キー台帳を使って分類してから
+記録する。行ロック方式のバックエンドでは敗者の re-load が version conflict 無しで勝者の
+コミット済み状態を読むため、この分類が無いと「ゲートウェイ呼び出しが dedupe リプレイ
+だった返金」を平気で記帳してしまう:
 
-敗者のエラーは**ドメインエラーとして清潔に返す**（`recordRejected` フラグで判別）。
-決定的キーによりゲートウェイが 1 回の実返金に集約しているため、これは手動突合イベントではない。
-真の永続化失敗（ゲートウェイ返金後に DB がダウン等）のみ MANUAL RECONCILIATION として
-Error ログを出す。
+| 分類 | 挙動 |
+|---|---|
+| 記帳済み返金に**この invocation のキーが存在** | 上のゲートウェイ呼び出しは、その記帳済み返金の**資金移動なしのリプレイ**であることが証明される（並行する同一額の重複が勝者としてキースロットを消費したケース、および記帳済みキーを再送する逐次リプレイの両方）。記録すると幽霊返金を計上するため、**記録せず `ErrCodeConflict`** を返す（Info ログ、突合イベントではない）。並行する同一額の重複は **1 回の資金移動に収束**する。意図的に同額をもう 1 回返金したい呼び出し側は、ゲートウェイ状態を確認して `Refund` を再 invocation する（進んだ累積額から新しいキーが導出される） |
+| 導出キー・キー不在・進行なし | 通常どおり記録（キー付きで台帳へ追記） |
+| 導出キー・キー不在・進行あり・**台帳が完全**（全エントリがキー持ちで合計 == 累積返金額） | 並行返金はすべて**別のキー**を使った、つまりこの invocation のゲートウェイ資金移動は実在する — 新しい累積額に対して記録する（`RecordRefundWithKey` が再検証。勝者が返金可能残額を使い切っていて拒否された場合、実移動が未記録のまま残るため **MANUAL RECONCILIATION** の Error ログでエスカレーション） |
+| 導出キー・キー不在・進行あり・**台帳が不完全**（キー追跡以前の履歴、またはキー無し `RecordRefund` 記帳） | リプレイか実移動かを判定できない: **記録せず `ErrCodeConflict`** を返し、ゲートウェイ状態の確認を指示する **MANUAL RECONCILIATION の Error ログ**を出す |
+| **明示キー・任意の進行** | 呼び出し側所有のキーでは「リプレイか実移動か」をローカル状態から判定できない: **記録せず `ErrCodeConflict`** を返し、**MANUAL RECONCILIATION の Error ログ**を出す。ゲートウェイを再度叩くこともしない。リトライ前にゲートウェイ状態の確認が必要 |
+
+> **⚠️ 前提: ゲートウェイの冪等性キー保持期間**: 明示的な `RefundInput.IdempotencyKey`
+> の再利用に対する上記の dedup 分類（「記帳済みキーの再送 = 資金移動なしのリプレイ」）は、
+> **ゲートウェイ側がそのキーをまだ保持している期間内**（例: Stripe は約 24h、Adyen は 7 日、
+> PayPal は 45 日 — §6.1.5/§6.1.8 参照）でのみ健全である。保持期限切れ後に同じ明示キーを
+> 再送すると、ゲートウェイはそれを**新規の実返金として実行**し得るが、コアはローカル台帳の
+> キー一致から「リプレイ」（Info ログの `ErrCodeConflict`）と分類してしまう。保持期間を
+> 超えて明示キーを再利用しないこと。
+
+**不変条件: ゲートウェイが動かしていない金額を記帳するパスは存在しない**。リプレイ判定は
+累積額のヒューリスティックではなく「この invocation の**キーそのもの**が記帳済み返金に
+あるか」で行うため、**3 者以上**が同一 payment を並行更新しても分類は厳密なままである
+（旧実装は累積額のみから推論したため、A(3000)/B(3000)/C(2000) が全員 prior=0 を読み
+コミット順 A→C→B となると、B が advance=5000 を「実移動」と誤分類し、ゲートウェイが
+動かしていない 3000 を台帳に計上した — 台帳 8000 vs ゲートウェイ 5000）。残る曖昧さは
+キー台帳が不完全な場合だけで、その failure mode は保守的な `ErrCodeConflict`
+（オペレータにゲートウェイ確認を指示）であり、幽霊台帳記録には決してならない。
+invocation 単位の成功（conflict-and-retry ではなく）が必要な呼び出し側は payment 単位で
+返金を直列化する。
+
+> **⚠️ アップグレード注意（返金キー台帳）**: `PaymentSnapshot` に `Refunds`
+> （返金ごとの `{IdempotencyKey, Amount}`）が追加された。BYO 永続化アダプタはこの
+> フィールドを保存・復元すること。保存しない場合も安全側に倒れる — 返金履歴を持つ
+> payment の台帳が「不完全」となり、並行進行時に（記録ではなく）保守的な
+> `ErrCodeConflict` が返る。既存データ（キー追跡以前に記帳された返金）も同様に
+> 不完全扱いとなる。
+
+真の永続化失敗（ゲートウェイ返金後に DB がダウン等）は従来どおり MANUAL RECONCILIATION
+として Error ログを出す。
+
+**呼び出し側所有トランザクション内からの呼び出しは入口で拒否する（#233 フォローアップ、
+BREAKING pre-1.0）**: `Refund` は `tx.InTransaction(ctx)` を検出すると、**ゲートウェイを
+一切呼ぶ前に** `ErrCodeBusinessRule` の DomainError で拒否する。旧挙動（外側 tx にジョイン）
+では、version conflict 後の `RetryOnConflict` の各リトライが**中断済みの外側 tx に再ジョイン**
+し（Postgres 25P02: 以後の全クエリが失敗）、実返金が動いた後に「local save failed after
+gateway refund (MANUAL RECONCILIATION REQUIRED)」という誤ったラベルの非収束エラーとして
+表面化していた。入口拒否は資金移動前の決定的なユーザーエラーに変える — `Refund` は
+トランザクションの**外**で呼び出すこと（記帳 tx は Refund 自身が管理する）。
 
 `OnRefund` フックは従来どおり永続化成功後に発火する（非致命）。
+
+**関連: Charge 側のターミナル状態リプレイのポリシー（issue #234）** — `ProcessPayment` の
+冪等性キーが**ターミナル状態の既存 payment** と衝突した場合の扱いも「補償が二重リバースに
+ならないこと」を軸に分岐する:
+
+- **Refunded / PartiallyRefunded / ChargedBack**（資金が既に動いた・戻されたターミナル状態）:
+  直前の gateway Charge はそのターミナル記録を裏付けるトランザクションの冪等リプレイで
+  あり、新しい資金は動いていない。tx 内衝突は **saga 補償を発火させずに** `ErrCodeConflict`
+  を返して収束する（**Warn ログ**。補償 Refund を発火させると元トランザクションの
+  **2 回目の実リバース**になる — ChargedBack では資金が既にネットワークに引き戻されており最悪）。
+  なお通常はゲートウェイ呼び出し前の pre-charge ルックアップが同じ衝突を先に
+  `ErrCodeConflict` で短絡させる（tx 内分岐は pre-charge 読み取りとの race に対する防御）。
+- **Failed** は意図的にこの集合に**含めない**: Captured/Succeeded の ChargeResponse が
+  「キャプチャされなかった」と記帳済みの Failed 記録のリプレイであることはあり得ない —
+  いま行われた課金は**実在し、ローカル記録の裏付けが無い**。したがって Failed との衝突は
+  従来どおり汎用の補償パス（Void→Refund）に流れ、実課金が巻き戻される。この経路では
+  Save が一度も試行されていないため、`OnCompensationExecutedHook` へ報告される理由は
+  `local_save_failed` ではなく **`CompensationReasonIdempotencyConflict`**（#234 レビュー、
+  plugin-system.md §3.7）であり、呼び出し側エラーも「idempotency key collided with a
+  failed payment record (gateway charge reversed)」と衝突を明示する。
 
 ### 6.3.4 検証
 
@@ -1772,6 +1928,15 @@ Error ログを出す。
   敗者はドメインエラー（`-race`）
 - `TestRefund_SequentialPartialRefunds_UseDistinctKeys` — 逐次の部分返金 2 回が異なるキーを使う
 - `TestRefund_ExplicitIdempotencyKey_IsHonored` — 明示キーがゲートウェイへそのまま伝播する
+
+`application/service/payment_refund_key_test.go`（キー台帳分類、#235 レビュー）:
+- `TestRefund_ThreeWriters_CommitOrderACB_NoPhantomRecord` — 3 者レース
+  A(3000)/B(3000)/C(2000)・コミット順 A→C→B で、リプレイされた B が記帳されない
+  （台帳合計 == ゲートウェイ移動合計）
+- `TestRefund_ThreeWriters_CommitOrderABC_Converges` — コミット順 A→B→C は従来どおり
+  収束する（A・C は記録、B は conflict）
+- `TestRefund_UntrackedRefundHistory_ConcurrentAdvance_ConservativeConflict` —
+  キー台帳が不完全な payment への並行進行は保守的 conflict + Error ログ
 
 ---
 

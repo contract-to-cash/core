@@ -29,7 +29,6 @@ func TestInvoice_ConcurrentRecordPayment_SecondSaveConflicts(t *testing.T) {
 	inv, err := invoice.NewInvoice(
 		shared.NewInvoiceID(), shared.NewAccountID(), shared.NewContractID(),
 		moneyJPY(10000), moneyJPY(0), moneyJPY(0),
-		invoice.WithStatus(invoice.InvoiceStatusDraft),
 		invoice.WithAllowPartialPayment(true),
 	)
 	if err != nil {

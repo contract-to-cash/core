@@ -126,6 +126,83 @@ func TestLogNonFatalHookError_OrdinaryErrorAtWarn(t *testing.T) {
 	}
 }
 
+func TestFireNonFatal_SuccessLogsNothing(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	called := false
+	FireNonFatal(logger, "OnContractCreateHook.OnContractCreate", "notify", func() error {
+		called = true
+		return nil
+	})
+
+	if !called {
+		t.Fatal("hook fn was not invoked")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("successful hook must not log, got: %s", buf.String())
+	}
+}
+
+func TestFireNonFatal_ErrorLoggedAtWarnAndSwallowed(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	FireNonFatal(logger, "OnContractSuspendHook.OnContractSuspend", "notify", func() error {
+		return errors.New("smtp down")
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("hook error should log at WARN, got: %s", out)
+	}
+	if !strings.Contains(out, "hook=OnContractSuspendHook.OnContractSuspend") {
+		t.Errorf("hook type attr missing, got: %s", out)
+	}
+	if !strings.Contains(out, "plugin=notify") {
+		t.Errorf("plugin name attr missing, got: %s", out)
+	}
+	if !strings.Contains(out, "smtp down") {
+		t.Errorf("underlying error missing, got: %s", out)
+	}
+}
+
+func TestFireNonFatal_PanicIsolatedAndLoggedAtError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Must not panic through to the caller.
+	FireNonFatal(logger, "OnContractCancelHook.OnContractCancel", "evil", func() error {
+		panic("boom")
+	})
+
+	out := buf.String()
+	if !strings.Contains(out, "level=ERROR") {
+		t.Errorf("panic should log at ERROR level, got: %s", out)
+	}
+	if !strings.Contains(out, "stack=") {
+		t.Errorf("panic log must include stack, got: %s", out)
+	}
+	if !strings.Contains(out, "plugin=evil") {
+		t.Errorf("plugin name attr missing, got: %s", out)
+	}
+}
+
+func TestFireNonFatal_NilLoggerFallsBackToDefault(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	FireNonFatal(nil, "OnContractResumeHook.OnContractResume", "notify", func() error {
+		return errors.New("boom")
+	})
+
+	if !strings.Contains(buf.String(), "non-fatal hook failed") {
+		t.Errorf("nil logger must fall back to slog.Default(), got: %s", buf.String())
+	}
+}
+
 // --- panicking plugin lifecycle ---
 
 type panicInitPlugin struct{ basePlugin }
