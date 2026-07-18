@@ -160,7 +160,7 @@ per-entry upgrade notes.
   where the old code recorded; (2) re-invoking `Refund` with an explicit key
   that is already recorded now returns `ErrCodeConflict` instead of silently
   double-booking the gateway's replay.
-- **Duplicate-key convergence now dispatches on the winner's status
+- **BREAKING — Duplicate-key convergence now dispatches on the winner's status
   (#234 review)** — the race loser previously returned whatever record the
   winner wrote as unconditional success: a PENDING winner (3DS
   requires_action / async settlement) was returned as `(payment, nil)` and the
@@ -177,8 +177,14 @@ per-entry upgrade notes.
   compensating on that ambiguity could reverse money that never moved. The
   Failed-winner branch instead emits an Error-level MANUAL RECONCILIATION log
   (a possibly-unbacked captured charge may exist; verify gateway state for
-  the key) with payment/invoice/key identifiers. No branch fires saga
-  compensation. Applies to both the gateway and zero-amount call sites.
+  the key) with payment/invoice/key identifiers. A winner in a status this
+  code does not recognize (a future `PaymentStatus` value) also fails closed
+  with `ErrCodeConflict` instead of converging as success. No branch fires
+  saga compensation. Applies to both the gateway and zero-amount call sites.
+  BREAKING: a race-losing `ProcessPayment` that previously returned
+  `(payment, nil)` for a Pending winner now returns
+  `(winner, ErrPaymentPending)` — consumers that treated a nil error as
+  proof of payment must handle the sentinel.
 - **Duplicate-invoice guards now exempt proration invoices (#232)** — a mid-period
   proration invoice no longer permanently blocks `GenerateInvoice` /
   `RegenerateInvoice` / `ReissueInvoice` for its period (matching the repository

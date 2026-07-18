@@ -580,6 +580,12 @@ func (s *PaymentService) resolveGatewayCustomerID(ctx context.Context, accountID
 //     refund out-of-band if a captured charge is standing without a local
 //     Completed record.
 //
+//     Any OTHER status (a PaymentStatus value this binary does not
+//     recognize, e.g. written by a newer version during a rolling upgrade)
+//     fails CLOSED: (nil, ErrCodeConflict) with an ERROR log naming the
+//     unexpected status. A payment path must never converge a state it does
+//     not understand as success; no compensation fires.
+//
 // The read uses s.paymentRepo on the OUTER ctx (not tx-scoped repos): by the
 // time this runs at the top level, RunInTx has rolled the failed tx back, so
 // the connection is safe to query.
@@ -669,8 +675,26 @@ func (s *PaymentService) convergeOnDuplicateKeyWinner(ctx context.Context, effec
 				winner.Status(), effectiveKey),
 		)
 	}
-	// Unreachable with the current status set; kept for defensive completeness.
-	return winner, nil
+	// Unreachable with the current status set (the switch above is enforced
+	// exhaustive by lint), but reachable if a NEWER writer persisted a
+	// PaymentStatus value this binary does not know (e.g. a snapshot written
+	// during a rolling upgrade). A payment path must fail CLOSED on states it
+	// does not understand: converging an unknown status as success would fire
+	// the completed-success hooks and mark the invoice paid on a record whose
+	// semantics this code cannot judge. Return a conservative retryable
+	// conflict instead (no compensation — the winner's record still owns any
+	// underlying gateway charge).
+	s.logger.Error("duplicate-key race converged on a winner with an unrecognized payment status; failing closed with conflict (no compensation)",
+		"effectiveKey", effectiveKey,
+		"invoiceID", invoiceID,
+		"winnerPaymentID", winner.ID(),
+		"winnerStatus", winner.Status(),
+	)
+	return nil, shared.NewDomainError(
+		shared.ErrCodeConflict,
+		fmt.Sprintf("duplicate idempotency key %q converged on a payment with unrecognized status %q; refusing to converge (fail closed) — retry after reconciling",
+			effectiveKey, winner.Status()),
+	)
 }
 
 // ProcessPayment charges an invoice and records the payment.
