@@ -146,6 +146,22 @@ func (r *isolatingPaymentRepo) FindByIdempotencyKey(ctx context.Context, key str
 	return clonePayment(p)
 }
 
+func (r *isolatingPaymentRepo) FindStalePending(ctx context.Context, olderThan time.Time, limit int) ([]*payment.Payment, error) {
+	ps, err := r.inner.FindStalePending(ctx, olderThan, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*payment.Payment, 0, len(ps))
+	for _, p := range ps {
+		clone, cErr := clonePayment(p)
+		if cErr != nil {
+			return nil, cErr
+		}
+		out = append(out, clone)
+	}
+	return out, nil
+}
+
 // seedCompletedPayment charges an invoice through the service so a completed
 // payment exists to refund.
 func seedCompletedPayment(t *testing.T, ctx context.Context, svc *service.PaymentService, invoiceID shared.InvoiceID, amount shared.Money, key string) *payment.Payment {

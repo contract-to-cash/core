@@ -435,3 +435,136 @@ func TestInMemoryPaymentRepository_ConcurrentRecordRefund(t *testing.T) {
 			stored.RefundedAmount().Amount().RatString())
 	}
 }
+
+// --- FindStalePending (issue #98) ---
+
+// newTestPaymentAt builds a Pending payment with the given ProcessedAt.
+func newTestPaymentAt(t *testing.T, processedAt time.Time) *payment.Payment {
+	t.Helper()
+	p, err := payment.NewPayment(
+		shared.NewPaymentID(),
+		shared.NewInvoiceID(),
+		shared.NewMoney(new(big.Rat).SetInt64(5000), shared.CurrencyJPY),
+		payment.PaymentMethodCreditCard,
+		"gw_txn_stale",
+		processedAt,
+	)
+	if err != nil {
+		t.Fatalf("newTestPaymentAt: %v", err)
+	}
+	return p
+}
+
+func TestInMemoryPaymentRepository_FindStalePending_FiltersStatusAndCutoff(t *testing.T) {
+	repo := NewInMemoryPaymentRepository()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+
+	stale := newTestPaymentAt(t, cutoff.Add(-48*time.Hour)) // Pending, old → returned
+	atCutoff := newTestPaymentAt(t, cutoff)                 // Pending, exactly AT cutoff → excluded (strict Before)
+	fresh := newTestPaymentAt(t, cutoff.Add(time.Hour))     // Pending, young → excluded
+	completedOld := newTestPaymentAt(t, cutoff.Add(-72*time.Hour))
+	if err := completedOld.Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	failedOld := newTestPaymentAt(t, cutoff.Add(-72*time.Hour))
+	if err := failedOld.Fail("declined"); err != nil {
+		t.Fatalf("Fail: %v", err)
+	}
+	for _, p := range []*payment.Payment{stale, atCutoff, fresh, completedOld, failedOld} {
+		if err := repo.Save(ctx, p); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	got, err := repo.FindStalePending(ctx, cutoff, 0)
+	if err != nil {
+		t.Fatalf("FindStalePending failed: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 stale pending payment, got %d", len(got))
+	}
+	if got[0].ID() != stale.ID() {
+		t.Errorf("expected payment %s, got %s", stale.ID(), got[0].ID())
+	}
+}
+
+func TestInMemoryPaymentRepository_FindStalePending_OrderingAndLimit(t *testing.T) {
+	repo := NewInMemoryPaymentRepository()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+
+	oldest := newTestPaymentAt(t, cutoff.Add(-72*time.Hour))
+	middle := newTestPaymentAt(t, cutoff.Add(-48*time.Hour))
+	newest := newTestPaymentAt(t, cutoff.Add(-24*time.Hour))
+	// Save out of order to prove the sort.
+	for _, p := range []*payment.Payment{middle, newest, oldest} {
+		if err := repo.Save(ctx, p); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+	}
+
+	got, err := repo.FindStalePending(ctx, cutoff, 0)
+	if err != nil {
+		t.Fatalf("FindStalePending failed: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 stale payments, got %d", len(got))
+	}
+	wantOrder := []shared.PaymentID{oldest.ID(), middle.ID(), newest.ID()}
+	for i, want := range wantOrder {
+		if got[i].ID() != want {
+			t.Errorf("position %d: expected %s (ProcessedAt asc), got %s", i, want, got[i].ID())
+		}
+	}
+
+	// A positive limit returns the OLDEST rows first so repeated runs drain
+	// the backlog deterministically.
+	limited, err := repo.FindStalePending(ctx, cutoff, 2)
+	if err != nil {
+		t.Fatalf("FindStalePending with limit failed: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Fatalf("expected 2 payments under limit, got %d", len(limited))
+	}
+	if limited[0].ID() != oldest.ID() || limited[1].ID() != middle.ID() {
+		t.Errorf("limit must keep the oldest rows, got [%s %s]", limited[0].ID(), limited[1].ID())
+	}
+}
+
+func TestInMemoryPaymentRepository_FindStalePending_EmptyResultIsNotAnError(t *testing.T) {
+	repo := NewInMemoryPaymentRepository()
+	got, err := repo.FindStalePending(context.Background(), time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC), 0)
+	if err != nil {
+		t.Fatalf("expected nil error on no matches, got %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected empty result, got %d", len(got))
+	}
+}
+
+func TestInMemoryPaymentRepository_FindStalePending_ReturnsIsolatedCopies(t *testing.T) {
+	repo := NewInMemoryPaymentRepository()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+
+	p := newTestPaymentAt(t, cutoff.Add(-48*time.Hour))
+	if err := repo.Save(ctx, p); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := repo.FindStalePending(ctx, cutoff, 0)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("FindStalePending: %v (n=%d)", err, len(got))
+	}
+	// Mutating the returned copy must not leak into the stored record (#152).
+	if err := got[0].Complete(); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	stored, err := repo.FindByID(ctx, p.ID())
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if stored.Status() != payment.PaymentStatusPending {
+		t.Errorf("stored payment mutated through the returned copy: status %s", stored.Status())
+	}
+}

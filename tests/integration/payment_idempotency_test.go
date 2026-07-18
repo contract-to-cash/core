@@ -201,6 +201,10 @@ func (r *rendezvousPaymentRepo) FindByIdempotencyKey(ctx context.Context, key st
 	return r.inner.FindByIdempotencyKey(ctx, key)
 }
 
+func (r *rendezvousPaymentRepo) FindStalePending(ctx context.Context, olderThan time.Time, limit int) ([]*payment.Payment, error) {
+	return r.inner.FindStalePending(ctx, olderThan, limit)
+}
+
 // switchableIntegrationTxManager fails the first N RunInTx calls, then
 // delegates to a NoopTxManager backed by real in-memory repositories.
 type switchableIntegrationTxManager struct {
@@ -918,6 +922,13 @@ func (r *abortedTxRepoWrapper) FindByIdempotencyKey(ctx context.Context, key str
 		return nil, err
 	}
 	return r.inner.FindByIdempotencyKey(ctx, key)
+}
+
+func (r *abortedTxRepoWrapper) FindStalePending(ctx context.Context, olderThan time.Time, limit int) ([]*payment.Payment, error) {
+	if err := r.failedOrInner(ctx, "find stale pending"); err != nil {
+		return nil, err
+	}
+	return r.inner.FindStalePending(ctx, olderThan, limit)
 }
 
 // abortedTxSimulatingTxManager decorates each txCtx with a fresh

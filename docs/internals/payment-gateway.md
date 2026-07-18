@@ -1690,7 +1690,7 @@ SELECT effective_key FROM compensated_idempotency_keys WHERE original_key = $1;
   InMemory 実装 (`infrastructure/inmemory/payment_repository.go`) は unique 制約をシミュレートし、この契約を満たす。統合テスト `TestPaymentIdempotency_ConcurrentSuccess_Race_Integration` および `TestPaymentIdempotency_ConcurrentSuccess_AbortedTxSimulation_Integration` (Postgres aborted-tx シミュレーション) で end-to-end を検証済み。
 
   並行**失敗** (両方が compensation 発火) の safety は `comp-refund-{txnID}` の決定性で別途保証されており、`TestPaymentIdempotency_Concurrent_CompensationRace_Integration` で検証済み。
-- **Compensation-after-3DS の orphan pending record** (別 issue: #98): 「Call 1 が 3DS requires_action で pending payment を保存 → Call 2 が Captured で tx commit fail → compensation が txn を refund + store がマーカー書き込み → Call 3 が新しい effective key で fresh charge として成功」のシーケンスで、Call 1 の pending payment record は誰も参照しない状態で repo に残る(orphan)。money flow は正しい(gateway 側は refund 済み、local invoice は Call 3 の新 txn で正しく recorded)が、repo に「死んだ pending record」がゴミとして残る。これは reconciliation job の責務とし、本ライブラリのスコープ外とする
+- **Compensation-after-3DS の orphan pending record** (issue #98 — クリーンアップの骨格は §6.6 で提供): 「Call 1 が 3DS requires_action で pending payment を保存 → Call 2 が Captured で tx commit fail → compensation が txn を refund + store がマーカー書き込み → Call 3 が新しい effective key で fresh charge として成功」のシーケンスで、Call 1 の pending payment record は誰も参照しない状態で repo に残る(orphan)。money flow は正しい(gateway 側は refund 済み、local invoice は Call 3 の新 txn で正しく recorded)が、repo に「死んだ pending record」がゴミとして残り、リスティング・メトリクスを恒久的に汚染する。**ゲートウェイ照合そのもの**（この pending の txn は refund/void 済みか？）は BYO-Gateway 境界の向こう側なので引き続き利用者の責務だが、コアは `batch.StalePendingPaymentProcessor` + `port.PendingPaymentReconciler` でクリーンアップの骨格（スキャン → 利用者判定 → `MarkPaymentFailed` 経由の遷移）を提供する — §6.6 を参照
 
 ---
 
@@ -2103,6 +2103,96 @@ func (s *PaymentService) MarkPaymentFailed(ctx context.Context, paymentID shared
 **SemVer**: フィールド追加（`ChargeResponse.Instructions`）・型追加
 （`port.PaymentInstructions`）・エンティティのメソッド/定数追加のみで **Minor**。
 既存アダプタは `Instructions` 未設定でも挙動不変（nil → Metadata 書き込みなし）。
+
+---
+
+## 6.6 Stale Pending Payment のクリーンアップ（Issue #98 対応）
+
+### 6.6.1 解決する課題
+
+§6.1.8 の既知の制限のとおり、compensation-after-3DS は**orphan な Pending payment
+record** を残す: 3DS `requires_action` で保存された Pending レコードの gateway txn が、
+並行呼び出しのサガ補償で refund/void 済みになっても、ローカルの Pending レコードは
+誰にも遷移されずに残る。money flow は正しいが、「死んだ pending」がリスティング・
+メトリクス・ダニング判定を恒久的に汚染する。同型の残骸は、gateway webhook が来ないまま
+支払い指示（コンビニ払い・銀行振込の払込期限）が失効したケースでも生じる。
+
+### 6.6.2 設計: コアは骨格、ゲートウェイ照合は利用者（BYO 境界）
+
+「この Pending の txn は gateway 側で refund/void/失効済みか？」の判定はゲートウェイ
+固有の知識であり、BYO-Gateway 境界の**向こう側**にある。コアはゲートウェイをここで
+一切照会しない。分担は 3 段:
+
+1. **スキャン（コア）** — `payment.Repository.FindStalePending(ctx, olderThan, limit)`
+   （**BREAKING**: BYO リポジトリ実装者はメソッド追加が必要）。Pending ステータスかつ
+   `ProcessedAt()` が `olderThan` より**厳密に**前の行を、ProcessedAt 昇順（古い順）で
+   返す。ProcessedAt が staleness の基準タイムスタンプである（構築時に `clock.Now()` が
+   刻印され以後不変 — Payment に createdAt/updatedAt は存在しないため、「この時刻から
+   ずっと Pending のまま」を正確に表す）。limit は `BatchOptions.Limit` がスレッドされる
+   （0 = 無制限）。契約の正準は `domain/payment/repository.go` の godoc。
+2. **判定（利用者）** — `port.PendingPaymentReconciler.ReconcilePendingPayment(ctx, p, inv)`
+   が disposition を返す: **`PendingPaymentKeep`**（まだ本当に in-flight — 3DS 未完了、
+   払込期限内など。バッチは Skipped と数え、次回また評価）または
+   **`PendingPaymentMarkFailed`**（gateway 側で txn が refund/void/失効済み = orphan）。
+   gateway 照会・reconciliation レポート突合は**利用者実装の中**で行う。`inv` は
+   invoiceRepo 配線時に best-effort でロードされる（nil 許容）。実装は read-only で
+   あること（dry run でも判定のために呼ばれる）。
+3. **遷移（コア）** — `batch.StalePendingPaymentProcessor` が MarkFailed 判定を**既存の**
+   `PaymentService.MarkPaymentFailed` にルーティングする（§6.5.4）。これにより遷移の
+   セマンティクスが完全に保たれる: Pending→Failed の実遷移時のみ `OnPaymentFailedHook`
+   がコミット後・非致命で発火、already-Failed は冪等 no-op、Completed 等のターミナルは
+   `invalid_state_transition` で拒否（バッチはこれを「scan と遷移の間に決済が完了した
+   race」として Warn + Skipped 扱いにする — reconciler の判定が stale だっただけで
+   バッチの失敗ではない）。バッチ自身は書き込みを一切行わず、TxManager も持たない
+   （唯一の書き込みパスである `MarkPaymentFailed` が自身の tx を管理する）。
+
+### 6.6.3 バッチの形（他プロセッサと同型）
+
+```go
+proc := batch.NewStalePendingPaymentProcessor(
+    paymentRepo,       // payment.Repository（FindStalePending を提供）
+    invoiceRepo,       // invoice.Repository（nil 可 — reconciler の inv が nil になる）
+    myReconciler,      // port.PendingPaymentReconciler（利用者実装）
+    paymentService,    // *service.PaymentService（batch.PendingPaymentFailer を満たす）
+    30*24*time.Hour,   // staleAfter: now − ProcessedAt がこれを超えたら scan 対象
+                       // （<= 0 は batch.DefaultStalePendingAfter = 24h）
+    clock, logger,
+)
+result, err := proc.Process(ctx, batch.BatchOptions{ContinueOnError: true, Limit: 100})
+```
+
+- 他のバッチと同じく**スケジューリングは利用者の責務**（cron / CronJob / Cloud
+  Scheduler）。コアはどのサービスにも自動配線しない。
+- `BatchResult` の会計は #242 の不変条件どおり `Total == Succeeded + Failed + Skipped`:
+  MarkFailed 適用 = Succeeded、Keep（と防御的スキップ）= Skipped、reconciler エラー・
+  遷移エラー = Failed（`ContinueOnError` に従う）。
+- **Dry run** は書き込みゼロで reconciler だけを呼び、orphan 判定 1 件につき
+  `DryRunActions` へ `{ItemID: paymentID, Action: "mark_failed"}` を報告する。
+- **再実行は冪等**: 失敗済みレコードは Pending でないため再選択されない。
+
+### 6.6.4 運用ガイダンス
+
+- `staleAfter` は**扱う決済手段の最長の正当な pending 期間より長く**設定する
+  （例: コンビニ払いの払込期限が 14 日なら 14 日超）。短すぎると正当な in-flight を
+  reconciler に何度も照会させる（Keep なら安全だが照会コストが無駄）。
+- reconciler が判定できない場合（gateway API 障害等）は **error を返す**こと
+  （item は Failed と数えられ、次回リトライされる）。「わからないから MarkFailed」は
+  決してしない — 遅延セトルメントを誤って failed にすると、後続の `SettlePayment` が
+  `invalid_state_transition` で拒否される。
+- Keep が長期間続く場合はアラート対象（reconciler が判定材料を持っていない兆候）。
+- `MarkPaymentFailed` に渡す reason は `batch.StalePendingFailureReason`（エクスポート済み
+  定数）で、`OnPaymentFailedHook` 実装はこれを使ってバッチ由来のクリーンアップと本物の
+  決済失敗を区別できる。推奨は**エンティティ側の照合**: entity は raw reason をそのまま
+  保持するため、`r := ctx.Payment().FailureReason(); r != nil && *r ==
+  batch.StalePendingFailureReason` で判定する（このケースだけダニング・ページングを
+  抑止する等）。フォールバックとして
+  `strings.Contains(err.Error(), batch.StalePendingFailureReason)` も一致する。
+  なお hook に渡る error は reason を埋め込んだ素の `fmt.Errorf` であり
+  `*shared.DomainError` では**ない**ため、`errors.As` ベースの照合は決して一致しない。
+
+**SemVer**: `FindStalePending`（インターフェースへのメソッド追加）は BYO リポジトリ
+実装者に対して **BREAKING**（pre-1.0 規約で CHANGELOG に明記）。port / batch の追加は
+additive。
 
 ---
 
